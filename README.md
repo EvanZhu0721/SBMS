@@ -42,6 +42,7 @@ Outputs:
 
 ```text
 SBMS.exe
+SBMSSetup.exe
 SBMSNative.exe
 SBMSDeviceHost.exe
 ```
@@ -61,12 +62,13 @@ Install or refresh the test driver:
 Default workflow:
 
 1. Open `设置 > 配置`.
-2. Pick primary and target presets, or edit the resolution/size fields manually.
-3. Pick a sizing strategy:
+2. Pick `预设` or `手动`.
+3. Set the base and target using horizontal pixels, aspect ratio, orientation, and physical size.
+4. Pick a sizing strategy:
    - `真实尺寸比例`: virtual source follows physical-size ratio.
    - `文字清晰优先`: virtual source favors an integer multiple of the output display.
-   - `手动源分辨率`: use the selected or typed source directly.
-4. Click `启动`.
+   - `直接使用源`: use the selected or typed source directly.
+5. Click `启动`.
 
 `轻量模式` is a top-level menu item. When it is checked and SBMS is running, closing the window hides SBMS to the tray and keeps the bridge running. The tray menu has `打开`, `停止`, and `退出`.
 
@@ -161,6 +163,8 @@ The package script writes:
 - `%USERPROFILE%\Documents\SBMS-Release\SBMS`
 - `%USERPROFILE%\Documents\SBMS-Release\SBMS.zip`
 - `C:\Program Files\SBMS` when the shell has permission
+
+The release directory also contains `SBMSSetup.exe`, an elevated installer that copies SBMS to Program Files, optionally installs the test driver, and can create a Start Menu shortcut and startup task.
 
 If the current shell is not elevated, run this from the release directory in an administrator PowerShell:
 

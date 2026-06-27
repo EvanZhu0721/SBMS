@@ -86,6 +86,7 @@ if (-not $SkipBuild) {
     & (Join-Path $Root "build-sbms-device-host.ps1")
     & (Join-Path $Root "build-sbms-native.ps1")
     & (Join-Path $Root "build-sbms-gui.ps1")
+    & (Join-Path $Root "build-sbms-setup.ps1")
     & (Join-Path $Root "build-sbms-driver.ps1")
 }
 
@@ -103,6 +104,7 @@ $sourceFiles = @(
     "build-sbms-driver.ps1",
     "build-sbms-gui.ps1",
     "build-sbms-native.ps1",
+    "build-sbms-setup.ps1",
     "install-sbms-driver.ps1",
     "install-sbms-program-files.ps1",
     "run-sbms-native.ps1",
@@ -117,6 +119,7 @@ foreach ($file in $sourceFiles) {
 
 $sourceDirs = @(
     "gui",
+    "installer",
     "device-host",
     "native-output-demo",
     "Windows-driver-samples\video\IndirectDisplay",
@@ -139,6 +142,7 @@ Get-ChildItem -LiteralPath $CoreDir -Recurse -File -Force |
 
 $releaseFiles = @(
     "SBMS.exe",
+    "SBMSSetup.exe",
     "SBMSNative.exe",
     "SBMSDeviceHost.exe",
     "README.md",

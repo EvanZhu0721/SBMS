@@ -75,6 +75,17 @@ namespace SBMSGui
         private readonly TextBox primarySizeText = new TextBox();
         private readonly TextBox targetResolutionText = new TextBox();
         private readonly TextBox targetSizeText = new TextBox();
+        private readonly TabControl configInputTabs = new TabControl();
+        private readonly TabPage presetConfigPage = new TabPage();
+        private readonly TabPage manualConfigPage = new TabPage();
+        private readonly TextBox manualBaseHorizontalText = new TextBox();
+        private readonly TextBox manualBaseAspectText = new TextBox();
+        private readonly ComboBox manualBaseOrientationCombo = new ComboBox();
+        private readonly TextBox manualBaseSizeText = new TextBox();
+        private readonly TextBox manualTargetHorizontalText = new TextBox();
+        private readonly TextBox manualTargetAspectText = new TextBox();
+        private readonly ComboBox manualTargetOrientationCombo = new ComboBox();
+        private readonly TextBox manualTargetSizeText = new TextBox();
         private readonly ComboBox filterCombo = new ComboBox();
         private readonly CheckBox inputCheck = new CheckBox();
         private readonly CheckBox windowMoveCheck = new CheckBox();
@@ -118,6 +129,7 @@ namespace SBMSGui
         private bool english;
         private bool exiting;
         private bool updatingPresetCombos;
+        private bool updatingConfigurationInputs;
 
         private static readonly Color ThemeBack = Color.FromArgb(6, 12, 8);
         private static readonly Color ThemePanel = Color.FromArgb(10, 22, 14);
@@ -182,7 +194,7 @@ namespace SBMSGui
             public override string ToString()
             {
                 return Number + "  " + DeviceName + "  " + Resolution + "@" + Refresh +
-                       (Primary ? "  主屏" : "") +
+                       (Primary ? "  基准" : "") +
                        (Virtual ? "  虚拟" : "") +
                        "  " + Name;
             }
@@ -211,10 +223,17 @@ namespace SBMSGui
             primarySizeText.Text = "27";
             targetResolutionText.Text = "2560x1440";
             targetSizeText.Text = "24";
+            manualBaseHorizontalText.Text = "5120";
+            manualBaseAspectText.Text = "16:9";
+            manualBaseSizeText.Text = "27";
+            manualTargetHorizontalText.Text = "2560";
+            manualTargetAspectText.Text = "16:9";
+            manualTargetSizeText.Text = "24";
             strategyCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            strategyCombo.Items.AddRange(new object[] { "真实尺寸比例", "文字清晰优先", "手动源分辨率" });
+            strategyCombo.Items.AddRange(new object[] { "真实尺寸比例", "文字清晰优先", "直接使用源" });
             strategyCombo.SelectedIndex = 0;
             ConfigurePresetCombos();
+            ConfigureManualOrientationCombos();
             primaryResolutionPresetCombo.SelectedIndex = 4;
             primaryAspectPresetCombo.SelectedIndex = 0;
             primaryOrientationPresetCombo.SelectedIndex = 0;
@@ -223,7 +242,9 @@ namespace SBMSGui
             targetAspectPresetCombo.SelectedIndex = 0;
             targetOrientationPresetCombo.SelectedIndex = 0;
             targetSizePresetCombo.SelectedIndex = 7;
-            ApplyPresetSelections(false);
+            manualBaseOrientationCombo.SelectedIndex = 0;
+            manualTargetOrientationCombo.SelectedIndex = 0;
+            SyncConfigurationInputsFromMode(false);
             filterCombo.DropDownStyle = ComboBoxStyle.DropDownList;
             filterCombo.Items.AddRange(new object[] { "自动", "线性平滑", "锐利最近邻", "整数2x" });
             filterCombo.SelectedIndex = 0;
@@ -245,6 +266,7 @@ namespace SBMSGui
             calculateButton.Click += delegate { ApplyStrategy(true); };
             applyConfigButton.Click += delegate { ApplyConfigurationChanges(); };
             strategyCombo.SelectedIndexChanged += delegate { ApplyStrategy(false); };
+            configInputTabs.SelectedIndexChanged += delegate { SyncConfigurationInputsFromMode(true); };
             primaryResolutionPresetCombo.SelectedIndexChanged += delegate { ApplyPresetSelections(true); };
             primaryAspectPresetCombo.SelectedIndexChanged += delegate { ApplyPresetSelections(true); };
             primaryOrientationPresetCombo.SelectedIndexChanged += delegate { ApplyPresetSelections(true); };
@@ -253,6 +275,14 @@ namespace SBMSGui
             targetAspectPresetCombo.SelectedIndexChanged += delegate { ApplyPresetSelections(true); };
             targetOrientationPresetCombo.SelectedIndexChanged += delegate { ApplyPresetSelections(true); };
             targetSizePresetCombo.SelectedIndexChanged += delegate { ApplyPresetSelections(true); };
+            manualBaseHorizontalText.TextChanged += delegate { ApplyManualSelections(true); };
+            manualBaseAspectText.TextChanged += delegate { ApplyManualSelections(true); };
+            manualBaseOrientationCombo.SelectedIndexChanged += delegate { ApplyManualSelections(true); };
+            manualBaseSizeText.TextChanged += delegate { ApplyManualSelections(true); };
+            manualTargetHorizontalText.TextChanged += delegate { ApplyManualSelections(true); };
+            manualTargetAspectText.TextChanged += delegate { ApplyManualSelections(true); };
+            manualTargetOrientationCombo.SelectedIndexChanged += delegate { ApplyManualSelections(true); };
+            manualTargetSizeText.TextChanged += delegate { ApplyManualSelections(true); };
             targetResolutionText.TextChanged += delegate { SyncTargetSelector(); };
             sourceDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
@@ -365,8 +395,8 @@ namespace SBMSGui
         {
             configForm = new Form();
             configForm.StartPosition = FormStartPosition.CenterParent;
-            configForm.Size = new Size(820, 560);
-            configForm.MinimumSize = new Size(760, 520);
+            configForm.Size = new Size(900, 580);
+            configForm.MinimumSize = new Size(820, 540);
             configForm.ShowInTaskbar = false;
             configForm.FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
@@ -382,13 +412,18 @@ namespace SBMSGui
             panel.Dock = DockStyle.Fill;
             panel.Padding = new Padding(14);
             panel.ColumnCount = 2;
-            panel.RowCount = 13;
+            panel.RowCount = 10;
             panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
             panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            for (int i = 0; i < 12; ++i)
-            {
-                panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            }
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             configHost.Controls.Add(panel);
 
@@ -396,16 +431,11 @@ namespace SBMSGui
             panel.Controls.Add(sourceDisplayCombo, 1, 0);
             AddLabel(panel, "输出目标", 1);
             panel.Controls.Add(targetDisplayCombo, 1, 1);
-            AddLabel(panel, "主屏预设", 2);
-            panel.Controls.Add(CreatePresetPanel(primaryResolutionPresetCombo, primaryAspectPresetCombo, primaryOrientationPresetCombo, primarySizePresetCombo), 1, 2);
-            AddLabel(panel, "主屏参数", 3);
-            panel.Controls.Add(CreateInlinePanel(primaryResolutionText, primarySizeText, "英寸"), 1, 3);
-            AddLabel(panel, "目标预设", 4);
-            panel.Controls.Add(CreatePresetPanel(targetResolutionPresetCombo, targetAspectPresetCombo, targetOrientationPresetCombo, targetSizePresetCombo), 1, 4);
-            AddLabel(panel, "目标屏参数", 5);
-            panel.Controls.Add(CreateInlinePanel(targetResolutionText, targetSizeText, "英寸"), 1, 5);
-            AddLabel(panel, "尺寸策略", 6);
-            panel.Controls.Add(strategyCombo, 1, 6);
+            AddLabel(panel, "配置方式", 2);
+            ConfigureInputTabs();
+            panel.Controls.Add(configInputTabs, 1, 2);
+            AddLabel(panel, "尺寸策略", 3);
+            panel.Controls.Add(strategyCombo, 1, 3);
 
             var sourcePanel = new FlowLayoutPanel();
             sourcePanel.Dock = DockStyle.Fill;
@@ -415,12 +445,12 @@ namespace SBMSGui
             sourcePanel.Controls.Add(sourceText);
             sourcePanel.Controls.Add(targetText);
             sourcePanel.Controls.Add(calculateButton);
-            AddLabel(panel, "启动分辨率", 7);
-            panel.Controls.Add(sourcePanel, 1, 7);
+            AddLabel(panel, "映射结果", 4);
+            panel.Controls.Add(sourcePanel, 1, 4);
 
-            AddLabel(panel, "缩放滤镜", 8);
+            AddLabel(panel, "缩放滤镜", 5);
             filterCombo.Width = 170;
-            panel.Controls.Add(filterCombo, 1, 8);
+            panel.Controls.Add(filterCombo, 1, 5);
 
             var checks = new FlowLayoutPanel();
             checks.Dock = DockStyle.Fill;
@@ -429,8 +459,8 @@ namespace SBMSGui
             checks.Controls.Add(windowMoveCheck);
             checks.Controls.Add(deviceHostCheck);
             checks.Controls.Add(vsyncCheck);
-            AddLabel(panel, "运行选项", 9);
-            panel.Controls.Add(checks, 1, 9);
+            AddLabel(panel, "运行选项", 6);
+            panel.Controls.Add(checks, 1, 6);
 
             var configButtons = new FlowLayoutPanel();
             configButtons.Dock = DockStyle.Fill;
@@ -441,7 +471,7 @@ namespace SBMSGui
             applyConfigButton.Tag = "应用";
             configButtons.Controls.Add(applyConfigButton);
             configButtons.Controls.Add(closeButton);
-            panel.Controls.Add(configButtons, 1, 11);
+            panel.Controls.Add(configButtons, 1, 8);
 
             configLockPanel.Dock = DockStyle.Fill;
             configLockPanel.Name = "configLockPanel";
@@ -456,6 +486,73 @@ namespace SBMSGui
             configLockPanel.Controls.Add(configLockLabel);
             configHost.Controls.Add(configLockPanel);
             configLockPanel.BringToFront();
+        }
+
+        private void ConfigureInputTabs()
+        {
+            configInputTabs.Dock = DockStyle.Fill;
+            configInputTabs.TabPages.Clear();
+            presetConfigPage.Text = T("预设");
+            presetConfigPage.Tag = "预设";
+            manualConfigPage.Text = T("手动");
+            manualConfigPage.Tag = "手动";
+            presetConfigPage.Controls.Clear();
+            manualConfigPage.Controls.Clear();
+            presetConfigPage.Controls.Add(CreatePresetModePanel());
+            manualConfigPage.Controls.Add(CreateManualModePanel());
+            configInputTabs.TabPages.Add(presetConfigPage);
+            configInputTabs.TabPages.Add(manualConfigPage);
+            configInputTabs.SelectedIndex = Math.Max(0, Math.Min(configInputTabs.SelectedIndex, configInputTabs.TabPages.Count - 1));
+        }
+
+        private Control CreatePresetModePanel()
+        {
+            var grid = CreateModeGrid();
+            AddHeaderRow(grid);
+            AddLabel(grid, "基准", 1);
+            grid.Controls.Add(CreatePresetPanel(primaryResolutionPresetCombo, primaryAspectPresetCombo, primaryOrientationPresetCombo, primarySizePresetCombo), 1, 1);
+            AddLabel(grid, "目标", 2);
+            grid.Controls.Add(CreatePresetPanel(targetResolutionPresetCombo, targetAspectPresetCombo, targetOrientationPresetCombo, targetSizePresetCombo), 1, 2);
+            return grid;
+        }
+
+        private Control CreateManualModePanel()
+        {
+            var grid = CreateModeGrid();
+            AddHeaderRow(grid);
+            AddLabel(grid, "基准", 1);
+            grid.Controls.Add(CreateManualInputPanel(manualBaseHorizontalText, manualBaseAspectText, manualBaseOrientationCombo, manualBaseSizeText), 1, 1);
+            AddLabel(grid, "目标", 2);
+            grid.Controls.Add(CreateManualInputPanel(manualTargetHorizontalText, manualTargetAspectText, manualTargetOrientationCombo, manualTargetSizeText), 1, 2);
+            return grid;
+        }
+
+        private static TableLayoutPanel CreateModeGrid()
+        {
+            var grid = new TableLayoutPanel();
+            grid.Dock = DockStyle.Fill;
+            grid.Padding = new Padding(8, 8, 8, 4);
+            grid.ColumnCount = 2;
+            grid.RowCount = 3;
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            return grid;
+        }
+
+        private static void AddHeaderRow(TableLayoutPanel grid)
+        {
+            var header = new Label
+            {
+                Text = "横向像素    比例        方向          尺寸",
+                Tag = "横向像素    比例        方向          尺寸",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Consolas", 9F)
+            };
+            grid.Controls.Add(header, 1, 0);
         }
 
         private static void AddLabel(TableLayoutPanel panel, string text, int row)
@@ -495,6 +592,23 @@ namespace SBMSGui
             panel.Controls.Add(aspectBox);
             panel.Controls.Add(orientationBox);
             panel.Controls.Add(sizeBox);
+            return panel;
+        }
+
+        private static FlowLayoutPanel CreateManualInputPanel(TextBox horizontalBox, TextBox aspectBox, ComboBox orientationBox, TextBox sizeBox)
+        {
+            var panel = new FlowLayoutPanel();
+            panel.Dock = DockStyle.Fill;
+            panel.FlowDirection = FlowDirection.LeftToRight;
+            horizontalBox.Width = 138;
+            aspectBox.Width = 86;
+            orientationBox.Width = 104;
+            sizeBox.Width = 64;
+            panel.Controls.Add(horizontalBox);
+            panel.Controls.Add(aspectBox);
+            panel.Controls.Add(orientationBox);
+            panel.Controls.Add(sizeBox);
+            panel.Controls.Add(new Label { Text = "英寸", Tag = "英寸", AutoSize = true, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(4, 5, 0, 0) });
             return panel;
         }
 
@@ -613,7 +727,7 @@ namespace SBMSGui
         {
             int strategyIndex = strategyCombo.SelectedIndex;
             strategyCombo.Items.Clear();
-            strategyCombo.Items.AddRange(new object[] { T("真实尺寸比例"), T("文字清晰优先"), T("手动源分辨率") });
+            strategyCombo.Items.AddRange(new object[] { T("真实尺寸比例"), T("文字清晰优先"), T("直接使用源") });
             strategyCombo.SelectedIndex = Math.Max(0, Math.Min(strategyIndex, strategyCombo.Items.Count - 1));
 
             int filterIndex = filterCombo.SelectedIndex;
@@ -622,6 +736,12 @@ namespace SBMSGui
             filterCombo.SelectedIndex = Math.Max(0, Math.Min(filterIndex, filterCombo.Items.Count - 1));
 
             ConfigurePresetCombos();
+            ConfigureManualOrientationCombos();
+            if (configInputTabs.TabPages.Count == 2)
+            {
+                presetConfigPage.Text = T("预设");
+                manualConfigPage.Text = T("手动");
+            }
         }
 
         private void ConfigurePresetCombos()
@@ -636,6 +756,12 @@ namespace SBMSGui
             ConfigureSizePresetCombo(primarySizePresetCombo);
             ConfigureSizePresetCombo(targetSizePresetCombo);
             updatingPresetCombos = false;
+        }
+
+        private void ConfigureManualOrientationCombos()
+        {
+            ConfigureOrientationPresetCombo(manualBaseOrientationCombo);
+            ConfigureOrientationPresetCombo(manualTargetOrientationCombo);
         }
 
         private void ConfigureResolutionPresetCombo(ComboBox combo)
@@ -700,7 +826,11 @@ namespace SBMSGui
 
         private void ApplyPresetSelections(bool recalculate)
         {
-            if (updatingPresetCombos)
+            if (updatingPresetCombos || updatingConfigurationInputs)
+            {
+                return;
+            }
+            if (configInputTabs.TabPages.Count > 0 && configInputTabs.SelectedIndex != 0)
             {
                 return;
             }
@@ -709,6 +839,64 @@ namespace SBMSGui
             ApplyResolutionPreset(targetResolutionPresetCombo, targetAspectPresetCombo, targetOrientationPresetCombo, targetResolutionText);
             ApplySizePreset(primarySizePresetCombo, primarySizeText);
             ApplySizePreset(targetSizePresetCombo, targetSizeText);
+
+            if (recalculate)
+            {
+                ApplyStrategy(false);
+                UpdateStatus();
+            }
+        }
+
+        private void ApplyManualSelections(bool recalculate)
+        {
+            if (updatingConfigurationInputs)
+            {
+                return;
+            }
+            if (configInputTabs.TabPages.Count > 0 && configInputTabs.SelectedIndex != 1)
+            {
+                return;
+            }
+
+            if (!ApplyManualInput(manualBaseHorizontalText, manualBaseAspectText, manualBaseOrientationCombo, manualBaseSizeText, primaryResolutionText, primarySizeText) ||
+                !ApplyManualInput(manualTargetHorizontalText, manualTargetAspectText, manualTargetOrientationCombo, manualTargetSizeText, targetResolutionText, targetSizeText))
+            {
+                if (recalculate)
+                {
+                    AppendLog("参数无效");
+                }
+                return;
+            }
+
+            if (recalculate)
+            {
+                ApplyStrategy(false);
+                UpdateStatus();
+            }
+        }
+
+        private void SyncConfigurationInputsFromMode(bool recalculate)
+        {
+            updatingConfigurationInputs = true;
+            try
+            {
+                if (configInputTabs.TabPages.Count == 0 || configInputTabs.SelectedIndex == 0)
+                {
+                    ApplyResolutionPreset(primaryResolutionPresetCombo, primaryAspectPresetCombo, primaryOrientationPresetCombo, primaryResolutionText);
+                    ApplyResolutionPreset(targetResolutionPresetCombo, targetAspectPresetCombo, targetOrientationPresetCombo, targetResolutionText);
+                    ApplySizePreset(primarySizePresetCombo, primarySizeText);
+                    ApplySizePreset(targetSizePresetCombo, targetSizeText);
+                }
+                else
+                {
+                    ApplyManualInput(manualBaseHorizontalText, manualBaseAspectText, manualBaseOrientationCombo, manualBaseSizeText, primaryResolutionText, primarySizeText);
+                    ApplyManualInput(manualTargetHorizontalText, manualTargetAspectText, manualTargetOrientationCombo, manualTargetSizeText, targetResolutionText, targetSizeText);
+                }
+            }
+            finally
+            {
+                updatingConfigurationInputs = false;
+            }
 
             if (recalculate)
             {
@@ -752,6 +940,35 @@ namespace SBMSGui
                 case 6: return 5120;
                 default: return 0;
             }
+        }
+
+        private static bool ApplyManualInput(TextBox horizontalBox, TextBox aspectBox, ComboBox orientationBox, TextBox sizeBox, TextBox resolutionTarget, TextBox sizeTarget)
+        {
+            int horizontal;
+            int aspectW;
+            int aspectH;
+            double size;
+            if (!int.TryParse(horizontalBox.Text.Trim(), out horizontal) ||
+                horizontal <= 0 ||
+                !TryParseAspectText(aspectBox.Text, out aspectW, out aspectH) ||
+                !TryParseSize(sizeBox.Text, out size) ||
+                size <= 0.0)
+            {
+                return false;
+            }
+
+            int width = RoundEven(horizontal);
+            int height = RoundEven(width * aspectH / (double)aspectW);
+            bool portrait = orientationBox.SelectedIndex == 1 || orientationBox.SelectedIndex == 3;
+            if (portrait)
+            {
+                int temp = width;
+                width = height;
+                height = temp;
+            }
+            resolutionTarget.Text = width + "x" + height;
+            sizeTarget.Text = sizeBox.Text.Trim().Replace(',', '.');
+            return true;
         }
 
         private static void GetAspect(int index, out int width, out int height)
@@ -824,12 +1041,16 @@ namespace SBMSGui
                 case "管理虚拟显示器": return "Virtual display";
                 case "虚拟源": return "Virtual source";
                 case "输出目标": return "Target";
-                case "主屏参数": return "Primary";
-                case "主屏预设": return "Primary preset";
+                case "配置方式": return "Input";
+                case "预设": return "Preset";
+                case "手动": return "Manual";
+                case "基准": return "Base";
+                case "横向像素    比例        方向          尺寸": return "Horizontal px   aspect      orientation    size";
                 case "目标预设": return "Target preset";
                 case "目标屏参数": return "Target spec";
                 case "尺寸策略": return "Sizing";
                 case "启动分辨率": return "Launch mode";
+                case "映射结果": return "Mapping";
                 case "缩放滤镜": return "Scaling";
                 case "运行选项": return "Runtime";
                 case "英寸": return "inch";
@@ -841,7 +1062,7 @@ namespace SBMSGui
                 case "关闭": return "Close";
                 case "真实尺寸比例": return "Physical size";
                 case "文字清晰优先": return "Text clarity";
-                case "手动源分辨率": return "Manual source";
+                case "直接使用源": return "Direct source";
                 case "自动": return "Auto";
                 case "线性平滑": return "Linear";
                 case "锐利最近邻": return "Nearest";
@@ -1160,11 +1381,45 @@ namespace SBMSGui
             {
                 targetText.Text = targetDisplay.DeviceName;
                 targetResolutionText.Text = targetDisplay.Resolution;
+                if (!updatingConfigurationInputs && configInputTabs.TabPages.Count > 0 && configInputTabs.SelectedIndex == 1)
+                {
+                    PopulateManualTargetFromResolution(targetDisplay.Resolution);
+                }
+            }
+        }
+
+        private void PopulateManualTargetFromResolution(string resolutionText)
+        {
+            Resolution resolution;
+            if (!TryParseResolution(resolutionText, out resolution) || resolution.Width <= 0 || resolution.Height <= 0)
+            {
+                return;
+            }
+            updatingConfigurationInputs = true;
+            try
+            {
+                bool portrait = resolution.Height > resolution.Width;
+                int horizontal = portrait ? resolution.Height : resolution.Width;
+                int aspectW = Math.Max(resolution.Width, resolution.Height);
+                int aspectH = Math.Min(resolution.Width, resolution.Height);
+                int divisor = GreatestCommonDivisor(aspectW, aspectH);
+                manualTargetHorizontalText.Text = horizontal.ToString(CultureInfo.InvariantCulture);
+                manualTargetAspectText.Text = (aspectW / divisor).ToString(CultureInfo.InvariantCulture) + ":" + (aspectH / divisor).ToString(CultureInfo.InvariantCulture);
+                manualTargetOrientationCombo.SelectedIndex = portrait ? 1 : 0;
+            }
+            finally
+            {
+                updatingConfigurationInputs = false;
             }
         }
 
         private void ApplyStrategy(bool log)
         {
+            if (!updatingConfigurationInputs)
+            {
+                SyncConfigurationInputsFromMode(false);
+            }
+
             Resolution primary;
             Resolution target;
             double primarySize;
@@ -1273,6 +1528,11 @@ namespace SBMSGui
         private bool TryCalculateStrategySource(out Resolution source)
         {
             source = new Resolution();
+            if (!updatingConfigurationInputs)
+            {
+                SyncConfigurationInputsFromMode(false);
+            }
+
             Resolution primary;
             Resolution target;
             double primarySize;
@@ -1305,6 +1565,19 @@ namespace SBMSGui
             return (rounded % 2 == 0) ? rounded : rounded + 1;
         }
 
+        private static int GreatestCommonDivisor(int a, int b)
+        {
+            a = Math.Abs(a);
+            b = Math.Abs(b);
+            while (b != 0)
+            {
+                int t = a % b;
+                a = b;
+                b = t;
+            }
+            return Math.Max(a, 1);
+        }
+
         private static bool TryParseResolution(string text, out Resolution resolution)
         {
             resolution = new Resolution();
@@ -1328,6 +1601,23 @@ namespace SBMSGui
         {
             string normalized = text.Trim().Replace(',', '.');
             return double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryParseAspectText(string text, out int width, out int height)
+        {
+            width = 0;
+            height = 0;
+            string normalized = text.Trim().Replace('：', ':').Replace('/', ':');
+            string[] parts = normalized.Split(':');
+            if (parts.Length != 2 ||
+                !int.TryParse(parts[0].Trim(), out width) ||
+                !int.TryParse(parts[1].Trim(), out height) ||
+                width <= 0 ||
+                height <= 0)
+            {
+                return false;
+            }
+            return true;
         }
 
         private static string FormatResolution(Resolution resolution)
@@ -1663,7 +1953,10 @@ namespace SBMSGui
 
         private int GetSelectedDisplayOrientation()
         {
-            switch (targetOrientationPresetCombo.SelectedIndex)
+            ComboBox orientationCombo = configInputTabs.TabPages.Count > 0 && configInputTabs.SelectedIndex == 1
+                ? manualTargetOrientationCombo
+                : targetOrientationPresetCombo;
+            switch (orientationCombo.SelectedIndex)
             {
                 case 1: return DMDO_90;
                 case 2: return DMDO_180;
@@ -1945,10 +2238,27 @@ namespace SBMSGui
             sourceDisplayCombo.Enabled = true;
             targetDisplayCombo.Enabled = true;
             strategyCombo.Enabled = true;
+            configInputTabs.Enabled = true;
+            primaryResolutionPresetCombo.Enabled = true;
+            primaryAspectPresetCombo.Enabled = true;
+            primaryOrientationPresetCombo.Enabled = true;
+            primarySizePresetCombo.Enabled = true;
+            targetResolutionPresetCombo.Enabled = true;
+            targetAspectPresetCombo.Enabled = true;
+            targetOrientationPresetCombo.Enabled = true;
+            targetSizePresetCombo.Enabled = true;
             primaryResolutionText.Enabled = true;
             primarySizeText.Enabled = true;
             targetResolutionText.Enabled = true;
             targetSizeText.Enabled = true;
+            manualBaseHorizontalText.Enabled = true;
+            manualBaseAspectText.Enabled = true;
+            manualBaseOrientationCombo.Enabled = true;
+            manualBaseSizeText.Enabled = true;
+            manualTargetHorizontalText.Enabled = true;
+            manualTargetAspectText.Enabled = true;
+            manualTargetOrientationCombo.Enabled = true;
+            manualTargetSizeText.Enabled = true;
             filterCombo.Enabled = true;
             calculateButton.Enabled = true;
             applyConfigButton.Enabled = true;
