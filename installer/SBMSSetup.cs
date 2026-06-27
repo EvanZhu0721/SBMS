@@ -53,11 +53,14 @@ namespace SBMSSetup
             var options = new FlowLayoutPanel();
             options.Dock = DockStyle.Fill;
             options.FlowDirection = FlowDirection.LeftToRight;
-            driverCheck.Text = "安装/更新测试驱动";
+            driverCheck.Text = "安装/更新虚拟显示器驱动";
             driverCheck.Checked = true;
+            driverCheck.AutoSize = true;
             shortcutCheck.Text = "开始菜单快捷方式";
             shortcutCheck.Checked = true;
+            shortcutCheck.AutoSize = true;
             startupCheck.Text = "开机自启";
+            startupCheck.AutoSize = true;
             options.Controls.Add(driverCheck);
             options.Controls.Add(shortcutCheck);
             options.Controls.Add(startupCheck);
