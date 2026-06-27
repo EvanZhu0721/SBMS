@@ -80,14 +80,14 @@ SBMS can enumerate and select any active physical target display by its Windows 
 
 ## Multi-Screen BETA
 
-The BETA build can create up to three virtual source displays. In `设置 > 配置`, enable `多屏 BETA`, then tick the physical target displays under `多屏 BETA 目标`.
+The BETA build can create up to three virtual source displays. In `设置 > 配置`, enable `多屏 BETA`, then edit the rows under `多屏配置组`.
 
-When started, SBMS assigns one virtual source to each selected physical target and launches one `SBMSNative.exe` process per pair. This keeps the proven single-output renderer intact while testing real multi-display topology.
+Each enabled row is one bridge group. It has its own target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal multi-screen mode, SBMS assigns one virtual source to each enabled row and launches one `SBMSNative.exe` process per physical target. This keeps the proven single-output renderer intact while testing real multi-display topology.
 
 Notes:
 
-- `多屏 BETA` and `串流模式` are mutually exclusive.
-- All selected BETA targets currently share the same calculated virtual source resolution and orientation.
+- `多屏 BETA` and `串流模式` can be enabled together. In that mode SBMS creates multiple virtual desktops but does not copy them to physical outputs.
+- BETA currently supports up to three enabled configuration rows.
 - Pointer mapping and window migration still run per native process. This is usable for testing, but multi-display pointer capture may need a later unified input scheduler.
 - If the BETA topology behaves badly, stop SBMS first; the GUI will close all native output processes and then close the virtual display host.
 
