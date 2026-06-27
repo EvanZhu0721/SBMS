@@ -29,16 +29,17 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-27.022-beta";
+        private const string BuildLabel = "2026-06-27.023-beta";
         private const int MultiScreenBetaMaxTargets = 3;
         private const int BetaColEnabled = 0;
-        private const int BetaColTarget = 1;
-        private const int BetaColHorizontal = 2;
-        private const int BetaColAspect = 3;
-        private const int BetaColOrientation = 4;
-        private const int BetaColSize = 5;
-        private const int BetaColStrategy = 6;
-        private const int BetaColSource = 7;
+        private const int BetaColMode = 1;
+        private const int BetaColTarget = 2;
+        private const int BetaColHorizontal = 3;
+        private const int BetaColAspect = 4;
+        private const int BetaColOrientation = 5;
+        private const int BetaColSize = 6;
+        private const int BetaColStrategy = 7;
+        private const int BetaColSource = 8;
 
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
@@ -100,8 +101,11 @@ namespace SBMSGui
         private readonly CheckBox windowMoveCheck = new CheckBox();
         private readonly CheckBox deviceHostCheck = new CheckBox();
         private readonly CheckBox streamModeCheck = new CheckBox();
-        private readonly Label streamModeWarningLabel = new Label();
         private readonly CheckBox multiScreenBetaCheck = new CheckBox();
+        private readonly TabControl mappingTabs = new TabControl();
+        private readonly TabPage singleMappingPage = new TabPage();
+        private readonly TabPage multiMappingPage = new TabPage();
+        private readonly TabControl betaGroupTabs = new TabControl();
         private readonly DataGridView betaPairGrid = new DataGridView();
         private readonly Button addBetaGroupButton = new Button();
         private readonly Button removeBetaGroupButton = new Button();
@@ -147,6 +151,8 @@ namespace SBMSGui
         private bool updatingPresetCombos;
         private bool updatingConfigurationInputs;
         private bool updatingBetaPairGrid;
+        private bool multiMappingConfirmed;
+        private bool suppressStreamModePrompt;
 
         private static readonly Color ThemeBack = Color.FromArgb(6, 12, 8);
         private static readonly Color ThemePanel = Color.FromArgb(10, 22, 14);
@@ -219,6 +225,7 @@ namespace SBMSGui
 
         private sealed class BridgePairConfig
         {
+            public bool StreamOnly;
             public DisplayChoice TargetDisplay;
             public Resolution TargetResolution;
             public Resolution SourceResolution;
@@ -230,6 +237,7 @@ namespace SBMSGui
         private sealed class BridgePairSnapshot
         {
             public bool Enabled;
+            public string Mode;
             public string Target;
             public string Horizontal;
             public string Aspect;
@@ -295,17 +303,10 @@ namespace SBMSGui
             deviceHostCheck.Checked = true;
             streamModeCheck.Text = "串流模式";
             streamModeCheck.AutoSize = true;
-            streamModeWarningLabel.Text = "如果不清楚这个选项的作用，请不要勾选";
-            streamModeWarningLabel.Tag = "如果不清楚这个选项的作用，请不要勾选";
-            streamModeWarningLabel.Name = "streamModeWarningLabel";
-            streamModeWarningLabel.AutoSize = true;
-            streamModeWarningLabel.TextAlign = ContentAlignment.MiddleLeft;
-            streamModeWarningLabel.Padding = new Padding(4, 4, 0, 0);
-            multiScreenBetaCheck.Text = "多屏 BETA";
-            multiScreenBetaCheck.AutoSize = true;
+            multiScreenBetaCheck.Visible = false;
             ConfigureBetaPairGrid();
-            addBetaGroupButton.Text = "⊕ 新增组 β";
-            addBetaGroupButton.Width = 112;
+            addBetaGroupButton.Text = "+ 新增组 BETA";
+            addBetaGroupButton.Width = 126;
             removeBetaGroupButton.Text = "删除组";
             removeBetaGroupButton.Width = 90;
             vsyncCheck.Text = "VSync";
@@ -341,8 +342,7 @@ namespace SBMSGui
             sourceDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             streamModeCheck.CheckedChanged += delegate { OnStreamModeChanged(); };
-            multiScreenBetaCheck.CheckedChanged += delegate { OnMultiScreenBetaChanged(); };
-            addBetaGroupButton.Click += delegate { AddBetaGroupRow(null, true); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(); };
+            addBetaGroupButton.Click += delegate { AddBetaGroupFromUi(); };
             removeBetaGroupButton.Click += delegate { RemoveSelectedBetaGroup(); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(); };
             startButton.Click += delegate { StartBridge(); };
             stopButton.Click += delegate { StopBridge(); };
@@ -455,8 +455,8 @@ namespace SBMSGui
         {
             configForm = new Form();
             configForm.StartPosition = FormStartPosition.CenterParent;
-            configForm.Size = new Size(1120, 760);
-            configForm.MinimumSize = new Size(980, 680);
+            configForm.Size = new Size(1120, 780);
+            configForm.MinimumSize = new Size(980, 700);
             configForm.ShowInTaskbar = false;
             configForm.FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
@@ -472,61 +472,32 @@ namespace SBMSGui
             panel.Dock = DockStyle.Fill;
             panel.Padding = new Padding(14);
             panel.ColumnCount = 2;
-            panel.RowCount = 10;
+            panel.RowCount = 4;
             panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
             panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 148));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 214));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
             configHost.Controls.Add(panel);
 
-            AddLabel(panel, "虚拟源", 0);
-            panel.Controls.Add(sourceDisplayCombo, 1, 0);
-            AddLabel(panel, "输出目标", 1);
-            panel.Controls.Add(targetDisplayCombo, 1, 1);
-            AddLabel(panel, "配置方式", 2);
+            AddLabel(panel, "运行选项", 0);
+            panel.Controls.Add(CreateRuntimeOptionPanel(), 1, 0);
+
+            AddLabel(panel, "映射配置", 1);
             ConfigureInputTabs();
-            panel.Controls.Add(configInputTabs, 1, 2);
-            AddLabel(panel, "尺寸策略", 3);
-            panel.Controls.Add(strategyCombo, 1, 3);
-
-            var sourcePanel = new FlowLayoutPanel();
-            sourcePanel.Dock = DockStyle.Fill;
-            sourcePanel.FlowDirection = FlowDirection.LeftToRight;
-            sourceText.Width = 130;
-            targetText.Width = 130;
-            sourcePanel.Controls.Add(sourceText);
-            sourcePanel.Controls.Add(targetText);
-            sourcePanel.Controls.Add(calculateButton);
-            AddLabel(panel, "映射结果", 4);
-            panel.Controls.Add(sourcePanel, 1, 4);
-
-            AddLabel(panel, "缩放滤镜", 5);
-            filterCombo.Width = 170;
-            panel.Controls.Add(filterCombo, 1, 5);
-
-            var checks = new FlowLayoutPanel();
-            checks.Dock = DockStyle.Fill;
-            checks.FlowDirection = FlowDirection.LeftToRight;
-            checks.Controls.Add(inputCheck);
-            checks.Controls.Add(windowMoveCheck);
-            checks.Controls.Add(deviceHostCheck);
-            checks.Controls.Add(streamModeCheck);
-            checks.Controls.Add(multiScreenBetaCheck);
-            checks.Controls.Add(streamModeWarningLabel);
-            checks.Controls.Add(vsyncCheck);
-            AddLabel(panel, "运行选项", 6);
-            panel.Controls.Add(checks, 1, 6);
-
-            AddLabel(panel, "多屏配置组", 7);
-            panel.Controls.Add(CreateBetaGroupPanel(), 1, 7);
+            singleMappingPage.Text = T("单组映射");
+            singleMappingPage.Tag = "单组映射";
+            singleMappingPage.Controls.Clear();
+            singleMappingPage.Controls.Add(CreateSingleMappingPanel());
+            multiMappingPage.Text = T("多组映射 BETA");
+            multiMappingPage.Tag = "多组映射 BETA";
+            multiMappingPage.Controls.Clear();
+            multiMappingPage.Controls.Add(CreateBetaGroupPanel());
+            mappingTabs.Dock = DockStyle.Fill;
+            mappingTabs.TabPages.Clear();
+            mappingTabs.TabPages.Add(singleMappingPage);
+            panel.Controls.Add(mappingTabs, 1, 1);
 
             var configButtons = new FlowLayoutPanel();
             configButtons.Dock = DockStyle.Fill;
@@ -535,9 +506,11 @@ namespace SBMSGui
             closeButton.Click += delegate { configForm.Hide(); };
             closeButton.Tag = "关闭";
             applyConfigButton.Tag = "应用";
+            configButtons.Controls.Add(addBetaGroupButton);
+            configButtons.Controls.Add(removeBetaGroupButton);
             configButtons.Controls.Add(applyConfigButton);
             configButtons.Controls.Add(closeButton);
-            panel.Controls.Add(configButtons, 1, 8);
+            panel.Controls.Add(configButtons, 1, 2);
 
             configLockPanel.Dock = DockStyle.Fill;
             configLockPanel.Name = "configLockPanel";
@@ -552,28 +525,347 @@ namespace SBMSGui
             configLockPanel.Controls.Add(configLockLabel);
             configHost.Controls.Add(configLockPanel);
             configLockPanel.BringToFront();
+            UpdateMappingTabs();
+        }
+
+        private Control CreateRuntimeOptionPanel()
+        {
+            ConfigureToggle(inputCheck, 96);
+            ConfigureToggle(windowMoveCheck, 96);
+            ConfigureToggle(deviceHostCheck, 134);
+            ConfigureToggle(streamModeCheck, 104);
+            ConfigureToggle(vsyncCheck, 76);
+            filterCombo.Width = 150;
+
+            var checks = new FlowLayoutPanel();
+            checks.Dock = DockStyle.Fill;
+            checks.FlowDirection = FlowDirection.LeftToRight;
+            checks.Padding = new Padding(0, 7, 0, 0);
+            checks.WrapContents = false;
+            checks.Controls.Add(inputCheck);
+            checks.Controls.Add(windowMoveCheck);
+            checks.Controls.Add(deviceHostCheck);
+            checks.Controls.Add(streamModeCheck);
+            checks.Controls.Add(vsyncCheck);
+            var filterLabel = new Label();
+            filterLabel.Tag = "缩放滤镜";
+            filterLabel.Text = T("缩放滤镜");
+            filterLabel.AutoSize = true;
+            filterLabel.TextAlign = ContentAlignment.MiddleLeft;
+            filterLabel.Padding = new Padding(14, 7, 2, 0);
+            checks.Controls.Add(filterLabel);
+            checks.Controls.Add(filterCombo);
+            return checks;
+        }
+
+        private Control CreateSingleMappingPanel()
+        {
+            var panel = new TableLayoutPanel();
+            panel.Dock = DockStyle.Fill;
+            panel.Padding = new Padding(0, 8, 0, 0);
+            panel.ColumnCount = 2;
+            panel.RowCount = 6;
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 118));
+            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
+
+            AddLabel(panel, "虚拟源", 0);
+            panel.Controls.Add(sourceDisplayCombo, 1, 0);
+            AddLabel(panel, "输出目标", 1);
+            panel.Controls.Add(targetDisplayCombo, 1, 1);
+            AddLabel(panel, "配置方式", 2);
+            panel.Controls.Add(configInputTabs, 1, 2);
+            AddLabel(panel, "尺寸策略", 3);
+            panel.Controls.Add(strategyCombo, 1, 3);
+
+            var sourcePanel = new FlowLayoutPanel();
+            sourcePanel.Dock = DockStyle.Fill;
+            sourcePanel.FlowDirection = FlowDirection.LeftToRight;
+            sourcePanel.WrapContents = false;
+            sourceText.Width = 130;
+            targetText.Width = 130;
+            sourcePanel.Controls.Add(sourceText);
+            sourcePanel.Controls.Add(targetText);
+            sourcePanel.Controls.Add(calculateButton);
+            AddLabel(panel, "映射结果", 4);
+            panel.Controls.Add(sourcePanel, 1, 4);
+            return panel;
         }
 
         private Control CreateBetaGroupPanel()
         {
             var host = new TableLayoutPanel();
             host.Dock = DockStyle.Fill;
-            host.RowCount = 2;
+            host.RowCount = 1;
             host.ColumnCount = 1;
-            host.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             host.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            var tools = new FlowLayoutPanel();
-            tools.Dock = DockStyle.Fill;
-            tools.FlowDirection = FlowDirection.LeftToRight;
-            tools.Controls.Add(addBetaGroupButton);
-            tools.Controls.Add(removeBetaGroupButton);
-            host.Controls.Add(tools, 0, 0);
-
-            betaPairGrid.Dock = DockStyle.Fill;
-            host.Controls.Add(betaPairGrid, 0, 1);
+            betaGroupTabs.Dock = DockStyle.Fill;
+            host.Controls.Add(betaGroupTabs, 0, 0);
             return host;
         }
+
+        private void UpdateMappingTabs()
+        {
+            if (mappingTabs.TabPages.Count == 0)
+            {
+                return;
+            }
+            bool multi = IsMultiMappingEnabled();
+            if (multi && !mappingTabs.TabPages.Contains(multiMappingPage))
+            {
+                mappingTabs.TabPages.Add(multiMappingPage);
+            }
+            if (!multi && mappingTabs.TabPages.Contains(multiMappingPage))
+            {
+                mappingTabs.TabPages.Remove(multiMappingPage);
+            }
+            if (multi && mappingTabs.SelectedTab != multiMappingPage)
+            {
+                mappingTabs.SelectedTab = multiMappingPage;
+            }
+            if (!multi && mappingTabs.SelectedTab != singleMappingPage)
+            {
+                mappingTabs.SelectedTab = singleMappingPage;
+            }
+            removeBetaGroupButton.Visible = multi;
+            streamModeCheck.Visible = !multi;
+            RebuildBetaGroupTabs();
+        }
+
+        private void RebuildBetaGroupTabs()
+        {
+            if (betaGroupTabs == null || betaGroupTabs.IsDisposed)
+            {
+                return;
+            }
+            int selected = betaGroupTabs.SelectedIndex;
+            betaGroupTabs.TabPages.Clear();
+            if (!IsMultiMappingEnabled())
+            {
+                return;
+            }
+            for (int i = 0; i < betaPairGrid.Rows.Count; ++i)
+            {
+                TabPage page = new TabPage(T("组") + " " + (i + 1).ToString(CultureInfo.InvariantCulture));
+                page.BackColor = ThemeBack;
+                page.ForeColor = ThemeGreen;
+                page.Controls.Add(CreateBetaGroupEditor(i));
+                ApplyTheme(page);
+                betaGroupTabs.TabPages.Add(page);
+            }
+            if (betaGroupTabs.TabPages.Count > 0)
+            {
+                betaGroupTabs.SelectedIndex = Math.Max(0, Math.Min(selected, betaGroupTabs.TabPages.Count - 1));
+            }
+            UpdateToggleVisuals();
+        }
+
+        private Control CreateBetaGroupEditor(int rowIndex)
+        {
+            DataGridViewRow row = betaPairGrid.Rows[rowIndex];
+            var grid = new TableLayoutPanel();
+            grid.Dock = DockStyle.Fill;
+            grid.Padding = new Padding(0, 10, 0, 0);
+            grid.ColumnCount = 2;
+            grid.RowCount = 8;
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int i = 0; i < grid.RowCount; ++i)
+            {
+                grid.RowStyles.Add(new RowStyle(i == 7 ? SizeType.Percent : SizeType.Absolute, i == 7 ? 100 : 42));
+            }
+
+            var enabledToggle = new CheckBox();
+            enabledToggle.Tag = "启用";
+            enabledToggle.Text = T("启用");
+            enabledToggle.Checked = IsBetaRowEnabled(row);
+            ConfigureToggle(enabledToggle, 88);
+            enabledToggle.CheckedChanged += delegate
+            {
+                if (rowIndex >= betaPairGrid.Rows.Count) return;
+                betaPairGrid.Rows[rowIndex].Cells[BetaColEnabled].Value = enabledToggle.Checked;
+                RecalculateBetaPairGrid(false);
+                UpdateRuntimeOptionState();
+            };
+            AddLabel(grid, "启用", 0);
+            grid.Controls.Add(enabledToggle, 1, 0);
+
+            var streamToggle = new CheckBox();
+            streamToggle.Text = T("仅虚拟桌面");
+            streamToggle.Checked = IsBetaRowStreamOnly(row);
+            ConfigureToggle(streamToggle, 142);
+            AddLabel(grid, "模式", 1);
+            grid.Controls.Add(streamToggle, 1, 1);
+
+            var targetCombo = new ComboBox();
+            targetCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            targetCombo.Dock = DockStyle.Fill;
+            foreach (DisplayChoice display in GetPhysicalDisplays())
+            {
+                targetCombo.Items.Add(GetDisplayLabel(display));
+            }
+            string currentTarget = GetNormalTargetLabel(row);
+            SelectComboByText(targetCombo, currentTarget);
+            targetCombo.Enabled = !streamToggle.Checked;
+            targetCombo.SelectedIndexChanged += delegate
+            {
+                if (rowIndex >= betaPairGrid.Rows.Count || IsBetaRowStreamOnly(betaPairGrid.Rows[rowIndex])) return;
+                string selected = Convert.ToString(targetCombo.SelectedItem, CultureInfo.InvariantCulture);
+                DataGridViewRow current = betaPairGrid.Rows[rowIndex];
+                current.Cells[BetaColTarget].Value = selected;
+                DisplayChoice display = FindDisplayByTargetLabel(selected);
+                current.Tag = display;
+                if (display != null)
+                {
+                    PopulateBetaRowFromDisplay(current, display);
+                    RecalculateBetaPairGrid(false);
+                    RebuildBetaGroupTabs();
+                }
+            };
+            AddLabel(grid, "目标显示器", 2);
+            grid.Controls.Add(targetCombo, 1, 2);
+
+            var horizontalText = CreateEditorTextBox(GetCellText(row, BetaColHorizontal));
+            var aspectText = CreateEditorTextBox(GetCellText(row, BetaColAspect));
+            var sizeText = CreateEditorTextBox(GetCellText(row, BetaColSize));
+            var sourceOutput = CreateEditorTextBox(GetCellText(row, BetaColSource));
+            sourceOutput.ReadOnly = true;
+
+            var orientationCombo = new ComboBox();
+            orientationCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            orientationCombo.Items.AddRange(new object[] { "横屏", "竖屏", "横屏反向", "竖屏反向" });
+            SelectComboByText(orientationCombo, GetCellText(row, BetaColOrientation));
+
+            var strategyComboBox = new ComboBox();
+            strategyComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            strategyComboBox.Items.AddRange(new object[] { "真实尺寸比例", "文字清晰优先", "直接使用源" });
+            SelectComboByText(strategyComboBox, GetCellText(row, BetaColStrategy));
+
+            horizontalText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColHorizontal, horizontalText.Text, sourceOutput); };
+            aspectText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColAspect, aspectText.Text, sourceOutput); };
+            sizeText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColSize, sizeText.Text, sourceOutput); };
+            orientationCombo.SelectedIndexChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColOrientation, Convert.ToString(orientationCombo.SelectedItem, CultureInfo.InvariantCulture), sourceOutput); };
+            strategyComboBox.SelectedIndexChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColStrategy, Convert.ToString(strategyComboBox.SelectedItem, CultureInfo.InvariantCulture), sourceOutput); };
+
+            streamToggle.CheckedChanged += delegate
+            {
+                if (rowIndex >= betaPairGrid.Rows.Count) return;
+                if (streamToggle.Checked && !ShowRiskConfirmation("串流模式", "串流模式只创建虚拟桌面，不复制到任何物理显示器"))
+                {
+                    streamToggle.Checked = false;
+                    UpdateToggleVisuals();
+                    return;
+                }
+                SetBetaRowStreamMode(rowIndex, streamToggle.Checked);
+                targetCombo.Enabled = !streamToggle.Checked;
+                RecalculateBetaPairGrid(false);
+                RebuildBetaGroupTabs();
+                UpdateRuntimeOptionState();
+            };
+
+            AddLabel(grid, "横向像素", 3);
+            grid.Controls.Add(horizontalText, 1, 3);
+            AddLabel(grid, "比例", 4);
+            grid.Controls.Add(aspectText, 1, 4);
+            AddLabel(grid, "方向", 5);
+            grid.Controls.Add(orientationCombo, 1, 5);
+
+            var lower = new FlowLayoutPanel();
+            lower.Dock = DockStyle.Fill;
+            lower.FlowDirection = FlowDirection.LeftToRight;
+            lower.WrapContents = false;
+            lower.Controls.Add(CreateInlineLabel("尺寸"));
+            lower.Controls.Add(sizeText);
+            lower.Controls.Add(CreateInlineLabel("策略"));
+            lower.Controls.Add(strategyComboBox);
+            lower.Controls.Add(CreateInlineLabel("虚拟源"));
+            lower.Controls.Add(sourceOutput);
+            sizeText.Width = 72;
+            strategyComboBox.Width = 138;
+            sourceOutput.Width = 118;
+            AddLabel(grid, "映射结果", 6);
+            grid.Controls.Add(lower, 1, 6);
+            return grid;
+        }
+
+        private TextBox CreateEditorTextBox(string text)
+        {
+            var textBox = new TextBox();
+            textBox.Text = text;
+            textBox.Dock = DockStyle.Left;
+            textBox.Width = 150;
+            textBox.BorderStyle = BorderStyle.FixedSingle;
+            return textBox;
+        }
+
+        private Label CreateInlineLabel(string text)
+        {
+            var label = new Label();
+            label.Text = T(text);
+            label.Tag = text;
+            label.AutoSize = true;
+            label.Padding = new Padding(10, 7, 4, 0);
+            return label;
+        }
+
+        private static void SelectComboByText(ComboBox combo, string text)
+        {
+            for (int i = 0; i < combo.Items.Count; ++i)
+            {
+                if (string.Equals(Convert.ToString(combo.Items[i], CultureInfo.InvariantCulture), text, StringComparison.OrdinalIgnoreCase))
+                {
+                    combo.SelectedIndex = i;
+                    return;
+                }
+            }
+            combo.SelectedIndex = combo.Items.Count > 0 ? 0 : -1;
+        }
+
+        private void UpdateBetaCellFromText(int rowIndex, int columnIndex, string value, TextBox sourceOutput)
+        {
+            if (rowIndex < 0 || rowIndex >= betaPairGrid.Rows.Count)
+            {
+                return;
+            }
+            betaPairGrid.Rows[rowIndex].Cells[columnIndex].Value = value;
+            RecalculateBetaPairGrid(false);
+            sourceOutput.Text = GetCellText(betaPairGrid.Rows[rowIndex], BetaColSource);
+        }
+
+        private void SetBetaRowStreamMode(int rowIndex, bool streamOnly)
+        {
+            if (rowIndex < 0 || rowIndex >= betaPairGrid.Rows.Count)
+            {
+                return;
+            }
+            DataGridViewRow row = betaPairGrid.Rows[rowIndex];
+            row.Cells[BetaColMode].Value = streamOnly ? "串流" : "输出";
+            if (streamOnly)
+            {
+                row.Tag = null;
+                string streamLabel = "串流目标 " + (rowIndex + 1).ToString(CultureInfo.InvariantCulture);
+                AddComboItemIfMissing(BetaColTarget, streamLabel);
+                row.Cells[BetaColTarget].Value = streamLabel;
+            }
+            else
+            {
+                DisplayChoice display = GetDefaultPhysicalDisplay("");
+                if (display != null)
+                {
+                    row.Tag = display;
+                    string targetLabel = GetDisplayLabel(display);
+                    AddComboItemIfMissing(BetaColTarget, targetLabel);
+                    row.Cells[BetaColTarget].Value = targetLabel;
+                    PopulateBetaRowFromDisplay(row, display);
+                }
+            }
+        }
+
 
         private void ConfigureBetaPairGrid()
         {
@@ -593,6 +885,7 @@ namespace SBMSGui
             betaPairGrid.EnableHeadersVisualStyles = false;
 
             betaPairGrid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "启用", FillWeight = 42 });
+            betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "模式", FillWeight = 72, FlatStyle = FlatStyle.Flat });
             betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "目标显示器", FillWeight = 170, FlatStyle = FlatStyle.Flat });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "横向像素", FillWeight = 72 });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "比例", FillWeight = 62 });
@@ -601,6 +894,11 @@ namespace SBMSGui
             betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "策略", FillWeight = 118, FlatStyle = FlatStyle.Flat });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "虚拟源", FillWeight = 92 });
 
+            DataGridViewComboBoxColumn modeColumn = betaPairGrid.Columns[BetaColMode] as DataGridViewComboBoxColumn;
+            if (modeColumn != null)
+            {
+                modeColumn.Items.AddRange(new object[] { "输出", "串流" });
+            }
             DataGridViewComboBoxColumn orientationColumn = betaPairGrid.Columns[BetaColOrientation] as DataGridViewComboBoxColumn;
             if (orientationColumn != null)
             {
@@ -623,7 +921,7 @@ namespace SBMSGui
             betaPairGrid.CellEndEdit += delegate { RecalculateBetaPairGrid(false); };
             betaPairGrid.CellBeginEdit += delegate(object sender, DataGridViewCellCancelEventArgs e)
             {
-                if (streamModeCheck.Checked && e.ColumnIndex == BetaColTarget)
+                if (IsBetaRowStreamOnly(e.RowIndex) && e.ColumnIndex == BetaColTarget)
                 {
                     e.Cancel = true;
                 }
@@ -840,33 +1138,36 @@ namespace SBMSGui
             listButton.Text = T("刷新列表");
             calculateButton.Text = T("计算");
             applyConfigButton.Text = T("应用");
-            addBetaGroupButton.Text = "⊕ " + T("新增组") + " β";
+            addBetaGroupButton.Text = "+ " + T("新增组") + " BETA";
             removeBetaGroupButton.Text = T("删除组");
             inputCheck.Text = T("鼠标映射");
             windowMoveCheck.Text = T("迁移窗口");
             deviceHostCheck.Text = T("管理虚拟显示器");
             streamModeCheck.Text = T("串流模式");
-            multiScreenBetaCheck.Text = T("多屏 BETA");
-            streamModeWarningLabel.Text = T("如果不清楚这个选项的作用，请不要勾选");
+            singleMappingPage.Text = T("单组映射");
+            multiMappingPage.Text = T("多组映射 BETA");
             if (configForm != null)
             {
                 configForm.Text = T("配置");
                 ApplyLanguageToControls(configForm);
             }
             ApplyBetaPairGridLanguage();
+            RebuildBetaGroupTabs();
             configLockLabel.Text = T("配置已锁定") + Environment.NewLine + T("请先停止 SBMS");
             ApplyComboTexts();
+            UpdateToggleVisuals();
             UpdateStatus();
         }
 
         private void ApplyBetaPairGridLanguage()
         {
-            if (betaPairGrid.Columns.Count < 8)
+            if (betaPairGrid.Columns.Count < 9)
             {
                 return;
             }
             betaPairGrid.Columns[BetaColEnabled].HeaderText = T("启用");
-            betaPairGrid.Columns[BetaColTarget].HeaderText = T(streamModeCheck.Checked ? "串流目标" : "目标显示器");
+            betaPairGrid.Columns[BetaColMode].HeaderText = T("模式");
+            betaPairGrid.Columns[BetaColTarget].HeaderText = T("目标显示器");
             betaPairGrid.Columns[BetaColHorizontal].HeaderText = T("横向像素");
             betaPairGrid.Columns[BetaColAspect].HeaderText = T("比例");
             betaPairGrid.Columns[BetaColOrientation].HeaderText = T("方向");
@@ -1204,18 +1505,29 @@ namespace SBMSGui
                 case "管理虚拟显示器": return "Virtual display";
                 case "串流模式": return "Streaming mode";
                 case "多屏 BETA": return "Multi-screen BETA";
-                case "多屏配置组": return "Multi-screen groups";
+                case "多组映射": return "Multi-mapping";
+                case "映射配置": return "Mapping";
+                case "单组映射": return "Single mapping";
+                case "多组映射 BETA": return "Multi-mapping BETA";
+                case "组": return "Group";
                 case "新增组": return "Add group";
                 case "删除组": return "Remove group";
                 case "启用": return "On";
+                case "模式": return "Mode";
+                case "输出": return "Output";
                 case "目标显示器": return "Target display";
                 case "串流目标": return "Streaming target";
+                case "仅虚拟桌面": return "Virtual only";
                 case "横向像素": return "Horizontal px";
                 case "比例": return "Aspect";
                 case "方向": return "Orientation";
                 case "尺寸": return "Size";
                 case "策略": return "Strategy";
                 case "如果不清楚这个选项的作用，请不要勾选": return "Do not enable this unless you know what it does";
+                case "多组映射支持为BETA功能, 不保证稳定性": return "Multi-mapping support is BETA and is not guaranteed stable";
+                case "串流模式只创建虚拟桌面，不复制到任何物理显示器": return "Streaming mode only creates a virtual desktop and does not copy it to a physical display";
+                case "确认": return "Confirm";
+                case "放弃更改": return "Cancel";
                 case "虚拟源": return "Virtual source";
                 case "输出目标": return "Target";
                 case "配置方式": return "Input";
@@ -1294,12 +1606,6 @@ namespace SBMSGui
                 control.ForeColor = ThemeRed;
                 return;
             }
-            if (control.Name == "streamModeWarningLabel")
-            {
-                control.BackColor = ThemeBack;
-                control.ForeColor = ThemeRed;
-                return;
-            }
             if (control is TextBox || control is ListBox || control is ComboBox)
             {
                 control.BackColor = ThemePanel;
@@ -1326,6 +1632,11 @@ namespace SBMSGui
                 ((Button)control).FlatStyle = FlatStyle.Flat;
                 ((Button)control).FlatAppearance.BorderColor = ThemeGreen;
             }
+            else if (control is TabControl || control is TabPage)
+            {
+                control.BackColor = ThemeBack;
+                control.ForeColor = ThemeGreen;
+            }
             else
             {
                 control.BackColor = ThemeBack;
@@ -1335,7 +1646,178 @@ namespace SBMSGui
             if (checkBox != null)
             {
                 checkBox.ForeColor = ThemeMuted;
+                checkBox.FlatStyle = FlatStyle.Flat;
             }
+        }
+
+        private static void ConfigureToggle(CheckBox checkBox, int width)
+        {
+            checkBox.Appearance = Appearance.Button;
+            checkBox.AutoSize = false;
+            checkBox.Width = width;
+            checkBox.Height = 30;
+            checkBox.TextAlign = ContentAlignment.MiddleCenter;
+            checkBox.FlatStyle = FlatStyle.Flat;
+            checkBox.FlatAppearance.BorderSize = 1;
+            checkBox.Margin = new Padding(0, 0, 8, 0);
+        }
+
+        private void UpdateToggleVisuals()
+        {
+            ApplyToggleVisual(inputCheck);
+            ApplyToggleVisual(windowMoveCheck);
+            ApplyToggleVisual(deviceHostCheck);
+            ApplyToggleVisual(streamModeCheck);
+            ApplyToggleVisual(vsyncCheck);
+            foreach (TabPage page in betaGroupTabs.TabPages)
+            {
+                ApplyToggleVisuals(page);
+            }
+        }
+
+        private void ApplyToggleVisuals(Control parent)
+        {
+            foreach (Control control in parent.Controls)
+            {
+                CheckBox checkBox = control as CheckBox;
+                if (checkBox != null && checkBox.Appearance == Appearance.Button)
+                {
+                    ApplyToggleVisual(checkBox);
+                }
+                ApplyToggleVisuals(control);
+            }
+        }
+
+        private static void ApplyToggleVisual(CheckBox checkBox)
+        {
+            if (checkBox == null || checkBox.Appearance != Appearance.Button)
+            {
+                return;
+            }
+            if (checkBox.Checked)
+            {
+                checkBox.BackColor = Color.FromArgb(170, 245, 185);
+                checkBox.ForeColor = ThemeRed;
+                checkBox.FlatAppearance.BorderColor = ThemeRed;
+            }
+            else
+            {
+                checkBox.BackColor = Color.FromArgb(10, 72, 32);
+                checkBox.ForeColor = Color.White;
+                checkBox.FlatAppearance.BorderColor = Color.FromArgb(35, 130, 65);
+            }
+        }
+
+        private bool ShowRiskConfirmation(string title, string message)
+        {
+            Form owner = configForm != null && configForm.Visible ? configForm : this;
+            using (var dialog = new Form())
+            {
+                dialog.FormBorderStyle = FormBorderStyle.None;
+                dialog.StartPosition = FormStartPosition.Manual;
+                dialog.Bounds = owner.Bounds;
+                dialog.ShowInTaskbar = false;
+                dialog.TopMost = owner.TopMost;
+                dialog.BackColor = Color.FromArgb(18, 4, 4);
+                dialog.BackgroundImage = CaptureBlurredBackground(owner);
+                dialog.BackgroundImageLayout = ImageLayout.Stretch;
+
+                var layout = new TableLayoutPanel();
+                layout.Dock = DockStyle.Fill;
+                layout.BackColor = Color.Transparent;
+                layout.ColumnCount = 1;
+                layout.RowCount = 4;
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+                dialog.Controls.Add(layout);
+
+                var titleLabel = new Label();
+                titleLabel.Text = T(message);
+                titleLabel.Dock = DockStyle.Fill;
+                titleLabel.TextAlign = ContentAlignment.MiddleCenter;
+                titleLabel.Font = new Font("Segoe UI", 28F, FontStyle.Bold);
+                titleLabel.ForeColor = ThemeRed;
+                titleLabel.BackColor = Color.Transparent;
+                layout.Controls.Add(titleLabel, 0, 1);
+
+                var subtitleLabel = new Label();
+                subtitleLabel.Text = T(title);
+                subtitleLabel.Dock = DockStyle.Fill;
+                subtitleLabel.TextAlign = ContentAlignment.TopCenter;
+                subtitleLabel.Font = new Font("Consolas", 15F, FontStyle.Bold);
+                subtitleLabel.ForeColor = Color.White;
+                subtitleLabel.BackColor = Color.Transparent;
+                layout.Controls.Add(subtitleLabel, 0, 2);
+
+                var buttons = new FlowLayoutPanel();
+                buttons.Dock = DockStyle.Bottom;
+                buttons.Height = 58;
+                buttons.FlowDirection = FlowDirection.RightToLeft;
+                buttons.Padding = new Padding(0, 0, 28, 18);
+                buttons.BackColor = Color.Transparent;
+                var confirm = new Button { Text = T("确认"), Width = 110, Height = 34, DialogResult = DialogResult.OK };
+                var cancel = new Button { Text = T("放弃更改"), Width = 120, Height = 34, DialogResult = DialogResult.Cancel };
+                StyleRiskButton(confirm, true);
+                StyleRiskButton(cancel, false);
+                buttons.Controls.Add(confirm);
+                buttons.Controls.Add(cancel);
+                dialog.Controls.Add(buttons);
+                dialog.AcceptButton = confirm;
+                dialog.CancelButton = cancel;
+                return dialog.ShowDialog(owner) == DialogResult.OK;
+            }
+        }
+
+        private static void StyleRiskButton(Button button, bool danger)
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.BackColor = danger ? Color.FromArgb(190, 255, 210) : Color.FromArgb(10, 72, 32);
+            button.ForeColor = danger ? ThemeRed : Color.White;
+            button.FlatAppearance.BorderColor = danger ? ThemeRed : Color.FromArgb(35, 130, 65);
+        }
+
+        private static Bitmap CaptureBlurredBackground(Form owner)
+        {
+            int width = Math.Max(1, owner.Bounds.Width);
+            int height = Math.Max(1, owner.Bounds.Height);
+            Bitmap capture = new Bitmap(width, height);
+            try
+            {
+                using (Graphics graphics = Graphics.FromImage(capture))
+                {
+                    graphics.CopyFromScreen(owner.Bounds.Location, Point.Empty, owner.Bounds.Size);
+                }
+            }
+            catch
+            {
+                using (Graphics graphics = Graphics.FromImage(capture))
+                {
+                    graphics.Clear(Color.FromArgb(18, 4, 4));
+                }
+            }
+            int smallWidth = Math.Max(1, width / 14);
+            int smallHeight = Math.Max(1, height / 14);
+            Bitmap small = new Bitmap(smallWidth, smallHeight);
+            using (Graphics graphics = Graphics.FromImage(small))
+            {
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                graphics.DrawImage(capture, new Rectangle(0, 0, smallWidth, smallHeight));
+            }
+            Bitmap blurred = new Bitmap(width, height);
+            using (Graphics graphics = Graphics.FromImage(blurred))
+            {
+                graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                graphics.DrawImage(small, new Rectangle(0, 0, width, height));
+                using (Brush brush = new SolidBrush(Color.FromArgb(120, 4, 0, 0)))
+                {
+                    graphics.FillRectangle(brush, new Rectangle(0, 0, width, height));
+                }
+            }
+            capture.Dispose();
+            small.Dispose();
+            return blurred;
         }
 
         private void UpdateConfigLock()
@@ -1350,14 +1832,26 @@ namespace SBMSGui
 
         private void OnStreamModeChanged()
         {
+            if (!suppressStreamModePrompt && streamModeCheck.Checked)
+            {
+                if (!ShowRiskConfirmation("串流模式", "串流模式只创建虚拟桌面，不复制到任何物理显示器"))
+                {
+                    suppressStreamModePrompt = true;
+                    streamModeCheck.Checked = false;
+                    suppressStreamModePrompt = false;
+                    UpdateToggleVisuals();
+                    return;
+                }
+            }
             ApplyStreamModeToBetaPairGrid();
             UpdateRuntimeOptionState();
+            UpdateToggleVisuals();
             UpdateStatus();
         }
 
         private void OnMultiScreenBetaChanged()
         {
-            if (multiScreenBetaCheck.Checked)
+            if (IsMultiMappingEnabled())
             {
                 if (!deviceHostCheck.Checked)
                 {
@@ -1375,8 +1869,8 @@ namespace SBMSGui
                 return;
             }
 
-            bool streamOnly = streamModeCheck.Checked;
-            betaPairGrid.Columns[BetaColTarget].HeaderText = T(streamOnly ? "串流目标" : "目标显示器");
+            bool streamOnly = streamModeCheck.Checked && !IsMultiMappingEnabled();
+            betaPairGrid.Columns[BetaColTarget].HeaderText = T("目标显示器");
             betaPairGrid.Columns[BetaColTarget].ReadOnly = streamOnly;
 
             updatingBetaPairGrid = true;
@@ -1389,10 +1883,15 @@ namespace SBMSGui
                     {
                         string streamLabel = "串流目标 " + (i + 1).ToString(CultureInfo.InvariantCulture);
                         AddComboItemIfMissing(BetaColTarget, streamLabel);
+                        row.Cells[BetaColMode].Value = "串流";
                         row.Cells[BetaColTarget].Value = streamLabel;
                     }
                     else
                     {
+                        if (!IsMultiMappingEnabled() || string.IsNullOrWhiteSpace(GetCellText(row, BetaColMode)))
+                        {
+                            row.Cells[BetaColMode].Value = "输出";
+                        }
                         DisplayChoice display = row.Tag as DisplayChoice ?? GetDefaultPhysicalDisplay("");
                         if (display != null)
                         {
@@ -1408,12 +1907,13 @@ namespace SBMSGui
             {
                 updatingBetaPairGrid = false;
             }
+            RebuildBetaGroupTabs();
         }
 
         private void UpdateRuntimeOptionState()
         {
-            bool streamOnly = streamModeCheck.Checked;
-            bool multiBeta = multiScreenBetaCheck.Checked;
+            bool multiBeta = IsMultiMappingEnabled();
+            bool streamOnly = streamModeCheck.Checked && !multiBeta;
             if ((streamOnly || multiBeta) && !deviceHostCheck.Checked)
             {
                 deviceHostCheck.Checked = true;
@@ -1424,14 +1924,16 @@ namespace SBMSGui
             targetDisplayCombo.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
             targetText.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
             betaPairGrid.Enabled = multiBeta && !bridgeRunning;
-            addBetaGroupButton.Enabled = multiBeta && !bridgeRunning && betaPairGrid.Rows.Count < MultiScreenBetaMaxTargets;
+            addBetaGroupButton.Enabled = !bridgeRunning && betaPairGrid.Rows.Count < MultiScreenBetaMaxTargets;
             removeBetaGroupButton.Enabled = multiBeta && !bridgeRunning && betaPairGrid.Rows.Count > 1;
-            filterCombo.Enabled = !streamOnly && !bridgeRunning;
+            filterCombo.Enabled = (!streamOnly || multiBeta) && !bridgeRunning;
             inputCheck.Enabled = !streamOnly && !bridgeRunning;
             windowMoveCheck.Enabled = !streamOnly && !bridgeRunning;
             vsyncCheck.Enabled = !streamOnly && !bridgeRunning;
             streamModeCheck.Enabled = !bridgeRunning;
-            multiScreenBetaCheck.Enabled = !bridgeRunning;
+            multiScreenBetaCheck.Checked = multiBeta;
+            UpdateMappingTabs();
+            UpdateToggleVisuals();
         }
 
         private static void ApplyThemeToMenuItems(ToolStripItemCollection items)
@@ -1453,14 +1955,18 @@ namespace SBMSGui
         private void UpdateStatus()
         {
             bool running = IsBridgeRunning();
-            bool streamOnly = streamModeCheck.Checked && running && (process == null || process.HasExited);
-            bool multiBeta = multiScreenBetaCheck.Checked && running && (streamModeCheck.Checked || HasRunningBetaProcess());
+            bool multiConfigured = IsMultiMappingEnabled();
+            bool streamOnly = streamModeCheck.Checked && !multiConfigured && running && (process == null || process.HasExited);
+            bool multiBeta = multiConfigured && running && (HasRunningBetaProcess() || deviceHostProcess != null);
             statusLabel.Text = AppName + " // " + T(running ? (multiBeta ? "多屏BETA运行中" : (streamOnly ? "串流中" : "运行中")) : "待机");
-            if (multiScreenBetaCheck.Checked)
+            if (multiConfigured)
             {
                 int pairCount = Math.Max(1, CountEnabledBetaPairs());
+                int streamCount = CountEnabledStreamOnlyBetaPairs();
+                int outputCount = Math.Max(0, pairCount - streamCount);
                 routeLabel.Text = T("虚拟源") + " x" + pairCount.ToString(CultureInfo.InvariantCulture) +
-                                  (streamModeCheck.Checked ? "  //  " + T("串流模式") : "  >  " + T("目标") + " x" + pairCount.ToString(CultureInfo.InvariantCulture));
+                                  "  >  " + T("目标") + " x" + outputCount.ToString(CultureInfo.InvariantCulture) +
+                                  (streamCount > 0 ? "  //  " + T("串流模式") + " x" + streamCount.ToString(CultureInfo.InvariantCulture) : "");
             }
             else if (streamModeCheck.Checked)
             {
@@ -1581,6 +2087,7 @@ namespace SBMSGui
                 snapshots.Add(new BridgePairSnapshot
                 {
                     Enabled = IsBetaRowEnabled(row),
+                    Mode = GetCellText(row, BetaColMode),
                     Target = GetNormalTargetLabel(row),
                     Horizontal = GetCellText(row, BetaColHorizontal),
                     Aspect = GetCellText(row, BetaColAspect),
@@ -1634,6 +2141,7 @@ namespace SBMSGui
             {
                 updatingBetaPairGrid = false;
             }
+            RebuildBetaGroupTabs();
         }
 
         private void AddBetaGroupRow(BridgePairSnapshot snapshot, bool userAdded)
@@ -1656,16 +2164,54 @@ namespace SBMSGui
 
             if (userAdded)
             {
+                multiMappingConfirmed = true;
                 multiScreenBetaCheck.Checked = true;
                 ApplyStreamModeToBetaPairGrid();
                 AppendLog("已新增 BETA 配置组");
+                UpdateMappingTabs();
+                RebuildBetaGroupTabs();
+            }
+        }
+
+        private void AddBetaGroupFromUi()
+        {
+            if (IsBridgeRunning())
+            {
+                UpdateConfigLock();
+                return;
+            }
+            if (!multiMappingConfirmed)
+            {
+                if (!ShowRiskConfirmation("多组映射 BETA", "多组映射支持为BETA功能, 不保证稳定性"))
+                {
+                    return;
+                }
+                multiMappingConfirmed = true;
+                multiScreenBetaCheck.Checked = true;
+            }
+            if (betaPairGrid.Rows.Count == 0)
+            {
+                AddBetaGroupRow(null, false);
+            }
+            AddBetaGroupRow(null, true);
+            RecalculateBetaPairGrid(false);
+            UpdateRuntimeOptionState();
+            if (mappingTabs.TabPages.Contains(multiMappingPage))
+            {
+                mappingTabs.SelectedTab = multiMappingPage;
+            }
+            if (betaGroupTabs.TabPages.Count > 0)
+            {
+                betaGroupTabs.SelectedIndex = betaGroupTabs.TabPages.Count - 1;
             }
         }
 
         private void AddBetaGroupRowInternal(BridgePairSnapshot snapshot, bool selectNewRow)
         {
             DisplayChoice display = FindDisplayByTargetLabel(snapshot.Target) ?? GetDefaultPhysicalDisplay("");
-            string targetLabel = display != null ? GetDisplayLabel(display) : "";
+            string rowMode = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Mode) ? snapshot.Mode : "输出";
+            bool streamOnly = IsStreamModeText(rowMode);
+            string targetLabel = streamOnly ? "" : (display != null ? GetDisplayLabel(display) : "");
             string rowHorizontal = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Horizontal) ? snapshot.Horizontal : "2560";
             string rowAspect = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Aspect) ? snapshot.Aspect : "16:9";
             string rowOrientation = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Orientation) ? snapshot.Orientation : "横屏";
@@ -1674,9 +2220,13 @@ namespace SBMSGui
             string rowSource = snapshot != null ? snapshot.Source : "";
             bool enabled = snapshot == null || snapshot.Enabled;
 
+            if (streamOnly)
+            {
+                targetLabel = "串流目标 " + (betaPairGrid.Rows.Count + 1).ToString(CultureInfo.InvariantCulture);
+            }
             AddComboItemIfMissing(BetaColTarget, targetLabel);
-            int index = betaPairGrid.Rows.Add(enabled, targetLabel, rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowSource);
-            betaPairGrid.Rows[index].Tag = display;
+            int index = betaPairGrid.Rows.Add(enabled, streamOnly ? "串流" : "输出", targetLabel, rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowSource);
+            betaPairGrid.Rows[index].Tag = streamOnly ? null : display;
             if (display != null && snapshot != null && string.IsNullOrWhiteSpace(snapshot.Horizontal))
             {
                 PopulateBetaRowFromDisplay(betaPairGrid.Rows[index], display);
@@ -1707,6 +2257,7 @@ namespace SBMSGui
             return new BridgePairSnapshot
             {
                 Enabled = true,
+                Mode = "输出",
                 Target = display != null ? GetDisplayLabel(display) : "",
                 Horizontal = horizontal,
                 Aspect = aspect,
@@ -1725,11 +2276,19 @@ namespace SBMSGui
                 return;
             }
 
-            int index = betaPairGrid.CurrentRow != null ? betaPairGrid.CurrentRow.Index : betaPairGrid.Rows.Count - 1;
+            int index = betaGroupTabs.SelectedIndex >= 0 ? betaGroupTabs.SelectedIndex :
+                        (betaPairGrid.CurrentRow != null ? betaPairGrid.CurrentRow.Index : betaPairGrid.Rows.Count - 1);
             if (index >= 0 && index < betaPairGrid.Rows.Count)
             {
                 betaPairGrid.Rows.RemoveAt(index);
             }
+            if (betaPairGrid.Rows.Count <= 1)
+            {
+                multiMappingConfirmed = false;
+                multiScreenBetaCheck.Checked = false;
+            }
+            UpdateMappingTabs();
+            RebuildBetaGroupTabs();
         }
 
         private List<DisplayChoice> GetPhysicalDisplays()
@@ -1853,7 +2412,30 @@ namespace SBMSGui
             }
 
             DataGridViewRow row = betaPairGrid.Rows[e.RowIndex];
-            if (e.ColumnIndex == BetaColTarget && !streamModeCheck.Checked)
+            if (e.ColumnIndex == BetaColMode)
+            {
+                if (IsBetaRowStreamOnly(row))
+                {
+                    row.Tag = null;
+                    string streamLabel = "串流目标 " + (e.RowIndex + 1).ToString(CultureInfo.InvariantCulture);
+                    AddComboItemIfMissing(BetaColTarget, streamLabel);
+                    row.Cells[BetaColTarget].Value = streamLabel;
+                }
+                else
+                {
+                    DisplayChoice display = GetDefaultPhysicalDisplay("");
+                    if (display != null)
+                    {
+                        row.Tag = display;
+                        string targetLabel = GetDisplayLabel(display);
+                        AddComboItemIfMissing(BetaColTarget, targetLabel);
+                        row.Cells[BetaColTarget].Value = targetLabel;
+                        PopulateBetaRowFromDisplay(row, display);
+                    }
+                }
+                RebuildBetaGroupTabs();
+            }
+            if (e.ColumnIndex == BetaColTarget && !IsBetaRowStreamOnly(row))
             {
                 DisplayChoice display = FindDisplayByTargetLabel(GetCellText(row, BetaColTarget));
                 row.Tag = display;
@@ -1884,6 +2466,55 @@ namespace SBMSGui
                 }
             }
             return count;
+        }
+
+        private int CountEnabledStreamOnlyBetaPairs()
+        {
+            int count = 0;
+            foreach (DataGridViewRow row in betaPairGrid.Rows)
+            {
+                if (IsBetaRowEnabled(row) && IsBetaRowStreamOnly(row))
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
+        private static int CountOutputBridgePairs(List<BridgePairConfig> pairs)
+        {
+            int count = 0;
+            for (int i = 0; i < pairs.Count; ++i)
+            {
+                if (!pairs[i].StreamOnly)
+                {
+                    ++count;
+                }
+            }
+            return count;
+        }
+
+        private bool IsMultiMappingEnabled()
+        {
+            return multiMappingConfirmed && betaPairGrid.Rows.Count > 1;
+        }
+
+        private bool IsBetaRowStreamOnly(int rowIndex)
+        {
+            return rowIndex >= 0 && rowIndex < betaPairGrid.Rows.Count && IsBetaRowStreamOnly(betaPairGrid.Rows[rowIndex]);
+        }
+
+        private static bool IsBetaRowStreamOnly(DataGridViewRow row)
+        {
+            return row != null && IsStreamModeText(GetCellText(row, BetaColMode));
+        }
+
+        private static bool IsStreamModeText(string text)
+        {
+            return string.Equals(text, "串流", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(text, "Streaming", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(text, "Virtual only", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(text, "仅虚拟桌面", StringComparison.OrdinalIgnoreCase);
         }
 
         private void RecalculateBetaPairGrid(bool log)
@@ -1935,7 +2566,7 @@ namespace SBMSGui
             }
             if (log)
             {
-                AppendLog("多屏配置组已计算");
+                AppendLog("多组映射已计算");
             }
             UpdateStatus();
         }
@@ -1953,10 +2584,11 @@ namespace SBMSGui
                     continue;
                 }
 
+                bool rowStreamOnly = streamOnly || IsBetaRowStreamOnly(row);
                 DisplayChoice targetDisplay = row.Tag as DisplayChoice;
-                if (!streamOnly && targetDisplay == null)
+                if (!rowStreamOnly && targetDisplay == null)
                 {
-                    message = "多屏配置组缺少目标显示器";
+                    message = "多组映射缺少目标显示器";
                     return false;
                 }
 
@@ -1964,19 +2596,20 @@ namespace SBMSGui
                 double targetSize;
                 if (!TryReadBetaTargetSpec(row, out targetResolution, out targetSize))
                 {
-                    message = "多屏配置组参数无效: " + GetCellText(row, BetaColTarget);
+                    message = "多组映射参数无效: " + GetCellText(row, BetaColTarget);
                     return false;
                 }
 
                 Resolution sourceResolution;
                 if (!TryParseResolution(GetCellText(row, BetaColSource), out sourceResolution))
                 {
-                    message = "多屏配置组虚拟源无效: " + GetCellText(row, BetaColTarget);
+                    message = "多组映射虚拟源无效: " + GetCellText(row, BetaColTarget);
                     return false;
                 }
 
                 pairs.Add(new BridgePairConfig
                 {
+                    StreamOnly = rowStreamOnly,
                     TargetDisplay = targetDisplay,
                     TargetResolution = targetResolution,
                     SourceResolution = sourceResolution,
@@ -1988,7 +2621,7 @@ namespace SBMSGui
 
             if (pairs.Count == 0)
             {
-                message = "多屏配置组未启用";
+                message = "多组映射未启用";
                 return false;
             }
             if (pairs.Count > MultiScreenBetaMaxTargets)
@@ -2031,7 +2664,9 @@ namespace SBMSGui
             int height = RoundEven(width * aspectH / (double)aspectW);
             string orientation = GetCellText(row, BetaColOrientation);
             bool portrait = string.Equals(orientation, "竖屏", StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(orientation, "竖屏反向", StringComparison.OrdinalIgnoreCase);
+                            string.Equals(orientation, "竖屏反向", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(orientation, "Portrait", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(orientation, "Portrait flipped", StringComparison.OrdinalIgnoreCase);
             targetResolution = portrait
                 ? new Resolution { Width = height, Height = width }
                 : new Resolution { Width = width, Height = height };
@@ -2476,8 +3111,8 @@ namespace SBMSGui
             {
                 return;
             }
-            bool streamOnly = streamModeCheck.Checked;
-            bool multiBeta = multiScreenBetaCheck.Checked;
+            bool multiBeta = IsMultiMappingEnabled();
+            bool streamOnly = streamModeCheck.Checked && !multiBeta;
             bool manageVirtualDisplay = deviceHostCheck.Checked || streamOnly;
             if (multiBeta)
             {
@@ -2511,7 +3146,7 @@ namespace SBMSGui
             if (multiBeta)
             {
                 string betaMessage;
-                if (!TryGetEnabledBridgePairs(streamOnly, out betaPairs, out betaMessage))
+                if (!TryGetEnabledBridgePairs(false, out betaPairs, out betaMessage))
                 {
                     AppendLog(betaMessage);
                     return;
@@ -2567,14 +3202,16 @@ namespace SBMSGui
                     }
 
                     sourceText.Text = virtualSources[0].DeviceName;
-                    if (streamOnly)
+                    int outputPairCount = CountOutputBridgePairs(betaPairs);
+                    int streamPairCount = betaPairs.Count - outputPairCount;
+                    if (outputPairCount == 0)
                     {
                         process = null;
                         stoppingRequested = false;
                         nativeRestartCount = 0;
                         lastNativeArgs = "";
                         SetRunning(true);
-                        AppendLog("多屏串流模式已启动: " + betaPairs.Count.ToString(CultureInfo.InvariantCulture) + " 个虚拟源");
+                        AppendLog("多组虚拟桌面模式已启动: " + betaPairs.Count.ToString(CultureInfo.InvariantCulture) + " 个虚拟源");
                         return;
                     }
 
@@ -2585,7 +3222,7 @@ namespace SBMSGui
                         return;
                     }
                     SetRunning(true);
-                    AppendLog("多屏 BETA 已启动: " + betaPairs.Count.ToString(CultureInfo.InvariantCulture) + " 组");
+                    AppendLog("多屏 BETA 已启动: 输出 " + outputPairCount.ToString(CultureInfo.InvariantCulture) + " 组, 串流 " + streamPairCount.ToString(CultureInfo.InvariantCulture) + " 组");
                     return;
                 }
 
@@ -2743,6 +3380,11 @@ namespace SBMSGui
             {
                 DisplayChoice source = virtualSources[i];
                 BridgePairConfig pair = pairs[i];
+                if (pair.StreamOnly)
+                {
+                    AppendLog("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] 仅虚拟桌面: " + source.DeviceName);
+                    continue;
+                }
                 DisplayChoice target = pair.TargetDisplay;
                 if (target == null)
                 {

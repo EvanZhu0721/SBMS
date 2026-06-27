@@ -19,7 +19,7 @@ This is a local engineering prototype, not a signed production driver.
 ## Components
 
 - `SBMS.exe`
-  - WinForms controller with multi-display list, terminal log, presets, tray/lightweight mode, streaming mode, startup task, language switch, and run controls.
+  - WinForms controller with multi-display list, terminal log, tabbed mapping configuration, presets, tray/lightweight mode, per-group virtual-only streaming mode, startup task, language switch, and run controls.
 - `SBMSNative.exe`
   - Native D3D11 Desktop Duplication output path. Captures the virtual source display and presents it on the physical target display.
 - `SBMSDeviceHost.exe`
@@ -72,26 +72,26 @@ Default workflow:
 
 `轻量模式` is a top-level menu item. When it is checked and SBMS is running, closing the window hides SBMS to the tray and keeps the bridge running. The tray menu has `打开`, `停止`, and `退出`.
 
-`串流模式` creates and keeps only the SBMS virtual desktop alive. It does not start `SBMSNative.exe`, does not copy the virtual desktop to a physical output, does not migrate windows, and does not capture pointer input. This is intended for external streaming or capture workflows. If you do not know what this option does, do not enable it.
+`串流模式` creates and keeps only the SBMS virtual desktop alive. It does not start `SBMSNative.exe`, does not copy the virtual desktop to a physical output, does not migrate windows, and does not capture pointer input. This is intended for external streaming or capture workflows. Enabling it now opens a full-window warning overlay and requires explicit confirmation.
 
 When `迁移窗口` is enabled, SBMS continuously moves movable top-level windows from the real target desktop to the virtual source desktop while the bridge is running. This keeps topmost windows such as Task Manager from blocking interaction on the physical output panel.
 
-SBMS can enumerate and select any active physical target display by its Windows device id such as `\\.\DISPLAY2`, so duplicate resolutions and 3+ monitor layouts do not have to rely on ambiguous resolution matching. The stable bridge path still runs one virtual source to one physical output per native process; `多屏 BETA` starts multiple bridge groups on top of that model.
+SBMS can enumerate and select any active physical target display by its Windows device id such as `\\.\DISPLAY2`, so duplicate resolutions and 3+ monitor layouts do not have to rely on ambiguous resolution matching. The stable bridge path still runs one virtual source to one physical output per native process; the BETA multi-mapping tab starts multiple bridge groups on top of that model.
 
 ## Multi-Screen BETA
 
-The BETA build can create up to three virtual source displays. In `设置 > 配置`, enable `多屏 BETA`, then edit the rows under `多屏配置组`. The GUI starts with one group by default; use `⊕ 新增组 β` only when you want another virtual-source group.
+The BETA build can create up to three virtual source displays. In `设置 > 配置`, use `+ 新增组 BETA` to enter multi-mapping. SBMS shows a full-window warning overlay saying `多组映射支持为BETA功能, 不保证稳定性`; only after explicit confirmation does the multi-mapping tab appear.
 
-Each enabled row is one bridge group. It has its own target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal multi-screen mode, choose a physical target display for each row, then let SBMS calculate the matching virtual display resolution.
+Each group is edited in its own tab. It has its own enable state, output mode, target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal output mode, choose a physical target display for that group, then let SBMS calculate the matching virtual display resolution.
 
-When `串流模式` is enabled, the group rows no longer choose a physical target display. Instead, each row represents a streaming target: enter the target device's real horizontal pixels, aspect ratio, orientation, and physical size, and SBMS calculates the virtual display resolution for that streaming target.
+When a group's `仅虚拟桌面` toggle is enabled, that group no longer chooses a physical target display. Instead, enter the streaming target's real horizontal pixels, aspect ratio, orientation, and physical size, and SBMS calculates the virtual display resolution for that virtual-only target. The toggle also opens the same full-window confirmation overlay used by single-screen streaming mode.
 
 In normal multi-screen mode, SBMS assigns one virtual source to each enabled row and launches one `SBMSNative.exe` process per physical target. This keeps the proven single-output renderer intact while testing real multi-display topology.
 
 Notes:
 
-- `多屏 BETA` and `串流模式` can be enabled together. In that mode SBMS creates multiple virtual desktops but does not copy them to physical outputs.
-- BETA currently supports up to three enabled configuration rows.
+- BETA currently supports up to three mapping groups.
+- Multi-mapping groups can mix normal physical-output groups and virtual-only streaming groups.
 - Pointer mapping and window migration still run per native process. This is usable for testing, but multi-display pointer capture may need a later unified input scheduler.
 - If the BETA topology behaves badly, stop SBMS first; the GUI will close all native output processes and then close the virtual display host.
 
