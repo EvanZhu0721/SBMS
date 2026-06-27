@@ -162,6 +162,12 @@ The package script writes:
 - `%USERPROFILE%\Documents\SBMS-Release\SBMS.zip`
 - `C:\Program Files\SBMS` when the shell has permission
 
+If the current shell is not elevated, run this from the release directory in an administrator PowerShell:
+
+```powershell
+.\install-sbms-program-files.ps1
+```
+
 ## Development
 
 Diagnostics:

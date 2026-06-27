@@ -39,6 +39,22 @@ function Reset-Directory {
     return $fullPath
 }
 
+function Reset-DirectoryKeepingGit {
+    param(
+        [Parameter(Mandatory=$true)] [string] $Path,
+        [Parameter(Mandatory=$true)] [string] $Parent
+    )
+    $fullPath = Assert-ChildPath -Path $Path -Parent $Parent
+    if (-not (Test-Path -LiteralPath $fullPath)) {
+        New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
+        return $fullPath
+    }
+    Get-ChildItem -LiteralPath $fullPath -Force |
+        Where-Object { $_.Name -ne ".git" } |
+        Remove-Item -Recurse -Force
+    return $fullPath
+}
+
 function Copy-RequiredFile {
     param(
         [Parameter(Mandatory=$true)] [string] $RelativePath,
@@ -76,7 +92,7 @@ if (-not $SkipBuild) {
 $ReleaseRoot = Reset-Directory -Path $ReleaseRoot -Parent $Documents
 $ReleaseDir = New-Item -ItemType Directory -Path $ReleaseDir -Force
 $ReleaseDir = $ReleaseDir.FullName
-$CoreDir = Reset-Directory -Path $CoreDir -Parent $Documents
+$CoreDir = Reset-DirectoryKeepingGit -Path $CoreDir -Parent $Documents
 
 $sourceFiles = @(
     ".gitignore",
@@ -88,6 +104,7 @@ $sourceFiles = @(
     "build-sbms-gui.ps1",
     "build-sbms-native.ps1",
     "install-sbms-driver.ps1",
+    "install-sbms-program-files.ps1",
     "run-sbms-native.ps1",
     "diagnose-sbms.ps1",
     "check-displays.ps1",
@@ -128,6 +145,7 @@ $releaseFiles = @(
     "NOTICE.md",
     "RELEASE_NOTES.md",
     "install-sbms-driver.ps1",
+    "install-sbms-program-files.ps1",
     "run-sbms-native.ps1",
     "diagnose-sbms.ps1"
 )
