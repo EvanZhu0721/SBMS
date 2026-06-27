@@ -234,14 +234,14 @@ namespace SBMSGui
             strategyCombo.SelectedIndex = 0;
             ConfigurePresetCombos();
             ConfigureManualOrientationCombos();
-            primaryResolutionPresetCombo.SelectedIndex = 4;
+            primaryResolutionPresetCombo.SelectedIndex = 3;
             primaryAspectPresetCombo.SelectedIndex = 0;
             primaryOrientationPresetCombo.SelectedIndex = 0;
-            primarySizePresetCombo.SelectedIndex = 8;
-            targetResolutionPresetCombo.SelectedIndex = 2;
+            primarySizePresetCombo.SelectedIndex = 7;
+            targetResolutionPresetCombo.SelectedIndex = 1;
             targetAspectPresetCombo.SelectedIndex = 0;
             targetOrientationPresetCombo.SelectedIndex = 0;
-            targetSizePresetCombo.SelectedIndex = 7;
+            targetSizePresetCombo.SelectedIndex = 6;
             manualBaseOrientationCombo.SelectedIndex = 0;
             manualTargetOrientationCombo.SelectedIndex = 0;
             SyncConfigurationInputsFromMode(false);
@@ -770,7 +770,6 @@ namespace SBMSGui
             combo.DropDownStyle = ComboBoxStyle.DropDownList;
             combo.Items.Clear();
             combo.Items.AddRange(new object[] {
-                T("自定义"),
                 "1080p",
                 "2K / 1440p",
                 "4K / 2160p",
@@ -810,7 +809,6 @@ namespace SBMSGui
             combo.DropDownStyle = ComboBoxStyle.DropDownList;
             combo.Items.Clear();
             combo.Items.AddRange(new object[] {
-                T("自定义"),
                 "13.3\"",
                 "14\"",
                 "15.3\"",
@@ -932,13 +930,13 @@ namespace SBMSGui
         {
             switch (index)
             {
-                case 1: return 1920;
-                case 2: return 2560;
-                case 3: return 3840;
-                case 4: return 5120;
-                case 5: return 7680;
-                case 6: return 5120;
-                default: return 0;
+                case 0: return 1920;
+                case 1: return 2560;
+                case 2: return 3840;
+                case 3: return 5120;
+                case 4: return 7680;
+                case 5: return 5120;
+                default: return 1920;
             }
         }
 
@@ -1003,16 +1001,16 @@ namespace SBMSGui
         {
             switch (index)
             {
-                case 1: return "13.3";
-                case 2: return "14";
-                case 3: return "15.3";
-                case 4: return "15.6";
-                case 5: return "16";
-                case 6: return "18";
-                case 7: return "24";
-                case 8: return "27";
-                case 9: return "32";
-                default: return "";
+                case 0: return "13.3";
+                case 1: return "14";
+                case 2: return "15.3";
+                case 3: return "15.6";
+                case 4: return "16";
+                case 5: return "18";
+                case 6: return "24";
+                case 7: return "27";
+                case 8: return "32";
+                default: return "24";
             }
         }
 
@@ -1054,7 +1052,6 @@ namespace SBMSGui
                 case "缩放滤镜": return "Scaling";
                 case "运行选项": return "Runtime";
                 case "英寸": return "inch";
-                case "自定义": return "Custom";
                 case "横屏": return "Landscape";
                 case "竖屏": return "Portrait";
                 case "横屏反向": return "Landscape flipped";
