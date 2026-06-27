@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--Copyright, Microsoft Corporation, All rights reserved.-->
+<Rule Name="ConfigurationGeneralAdvanced" OverrideMode="Extend" xmlns="http://schemas.microsoft.com/build/2009/properties">
+
+  <EnumProperty Name="TargetFramework" DisplayName=".NET 目标框架" Description="项目面向的 .NET 版本。这仅在“公共语言运行时支持”设置为“.NET 运行时支持”时适用。" Category="CLR" F1Keyword="VC.Project.TargetFrameworkVersion">
+    <EnumProperty.DataSource>
+      <DataSource Persistence="ProjectFile" Label="Globals" HasConfigurationCondition="False"/>
+    </EnumProperty.DataSource>
+    <EnumValue Name="netcoreapp3.1" DisplayName=".NET Core 3.1"/>
+    <EnumValue Name="net5.0" DisplayName=".NET 5.0"/>
+    <EnumValue Name="net6.0" DisplayName=".NET 6.0"/>
+    <EnumValue Name="net7.0" DisplayName=".NET 7.0"/>
+    <EnumValue Name="net8.0" DisplayName=".NET 8.0"/>
+    <EnumValue Name="net9.0" DisplayName=".NET 9.0"/>
+  </EnumProperty>
+
+  <StringProperty Name="TargetFrameworkVersion" Visible="false" DisplayName=".NET 目标框架版本" Description="项目所面向的 .NET Framework 版本。这仅在设置了“.NET Framework 运行时支持”时适用。" Category="CLR" F1Keyword="VC.Project.TargetFrameworkVersion">
+    <StringProperty.DataSource>
+      <DataSource Persistence="ProjectFile" Label="Globals" HasConfigurationCondition="False"/>
+    </StringProperty.DataSource>
+  </StringProperty>
+
+  <BoolProperty Name="EnableManagedIncrementalBuild" Visible="false" DisplayName="启用托管增量生成" Description="使用 metagen 启用托管增量生成方案。" Category="CLR" F1Keyword="VC.Project.VCConfiguration.EnableManagedIncrementalBuild">
+    <BoolProperty.DataSource>
+      <DataSource Persistence="ProjectFile" Label=""/>
+    </BoolProperty.DataSource>
+  </BoolProperty>
+
+  <DynamicEnumProperty Name="WindowsTargetPlatformMinVersion" DisplayName=".NET 目标 Windows 版本" Description="此项目使用“.NET 运行时支持”进行生成时可能面向的最低 Windows 版本。" Category="CLR" EnumProvider="PreviousPlatformVersions" Visible="true" F1Keyword="VC.Project.WindowsTargetPlatformMinVersion">
+    <DynamicEnumProperty.DataSource>
+      <DataSource Persistence="ProjectFile" Label="Globals" SourceOfDefaultValue="AfterContext" HasConfigurationCondition="False"/>
+    </DynamicEnumProperty.DataSource>
+    <DynamicEnumProperty.ProviderSettings>
+      <NameValuePair Name="Value" Value="8.0"/>
+      <NameValuePair Name="Value" Value="7.0"/>
+    </DynamicEnumProperty.ProviderSettings>
+  </DynamicEnumProperty>
+
+  <BoolProperty Name="EnableManagedPackageReferenceSupport" Visible="false" ReadOnly="false" DisplayName="在 .NET 项目中启用 PackageReference 支持。" Description="在面向 .NET 的 CLR 项目中启用托管 PackageReference 支持。" Category="CLR" F1Keyword="VC.Project.VCConfiguration.EnableManagedPackageReferenceSupport">
+    <BoolProperty.DataSource>
+      <DataSource Persistence="ProjectFile" Label="Globals" HasConfigurationCondition="False"/>
+    </BoolProperty.DataSource>
+  </BoolProperty>
+
+</Rule>

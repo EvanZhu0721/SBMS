@@ -1,0 +1,49 @@
+﻿<!--
+***********************************************************************************************
+Microsoft.Cpp.Redirect.14.Build.targets
+
+WARNING:  DO NOT MODIFY this file unless you are knowledgeable about MSBuild and have
+          created a backup copy.  Incorrect changes to this file will make it
+          impossible to load or build your projects from the command-line or the IDE.
+
+This file is used to build Visual C++ projects with the VS2010 toolset.
+
+Copyright (C) Microsoft Corporation. All rights reserved.
+***********************************************************************************************
+-->
+
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <!-- overriding v140 target to exclude static libs outputs from ManagedTargetPath, as static lib projects did not set $(ManagedAssembly) as true there,
+       and they are now as this property controls managed imports and references in msbuild common targets -->
+  <Target
+      Name="Build"
+      Condition=" '$(_InvalidConfigurationWarning)' != 'true' "
+      DependsOnTargets="$(BuildDependsOn)"
+      Returns="@(ManagedTargetPath);@(WinMDFullPath)" >
+    <ItemGroup>
+      <ManagedTargetPath Include="$(TargetPath)" Condition="'$(ManagedAssembly)' == 'true' and '$(ConfigurationType)' != 'StaticLibrary'" />
+    </ItemGroup>
+  </Target>
+
+  <Target
+    Name="Rebuild"
+    Condition=" '$(_InvalidConfigurationWarning)' != 'true' "
+    DependsOnTargets="$(RebuildDependsOn)"
+    Returns="@(ManagedTargetPath);@(WinMDFullPath)">
+    <ItemGroup>
+      <ManagedTargetPath Include="$(TargetPath)" Condition="'$(ManagedAssembly)' == 'true' and '$(ConfigurationType)' != 'StaticLibrary'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="GetTargetPath" DependsOnTargets="_PrepareForReferenceResolution;GetResolvedWinMD" Returns="@(ManagedTargetPath);@(WinMDFullPath)" >
+    <PropertyGroup>
+      <_IncludeInManagedTargetPath Condition="'@(WinMDFullPath)' == '' and ('$(ManagedAssembly)' == 'true' or '$(DesignTimeBuild)' == 'true')">true</_IncludeInManagedTargetPath>
+      <_IncludeInManagedTargetPath Condition="'$(ConfigurationType)' == 'StaticLibrary' and '$(DesignTimeBuild)' != 'true'">false</_IncludeInManagedTargetPath>
+    </PropertyGroup>
+    <ItemGroup>
+      <ManagedTargetPath Include="$(TargetPath)" Condition="'$(_IncludeInManagedTargetPath)' == 'true'" />
+    </ItemGroup>
+  </Target>
+
+</Project>

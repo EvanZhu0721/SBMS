@@ -1,0 +1,36 @@
+﻿<!--
+***********************************************************************************************
+Microsoft.Cpp.ClangTidy.props
+
+WARNING:  DO NOT MODIFY this file unless you are knowledgeable about MSBuild and have
+          created a backup copy.  Incorrect changes to this file will make it
+          impossible to load or build your projects from the command-line or the IDE.
+
+Copyright (C) Microsoft Corporation. All rights reserved.
+***********************************************************************************************
+-->
+
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <PropertyGroup Condition="'$(LLVMInstallDir)' == ''">
+    <ClangTidyLLVMInstallDir Condition="'$(PreferredToolArchitecture)' == 'arm64'">$(VsInstallRoot)\VC\Tools\Llvm\ARM64</ClangTidyLLVMInstallDir>
+    <ClangTidyLLVMInstallDir Condition="'$(PreferredToolArchitecture)' == 'x64'">$(VsInstallRoot)\VC\Tools\Llvm\x64</ClangTidyLLVMInstallDir>
+    <ClangTidyLLVMInstallDir Condition="'$(PreferredToolArchitecture)' != 'x64' AND '$(PreferredToolArchitecture)' != 'arm64'">$(VsInstallRoot)\VC\Tools\Llvm</ClangTidyLLVMInstallDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(LLVMInstallDir)' != ''">
+    <ClangTidyLLVMInstallDir>$(LLVMInstallDir)</ClangTidyLLVMInstallDir>
+  </PropertyGroup>
+   <PropertyGroup>
+    <ClangTidyToolExe Condition="'$(ClangTidyToolExe)'==''">clang-tidy.exe</ClangTidyToolExe>
+    <!-- ClangTidyToolExeAdditionalOptions is added to the clang-tidy.exe commandline. -->
+    <ClangTidyToolExeAdditionalOptions Condition="'$(ClangTidyToolExeAdditionalOptions)'==''"></ClangTidyToolExeAdditionalOptions>
+    <ClangTidyChecks Condition="'$(ClangTidyChecks)'==''"></ClangTidyChecks>
+    <ClangTidyHeaderFilter Condition="'$(ClangTidyHeaderFilter)'==''"></ClangTidyHeaderFilter>
+    <ClangTidyWarningsInSystemHeaders Condition="'$(ClangTidyWarningsInSystemHeaders)'==''">false</ClangTidyWarningsInSystemHeaders>
+    <ClangTidyPlatformTargetSwitch Condition="'$(PlatformTarget)'=='x86'">--target=i686-pc-windows-msvc</ClangTidyPlatformTargetSwitch>
+    <ClangTidyPlatformTargetSwitch Condition="'$(PlatformTarget)'=='x64'">--target=amd64-pc-windows-msvc</ClangTidyPlatformTargetSwitch>
+    <ClangTidyPlatformTargetSwitch Condition="'$(PlatformTarget)'=='arm64'">--target=arm64-pc-windows-msvc</ClangTidyPlatformTargetSwitch>
+    <!-- ClangTidyAdditionalOptions is added to the compile commands -->
+    <ClangTidyAdditionalOptions>$(ClangTidyPlatformTargetSwitch) $(ClangTidyAdditionalOptions)</ClangTidyAdditionalOptions>
+    <ClangTidyToolPath Condition="'$(ClangTidyToolPath)'==''">$(ClangTidyLLVMInstallDir)\bin</ClangTidyToolPath>
+  </PropertyGroup>
+</Project>

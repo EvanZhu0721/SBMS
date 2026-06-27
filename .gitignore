@@ -1,0 +1,28 @@
+# Build outputs
+*.exe
+*.dll
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.cat
+*.cer
+*.log
+
+# Visual Studio / WDK
+.vs/
+x64/
+Debug/
+Release/
+ipch/
+*.tlog/
+*.lastbuildstate
+
+# Python / local experiments
+__pycache__/
+.venv*/
+
+# Local release artifacts
+SBMS-Release/
+SBMS-Core-Source/
