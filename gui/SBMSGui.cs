@@ -29,7 +29,7 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-27.021-beta";
+        private const string BuildLabel = "2026-06-27.022-beta";
         private const int MultiScreenBetaMaxTargets = 3;
         private const int BetaColEnabled = 0;
         private const int BetaColTarget = 1;
@@ -103,6 +103,8 @@ namespace SBMSGui
         private readonly Label streamModeWarningLabel = new Label();
         private readonly CheckBox multiScreenBetaCheck = new CheckBox();
         private readonly DataGridView betaPairGrid = new DataGridView();
+        private readonly Button addBetaGroupButton = new Button();
+        private readonly Button removeBetaGroupButton = new Button();
         private readonly CheckBox vsyncCheck = new CheckBox();
         private readonly Button calculateButton = new Button();
         private readonly Button applyConfigButton = new Button();
@@ -228,6 +230,7 @@ namespace SBMSGui
         private sealed class BridgePairSnapshot
         {
             public bool Enabled;
+            public string Target;
             public string Horizontal;
             public string Aspect;
             public string Orientation;
@@ -301,6 +304,10 @@ namespace SBMSGui
             multiScreenBetaCheck.Text = "多屏 BETA";
             multiScreenBetaCheck.AutoSize = true;
             ConfigureBetaPairGrid();
+            addBetaGroupButton.Text = "⊕ 新增组 β";
+            addBetaGroupButton.Width = 112;
+            removeBetaGroupButton.Text = "删除组";
+            removeBetaGroupButton.Width = 90;
             vsyncCheck.Text = "VSync";
             calculateButton.Text = "计算";
             calculateButton.Width = 90;
@@ -335,6 +342,8 @@ namespace SBMSGui
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             streamModeCheck.CheckedChanged += delegate { OnStreamModeChanged(); };
             multiScreenBetaCheck.CheckedChanged += delegate { OnMultiScreenBetaChanged(); };
+            addBetaGroupButton.Click += delegate { AddBetaGroupRow(null, true); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(); };
+            removeBetaGroupButton.Click += delegate { RemoveSelectedBetaGroup(); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(); };
             startButton.Click += delegate { StartBridge(); };
             stopButton.Click += delegate { StopBridge(); };
             listButton.Click += delegate { RunList(); };
@@ -517,8 +526,7 @@ namespace SBMSGui
             panel.Controls.Add(checks, 1, 6);
 
             AddLabel(panel, "多屏配置组", 7);
-            betaPairGrid.Dock = DockStyle.Fill;
-            panel.Controls.Add(betaPairGrid, 1, 7);
+            panel.Controls.Add(CreateBetaGroupPanel(), 1, 7);
 
             var configButtons = new FlowLayoutPanel();
             configButtons.Dock = DockStyle.Fill;
@@ -546,6 +554,27 @@ namespace SBMSGui
             configLockPanel.BringToFront();
         }
 
+        private Control CreateBetaGroupPanel()
+        {
+            var host = new TableLayoutPanel();
+            host.Dock = DockStyle.Fill;
+            host.RowCount = 2;
+            host.ColumnCount = 1;
+            host.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            host.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+            var tools = new FlowLayoutPanel();
+            tools.Dock = DockStyle.Fill;
+            tools.FlowDirection = FlowDirection.LeftToRight;
+            tools.Controls.Add(addBetaGroupButton);
+            tools.Controls.Add(removeBetaGroupButton);
+            host.Controls.Add(tools, 0, 0);
+
+            betaPairGrid.Dock = DockStyle.Fill;
+            host.Controls.Add(betaPairGrid, 0, 1);
+            return host;
+        }
+
         private void ConfigureBetaPairGrid()
         {
             if (betaPairGrid.Columns.Count > 0)
@@ -564,7 +593,7 @@ namespace SBMSGui
             betaPairGrid.EnableHeadersVisualStyles = false;
 
             betaPairGrid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "启用", FillWeight = 42 });
-            betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "目标显示器", ReadOnly = true, FillWeight = 170 });
+            betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "目标显示器", FillWeight = 170, FlatStyle = FlatStyle.Flat });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "横向像素", FillWeight = 72 });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "比例", FillWeight = 62 });
             betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "方向", FillWeight = 86, FlatStyle = FlatStyle.Flat });
@@ -590,8 +619,15 @@ namespace SBMSGui
                     betaPairGrid.CommitEdit(DataGridViewDataErrorContexts.Commit);
                 }
             };
-            betaPairGrid.CellValueChanged += delegate { RecalculateBetaPairGrid(false); };
+            betaPairGrid.CellValueChanged += delegate(object sender, DataGridViewCellEventArgs e) { OnBetaPairGridCellValueChanged(e); };
             betaPairGrid.CellEndEdit += delegate { RecalculateBetaPairGrid(false); };
+            betaPairGrid.CellBeginEdit += delegate(object sender, DataGridViewCellCancelEventArgs e)
+            {
+                if (streamModeCheck.Checked && e.ColumnIndex == BetaColTarget)
+                {
+                    e.Cancel = true;
+                }
+            };
             betaPairGrid.DataError += delegate(object sender, DataGridViewDataErrorEventArgs e) { e.ThrowException = false; };
         }
 
@@ -804,6 +840,8 @@ namespace SBMSGui
             listButton.Text = T("刷新列表");
             calculateButton.Text = T("计算");
             applyConfigButton.Text = T("应用");
+            addBetaGroupButton.Text = "⊕ " + T("新增组") + " β";
+            removeBetaGroupButton.Text = T("删除组");
             inputCheck.Text = T("鼠标映射");
             windowMoveCheck.Text = T("迁移窗口");
             deviceHostCheck.Text = T("管理虚拟显示器");
@@ -828,7 +866,7 @@ namespace SBMSGui
                 return;
             }
             betaPairGrid.Columns[BetaColEnabled].HeaderText = T("启用");
-            betaPairGrid.Columns[BetaColTarget].HeaderText = T("目标显示器");
+            betaPairGrid.Columns[BetaColTarget].HeaderText = T(streamModeCheck.Checked ? "串流目标" : "目标显示器");
             betaPairGrid.Columns[BetaColHorizontal].HeaderText = T("横向像素");
             betaPairGrid.Columns[BetaColAspect].HeaderText = T("比例");
             betaPairGrid.Columns[BetaColOrientation].HeaderText = T("方向");
@@ -1167,8 +1205,11 @@ namespace SBMSGui
                 case "串流模式": return "Streaming mode";
                 case "多屏 BETA": return "Multi-screen BETA";
                 case "多屏配置组": return "Multi-screen groups";
+                case "新增组": return "Add group";
+                case "删除组": return "Remove group";
                 case "启用": return "On";
                 case "目标显示器": return "Target display";
+                case "串流目标": return "Streaming target";
                 case "横向像素": return "Horizontal px";
                 case "比例": return "Aspect";
                 case "方向": return "Orientation";
@@ -1309,6 +1350,7 @@ namespace SBMSGui
 
         private void OnStreamModeChanged()
         {
+            ApplyStreamModeToBetaPairGrid();
             UpdateRuntimeOptionState();
             UpdateStatus();
         }
@@ -1326,6 +1368,48 @@ namespace SBMSGui
             UpdateStatus();
         }
 
+        private void ApplyStreamModeToBetaPairGrid()
+        {
+            if (betaPairGrid.Columns.Count <= BetaColTarget)
+            {
+                return;
+            }
+
+            bool streamOnly = streamModeCheck.Checked;
+            betaPairGrid.Columns[BetaColTarget].HeaderText = T(streamOnly ? "串流目标" : "目标显示器");
+            betaPairGrid.Columns[BetaColTarget].ReadOnly = streamOnly;
+
+            updatingBetaPairGrid = true;
+            try
+            {
+                for (int i = 0; i < betaPairGrid.Rows.Count; ++i)
+                {
+                    DataGridViewRow row = betaPairGrid.Rows[i];
+                    if (streamOnly)
+                    {
+                        string streamLabel = "串流目标 " + (i + 1).ToString(CultureInfo.InvariantCulture);
+                        AddComboItemIfMissing(BetaColTarget, streamLabel);
+                        row.Cells[BetaColTarget].Value = streamLabel;
+                    }
+                    else
+                    {
+                        DisplayChoice display = row.Tag as DisplayChoice ?? GetDefaultPhysicalDisplay("");
+                        if (display != null)
+                        {
+                            string targetLabel = GetDisplayLabel(display);
+                            AddComboItemIfMissing(BetaColTarget, targetLabel);
+                            row.Cells[BetaColTarget].Value = targetLabel;
+                            row.Tag = display;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                updatingBetaPairGrid = false;
+            }
+        }
+
         private void UpdateRuntimeOptionState()
         {
             bool streamOnly = streamModeCheck.Checked;
@@ -1340,6 +1424,8 @@ namespace SBMSGui
             targetDisplayCombo.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
             targetText.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
             betaPairGrid.Enabled = multiBeta && !bridgeRunning;
+            addBetaGroupButton.Enabled = multiBeta && !bridgeRunning && betaPairGrid.Rows.Count < MultiScreenBetaMaxTargets;
+            removeBetaGroupButton.Enabled = multiBeta && !bridgeRunning && betaPairGrid.Rows.Count > 1;
             filterCombo.Enabled = !streamOnly && !bridgeRunning;
             inputCheck.Enabled = !streamOnly && !bridgeRunning;
             windowMoveCheck.Enabled = !streamOnly && !bridgeRunning;
@@ -1391,7 +1477,7 @@ namespace SBMSGui
         {
             string previousSourceDevice = GetSelectedDeviceName(sourceDisplayCombo);
             string previousTargetDevice = GetSelectedDeviceName(targetDisplayCombo);
-            Dictionary<string, BridgePairSnapshot> betaSnapshots = CaptureBetaPairSnapshots();
+            List<BridgePairSnapshot> betaSnapshots = CaptureBetaPairSnapshots();
             if (string.IsNullOrWhiteSpace(previousSourceDevice) && IsDisplayDeviceSelector(sourceText.Text.Trim()))
             {
                 previousSourceDevice = sourceText.Text.Trim();
@@ -1429,7 +1515,6 @@ namespace SBMSGui
                     else
                     {
                         targetDisplayCombo.Items.Add(display);
-                        AddOrRestoreBetaPairRow(display, betaSnapshots);
                     }
                 }
             }
@@ -1439,8 +1524,10 @@ namespace SBMSGui
                 sourceDisplayCombo.Items.Add(T("按计算分辨率等待虚拟屏"));
             }
             SelectDefaultDisplays(previousSourceDevice, previousTargetDevice);
-            EnsureDefaultBetaPairEnabled(previousTargetDevice);
+            RefreshBetaTargetChoices();
+            RestoreBetaPairRows(betaSnapshots, previousTargetDevice);
             SyncSelectedDisplaysToSelectors();
+            ApplyStreamModeToBetaPairGrid();
             RecalculateBetaPairGrid(false);
             UpdateStatus();
         }
@@ -1486,56 +1573,62 @@ namespace SBMSGui
             return value.StartsWith(@"\\.\DISPLAY", StringComparison.OrdinalIgnoreCase);
         }
 
-        private Dictionary<string, BridgePairSnapshot> CaptureBetaPairSnapshots()
+        private List<BridgePairSnapshot> CaptureBetaPairSnapshots()
         {
-            var snapshots = new Dictionary<string, BridgePairSnapshot>(StringComparer.OrdinalIgnoreCase);
+            var snapshots = new List<BridgePairSnapshot>();
             foreach (DataGridViewRow row in betaPairGrid.Rows)
             {
-                DisplayChoice display = row.Tag as DisplayChoice;
-                if (display == null || string.IsNullOrWhiteSpace(display.DeviceName))
-                {
-                    continue;
-                }
-                snapshots[display.DeviceName] = new BridgePairSnapshot
+                snapshots.Add(new BridgePairSnapshot
                 {
                     Enabled = IsBetaRowEnabled(row),
+                    Target = GetNormalTargetLabel(row),
                     Horizontal = GetCellText(row, BetaColHorizontal),
                     Aspect = GetCellText(row, BetaColAspect),
                     Orientation = GetCellText(row, BetaColOrientation),
                     Size = GetCellText(row, BetaColSize),
                     Strategy = GetCellText(row, BetaColStrategy),
                     Source = GetCellText(row, BetaColSource)
-                };
+                });
             }
             return snapshots;
         }
 
-        private void AddOrRestoreBetaPairRow(DisplayChoice display, Dictionary<string, BridgePairSnapshot> snapshots)
+        private void RefreshBetaTargetChoices()
         {
-            Resolution resolution;
-            int horizontal = 2560;
-            string aspect = "16:9";
-            string orientation = "横屏";
-            if (TryParseResolution(display.Resolution, out resolution))
+            DataGridViewComboBoxColumn targetColumn = betaPairGrid.Columns[BetaColTarget] as DataGridViewComboBoxColumn;
+            if (targetColumn == null)
             {
-                BuildResolutionParts(resolution, out horizontal, out aspect, out orientation);
+                return;
             }
 
-            BridgePairSnapshot snapshot;
-            snapshots.TryGetValue(display.DeviceName, out snapshot);
-            bool enabled = snapshot != null && snapshot.Enabled;
-            string rowHorizontal = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Horizontal) ? snapshot.Horizontal : horizontal.ToString(CultureInfo.InvariantCulture);
-            string rowAspect = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Aspect) ? snapshot.Aspect : aspect;
-            string rowOrientation = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Orientation) ? snapshot.Orientation : orientation;
-            string rowSize = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Size) ? snapshot.Size : GuessTargetSize(display);
-            string rowStrategy = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Strategy) ? snapshot.Strategy : "真实尺寸比例";
-            string rowSource = snapshot != null ? snapshot.Source : "";
+            targetColumn.Items.Clear();
+            foreach (DisplayChoice display in GetPhysicalDisplays())
+            {
+                targetColumn.Items.Add(GetDisplayLabel(display));
+            }
+        }
 
+        private void RestoreBetaPairRows(List<BridgePairSnapshot> snapshots, string previousTargetDevice)
+        {
             updatingBetaPairGrid = true;
             try
             {
-                int index = betaPairGrid.Rows.Add(enabled, display.ToString(), rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowSource);
-                betaPairGrid.Rows[index].Tag = display;
+                betaPairGrid.Rows.Clear();
+                if (snapshots.Count == 0)
+                {
+                    AddBetaGroupRowInternal(CreateDefaultBetaPairSnapshot(previousTargetDevice), false);
+                }
+                else
+                {
+                    for (int i = 0; i < snapshots.Count && i < MultiScreenBetaMaxTargets; ++i)
+                    {
+                        AddBetaGroupRowInternal(snapshots[i], false);
+                    }
+                }
+                if (betaPairGrid.Rows.Count == 0)
+                {
+                    AddBetaGroupRowInternal(CreateDefaultBetaPairSnapshot(previousTargetDevice), false);
+                }
             }
             finally
             {
@@ -1543,31 +1636,241 @@ namespace SBMSGui
             }
         }
 
-        private void EnsureDefaultBetaPairEnabled(string previousTargetDevice)
+        private void AddBetaGroupRow(BridgePairSnapshot snapshot, bool userAdded)
         {
-            if (CountEnabledBetaPairs() > 0)
+            if (betaPairGrid.Rows.Count >= MultiScreenBetaMaxTargets)
+            {
+                AppendLog("多屏 BETA 当前最多支持 " + MultiScreenBetaMaxTargets.ToString(CultureInfo.InvariantCulture) + " 个配置组");
+                return;
+            }
+
+            updatingBetaPairGrid = true;
+            try
+            {
+                AddBetaGroupRowInternal(snapshot ?? CreateDefaultBetaPairSnapshot(""), true);
+            }
+            finally
+            {
+                updatingBetaPairGrid = false;
+            }
+
+            if (userAdded)
+            {
+                multiScreenBetaCheck.Checked = true;
+                ApplyStreamModeToBetaPairGrid();
+                AppendLog("已新增 BETA 配置组");
+            }
+        }
+
+        private void AddBetaGroupRowInternal(BridgePairSnapshot snapshot, bool selectNewRow)
+        {
+            DisplayChoice display = FindDisplayByTargetLabel(snapshot.Target) ?? GetDefaultPhysicalDisplay("");
+            string targetLabel = display != null ? GetDisplayLabel(display) : "";
+            string rowHorizontal = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Horizontal) ? snapshot.Horizontal : "2560";
+            string rowAspect = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Aspect) ? snapshot.Aspect : "16:9";
+            string rowOrientation = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Orientation) ? snapshot.Orientation : "横屏";
+            string rowSize = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Size) ? snapshot.Size : (display != null ? GuessTargetSize(display) : "24");
+            string rowStrategy = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Strategy) ? snapshot.Strategy : "真实尺寸比例";
+            string rowSource = snapshot != null ? snapshot.Source : "";
+            bool enabled = snapshot == null || snapshot.Enabled;
+
+            AddComboItemIfMissing(BetaColTarget, targetLabel);
+            int index = betaPairGrid.Rows.Add(enabled, targetLabel, rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowSource);
+            betaPairGrid.Rows[index].Tag = display;
+            if (display != null && snapshot != null && string.IsNullOrWhiteSpace(snapshot.Horizontal))
+            {
+                PopulateBetaRowFromDisplay(betaPairGrid.Rows[index], display);
+            }
+            if (selectNewRow)
+            {
+                betaPairGrid.ClearSelection();
+                betaPairGrid.Rows[index].Selected = true;
+            }
+        }
+
+        private BridgePairSnapshot CreateDefaultBetaPairSnapshot(string previousTargetDevice)
+        {
+            DisplayChoice display = GetDefaultPhysicalDisplay(previousTargetDevice);
+            string horizontal = "2560";
+            string aspect = "16:9";
+            string orientation = "横屏";
+            if (display != null)
+            {
+                Resolution resolution;
+                if (TryParseResolution(display.Resolution, out resolution))
+                {
+                    int parsedHorizontal;
+                    BuildResolutionParts(resolution, out parsedHorizontal, out aspect, out orientation);
+                    horizontal = parsedHorizontal.ToString(CultureInfo.InvariantCulture);
+                }
+            }
+            return new BridgePairSnapshot
+            {
+                Enabled = true,
+                Target = display != null ? GetDisplayLabel(display) : "",
+                Horizontal = horizontal,
+                Aspect = aspect,
+                Orientation = orientation,
+                Size = display != null ? GuessTargetSize(display) : "24",
+                Strategy = "真实尺寸比例",
+                Source = ""
+            };
+        }
+
+        private void RemoveSelectedBetaGroup()
+        {
+            if (betaPairGrid.Rows.Count <= 1)
+            {
+                AppendLog("至少保留一个配置组");
+                return;
+            }
+
+            int index = betaPairGrid.CurrentRow != null ? betaPairGrid.CurrentRow.Index : betaPairGrid.Rows.Count - 1;
+            if (index >= 0 && index < betaPairGrid.Rows.Count)
+            {
+                betaPairGrid.Rows.RemoveAt(index);
+            }
+        }
+
+        private List<DisplayChoice> GetPhysicalDisplays()
+        {
+            var physical = new List<DisplayChoice>();
+            foreach (DisplayChoice display in displays)
+            {
+                if (!display.Virtual)
+                {
+                    physical.Add(display);
+                }
+            }
+            return physical;
+        }
+
+        private static string GetDisplayLabel(DisplayChoice display)
+        {
+            return display == null ? "" : display.ToString();
+        }
+
+        private string GetNormalTargetLabel(DataGridViewRow row)
+        {
+            DisplayChoice display = row.Tag as DisplayChoice;
+            if (display != null)
+            {
+                return GetDisplayLabel(display);
+            }
+            return GetCellText(row, BetaColTarget);
+        }
+
+        private DisplayChoice FindDisplayByTargetLabel(string label)
+        {
+            if (string.IsNullOrWhiteSpace(label))
+            {
+                return null;
+            }
+            foreach (DisplayChoice display in GetPhysicalDisplays())
+            {
+                string displayLabel = GetDisplayLabel(display);
+                if (string.Equals(displayLabel, label, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(display.DeviceName, label, StringComparison.OrdinalIgnoreCase) ||
+                    label.IndexOf(display.DeviceName, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return display;
+                }
+            }
+            return null;
+        }
+
+        private DisplayChoice GetDefaultPhysicalDisplay(string previousTargetDevice)
+        {
+            if (!string.IsNullOrWhiteSpace(previousTargetDevice))
+            {
+                foreach (DisplayChoice display in GetPhysicalDisplays())
+                {
+                    if (string.Equals(display.DeviceName, previousTargetDevice, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return display;
+                    }
+                }
+            }
+
+            DisplayChoice selectedTarget = targetDisplayCombo.SelectedItem as DisplayChoice;
+            if (selectedTarget != null && !selectedTarget.Virtual)
+            {
+                return selectedTarget;
+            }
+
+            List<DisplayChoice> physical = GetPhysicalDisplays();
+            return physical.Count > 0 ? physical[0] : null;
+        }
+
+        private void AddComboItemIfMissing(int columnIndex, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return;
+            }
+            DataGridViewComboBoxColumn column = betaPairGrid.Columns[columnIndex] as DataGridViewComboBoxColumn;
+            if (column == null)
+            {
+                return;
+            }
+            foreach (object item in column.Items)
+            {
+                if (string.Equals(Convert.ToString(item, CultureInfo.InvariantCulture), value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+            column.Items.Add(value);
+        }
+
+        private void PopulateBetaRowFromDisplay(DataGridViewRow row, DisplayChoice display)
+        {
+            if (row == null || display == null)
+            {
+                return;
+            }
+            Resolution resolution;
+            if (!TryParseResolution(display.Resolution, out resolution))
             {
                 return;
             }
 
-            DisplayChoice selectedTarget = targetDisplayCombo.SelectedItem as DisplayChoice;
-            string wantedDevice = !string.IsNullOrWhiteSpace(previousTargetDevice)
-                ? previousTargetDevice
-                : (selectedTarget != null ? selectedTarget.DeviceName : "");
+            int horizontal;
+            string aspect;
+            string orientation;
+            BuildResolutionParts(resolution, out horizontal, out aspect, out orientation);
+            row.Cells[BetaColHorizontal].Value = horizontal.ToString(CultureInfo.InvariantCulture);
+            row.Cells[BetaColAspect].Value = aspect;
+            row.Cells[BetaColOrientation].Value = orientation;
+            row.Cells[BetaColSize].Value = GuessTargetSize(display);
+        }
 
-            for (int i = 0; i < betaPairGrid.Rows.Count; ++i)
+        private void OnBetaPairGridCellValueChanged(DataGridViewCellEventArgs e)
+        {
+            if (updatingBetaPairGrid || e.RowIndex < 0 || e.RowIndex >= betaPairGrid.Rows.Count)
             {
-                DisplayChoice display = betaPairGrid.Rows[i].Tag as DisplayChoice;
-                if (display != null && string.Equals(display.DeviceName, wantedDevice, StringComparison.OrdinalIgnoreCase))
+                return;
+            }
+
+            DataGridViewRow row = betaPairGrid.Rows[e.RowIndex];
+            if (e.ColumnIndex == BetaColTarget && !streamModeCheck.Checked)
+            {
+                DisplayChoice display = FindDisplayByTargetLabel(GetCellText(row, BetaColTarget));
+                row.Tag = display;
+                if (display != null)
                 {
-                    betaPairGrid.Rows[i].Cells[BetaColEnabled].Value = true;
-                    return;
+                    updatingBetaPairGrid = true;
+                    try
+                    {
+                        PopulateBetaRowFromDisplay(row, display);
+                    }
+                    finally
+                    {
+                        updatingBetaPairGrid = false;
+                    }
                 }
             }
-            if (betaPairGrid.Rows.Count > 0)
-            {
-                betaPairGrid.Rows[0].Cells[BetaColEnabled].Value = true;
-            }
+            RecalculateBetaPairGrid(false);
         }
 
         private int CountEnabledBetaPairs()
@@ -3141,6 +3444,8 @@ namespace SBMSGui
             streamModeCheck.Enabled = true;
             multiScreenBetaCheck.Enabled = true;
             betaPairGrid.Enabled = true;
+            addBetaGroupButton.Enabled = true;
+            removeBetaGroupButton.Enabled = true;
             vsyncCheck.Enabled = true;
             UpdateRuntimeOptionState();
             UpdateConfigLock();

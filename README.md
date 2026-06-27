@@ -80,9 +80,13 @@ SBMS can enumerate and select any active physical target display by its Windows 
 
 ## Multi-Screen BETA
 
-The BETA build can create up to three virtual source displays. In `设置 > 配置`, enable `多屏 BETA`, then edit the rows under `多屏配置组`.
+The BETA build can create up to three virtual source displays. In `设置 > 配置`, enable `多屏 BETA`, then edit the rows under `多屏配置组`. The GUI starts with one group by default; use `⊕ 新增组 β` only when you want another virtual-source group.
 
-Each enabled row is one bridge group. It has its own target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal multi-screen mode, SBMS assigns one virtual source to each enabled row and launches one `SBMSNative.exe` process per physical target. This keeps the proven single-output renderer intact while testing real multi-display topology.
+Each enabled row is one bridge group. It has its own target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal multi-screen mode, choose a physical target display for each row, then let SBMS calculate the matching virtual display resolution.
+
+When `串流模式` is enabled, the group rows no longer choose a physical target display. Instead, each row represents a streaming target: enter the target device's real horizontal pixels, aspect ratio, orientation, and physical size, and SBMS calculates the virtual display resolution for that streaming target.
+
+In normal multi-screen mode, SBMS assigns one virtual source to each enabled row and launches one `SBMSNative.exe` process per physical target. This keeps the proven single-output renderer intact while testing real multi-display topology.
 
 Notes:
 

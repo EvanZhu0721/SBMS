@@ -4,6 +4,8 @@
 
 - Renamed user-facing application and binaries to SBMS.
 - Added `多屏 BETA`: the test driver can expose up to three virtual monitors, and the GUI now configures independent bridge rows instead of one shared target list.
+- Changed `多屏配置组` to a default-one-group flow with an explicit `⊕ 新增组 β` button for additional BETA groups.
+- In `串流模式`, multi-screen rows no longer select physical displays; they use entered streaming-target parameters to calculate virtual display resolutions.
 - Added `串流模式`: SBMS can create only the virtual desktop without copying it to a physical output. This is marked as an advanced option in the GUI.
 - Added GUI presets for common resolutions, aspect ratios, orientations, and physical sizes.
 - Added landscape, portrait, and flipped orientation handling for requested virtual modes.
