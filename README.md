@@ -25,7 +25,7 @@ This is a local engineering prototype, not a signed production driver.
 - `SBMSDeviceHost.exe`
   - Creates and owns the software display device with `SwDeviceCreate`.
 - `Windows-driver-samples/video/IndirectDisplay`
-  - Patched Microsoft IndirectDisplay sample. It advertises common SBMS virtual modes including 1080p, 2K, 4K, 5K, 8K, 2880p-style modes, 16:9, 16:10, 4:3, landscape, and portrait sizes.
+  - Patched Microsoft IndirectDisplay sample. The BETA build exposes up to three virtual monitors and advertises common SBMS virtual modes including 1080p, 2K, 4K, 5K, 8K, 2880p-style modes, 16:9, 16:10, 4:3, landscape, and portrait sizes.
 
 ## Build
 
@@ -76,7 +76,20 @@ Default workflow:
 
 When `迁移窗口` is enabled, SBMS continuously moves movable top-level windows from the real target desktop to the virtual source desktop while the bridge is running. This keeps topmost windows such as Task Manager from blocking interaction on the physical output panel.
 
-SBMS can enumerate and select any active physical target display by its Windows device id such as `\\.\DISPLAY2`, so duplicate resolutions and 3+ monitor layouts do not have to rely on ambiguous resolution matching. The current bridge still runs one virtual source to one physical output per native process; simultaneous multi-output bridge groups are not enabled in this build.
+SBMS can enumerate and select any active physical target display by its Windows device id such as `\\.\DISPLAY2`, so duplicate resolutions and 3+ monitor layouts do not have to rely on ambiguous resolution matching. The stable bridge path still runs one virtual source to one physical output per native process; `多屏 BETA` starts multiple bridge groups on top of that model.
+
+## Multi-Screen BETA
+
+The BETA build can create up to three virtual source displays. In `设置 > 配置`, enable `多屏 BETA`, then tick the physical target displays under `多屏 BETA 目标`.
+
+When started, SBMS assigns one virtual source to each selected physical target and launches one `SBMSNative.exe` process per pair. This keeps the proven single-output renderer intact while testing real multi-display topology.
+
+Notes:
+
+- `多屏 BETA` and `串流模式` are mutually exclusive.
+- All selected BETA targets currently share the same calculated virtual source resolution and orientation.
+- Pointer mapping and window migration still run per native process. This is usable for testing, but multi-display pointer capture may need a later unified input scheduler.
+- If the BETA topology behaves badly, stop SBMS first; the GUI will close all native output processes and then close the virtual display host.
 
 ## Presets
 

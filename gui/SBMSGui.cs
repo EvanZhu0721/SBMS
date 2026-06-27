@@ -29,7 +29,8 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-27.010";
+        private const string BuildLabel = "2026-06-27.020-beta";
+        private const int MultiScreenBetaMaxTargets = 3;
 
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
@@ -92,6 +93,8 @@ namespace SBMSGui
         private readonly CheckBox deviceHostCheck = new CheckBox();
         private readonly CheckBox streamModeCheck = new CheckBox();
         private readonly Label streamModeWarningLabel = new Label();
+        private readonly CheckBox multiScreenBetaCheck = new CheckBox();
+        private readonly CheckedListBox betaTargetList = new CheckedListBox();
         private readonly CheckBox vsyncCheck = new CheckBox();
         private readonly Button calculateButton = new Button();
         private readonly Button applyConfigButton = new Button();
@@ -118,6 +121,7 @@ namespace SBMSGui
         private readonly Label configLockLabel = new Label();
 
         private Process process;
+        private readonly List<Process> betaProcesses = new List<Process>();
         private Process deviceHostProcess;
         private readonly StringBuilder deviceHostLog = new StringBuilder();
         private string lastNativeArgs = "";
@@ -264,6 +268,11 @@ namespace SBMSGui
             streamModeWarningLabel.AutoSize = true;
             streamModeWarningLabel.TextAlign = ContentAlignment.MiddleLeft;
             streamModeWarningLabel.Padding = new Padding(4, 4, 0, 0);
+            multiScreenBetaCheck.Text = "多屏 BETA";
+            multiScreenBetaCheck.AutoSize = true;
+            betaTargetList.CheckOnClick = true;
+            betaTargetList.HorizontalScrollbar = true;
+            betaTargetList.BorderStyle = BorderStyle.FixedSingle;
             vsyncCheck.Text = "VSync";
             calculateButton.Text = "计算";
             calculateButton.Width = 90;
@@ -296,7 +305,8 @@ namespace SBMSGui
             targetResolutionText.TextChanged += delegate { SyncTargetSelector(); };
             sourceDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
-            streamModeCheck.CheckedChanged += delegate { UpdateRuntimeOptionState(); UpdateStatus(); };
+            streamModeCheck.CheckedChanged += delegate { OnStreamModeChanged(); };
+            multiScreenBetaCheck.CheckedChanged += delegate { OnMultiScreenBetaChanged(); };
             startButton.Click += delegate { StartBridge(); };
             stopButton.Click += delegate { StopBridge(); };
             listButton.Click += delegate { RunList(); };
@@ -408,8 +418,8 @@ namespace SBMSGui
         {
             configForm = new Form();
             configForm.StartPosition = FormStartPosition.CenterParent;
-            configForm.Size = new Size(900, 580);
-            configForm.MinimumSize = new Size(820, 540);
+            configForm.Size = new Size(940, 660);
+            configForm.MinimumSize = new Size(860, 620);
             configForm.ShowInTaskbar = false;
             configForm.FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
@@ -435,7 +445,7 @@ namespace SBMSGui
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 112));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             configHost.Controls.Add(panel);
@@ -472,10 +482,15 @@ namespace SBMSGui
             checks.Controls.Add(windowMoveCheck);
             checks.Controls.Add(deviceHostCheck);
             checks.Controls.Add(streamModeCheck);
+            checks.Controls.Add(multiScreenBetaCheck);
             checks.Controls.Add(streamModeWarningLabel);
             checks.Controls.Add(vsyncCheck);
             AddLabel(panel, "运行选项", 6);
             panel.Controls.Add(checks, 1, 6);
+
+            AddLabel(panel, "多屏 BETA 目标", 7);
+            betaTargetList.Dock = DockStyle.Fill;
+            panel.Controls.Add(betaTargetList, 1, 7);
 
             var configButtons = new FlowLayoutPanel();
             configButtons.Dock = DockStyle.Fill;
@@ -716,6 +731,7 @@ namespace SBMSGui
             windowMoveCheck.Text = T("迁移窗口");
             deviceHostCheck.Text = T("管理虚拟显示器");
             streamModeCheck.Text = T("串流模式");
+            multiScreenBetaCheck.Text = T("多屏 BETA");
             streamModeWarningLabel.Text = T("如果不清楚这个选项的作用，请不要勾选");
             if (configForm != null)
             {
@@ -1055,6 +1071,8 @@ namespace SBMSGui
                 case "迁移窗口": return "Move windows";
                 case "管理虚拟显示器": return "Virtual display";
                 case "串流模式": return "Streaming mode";
+                case "多屏 BETA": return "Multi-screen BETA";
+                case "多屏 BETA 目标": return "Multi-screen BETA targets";
                 case "如果不清楚这个选项的作用，请不要勾选": return "Do not enable this unless you know what it does";
                 case "虚拟源": return "Virtual source";
                 case "输出目标": return "Target";
@@ -1087,6 +1105,7 @@ namespace SBMSGui
                 case "开机自启关闭": return "Startup disabled";
                 case "运行中": return "Running";
                 case "串流中": return "Streaming";
+                case "多屏BETA运行中": return "Multi-screen BETA running";
                 case "待机": return "Idle";
                 case "源": return "source";
                 case "目标": return "target";
@@ -1173,23 +1192,53 @@ namespace SBMSGui
             }
         }
 
+        private void OnStreamModeChanged()
+        {
+            if (streamModeCheck.Checked && multiScreenBetaCheck.Checked)
+            {
+                multiScreenBetaCheck.Checked = false;
+            }
+            UpdateRuntimeOptionState();
+            UpdateStatus();
+        }
+
+        private void OnMultiScreenBetaChanged()
+        {
+            if (multiScreenBetaCheck.Checked)
+            {
+                if (streamModeCheck.Checked)
+                {
+                    streamModeCheck.Checked = false;
+                }
+                if (!deviceHostCheck.Checked)
+                {
+                    deviceHostCheck.Checked = true;
+                }
+            }
+            UpdateRuntimeOptionState();
+            UpdateStatus();
+        }
+
         private void UpdateRuntimeOptionState()
         {
             bool streamOnly = streamModeCheck.Checked;
-            if (streamOnly && !deviceHostCheck.Checked)
+            bool multiBeta = multiScreenBetaCheck.Checked;
+            if ((streamOnly || multiBeta) && !deviceHostCheck.Checked)
             {
                 deviceHostCheck.Checked = true;
             }
 
             bool bridgeRunning = IsBridgeRunning();
-            deviceHostCheck.Enabled = !streamOnly && !bridgeRunning;
-            targetDisplayCombo.Enabled = !streamOnly && !bridgeRunning;
-            targetText.Enabled = !streamOnly && !bridgeRunning;
+            deviceHostCheck.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
+            targetDisplayCombo.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
+            targetText.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
+            betaTargetList.Enabled = multiBeta && !bridgeRunning;
             filterCombo.Enabled = !streamOnly && !bridgeRunning;
             inputCheck.Enabled = !streamOnly && !bridgeRunning;
             windowMoveCheck.Enabled = !streamOnly && !bridgeRunning;
             vsyncCheck.Enabled = !streamOnly && !bridgeRunning;
             streamModeCheck.Enabled = !bridgeRunning;
+            multiScreenBetaCheck.Enabled = !bridgeRunning;
         }
 
         private static void ApplyThemeToMenuItems(ToolStripItemCollection items)
@@ -1212,8 +1261,13 @@ namespace SBMSGui
         {
             bool running = IsBridgeRunning();
             bool streamOnly = streamModeCheck.Checked && running && (process == null || process.HasExited);
-            statusLabel.Text = AppName + " // " + T(running ? (streamOnly ? "串流中" : "运行中") : "待机");
-            if (streamModeCheck.Checked)
+            bool multiBeta = multiScreenBetaCheck.Checked && running && HasRunningBetaProcess();
+            statusLabel.Text = AppName + " // " + T(running ? (multiBeta ? "多屏BETA运行中" : (streamOnly ? "串流中" : "运行中")) : "待机");
+            if (multiScreenBetaCheck.Checked)
+            {
+                routeLabel.Text = T("虚拟源") + " x" + Math.Max(1, betaTargetList.CheckedItems.Count).ToString(CultureInfo.InvariantCulture) + "  >  " + T("目标") + " x" + Math.Max(1, betaTargetList.CheckedItems.Count).ToString(CultureInfo.InvariantCulture);
+            }
+            else if (streamModeCheck.Checked)
             {
                 routeLabel.Text = T("虚拟源") + " " + sourceText.Text.Trim() + "  //  " + T("串流模式");
             }
@@ -1228,6 +1282,7 @@ namespace SBMSGui
         {
             string previousSourceDevice = GetSelectedDeviceName(sourceDisplayCombo);
             string previousTargetDevice = GetSelectedDeviceName(targetDisplayCombo);
+            HashSet<string> checkedBetaTargets = GetCheckedBetaTargetDevices();
             if (string.IsNullOrWhiteSpace(previousSourceDevice) && IsDisplayDeviceSelector(sourceText.Text.Trim()))
             {
                 previousSourceDevice = sourceText.Text.Trim();
@@ -1241,6 +1296,7 @@ namespace SBMSGui
             displayList.Items.Clear();
             sourceDisplayCombo.Items.Clear();
             targetDisplayCombo.Items.Clear();
+            betaTargetList.Items.Clear();
 
             if (!File.Exists(nativeExe))
             {
@@ -1264,6 +1320,11 @@ namespace SBMSGui
                     else
                     {
                         targetDisplayCombo.Items.Add(display);
+                        int betaIndex = betaTargetList.Items.Add(display);
+                        if (checkedBetaTargets.Contains(display.DeviceName))
+                        {
+                            betaTargetList.SetItemChecked(betaIndex, true);
+                        }
                     }
                 }
             }
@@ -1273,6 +1334,7 @@ namespace SBMSGui
                 sourceDisplayCombo.Items.Add(T("按计算分辨率等待虚拟屏"));
             }
             SelectDefaultDisplays(previousSourceDevice, previousTargetDevice);
+            EnsureDefaultBetaTargetChecked(previousTargetDevice);
             SyncSelectedDisplaysToSelectors();
             UpdateStatus();
         }
@@ -1316,6 +1378,56 @@ namespace SBMSGui
         private static bool IsDisplayDeviceSelector(string value)
         {
             return value.StartsWith(@"\\.\DISPLAY", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private HashSet<string> GetCheckedBetaTargetDevices()
+        {
+            var devices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (object item in betaTargetList.CheckedItems)
+            {
+                DisplayChoice display = item as DisplayChoice;
+                if (display != null && !string.IsNullOrWhiteSpace(display.DeviceName))
+                {
+                    devices.Add(display.DeviceName);
+                }
+            }
+            return devices;
+        }
+
+        private List<DisplayChoice> GetCheckedBetaTargetDisplays()
+        {
+            var targets = new List<DisplayChoice>();
+            foreach (object item in betaTargetList.CheckedItems)
+            {
+                DisplayChoice display = item as DisplayChoice;
+                if (display != null && !display.Virtual)
+                {
+                    targets.Add(display);
+                }
+            }
+            return targets;
+        }
+
+        private void EnsureDefaultBetaTargetChecked(string previousTargetDevice)
+        {
+            if (betaTargetList.CheckedItems.Count > 0)
+            {
+                return;
+            }
+
+            DisplayChoice selectedTarget = targetDisplayCombo.SelectedItem as DisplayChoice;
+            string wantedDevice = !string.IsNullOrWhiteSpace(previousTargetDevice)
+                ? previousTargetDevice
+                : (selectedTarget != null ? selectedTarget.DeviceName : "");
+            for (int i = 0; i < betaTargetList.Items.Count; ++i)
+            {
+                DisplayChoice display = betaTargetList.Items[i] as DisplayChoice;
+                if (display != null && string.Equals(display.DeviceName, wantedDevice, StringComparison.OrdinalIgnoreCase))
+                {
+                    betaTargetList.SetItemChecked(i, true);
+                    return;
+                }
+            }
         }
 
         private void SelectDefaultDisplays(string previousSourceDevice, string previousTargetDevice)
@@ -1682,8 +1794,17 @@ namespace SBMSGui
                 return;
             }
             bool streamOnly = streamModeCheck.Checked;
+            bool multiBeta = multiScreenBetaCheck.Checked;
             bool manageVirtualDisplay = deviceHostCheck.Checked || streamOnly;
+            if (multiBeta)
+            {
+                manageVirtualDisplay = true;
+            }
             if (streamOnly && !deviceHostCheck.Checked)
+            {
+                deviceHostCheck.Checked = true;
+            }
+            if (multiBeta && !deviceHostCheck.Checked)
             {
                 deviceHostCheck.Checked = true;
             }
@@ -1703,6 +1824,18 @@ namespace SBMSGui
                 return;
             }
 
+            List<DisplayChoice> betaTargets = multiBeta ? GetCheckedBetaTargetDisplays() : new List<DisplayChoice>();
+            if (multiBeta && betaTargets.Count == 0)
+            {
+                AppendLog("多屏 BETA 未选择目标显示器");
+                return;
+            }
+            if (multiBeta && betaTargets.Count > MultiScreenBetaMaxTargets)
+            {
+                AppendLog("多屏 BETA 当前最多支持 " + MultiScreenBetaMaxTargets.ToString(CultureInfo.InvariantCulture) + " 个目标显示器");
+                return;
+            }
+
             string requestedSource = sourceText.Text.Trim();
             Resolution calculatedSource;
             if (manageVirtualDisplay && strategyCombo.SelectedIndex != 2 && TryCalculateStrategySource(out calculatedSource))
@@ -1718,6 +1851,55 @@ namespace SBMSGui
             if (manageVirtualDisplay)
             {
                 StartDeviceHost();
+                if (multiBeta)
+                {
+                    List<DisplayChoice> virtualSources;
+                    if (!WaitForVirtualSources(betaTargets.Count, 30000, out virtualSources))
+                    {
+                        AppendLog("等待多屏 BETA 虚拟显示器超时，needed=" + betaTargets.Count.ToString(CultureInfo.InvariantCulture));
+                        StopDeviceHost();
+                        return;
+                    }
+
+                    Resolution betaRequestedResolution;
+                    if (TryParseResolution(requestedSource, out betaRequestedResolution))
+                    {
+                        for (int i = 0; i < betaTargets.Count && i < virtualSources.Count; ++i)
+                        {
+                            string modeMessage;
+                            if (TryApplyDisplayMode(virtualSources[i].DeviceName, betaRequestedResolution, virtualSources[i].Refresh, GetSelectedDisplayOrientation(), out modeMessage))
+                            {
+                                AppendLog(modeMessage);
+                            }
+                            else
+                            {
+                                AppendLog(modeMessage);
+                            }
+                        }
+                        Thread.Sleep(500);
+                        RefreshDisplays();
+                        virtualSources = GetCurrentVirtualSources(betaTargets.Count);
+                    }
+
+                    if (virtualSources.Count < betaTargets.Count)
+                    {
+                        AppendLog("多屏 BETA 虚拟源数量不足，virtual=" + virtualSources.Count.ToString(CultureInfo.InvariantCulture) + " target=" + betaTargets.Count.ToString(CultureInfo.InvariantCulture));
+                        StopDeviceHost();
+                        return;
+                    }
+
+                    sourceText.Text = virtualSources[0].DeviceName;
+                    if (!StartMultiScreenBeta(virtualSources, betaTargets))
+                    {
+                        StopDeviceHost();
+                        SetRunning(false);
+                        return;
+                    }
+                    SetRunning(true);
+                    AppendLog("多屏 BETA 已启动: " + betaTargets.Count.ToString(CultureInfo.InvariantCulture) + " 组");
+                    return;
+                }
+
                 DisplayChoice virtualSource;
                 if (!WaitForAnyVirtualSource(30000, out virtualSource))
                 {
@@ -1859,6 +2041,100 @@ namespace SBMSGui
             AppendLog(restarted ? "native 已重启" : "native 已启动");
         }
 
+        private bool StartMultiScreenBeta(List<DisplayChoice> virtualSources, List<DisplayChoice> targets)
+        {
+            StopBetaProcesses();
+            stoppingRequested = false;
+            nativeRestartCount = 0;
+            lastNativeArgs = "";
+            process = null;
+
+            int count = Math.Min(virtualSources.Count, targets.Count);
+            for (int i = 0; i < count; ++i)
+            {
+                DisplayChoice source = virtualSources[i];
+                DisplayChoice target = targets[i];
+                var args = new StringBuilder();
+                args.Append("--source ").Append(Quote(source.DeviceName));
+                args.Append(" --target ").Append(Quote(target.DeviceName));
+                args.Append(" --filter ").Append(Quote(GetFilterArgument(source.Resolution, target.Resolution)));
+                if (!inputCheck.Checked)
+                {
+                    args.Append(" --no-input");
+                }
+                if (!windowMoveCheck.Checked)
+                {
+                    args.Append(" --no-window-move");
+                }
+                if (vsyncCheck.Checked)
+                {
+                    args.Append(" --vsync");
+                }
+                string nativeArgs = args.ToString();
+                AppendLog("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] " + source.DeviceName + " -> " + target.DeviceName + " args: " + nativeArgs);
+                if (!StartBetaNativeProcess(nativeArgs, i + 1))
+                {
+                    stoppingRequested = true;
+                    StopBetaProcesses();
+                    AppendLog("多屏 BETA 启动失败，已回滚已启动的输出进程");
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private bool StartBetaNativeProcess(string args, int index)
+        {
+            Process betaProcess = CreateProcess(args);
+            betaProcesses.Add(betaProcess);
+            betaProcess.EnableRaisingEvents = true;
+            betaProcess.OutputDataReceived += OnOutput;
+            betaProcess.ErrorDataReceived += OnOutput;
+            Process startedProcess = betaProcess;
+            betaProcess.Exited += delegate
+            {
+                BeginInvoke((Action)delegate
+                {
+                    int exitCode = GetProcessExitCode(startedProcess);
+                    AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 已退出 exit=" + exitCode.ToString(CultureInfo.InvariantCulture));
+                    if (stoppingRequested)
+                    {
+                        return;
+                    }
+                    AppendLog("多屏 BETA 子进程异常退出，停止全部桥接");
+                    stoppingRequested = true;
+                    RemoveExitedBetaProcesses();
+                    StopBetaProcesses();
+                    StopDeviceHost();
+                    SetRunning(false);
+                });
+            };
+            try
+            {
+                betaProcess.Start();
+                betaProcess.BeginOutputReadLine();
+                betaProcess.BeginErrorReadLine();
+            }
+            catch (Exception ex)
+            {
+                AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 启动失败: " + ex.Message);
+                try
+                {
+                    betaProcesses.Remove(betaProcess);
+                    if (!betaProcess.HasExited)
+                    {
+                        betaProcess.Kill();
+                    }
+                }
+                catch
+                {
+                }
+                return false;
+            }
+            AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 已启动");
+            return true;
+        }
+
         private void AppendSelectedDisplayLog()
         {
             DisplayChoice sourceDisplay = sourceDisplayCombo.SelectedItem as DisplayChoice;
@@ -1935,6 +2211,61 @@ namespace SBMSGui
                 Thread.Sleep(500);
             }
             return false;
+        }
+
+        private bool WaitForVirtualSources(int minimumCount, int timeoutMs, out List<DisplayChoice> sources)
+        {
+            var deadline = Environment.TickCount + timeoutMs;
+            sources = new List<DisplayChoice>();
+            while (Environment.TickCount < deadline)
+            {
+                if (deviceHostProcess != null && deviceHostProcess.HasExited)
+                {
+                    return false;
+                }
+                string list = CaptureNativeOutput("--list");
+                sources = ParseVirtualSources(list);
+                if (sources.Count >= minimumCount)
+                {
+                    RefreshDisplays();
+                    sources = GetCurrentVirtualSources(minimumCount);
+                    return sources.Count >= minimumCount;
+                }
+                Thread.Sleep(500);
+            }
+            return false;
+        }
+
+        private List<DisplayChoice> GetCurrentVirtualSources(int maximumCount)
+        {
+            var sources = new List<DisplayChoice>();
+            for (int i = 0; i < displays.Count; ++i)
+            {
+                DisplayChoice display = displays[i];
+                if (display.Virtual)
+                {
+                    sources.Add(display);
+                    if (sources.Count >= maximumCount)
+                    {
+                        break;
+                    }
+                }
+            }
+            return sources;
+        }
+
+        private static List<DisplayChoice> ParseVirtualSources(string listOutput)
+        {
+            var sources = new List<DisplayChoice>();
+            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                DisplayChoice display;
+                if (TryParseDisplayLine(rawLine.Trim(), out display) && display.Virtual)
+                {
+                    sources.Add(display);
+                }
+            }
+            return sources;
         }
 
         private bool WaitForVirtualSource(string selector, int timeoutMs, out DisplayChoice source)
@@ -2118,9 +2449,54 @@ namespace SBMSGui
             return p;
         }
 
+        private void StopBetaProcesses()
+        {
+            for (int i = betaProcesses.Count - 1; i >= 0; --i)
+            {
+                Process betaProcess = betaProcesses[i];
+                if (betaProcess == null)
+                {
+                    continue;
+                }
+                try
+                {
+                    if (!betaProcess.HasExited)
+                    {
+                        betaProcess.CloseMainWindow();
+                        PostCloseToProcess(betaProcess.Id);
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            for (int i = betaProcesses.Count - 1; i >= 0; --i)
+            {
+                Process betaProcess = betaProcesses[i];
+                if (betaProcess == null)
+                {
+                    continue;
+                }
+                try
+                {
+                    if (!betaProcess.HasExited && !betaProcess.WaitForExit(3000))
+                    {
+                        AppendLog("beta native 正常关闭超时，强制结束");
+                        betaProcess.Kill();
+                    }
+                }
+                catch
+                {
+                }
+            }
+            betaProcesses.Clear();
+        }
+
         private void StopBridge()
         {
             stoppingRequested = true;
+            StopBetaProcesses();
             if (process == null || process.HasExited)
             {
                 StopDeviceHost();
@@ -2147,7 +2523,46 @@ namespace SBMSGui
         private bool IsBridgeRunning()
         {
             return (process != null && !process.HasExited) ||
+                   HasRunningBetaProcess() ||
                    (deviceHostProcess != null && !deviceHostProcess.HasExited);
+        }
+
+        private bool HasRunningBetaProcess()
+        {
+            for (int i = 0; i < betaProcesses.Count; ++i)
+            {
+                Process betaProcess = betaProcesses[i];
+                try
+                {
+                    if (betaProcess != null && !betaProcess.HasExited)
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+            }
+            return false;
+        }
+
+        private void RemoveExitedBetaProcesses()
+        {
+            for (int i = betaProcesses.Count - 1; i >= 0; --i)
+            {
+                Process betaProcess = betaProcesses[i];
+                try
+                {
+                    if (betaProcess == null || betaProcess.HasExited)
+                    {
+                        betaProcesses.RemoveAt(i);
+                    }
+                }
+                catch
+                {
+                    betaProcesses.RemoveAt(i);
+                }
+            }
         }
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)

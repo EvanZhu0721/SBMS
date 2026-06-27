@@ -24,7 +24,7 @@ using namespace Microsoft::WRL;
 
 #pragma region SampleMonitors
 
-static constexpr DWORD IDD_SAMPLE_MONITOR_COUNT = 1; // SBMS: expose one virtual monitor for geometry testing
+static constexpr DWORD IDD_SAMPLE_MONITOR_COUNT = 3; // SBMS BETA: expose multiple virtual monitors for multi-screen bridge groups
 
 #define SBMS_SUPPORTED_MODES \
     { 4550, 2560, 240 }, \
@@ -796,6 +796,11 @@ NTSTATUS IddSampleMonitorGetDefaultModes(IDDCX_MONITOR MonitorObject, const IDAR
     if (pInArgs->DefaultMonitorModeBufferInputCount == 0)
     {
         pOutArgs->DefaultMonitorModeBufferOutputCount = ARRAYSIZE(s_SampleDefaultModes); 
+    }
+    else if (pInArgs->DefaultMonitorModeBufferInputCount < ARRAYSIZE(s_SampleDefaultModes))
+    {
+        pOutArgs->DefaultMonitorModeBufferOutputCount = ARRAYSIZE(s_SampleDefaultModes);
+        return STATUS_BUFFER_TOO_SMALL;
     }
     else
     {
