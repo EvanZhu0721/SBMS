@@ -90,6 +90,8 @@ namespace SBMSGui
         private readonly CheckBox inputCheck = new CheckBox();
         private readonly CheckBox windowMoveCheck = new CheckBox();
         private readonly CheckBox deviceHostCheck = new CheckBox();
+        private readonly CheckBox streamModeCheck = new CheckBox();
+        private readonly Label streamModeWarningLabel = new Label();
         private readonly CheckBox vsyncCheck = new CheckBox();
         private readonly Button calculateButton = new Button();
         private readonly Button applyConfigButton = new Button();
@@ -254,6 +256,14 @@ namespace SBMSGui
             windowMoveCheck.Checked = true;
             deviceHostCheck.Text = "管理虚拟显示器";
             deviceHostCheck.Checked = true;
+            streamModeCheck.Text = "串流模式";
+            streamModeCheck.AutoSize = true;
+            streamModeWarningLabel.Text = "如果不清楚这个选项的作用，请不要勾选";
+            streamModeWarningLabel.Tag = "如果不清楚这个选项的作用，请不要勾选";
+            streamModeWarningLabel.Name = "streamModeWarningLabel";
+            streamModeWarningLabel.AutoSize = true;
+            streamModeWarningLabel.TextAlign = ContentAlignment.MiddleLeft;
+            streamModeWarningLabel.Padding = new Padding(4, 4, 0, 0);
             vsyncCheck.Text = "VSync";
             calculateButton.Text = "计算";
             calculateButton.Width = 90;
@@ -286,6 +296,7 @@ namespace SBMSGui
             targetResolutionText.TextChanged += delegate { SyncTargetSelector(); };
             sourceDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
+            streamModeCheck.CheckedChanged += delegate { UpdateRuntimeOptionState(); UpdateStatus(); };
             startButton.Click += delegate { StartBridge(); };
             stopButton.Click += delegate { StopBridge(); };
             listButton.Click += delegate { RunList(); };
@@ -296,6 +307,7 @@ namespace SBMSGui
             ApplyStrategy(false);
             RefreshDisplays();
             ApplyLanguage();
+            UpdateRuntimeOptionState();
             ApplyTheme(this);
             AppendLog("GUI版本 = " + BuildLabel);
         }
@@ -338,7 +350,7 @@ namespace SBMSGui
             main.ColumnCount = 1;
             main.RowCount = 4;
             main.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
-            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
+            main.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
             main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             main.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             Controls.Add(main);
@@ -364,6 +376,7 @@ namespace SBMSGui
             displayList.Dock = DockStyle.Fill;
             displayList.Font = new Font("Consolas", 9F);
             displayList.BorderStyle = BorderStyle.FixedSingle;
+            displayList.HorizontalScrollbar = true;
             main.Controls.Add(displayList, 0, 1);
 
             logText.Dock = DockStyle.Fill;
@@ -421,7 +434,7 @@ namespace SBMSGui
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -458,6 +471,8 @@ namespace SBMSGui
             checks.Controls.Add(inputCheck);
             checks.Controls.Add(windowMoveCheck);
             checks.Controls.Add(deviceHostCheck);
+            checks.Controls.Add(streamModeCheck);
+            checks.Controls.Add(streamModeWarningLabel);
             checks.Controls.Add(vsyncCheck);
             AddLabel(panel, "运行选项", 6);
             panel.Controls.Add(checks, 1, 6);
@@ -700,6 +715,8 @@ namespace SBMSGui
             inputCheck.Text = T("鼠标映射");
             windowMoveCheck.Text = T("迁移窗口");
             deviceHostCheck.Text = T("管理虚拟显示器");
+            streamModeCheck.Text = T("串流模式");
+            streamModeWarningLabel.Text = T("如果不清楚这个选项的作用，请不要勾选");
             if (configForm != null)
             {
                 configForm.Text = T("配置");
@@ -1037,6 +1054,8 @@ namespace SBMSGui
                 case "鼠标映射": return "Pointer";
                 case "迁移窗口": return "Move windows";
                 case "管理虚拟显示器": return "Virtual display";
+                case "串流模式": return "Streaming mode";
+                case "如果不清楚这个选项的作用，请不要勾选": return "Do not enable this unless you know what it does";
                 case "虚拟源": return "Virtual source";
                 case "输出目标": return "Target";
                 case "配置方式": return "Input";
@@ -1067,6 +1086,7 @@ namespace SBMSGui
                 case "开机自启开启": return "Startup enabled";
                 case "开机自启关闭": return "Startup disabled";
                 case "运行中": return "Running";
+                case "串流中": return "Streaming";
                 case "待机": return "Idle";
                 case "源": return "source";
                 case "目标": return "target";
@@ -1113,6 +1133,12 @@ namespace SBMSGui
                 control.ForeColor = ThemeRed;
                 return;
             }
+            if (control.Name == "streamModeWarningLabel")
+            {
+                control.BackColor = ThemeBack;
+                control.ForeColor = ThemeRed;
+                return;
+            }
             if (control is TextBox || control is ListBox || control is ComboBox)
             {
                 control.BackColor = ThemePanel;
@@ -1139,12 +1165,31 @@ namespace SBMSGui
 
         private void UpdateConfigLock()
         {
-            bool locked = process != null && !process.HasExited;
+            bool locked = IsBridgeRunning();
             configLockPanel.Visible = locked;
             if (locked)
             {
                 configLockPanel.BringToFront();
             }
+        }
+
+        private void UpdateRuntimeOptionState()
+        {
+            bool streamOnly = streamModeCheck.Checked;
+            if (streamOnly && !deviceHostCheck.Checked)
+            {
+                deviceHostCheck.Checked = true;
+            }
+
+            bool bridgeRunning = IsBridgeRunning();
+            deviceHostCheck.Enabled = !streamOnly && !bridgeRunning;
+            targetDisplayCombo.Enabled = !streamOnly && !bridgeRunning;
+            targetText.Enabled = !streamOnly && !bridgeRunning;
+            filterCombo.Enabled = !streamOnly && !bridgeRunning;
+            inputCheck.Enabled = !streamOnly && !bridgeRunning;
+            windowMoveCheck.Enabled = !streamOnly && !bridgeRunning;
+            vsyncCheck.Enabled = !streamOnly && !bridgeRunning;
+            streamModeCheck.Enabled = !bridgeRunning;
         }
 
         private static void ApplyThemeToMenuItems(ToolStripItemCollection items)
@@ -1165,9 +1210,17 @@ namespace SBMSGui
 
         private void UpdateStatus()
         {
-            bool running = process != null && !process.HasExited;
-            statusLabel.Text = AppName + " // " + T(running ? "运行中" : "待机");
-            routeLabel.Text = T("源") + " " + sourceText.Text.Trim() + "  >  " + T("目标") + " " + targetText.Text.Trim();
+            bool running = IsBridgeRunning();
+            bool streamOnly = streamModeCheck.Checked && running && (process == null || process.HasExited);
+            statusLabel.Text = AppName + " // " + T(running ? (streamOnly ? "串流中" : "运行中") : "待机");
+            if (streamModeCheck.Checked)
+            {
+                routeLabel.Text = T("虚拟源") + " " + sourceText.Text.Trim() + "  //  " + T("串流模式");
+            }
+            else
+            {
+                routeLabel.Text = T("源") + " " + sourceText.Text.Trim() + "  >  " + T("目标") + " " + targetText.Text.Trim();
+            }
             trayStopMenuItem.Enabled = running;
         }
 
@@ -1484,7 +1537,7 @@ namespace SBMSGui
         {
             ApplyStrategy(true);
             UpdateStatus();
-            bool running = process != null && !process.HasExited;
+            bool running = IsBridgeRunning();
             if (running)
             {
                 UpdateConfigLock();
@@ -1624,11 +1677,17 @@ namespace SBMSGui
 
         private void StartBridge()
         {
-            if (process != null && !process.HasExited)
+            if (IsBridgeRunning())
             {
                 return;
             }
-            if (deviceHostCheck.Checked && !IsRunningAsAdministrator())
+            bool streamOnly = streamModeCheck.Checked;
+            bool manageVirtualDisplay = deviceHostCheck.Checked || streamOnly;
+            if (streamOnly && !deviceHostCheck.Checked)
+            {
+                deviceHostCheck.Checked = true;
+            }
+            if (manageVirtualDisplay && !IsRunningAsAdministrator())
             {
                 AppendLog("需要管理员权限创建虚拟显示器，请关闭后以管理员身份重新运行 GUI。");
                 return;
@@ -1638,7 +1697,7 @@ namespace SBMSGui
                 AppendLog("找不到 SBMSNative.exe");
                 return;
             }
-            if (deviceHostCheck.Checked && !File.Exists(deviceHostExe))
+            if (manageVirtualDisplay && !File.Exists(deviceHostExe))
             {
                 AppendLog("找不到 SBMSDeviceHost.exe");
                 return;
@@ -1646,7 +1705,7 @@ namespace SBMSGui
 
             string requestedSource = sourceText.Text.Trim();
             Resolution calculatedSource;
-            if (deviceHostCheck.Checked && strategyCombo.SelectedIndex != 2 && TryCalculateStrategySource(out calculatedSource))
+            if (manageVirtualDisplay && strategyCombo.SelectedIndex != 2 && TryCalculateStrategySource(out calculatedSource))
             {
                 requestedSource = FormatResolution(calculatedSource);
                 sourceText.Text = requestedSource;
@@ -1656,7 +1715,7 @@ namespace SBMSGui
             DisplayChoice selectedTargetForArgs = targetDisplayCombo.SelectedItem as DisplayChoice;
             string targetResolutionForFilter = selectedTargetForArgs != null ? selectedTargetForArgs.Resolution : targetResolutionText.Text.Trim();
 
-            if (deviceHostCheck.Checked)
+            if (manageVirtualDisplay)
             {
                 StartDeviceHost();
                 DisplayChoice virtualSource;
@@ -1716,6 +1775,16 @@ namespace SBMSGui
                 SelectComboByDevice(sourceDisplayCombo, sourceSelector);
             }
 
+            if (streamOnly)
+            {
+                lastNativeArgs = "";
+                stoppingRequested = false;
+                nativeRestartCount = 0;
+                AppendLog("串流模式已启动：仅创建虚拟桌面，未启动 native 输出");
+                SetRunning(true);
+                return;
+            }
+
             var args = new StringBuilder();
             args.Append("--source ").Append(Quote(sourceSelector));
             args.Append(" --target ").Append(Quote(targetText.Text.Trim()));
@@ -1761,8 +1830,8 @@ namespace SBMSGui
                     }
                     if (stoppingRequested)
                     {
-                        SetRunning(false);
                         StopDeviceHost();
+                        SetRunning(false);
                         return;
                     }
                     if (!stoppingRequested && exitCode == NativeTopologyChangedExitCode && nativeRestartCount < 5)
@@ -1773,15 +1842,15 @@ namespace SBMSGui
                         if (deviceHostCheck.Checked && !WaitForSourceDisplay(sourceText.Text.Trim(), 10000))
                         {
                             AppendLog("重启前等待虚拟显示器超时");
-                            SetRunning(false);
                             StopDeviceHost();
+                            SetRunning(false);
                             return;
                         }
                         StartNativeProcess(lastNativeArgs, true);
                         return;
                     }
-                    SetRunning(false);
                     StopDeviceHost();
+                    SetRunning(false);
                 });
             };
             process.Start();
@@ -2054,8 +2123,8 @@ namespace SBMSGui
             stoppingRequested = true;
             if (process == null || process.HasExited)
             {
-                SetRunning(false);
                 StopDeviceHost();
+                SetRunning(false);
                 return;
             }
             try
@@ -2071,8 +2140,8 @@ namespace SBMSGui
             catch
             {
             }
-            SetRunning(false);
             StopDeviceHost();
+            SetRunning(false);
         }
 
         private bool IsBridgeRunning()
@@ -2262,7 +2331,9 @@ namespace SBMSGui
             inputCheck.Enabled = true;
             windowMoveCheck.Enabled = true;
             deviceHostCheck.Enabled = true;
+            streamModeCheck.Enabled = true;
             vsyncCheck.Enabled = true;
+            UpdateRuntimeOptionState();
             UpdateConfigLock();
             UpdateStatus();
         }

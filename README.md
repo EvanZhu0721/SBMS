@@ -19,7 +19,7 @@ This is a local engineering prototype, not a signed production driver.
 ## Components
 
 - `SBMS.exe`
-  - WinForms controller with display list, terminal log, presets, tray/lightweight mode, startup task, language switch, and run controls.
+  - WinForms controller with multi-display list, terminal log, presets, tray/lightweight mode, streaming mode, startup task, language switch, and run controls.
 - `SBMSNative.exe`
   - Native D3D11 Desktop Duplication output path. Captures the virtual source display and presents it on the physical target display.
 - `SBMSDeviceHost.exe`
@@ -72,7 +72,11 @@ Default workflow:
 
 `轻量模式` is a top-level menu item. When it is checked and SBMS is running, closing the window hides SBMS to the tray and keeps the bridge running. The tray menu has `打开`, `停止`, and `退出`.
 
+`串流模式` creates and keeps only the SBMS virtual desktop alive. It does not start `SBMSNative.exe`, does not copy the virtual desktop to a physical output, does not migrate windows, and does not capture pointer input. This is intended for external streaming or capture workflows. If you do not know what this option does, do not enable it.
+
 When `迁移窗口` is enabled, SBMS continuously moves movable top-level windows from the real target desktop to the virtual source desktop while the bridge is running. This keeps topmost windows such as Task Manager from blocking interaction on the physical output panel.
+
+SBMS can enumerate and select any active physical target display by its Windows device id such as `\\.\DISPLAY2`, so duplicate resolutions and 3+ monitor layouts do not have to rely on ambiguous resolution matching. The current bridge still runs one virtual source to one physical output per native process; simultaneous multi-output bridge groups are not enabled in this build.
 
 ## Presets
 
