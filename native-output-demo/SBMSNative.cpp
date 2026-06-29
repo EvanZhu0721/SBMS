@@ -942,6 +942,11 @@ struct Args {
 };
 
 static constexpr int kTopologyChangedExitCode = 100;
+static constexpr int kSourceUnavailableExitCode = 101;
+
+static bool IsSourceUnavailableError(const std::string& message) {
+    return message.find("source selector did not match an active virtual display") != std::string::npos;
+}
 
 static int FilterModeFromName(const std::wstring& name) {
     if (name == L"linear") {
@@ -1334,7 +1339,17 @@ float4 PSMain(VSOut input) : SV_TARGET {
     } catch (const std::exception& exc) {
         CleanupInputMapper();
         RestoreMigratedWindows();
-        std::cerr << "error: " << exc.what() << "\n";
-        return 1;
+        std::string message = exc.what();
+        std::cerr << "error: " << message << "\n";
+        /*
+         * Issue #5: during multi-monitor mode changes Windows can briefly publish a
+         * virtual display to one process and hide or renumber it for the next process.
+         * The GUI already waits for the display to appear before launching native, but a
+         * fresh native process may still hit this selector miss while the topology
+         * transaction is settling. Return a dedicated code so the GUI can keep the
+         * software-device host alive, re-enumerate current \\.\DISPLAYxx ids, and retry
+         * instead of treating the race as a fatal native crash.
+         */
+        return IsSourceUnavailableError(message) ? kSourceUnavailableExitCode : 1;
     }
 }

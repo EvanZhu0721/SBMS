@@ -83,6 +83,7 @@ namespace SBMSGui
         private const int WM_CLOSE = 0x0010;
         private const uint EVENT_MODIFY_STATE = 0x0002;
         private const int NativeTopologyChangedExitCode = 100;
+        private const int NativeSourceUnavailableExitCode = 101;
         private const int ENUM_CURRENT_SETTINGS = -1;
         private const int DISP_CHANGE_SUCCESSFUL = 0;
         private const int DM_PELSWIDTH = 0x00080000;
@@ -95,7 +96,7 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-29.065-beta";
+        private const string BuildLabel = "2026-06-29.066-beta";
         private const int WM_SETREDRAW = 0x000B;
         private const int MultiScreenBetaMaxTargets = 2;
         private const int DisplayTopologySettleTimeoutMs = 7000;
@@ -5156,6 +5157,55 @@ namespace SBMSGui
                         betaPairGrid.Rows[i].Cells[BetaColRefresh].Value = betaPairs[i].Refresh;
                     }
 
+                    /*
+                     * Issue #5: each ChangeDisplaySettingsEx call can make Windows rebuild
+                     * the active display topology asynchronously. The GUI may confirm
+                     * \\.\DISPLAY129 in one --list probe, then a freshly started native
+                     * process can enumerate during the next topology commit and miss that
+                     * same id. Before launching any BETA native process, wait for two stable
+                     * native display-list samples, rebind physical targets, rediscover the
+                     * current virtual sources, and restore requested modes if Windows reset
+                     * them during the settle window.
+                     */
+                    string startupRecoveryMessage;
+                    if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, out startupRecoveryMessage))
+                    {
+                        AbortBridgeStart(startupRecoveryMessage);
+                        return;
+                    }
+
+                    if (!RebindBetaTargetDisplays(out startupRecoveryMessage))
+                    {
+                        AbortBridgeStart(startupRecoveryMessage);
+                        return;
+                    }
+
+                    if (!TryGetEnabledBridgePairs(false, out betaPairs, out startupRecoveryMessage))
+                    {
+                        AbortBridgeStart(startupRecoveryMessage);
+                        return;
+                    }
+
+                    if (!WaitForVirtualSources(betaPairs.Count, 15000, out virtualSources, out virtualWaitFailure))
+                    {
+                        AbortBridgeStart(string.IsNullOrWhiteSpace(virtualWaitFailure)
+                            ? "BETA 启动前等待虚拟显示器稳定超时，needed=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture)
+                            : virtualWaitFailure);
+                        return;
+                    }
+
+                    if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, out startupRecoveryMessage))
+                    {
+                        AbortBridgeStart(startupRecoveryMessage);
+                        return;
+                    }
+
+                    for (int i = 0; i < betaPairs.Count && i < betaPairGrid.Rows.Count; ++i)
+                    {
+                        betaPairGrid.Rows[i].Cells[BetaColSource].Value = FormatResolution(betaPairs[i].SourceResolution);
+                        betaPairGrid.Rows[i].Cells[BetaColRefresh].Value = betaPairs[i].Refresh;
+                    }
+
                     if (virtualSources.Count < betaPairs.Count)
                     {
                         AbortBridgeStart("多屏 BETA 虚拟源数量不足，virtual=" + virtualSources.Count.ToString(CultureInfo.InvariantCulture) + " groups=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture));
@@ -5309,10 +5359,10 @@ namespace SBMSGui
                         SetRunning(false);
                         return;
                     }
-                    if (!stoppingRequested && exitCode == NativeTopologyChangedExitCode && nativeRestartCount < 5)
+                    if (!stoppingRequested && IsRecoverableNativeDisplayExit(exitCode) && nativeRestartCount < 5)
                     {
                         ++nativeRestartCount;
-                        AppendLog("检测到显示拓扑变化，重启 native 输出 " + nativeRestartCount + "/5");
+                        AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出 " + nativeRestartCount + "/5");
                         if (!TryRestartNativeAfterTopologyChange())
                         {
                             AbortBridgeStart("native 重启失败，已停止桥接");
@@ -5337,6 +5387,19 @@ namespace SBMSGui
             }
             AppendLog(restarted ? "native 已重启" : "native 已启动");
             return true;
+        }
+
+        private static bool IsRecoverableNativeDisplayExit(int exitCode)
+        {
+            return exitCode == NativeTopologyChangedExitCode ||
+                   exitCode == NativeSourceUnavailableExitCode;
+        }
+
+        private static string GetRecoverableNativeExitMessage(int exitCode)
+        {
+            return exitCode == NativeSourceUnavailableExitCode
+                ? "检测到虚拟源枚举短暂丢失"
+                : "检测到显示拓扑变化";
         }
 
         private bool TryRestartNativeAfterTopologyChange()
@@ -5523,9 +5586,17 @@ namespace SBMSGui
                     {
                         return;
                     }
-                    if (exitCode == NativeTopologyChangedExitCode)
+                    /*
+                     * Issue #5: BETA native can be created immediately after virtual mode
+                     * changes, while Windows is still committing the display topology. A
+                     * dedicated source-unavailable exit means the native process did not
+                     * crash; it only saw a stale/missing \\.\DISPLAYxx snapshot. Recover by
+                     * keeping the host alive and rebuilding native processes from the latest
+                     * display enumeration.
+                     */
+                    if (IsRecoverableNativeDisplayExit(exitCode))
                     {
-                        RestartBridgeAfterTopologyChange("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                        RestartBridgeAfterTopologyChange("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] " + GetRecoverableNativeExitMessage(exitCode));
                         return;
                     }
                     RemoveExitedBetaProcesses();
@@ -5705,14 +5776,14 @@ namespace SBMSGui
             }
             if (nativeRestartCount >= 5)
             {
-                AbortBridgeStart("显示拓扑变化重建次数过多，停止桥接");
+                AbortBridgeStart("显示拓扑/虚拟源恢复次数过多，停止桥接");
                 return;
             }
 
             int restartCount = nativeRestartCount + 1;
             nativeRestartCount = restartCount;
             restartingAfterTopologyChange = true;
-            AppendLog("检测到显示拓扑变化，恢复 native 输出 " + restartCount.ToString(CultureInfo.InvariantCulture) + "/5: " + source);
+            AppendLog("检测到显示拓扑/虚拟源变化，恢复 native 输出 " + restartCount.ToString(CultureInfo.InvariantCulture) + "/5: " + source);
             try
             {
                 /*

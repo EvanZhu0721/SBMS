@@ -1,5 +1,13 @@
 # SBMS Release Notes
 
+## 2026-06-29.066-beta
+
+- Added a dedicated native exit code for transient virtual-source enumeration misses so the GUI can recover when Windows briefly hides or renumbers a BETA virtual display during mode/topology commits.
+- Stabilized multi-screen BETA startup after virtual mode changes by waiting for repeated stable display-list samples, rebinding target rows, rediscovering current virtual `\\.\DISPLAYxx` ids, and restoring requested virtual modes before launching native output.
+- Reused the host-stable native restart path for BETA startup source misses, avoiding immediate virtual-display host shutdown when native reports a recoverable source-selector race.
+- Added Issue #5 comments near the native error mapping, BETA startup settle/rebind logic, and BETA recoverable-exit handling.
+- Bumped the GUI and setup build labels to `2026-06-29.066-beta`.
+
 ## 2026-06-29.065-beta
 
 - Kept the virtual display host alive during multi-screen BETA topology-change recovery so Windows layout edits no longer lose the software display devices while the topology is being applied.
