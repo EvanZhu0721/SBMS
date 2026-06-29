@@ -1,5 +1,13 @@
 # SBMS Release Notes
 
+## 2026-06-29.068-beta
+
+- Added rollbackable `跟随Windows BETA` behavior for BETA topology recovery, defaulting on for this release while keeping the old strict SBMS-restore path available by unchecking it.
+- During running BETA recovery, SBMS now absorbs valid Windows-side virtual display mode changes, including resolution, refresh rate, and orientation, instead of immediately reverting a user rotation/layout edit.
+- Persisted absorbed Windows virtual-mode changes back into the active mapping configuration so a Windows Settings rotation can survive the next launch.
+- Added Issue #7 comments near the persisted rollback switch and follow-Windows recovery logic.
+- Bumped the GUI and setup build labels to `2026-06-29.068-beta`.
+
 ## 2026-06-29.067-beta
 
 - Added Sunshine-compatible display id discovery to `SBMSNative.exe --list` by resolving each active `\\.\DISPLAYxx` through DisplayConfig and monitor interface data.

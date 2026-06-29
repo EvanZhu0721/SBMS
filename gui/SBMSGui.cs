@@ -68,12 +68,16 @@ namespace SBMSGui
         public bool WindowMove;
         public bool DeviceHost;
         public bool VSync;
+        // Issue #7: persisted rollback switch for the BETA mode that absorbs
+        // valid Windows Settings display edits during topology recovery.
+        public bool FollowWindowsTopologyBeta;
         public int SelectedBetaGroupIndex;
         public List<GuiConfigBridgePair> BetaPairs;
 
         public GuiConfigFile()
         {
             Version = 1;
+            FollowWindowsTopologyBeta = true;
             BetaPairs = new List<GuiConfigBridgePair>();
         }
     }
@@ -96,7 +100,7 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-29.067-beta";
+        private const string BuildLabel = "2026-06-29.068-beta";
         private const int WM_SETREDRAW = 0x000B;
         private const int MultiScreenBetaMaxTargets = 2;
         private const int DisplayTopologySettleTimeoutMs = 7000;
@@ -179,6 +183,7 @@ namespace SBMSGui
         private readonly CheckBox windowMoveCheck = new CheckBox();
         private readonly CheckBox deviceHostCheck = new CheckBox();
         private readonly CheckBox streamModeCheck = new CheckBox();
+        private readonly CheckBox followWindowsTopologyCheck = new CheckBox();
         private readonly TabControl betaGroupTabs = new DarkTabControl();
         private readonly DataGridView betaPairGrid = new DataGridView();
         private readonly GlowButton addBetaGroupButton = new GlowButton();
@@ -327,6 +332,7 @@ namespace SBMSGui
             public string Refresh;
             public string Name;
             public string SunshineId;
+            public int Orientation;
             public bool Primary;
             public bool Virtual;
 
@@ -339,6 +345,13 @@ namespace SBMSGui
             }
         }
 
+        private sealed class DisplayRuntimeMode
+        {
+            public Resolution Resolution;
+            public string Refresh;
+            public int Orientation;
+        }
+
         private sealed class BridgePairConfig
         {
             public bool StreamOnly;
@@ -349,6 +362,7 @@ namespace SBMSGui
             public int StrategyIndex;
             public double TargetSize;
             public string Refresh;
+            public DataGridViewRow Row;
         }
 
         private sealed class BridgePairSnapshot
@@ -926,6 +940,8 @@ namespace SBMSGui
             deviceHostCheck.Text = "管理虚拟显示器";
             deviceHostCheck.Checked = true;
             streamModeCheck.Text = "串流模式";
+            followWindowsTopologyCheck.Text = "跟随Windows BETA";
+            followWindowsTopologyCheck.Checked = true;
             ConfigureBetaPairGrid();
             addBetaGroupButton.Text = "+ 新增组 BETA";
             addBetaGroupButton.Width = 126;
@@ -969,6 +985,7 @@ namespace SBMSGui
             sourceDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             streamModeCheck.CheckedChanged += delegate { OnStreamModeChanged(); };
+            followWindowsTopologyCheck.CheckedChanged += delegate { UpdateToggleVisuals(); };
             addBetaGroupButton.Click += delegate { AddBetaGroupFromUi(); };
             removeBetaGroupButton.Click += delegate { RemoveSelectedBetaGroup(); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(false); };
             startButton.Click += delegate { ToggleBridge(); };
@@ -1200,6 +1217,9 @@ namespace SBMSGui
             closeButton.Click += delegate { ToggleInlineConfig(false); };
             closeButton.Tag = "关闭";
             applyConfigButton.Tag = "应用";
+            ConfigureToggle(followWindowsTopologyCheck, 168, false);
+            followWindowsTopologyCheck.Margin = new Padding(0, 6, 12, 0);
+            configButtons.Controls.Add(followWindowsTopologyCheck);
             configButtons.Controls.Add(removeBetaGroupButton);
             configButtons.Controls.Add(applyConfigButton);
             configButtons.Controls.Add(closeButton);
@@ -2159,6 +2179,7 @@ namespace SBMSGui
             windowMoveCheck.Checked = config.WindowMove;
             deviceHostCheck.Checked = config.DeviceHost;
             vsyncCheck.Checked = config.VSync;
+            followWindowsTopologyCheck.Checked = config.FollowWindowsTopologyBeta;
             selectedBetaGroupIndex = Math.Max(0, config.SelectedBetaGroupIndex);
 
             if (config.BetaPairs != null && config.BetaPairs.Count > 0)
@@ -2230,6 +2251,7 @@ namespace SBMSGui
             deviceHostCheck.CheckedChanged += schedule;
             streamModeCheck.CheckedChanged += schedule;
             vsyncCheck.CheckedChanged += schedule;
+            followWindowsTopologyCheck.CheckedChanged += schedule;
 
             betaPairGrid.RowsAdded += delegate { ScheduleConfigurationSave(); };
             betaPairGrid.RowsRemoved += delegate { ScheduleConfigurationSave(); };
@@ -2321,6 +2343,7 @@ namespace SBMSGui
             config.WindowMove = windowMoveCheck.Checked;
             config.DeviceHost = deviceHostCheck.Checked;
             config.VSync = vsyncCheck.Checked;
+            config.FollowWindowsTopologyBeta = followWindowsTopologyCheck.Checked;
             config.SelectedBetaGroupIndex = Math.Max(0, selectedBetaGroupIndex);
             config.BetaPairs.Clear();
 
@@ -2661,6 +2684,7 @@ namespace SBMSGui
             windowMoveCheck.Text = T("迁移窗口");
             deviceHostCheck.Text = T("管理虚拟显示器");
             streamModeCheck.Text = T("串流模式");
+            followWindowsTopologyCheck.Text = T("跟随Windows BETA");
             if (configInlineHost.Controls.Count > 0)
             {
                 ApplyLanguageToControls(configInlineHost);
@@ -3022,6 +3046,7 @@ namespace SBMSGui
                 case "迁移窗口": return "Move windows";
                 case "管理虚拟显示器": return "Virtual display";
                 case "串流模式": return "Streaming mode";
+                case "跟随Windows BETA": return "Follow Windows BETA";
                 case "多屏 BETA": return "Multi-screen BETA";
                 case "多组映射": return "Multi-mapping";
                 case "映射配置": return "Mapping";
@@ -3220,6 +3245,7 @@ namespace SBMSGui
             ApplyToggleVisual(windowMoveCheck);
             ApplyToggleVisual(deviceHostCheck);
             ApplyToggleVisual(streamModeCheck);
+            ApplyToggleVisual(followWindowsTopologyCheck);
             ApplyToggleVisual(vsyncCheck);
             foreach (TabPage page in betaGroupTabs.TabPages)
             {
@@ -3887,15 +3913,41 @@ namespace SBMSGui
             }
 
             string name = match.Groups[6].Value.Trim();
+            DisplayRuntimeMode runtimeMode;
+            bool hasRuntimeMode = TryGetCurrentDisplayMode(match.Groups[1].Value, out runtimeMode);
             display = new DisplayChoice
             {
                 DeviceName = match.Groups[1].Value,
                 Primary = match.Groups[2].Success,
-                Resolution = match.Groups[3].Value,
-                Refresh = match.Groups[4].Value,
+                Resolution = hasRuntimeMode ? FormatResolution(runtimeMode.Resolution) : match.Groups[3].Value,
+                Refresh = hasRuntimeMode && !string.IsNullOrWhiteSpace(runtimeMode.Refresh) ? runtimeMode.Refresh : match.Groups[4].Value,
                 SunshineId = match.Groups[5].Success ? match.Groups[5].Value : "",
                 Name = name,
+                Orientation = hasRuntimeMode ? runtimeMode.Orientation : DMDO_DEFAULT,
                 Virtual = IsVirtualDisplayName(name)
+            };
+            return true;
+        }
+
+        private static bool TryGetCurrentDisplayMode(string deviceName, out DisplayRuntimeMode mode)
+        {
+            mode = null;
+            var devMode = new DEVMODE();
+            devMode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            if (!EnumDisplaySettings(deviceName, ENUM_CURRENT_SETTINGS, ref devMode) ||
+                devMode.dmPelsWidth <= 0 ||
+                devMode.dmPelsHeight <= 0)
+            {
+                return false;
+            }
+
+            mode = new DisplayRuntimeMode
+            {
+                Resolution = new Resolution { Width = devMode.dmPelsWidth, Height = devMode.dmPelsHeight },
+                Refresh = devMode.dmDisplayFrequency > 0
+                    ? devMode.dmDisplayFrequency.ToString(CultureInfo.InvariantCulture)
+                    : "",
+                Orientation = NormalizeDisplayOrientation(devMode.dmDisplayOrientation)
             };
             return true;
         }
@@ -4463,7 +4515,8 @@ namespace SBMSGui
                     Orientation = GetOrientationMode(GetCellText(row, BetaColOrientation)),
                     StrategyIndex = GetBetaRowStrategyIndex(row),
                     TargetSize = targetSize,
-                    Refresh = GetRefreshOrDefault(GetCellText(row, BetaColRefresh), targetDisplay)
+                    Refresh = GetRefreshOrDefault(GetCellText(row, BetaColRefresh), targetDisplay),
+                    Row = row
                 });
             }
 
@@ -4595,6 +4648,34 @@ namespace SBMSGui
                 return DMDO_270;
             }
             return DMDO_DEFAULT;
+        }
+
+        private static int NormalizeDisplayOrientation(int orientation)
+        {
+            switch (orientation)
+            {
+                case DMDO_90:
+                case DMDO_180:
+                case DMDO_270:
+                    return orientation;
+                default:
+                    return DMDO_DEFAULT;
+            }
+        }
+
+        private static string GetOrientationText(int orientation)
+        {
+            switch (NormalizeDisplayOrientation(orientation))
+            {
+                case DMDO_90:
+                    return "竖屏";
+                case DMDO_180:
+                    return "横屏反向";
+                case DMDO_270:
+                    return "竖屏反向";
+                default:
+                    return "横屏";
+            }
         }
 
         private static void BuildResolutionParts(Resolution resolution, out int horizontal, out string aspect, out string orientation)
@@ -5741,12 +5822,31 @@ namespace SBMSGui
 
         private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, out string message)
         {
+            return RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, false, out message);
+        }
+
+        private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, bool absorbWindowsRuntimeMode, out string message)
+        {
             message = "";
             int count = Math.Min(virtualSources.Count, betaPairs.Count);
             for (int i = 0; i < count; ++i)
             {
                 DisplayChoice source = virtualSources[i];
                 BridgePairConfig pair = betaPairs[i];
+
+                /*
+                 * Issue #7: after SBMS has created the virtual displays, Windows Settings
+                 * should be allowed to own the live desktop topology. In rollback mode this
+                 * block is skipped and the older strict restore path below reapplies the
+                 * SBMS mapping table. In the BETA follow-Windows mode, recovery absorbs the
+                 * current active virtual source mode into the running pair so a user rotation
+                 * or valid mode change is not immediately undone while native output restarts.
+                 */
+                if (absorbWindowsRuntimeMode && TryAbsorbWindowsRuntimeVirtualMode(i + 1, source, pair))
+                {
+                    continue;
+                }
+
                 string desiredResolution = FormatResolution(pair.SourceResolution);
                 if (string.Equals(source.Resolution, desiredResolution, StringComparison.OrdinalIgnoreCase))
                 {
@@ -5777,6 +5877,71 @@ namespace SBMSGui
             }
 
             return true;
+        }
+
+        private bool TryAbsorbWindowsRuntimeVirtualMode(int index, DisplayChoice source, BridgePairConfig pair)
+        {
+            Resolution runtimeResolution;
+            if (source == null ||
+                pair == null ||
+                !source.Virtual ||
+                !TryParseResolution(source.Resolution, out runtimeResolution) ||
+                runtimeResolution.Width <= 0 ||
+                runtimeResolution.Height <= 0)
+            {
+                return false;
+            }
+
+            string runtimeRefresh = string.IsNullOrWhiteSpace(source.Refresh) ? pair.Refresh : source.Refresh;
+            int runtimeOrientation = NormalizeDisplayOrientation(source.Orientation);
+            bool changed = !SameResolution(runtimeResolution, pair.SourceResolution) ||
+                           !string.Equals(runtimeRefresh, pair.Refresh, StringComparison.OrdinalIgnoreCase) ||
+                           runtimeOrientation != pair.Orientation;
+
+            pair.SourceResolution = runtimeResolution;
+            pair.Refresh = runtimeRefresh;
+            pair.Orientation = runtimeOrientation;
+            ApplyRuntimeModeToBetaRow(pair.Row, runtimeResolution, runtimeRefresh, runtimeOrientation);
+
+            if (changed)
+            {
+                AppendLog("BETA[" + index.ToString(CultureInfo.InvariantCulture) + "] 跟随 Windows 虚拟模式: " +
+                          source.DeviceName + " " + FormatResolution(runtimeResolution) +
+                          (string.IsNullOrWhiteSpace(runtimeRefresh) ? "" : "@" + runtimeRefresh) +
+                          " orientation=" + runtimeOrientation.ToString(CultureInfo.InvariantCulture));
+                SaveConfigurationNow(false);
+            }
+            return true;
+        }
+
+        private void ApplyRuntimeModeToBetaRow(DataGridViewRow row, Resolution resolution, string refresh, int orientation)
+        {
+            if (row == null)
+            {
+                return;
+            }
+
+            int horizontal = Math.Max(resolution.Width, resolution.Height);
+            int shortSide = Math.Min(resolution.Width, resolution.Height);
+            int divisor = GreatestCommonDivisor(horizontal, shortSide);
+
+            updatingBetaPairGrid = true;
+            try
+            {
+                row.Cells[BetaColHorizontal].Value = horizontal.ToString(CultureInfo.InvariantCulture);
+                row.Cells[BetaColAspect].Value = (horizontal / divisor).ToString(CultureInfo.InvariantCulture) + ":" +
+                                                  (shortSide / divisor).ToString(CultureInfo.InvariantCulture);
+                row.Cells[BetaColOrientation].Value = GetOrientationText(orientation);
+                row.Cells[BetaColSource].Value = FormatResolution(resolution);
+                if (!string.IsNullOrWhiteSpace(refresh))
+                {
+                    row.Cells[BetaColRefresh].Value = refresh;
+                }
+            }
+            finally
+            {
+                updatingBetaPairGrid = false;
+            }
         }
 
         private void RestartBridgeAfterTopologyChange(string source)
@@ -5853,7 +6018,7 @@ namespace SBMSGui
                     return;
                 }
 
-                if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, out recoveryMessage))
+                if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, followWindowsTopologyCheck.Checked, out recoveryMessage))
                 {
                     AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
                     return;
