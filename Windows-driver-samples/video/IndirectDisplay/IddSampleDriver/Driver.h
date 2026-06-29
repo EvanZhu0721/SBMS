@@ -13,7 +13,6 @@
 #include <wrl.h>
 
 #include <memory>
-#include <vector>
 
 #include "Trace.h"
 
@@ -39,14 +38,16 @@ namespace Microsoft
         struct IndirectSampleMonitor
         {
             static constexpr size_t szEdidBlock = 128;
-            static constexpr size_t szModeList = 62;
 
-            const BYTE pEdidBlock[szEdidBlock];
             const struct SampleMonitorMode {
                 DWORD Width;
                 DWORD Height;
                 DWORD VSync;
-            } pModeList[szModeList];
+            };
+
+            const BYTE pEdidBlock[szEdidBlock];
+            const SampleMonitorMode* pModeList;
+            const DWORD ModeCount;
             const DWORD ulPreferredModeIdx;
         };
 

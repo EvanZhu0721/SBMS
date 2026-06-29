@@ -71,7 +71,7 @@ function Write-SBMSDevices {
             $_.FriendlyName -like '*DisplayBridge*' -or
             $_.FriendlyName -like '*SBMS*' -or
             $_.InstanceId -like '*IddSampleDriver*'
-        } | Select-Object Status, Class, FriendlyName, InstanceId |
+        } | Select-Object Status, Class, FriendlyName, InstanceId, Problem, ConfigManagerErrorCode |
             Format-List
     }
 
@@ -84,6 +84,31 @@ function Write-SBMSDevices {
         Format-List
 }
 
+function Write-IddSampleDeviceProperties {
+    $instanceId = "SWD\IDDSAMPLEDRIVER\IDDSAMPLEDRIVER"
+    if (-not (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)) {
+        return
+    }
+
+    $keys = @(
+        "DEVPKEY_Device_HasProblem",
+        "DEVPKEY_Device_ProblemCode",
+        "DEVPKEY_Device_ProblemStatus",
+        "DEVPKEY_Device_DriverInfPath",
+        "DEVPKEY_Device_DriverVersion",
+        "DEVPKEY_Device_ConfigurationId",
+        "DEVPKEY_Device_Service"
+    )
+
+    foreach ($key in $keys) {
+        try {
+            $property = Get-PnpDeviceProperty -InstanceId $instanceId -KeyName $key -ErrorAction Stop
+            Write-Host "$($property.KeyName)=$($property.Data)"
+        } catch {
+        }
+    }
+}
+
 function Test-VirtualDisplayVisible {
     $Native = Join-Path $PSScriptRoot "SBMSNative.exe"
     if (-not (Test-Path $Native)) {
@@ -91,6 +116,103 @@ function Test-VirtualDisplayVisible {
     }
     $text = (& $Native --list 2>&1 | Out-String)
     return ($text -match '(?i)IddSample|DisplayBridge|SBMS')
+}
+
+function Get-InfDriverVersion {
+    param([string] $InfPath)
+
+    if (-not (Test-Path -LiteralPath $InfPath)) {
+        return ""
+    }
+
+    $line = Select-String -LiteralPath $InfPath -Pattern '^\s*DriverVer\s*=' -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($line -and $line.Line -match '=\s*(.+)$') {
+        return $Matches[1].Trim()
+    }
+    return ""
+}
+
+function Write-IddSampleDriverStorePackages {
+    $root = Join-Path $env:WINDIR "System32\DriverStore\FileRepository"
+    $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter "iddsampledriver.inf_*" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending
+
+    foreach ($dir in $dirs) {
+        $inf = Join-Path $dir.FullName "IddSampleDriver.inf"
+        $dll = Join-Path $dir.FullName "IddSampleDriver.dll"
+        $cat = Get-ChildItem -LiteralPath $dir.FullName -Filter "*.cat" -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        $dllSig = if (Test-Path -LiteralPath $dll) { (Get-AuthenticodeSignature -LiteralPath $dll).Status } else { "Missing" }
+        $catSig = if ($cat) { (Get-AuthenticodeSignature -LiteralPath $cat.FullName).Status } else { "Missing" }
+        $dllHash = if (Test-Path -LiteralPath $dll) { (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash } else { "" }
+        $catHash = if ($cat) { (Get-FileHash -LiteralPath $cat.FullName -Algorithm SHA256).Hash } else { "" }
+        $dllLength = if (Test-Path -LiteralPath $dll) { (Get-Item -LiteralPath $dll).Length } else { 0 }
+
+        [pscustomobject]@{
+            Directory = $dir.Name
+            DriverVer = Get-InfDriverVersion -InfPath $inf
+            DllLength = $dllLength
+            DllSignature = $dllSig
+            CatSignature = $catSig
+            DllSHA256 = $dllHash
+            CatSHA256 = $catHash
+        }
+    }
+}
+
+function Write-RecentKernelPnpEvents {
+    $events = Get-WinEvent -FilterHashtable @{
+        ProviderName = "Microsoft-Windows-Kernel-PnP"
+        StartTime = (Get-Date).AddHours(-6)
+    } -ErrorAction SilentlyContinue | Where-Object {
+        $_.Message -match '(?i)IddSampleDriver'
+    } | Select-Object -First 12
+
+    foreach ($event in $events) {
+        Write-Host ("{0:yyyy-MM-dd HH:mm:ss} EventId={1} Level={2}" -f $event.TimeCreated, $event.Id, $event.LevelDisplayName)
+        $summaryLines = New-Object System.Collections.Generic.List[string]
+        $messageText = $event.Message.Replace("`r`n", "`n").Replace("`r", "`n")
+        foreach ($line in $messageText.Split([char]10)) {
+            if ($line -match "(?i)IddSample|oem\d+\.inf|WUDFRd|IndirectKmd|0x[0-9A-F]+|Driver Name|Driver Version|Problem|Problem Status|Service|Configured|Started") {
+                $summaryLines.Add($line.Trim())
+            }
+        }
+        $summary = $summaryLines -join "; "
+        if ($summary) {
+            Write-Host $summary
+        }
+        Write-Host ""
+    }
+}
+
+function Write-DriverDiagnosticLogState {
+    $logs = @(
+        "Microsoft-Windows-DriverFrameworks-UserMode/Operational",
+        "Microsoft-Windows-IndirectDisplays-ClassExtension-Events/Diagnostic"
+    )
+
+    foreach ($logName in $logs) {
+        $log = Get-WinEvent -ListLog $logName -ErrorAction SilentlyContinue
+        if ($log) {
+            [pscustomobject]@{
+                LogName = $log.LogName
+                Enabled = $log.IsEnabled
+                RecordCount = $log.RecordCount
+            }
+        } else {
+            [pscustomobject]@{
+                LogName = $logName
+                Enabled = "Missing"
+                RecordCount = ""
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "To enable deeper driver startup logs, run as Administrator:"
+    Write-Host "wevtutil sl `"Microsoft-Windows-DriverFrameworks-UserMode/Operational`" /e:true"
+    Write-Host "wevtutil sl `"Microsoft-Windows-IndirectDisplays-ClassExtension-Events/Diagnostic`" /e:true"
 }
 
 Write-Host "== SBMS diagnostic =="
@@ -136,8 +258,24 @@ if (-not $foundDriver) {
 }
 
 Write-Host ""
+Write-Host "== DriverStore IddSampleDriver payloads =="
+Write-IddSampleDriverStorePackages | Format-Table -AutoSize
+
+Write-Host ""
 Write-Host "== active IddSample/SBMS PnP devices =="
 Write-SBMSDevices
+
+Write-Host ""
+Write-Host "== IddSample PnP properties =="
+Write-IddSampleDeviceProperties
+
+Write-Host ""
+Write-Host "== recent Kernel-PnP IddSample events =="
+Write-RecentKernelPnpEvents
+
+Write-Host ""
+Write-Host "== driver diagnostic log state =="
+Write-DriverDiagnosticLogState | Format-Table -AutoSize
 
 if ($TryHost) {
     Write-Host ""
@@ -184,6 +322,10 @@ if ($TryHost) {
     Write-Host ""
     Write-Host "== PnP devices while host alive =="
     Write-SBMSDevices
+
+    Write-Host ""
+    Write-Host "== IddSample PnP properties while host alive =="
+    Write-IddSampleDeviceProperties
 
     if (-not $p.HasExited) {
         Write-Host "host still running; signaling stop"

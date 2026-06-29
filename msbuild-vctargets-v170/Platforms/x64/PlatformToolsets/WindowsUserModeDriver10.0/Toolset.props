@@ -1,0 +1,27 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildThisFileDirectory)ImportBefore\*.props" Condition="Exists('$(MSBuildThisFileDirectory)ImportBefore')" />
+  <PropertyGroup>
+    <WDKContentRoot Condition="'$(WDKContentRoot)' == ''">C:\Program Files (x86)\Windows Kits\10\</WDKContentRoot>
+    <WdkContentRoot Condition="'$(WdkContentRoot)' == ''">$(WDKContentRoot)</WdkContentRoot>
+    <WDKBuildFolder Condition="'$(WDKBuildFolder)' == ''">10.0.26100.0</WDKBuildFolder>
+    <VisualStudioVersion Condition="'$(VisualStudioVersion)' == ''">17.0</VisualStudioVersion>
+    <IsUserModeToolset>true</IsUserModeToolset>
+    <DriverTargetPlatform Condition="'$(DriverTargetPlatform)' == ''">Windows Driver</DriverTargetPlatform>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.MSVC.Toolset.x64.props" />
+  <Import Project="$(WDKContentRoot)build\$(WDKBuildFolder)\x64\WindowsUserModeDriver\WDK.x64.WindowsUserModeDriver.props" />
+  <Import Project="$(WDKContentRoot)build\$(WDKBuildFolder)\WindowsDriver.Default.props" />
+  <PropertyGroup>
+    <CRT_IncludePath Condition="'$(CRT_IncludePath)' == ''">$(WDKContentRoot)Include\$(TargetPlatformVersion)\ucrt</CRT_IncludePath>
+    <UM_IncludePath Condition="'$(UM_IncludePath)' == ''">$(WDKContentRoot)Include\$(TargetPlatformVersion)\um</UM_IncludePath>
+    <KIT_SHARED_IncludePath Condition="'$(KIT_SHARED_IncludePath)' == ''">$(WDKContentRoot)Include\$(TargetPlatformVersion)\shared</KIT_SHARED_IncludePath>
+    <KIT_SHARED_INC_PATH_WDK Condition="'$(KIT_SHARED_INC_PATH_WDK)' == ''">$(KIT_SHARED_IncludePath)</KIT_SHARED_INC_PATH_WDK>
+    <WDK_UM_INC_PATH Condition="'$(WDK_UM_INC_PATH)' == ''">$(UM_IncludePath)\</WDK_UM_INC_PATH>
+    <UMDF_INC_PATH Condition="'$(UMDF_INC_PATH)' == ''">$(WDKContentRoot)Include\wdf\umdf\</UMDF_INC_PATH>
+    <UMDF_LIB_PATH Condition="'$(UMDF_LIB_PATH)' == ''">$(WDKContentRoot)Lib\wdf\umdf\$(Platform)\</UMDF_LIB_PATH>
+    <IDDCX_INC_PATH Condition="'$(IDDCX_INC_PATH)' == ''">$(WDK_UM_INC_PATH)iddcx\$(IDDCX_VERSION_MAJOR).$(IDDCX_VERSION_MINOR)</IDDCX_INC_PATH>
+  </PropertyGroup>
+  <Import Project="$(WDKContentRoot)build\$(WDKBuildFolder)\x64\ImportAfter\WDK.x64.WindowsUserModeDriver.Platform.props" />
+  <Import Project="$(MSBuildThisFileDirectory)ImportAfter\*.props" Condition="Exists('$(MSBuildThisFileDirectory)ImportAfter')" />
+  <Import Project="$(_PlatformFolder)Platform.Common.props" />
+</Project>

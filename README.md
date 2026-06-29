@@ -1,5 +1,7 @@
 # SBMS
 
+Start with [CONTEXT.md](CONTEXT.md) for the project workflow constraints.
+
 SBMS means **SBMS bridges multiple screens**.
 
 SBMS is a Windows prototype that creates a controllable virtual desktop through the Indirect Display Driver model, then presents that desktop on a physical monitor with a native D3D11 output path. It is designed for mixed-size, mixed-DPI monitor setups where Windows' resolution-based desktop geometry feels physically wrong.
@@ -25,7 +27,7 @@ This is a local engineering prototype, not a signed production driver.
 - `SBMSDeviceHost.exe`
   - Creates and owns the software display device with `SwDeviceCreate`.
 - `Windows-driver-samples/video/IndirectDisplay`
-  - Patched Microsoft IndirectDisplay sample. The BETA build exposes up to three virtual monitors and advertises common SBMS virtual modes including 1080p, 2K, 4K, 5K, 8K, 2880p-style modes, 16:9, 16:10, 4:3, landscape, and portrait sizes.
+  - Patched Microsoft IndirectDisplay sample. Each software device instance exposes one virtual monitor, and the host creates only the number of instances requested by the current mapping configuration. The driver advertises common SBMS virtual modes including 1080p, 2K, 4K, 5K, 8K, 2880p-style modes, 16:9, 16:10, 4:3, landscape, and portrait sizes.
 
 ## Build
 
@@ -80,7 +82,7 @@ SBMS can enumerate and select any active physical target display by its Windows 
 
 ## Multi-Screen BETA
 
-The BETA build can create up to three virtual source displays. In `设置 > 配置`, use `+ 新增组 BETA` to enter multi-mapping. SBMS shows a full-window warning overlay saying `多组映射支持为BETA功能, 不保证稳定性`; only after explicit confirmation does the multi-mapping tab appear.
+The BETA build can create up to three virtual source displays by starting multiple one-monitor software device instances. In `设置 > 配置`, use `+ 新增组 BETA` to enter multi-mapping. SBMS shows a full-window warning overlay saying `多组映射支持为BETA功能, 不保证稳定性`; only after explicit confirmation does the multi-mapping tab appear.
 
 Each group is edited in its own tab. It has its own enable state, output mode, target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal output mode, choose a physical target display for that group, then let SBMS calculate the matching virtual display resolution.
 

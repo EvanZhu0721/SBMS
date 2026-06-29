@@ -275,6 +275,44 @@ static bool IsShellOrSystemWindow(HWND hwnd) {
            klass == L"Button";
 }
 
+static std::wstring ProcessFileNameForWindow(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == 0) {
+        return L"";
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return L"";
+    }
+    wchar_t path[MAX_PATH]{};
+    DWORD size = ARRAYSIZE(path);
+    std::wstring fileName;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        std::wstring fullPath(path, size);
+        size_t slash = fullPath.find_last_of(L"\\/");
+        fileName = slash == std::wstring::npos ? fullPath : fullPath.substr(slash + 1);
+    }
+    CloseHandle(process);
+    return fileName;
+}
+
+static bool EqualsIgnoreCase(const std::wstring& left, const wchar_t* right) {
+    return CompareStringOrdinal(left.c_str(), -1, right, -1, TRUE) == CSTR_EQUAL;
+}
+
+static bool IsScreenCaptureWindow(HWND hwnd) {
+    std::wstring processName = ProcessFileNameForWindow(hwnd);
+    if (EqualsIgnoreCase(processName, L"ScreenClippingHost.exe") ||
+        EqualsIgnoreCase(processName, L"SnippingTool.exe") ||
+        EqualsIgnoreCase(processName, L"ScreenSketch.exe") ||
+        EqualsIgnoreCase(processName, L"ShellExperienceHost.exe") ||
+        EqualsIgnoreCase(processName, L"StartMenuExperienceHost.exe")) {
+        return true;
+    }
+    return false;
+}
+
 static bool IsMovableTopLevelWindow(HWND hwnd) {
     if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) {
         return false;
@@ -290,6 +328,9 @@ static bool IsMovableTopLevelWindow(HWND hwnd) {
         return false;
     }
     if (IsShellOrSystemWindow(hwnd)) {
+        return false;
+    }
+    if (IsScreenCaptureWindow(hwnd)) {
         return false;
     }
     DWORD pid = 0;
@@ -544,11 +585,42 @@ static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wparam, LPARAM lparam
     return CallNextHookEx(g_input.mouseHook, code, wparam, lparam);
 }
 
+static bool IsVirtualKeyDown(int vk) {
+    return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+static bool IsWinShiftSHotkey(const KBDLLHOOKSTRUCT& event, WPARAM wparam) {
+    if (wparam != WM_KEYDOWN && wparam != WM_SYSKEYDOWN) {
+        return false;
+    }
+    if (event.vkCode != 'S') {
+        return false;
+    }
+    bool winDown = IsVirtualKeyDown(VK_LWIN) || IsVirtualKeyDown(VK_RWIN);
+    bool shiftDown = IsVirtualKeyDown(VK_SHIFT) || IsVirtualKeyDown(VK_LSHIFT) || IsVirtualKeyDown(VK_RSHIFT);
+    return winDown && shiftDown;
+}
+
+static bool IsScreenshotReleaseHotkey(const KBDLLHOOKSTRUCT& event, WPARAM wparam) {
+    if (wparam != WM_KEYDOWN && wparam != WM_SYSKEYDOWN) {
+        return false;
+    }
+    if (event.vkCode == VK_SNAPSHOT) {
+        return true;
+    }
+    return IsWinShiftSHotkey(event, wparam);
+}
+
 static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wparam, LPARAM lparam) {
     if (code < 0) {
         return CallNextHookEx(g_input.keyboardHook, code, wparam, lparam);
     }
     const auto* event = reinterpret_cast<KBDLLHOOKSTRUCT*>(lparam);
+    if (g_input.capture && IsScreenshotReleaseHotkey(*event, wparam)) {
+        std::cout << "input_capture_hotkey=screenshot\n";
+        StopInputCapture(false);
+        return CallNextHookEx(nullptr, code, wparam, lparam);
+    }
     if (g_input.capture && (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) && event->vkCode == VK_F8) {
         StopInputCapture();
         return 1;
@@ -1170,8 +1242,12 @@ float4 PSMain(VSOut input) : SV_TARGET {
             if (acquire == DXGI_ERROR_WAIT_TIMEOUT) {
                 continue;
             }
-            if (acquire == DXGI_ERROR_ACCESS_LOST) {
-                std::cerr << "topology_change=DXGI_ERROR_ACCESS_LOST\n";
+            if (acquire == DXGI_ERROR_ACCESS_LOST ||
+                acquire == DXGI_ERROR_DEVICE_REMOVED ||
+                acquire == DXGI_ERROR_DEVICE_RESET) {
+                std::cerr << "topology_change=AcquireNextFrame hr=0x"
+                          << std::hex << static_cast<unsigned int>(acquire)
+                          << std::dec << "\n";
                 CleanupInputMapper();
                 RestoreMigratedWindows();
                 return kTopologyChangedExitCode;

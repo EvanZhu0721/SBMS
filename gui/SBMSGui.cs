@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.Eventing.Reader;
 using System.Drawing;
 using System.Globalization;
 using System.IO;
@@ -9,9 +10,74 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
+using System.Xml;
+using System.Xml.Serialization;
 
 namespace SBMSGui
 {
+    public sealed class GuiConfigBridgePair
+    {
+        public bool Enabled;
+        public string Mode;
+        public string Target;
+        public string Horizontal;
+        public string Aspect;
+        public string Orientation;
+        public string Size;
+        public string Strategy;
+        public string Refresh;
+        public string Source;
+    }
+
+    public sealed class GuiConfigFile
+    {
+        public int Version;
+        public string SavedByBuild;
+        public bool English;
+        public bool LightweightMode;
+        public int ConfigTabIndex;
+        public int StrategyIndex;
+        public int FilterIndex;
+        public string SourceText;
+        public string TargetText;
+        public string SingleRefresh;
+        public string SelectedSourceDevice;
+        public string SelectedTargetDevice;
+        public string PrimaryResolution;
+        public string PrimarySize;
+        public string TargetResolution;
+        public string TargetSize;
+        public int PrimaryResolutionPresetIndex;
+        public int PrimaryAspectPresetIndex;
+        public int PrimaryOrientationPresetIndex;
+        public int PrimarySizePresetIndex;
+        public int TargetResolutionPresetIndex;
+        public int TargetAspectPresetIndex;
+        public int TargetOrientationPresetIndex;
+        public int TargetSizePresetIndex;
+        public string ManualBaseHorizontal;
+        public string ManualBaseAspect;
+        public int ManualBaseOrientationIndex;
+        public string ManualBaseSize;
+        public string ManualTargetHorizontal;
+        public string ManualTargetAspect;
+        public int ManualTargetOrientationIndex;
+        public string ManualTargetSize;
+        public bool StreamMode;
+        public bool InputMapping;
+        public bool WindowMove;
+        public bool DeviceHost;
+        public bool VSync;
+        public int SelectedBetaGroupIndex;
+        public List<GuiConfigBridgePair> BetaPairs;
+
+        public GuiConfigFile()
+        {
+            Version = 1;
+            BetaPairs = new List<GuiConfigBridgePair>();
+        }
+    }
+
     internal sealed class MainForm : Form
     {
         private const int WM_CLOSE = 0x0010;
@@ -29,8 +95,9 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-27.023-beta";
-        private const int MultiScreenBetaMaxTargets = 3;
+        private const string BuildLabel = "2026-06-29.064-beta";
+        private const int WM_SETREDRAW = 0x000B;
+        private const int MultiScreenBetaMaxTargets = 2;
         private const int BetaColEnabled = 0;
         private const int BetaColMode = 1;
         private const int BetaColTarget = 2;
@@ -39,7 +106,8 @@ namespace SBMSGui
         private const int BetaColOrientation = 5;
         private const int BetaColSize = 6;
         private const int BetaColStrategy = 7;
-        private const int BetaColSource = 8;
+        private const int BetaColRefresh = 8;
+        private const int BetaColSource = 9;
 
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
@@ -67,54 +135,61 @@ namespace SBMSGui
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern int ChangeDisplaySettingsEx(string deviceName, ref DEVMODE devMode, IntPtr hwnd, int flags, IntPtr lParam);
 
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int attributeValue, int attributeSize);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
+
         private readonly TextBox sourceText = new TextBox();
         private readonly TextBox targetText = new TextBox();
-        private readonly ComboBox sourceDisplayCombo = new ComboBox();
-        private readonly ComboBox targetDisplayCombo = new ComboBox();
+        private readonly TextBox singleRefreshText = new TextBox();
+        private readonly ComboBox sourceDisplayCombo = new DarkComboBox();
+        private readonly ComboBox targetDisplayCombo = new DarkComboBox();
         private readonly ListBox displayList = new ListBox();
-        private readonly ComboBox strategyCombo = new ComboBox();
-        private readonly ComboBox primaryResolutionPresetCombo = new ComboBox();
-        private readonly ComboBox primaryAspectPresetCombo = new ComboBox();
-        private readonly ComboBox primaryOrientationPresetCombo = new ComboBox();
-        private readonly ComboBox primarySizePresetCombo = new ComboBox();
-        private readonly ComboBox targetResolutionPresetCombo = new ComboBox();
-        private readonly ComboBox targetAspectPresetCombo = new ComboBox();
-        private readonly ComboBox targetOrientationPresetCombo = new ComboBox();
-        private readonly ComboBox targetSizePresetCombo = new ComboBox();
+        private readonly ComboBox strategyCombo = new DarkComboBox();
+        private readonly ComboBox primaryResolutionPresetCombo = new DarkComboBox();
+        private readonly ComboBox primaryAspectPresetCombo = new DarkComboBox();
+        private readonly ComboBox primaryOrientationPresetCombo = new DarkComboBox();
+        private readonly ComboBox primarySizePresetCombo = new DarkComboBox();
+        private readonly ComboBox targetResolutionPresetCombo = new DarkComboBox();
+        private readonly ComboBox targetAspectPresetCombo = new DarkComboBox();
+        private readonly ComboBox targetOrientationPresetCombo = new DarkComboBox();
+        private readonly ComboBox targetSizePresetCombo = new DarkComboBox();
         private readonly TextBox primaryResolutionText = new TextBox();
         private readonly TextBox primarySizeText = new TextBox();
         private readonly TextBox targetResolutionText = new TextBox();
         private readonly TextBox targetSizeText = new TextBox();
-        private readonly TabControl configInputTabs = new TabControl();
+        private readonly TabControl configInputTabs = new DarkTabControl();
         private readonly TabPage presetConfigPage = new TabPage();
         private readonly TabPage manualConfigPage = new TabPage();
         private readonly TextBox manualBaseHorizontalText = new TextBox();
         private readonly TextBox manualBaseAspectText = new TextBox();
-        private readonly ComboBox manualBaseOrientationCombo = new ComboBox();
+        private readonly ComboBox manualBaseOrientationCombo = new DarkComboBox();
         private readonly TextBox manualBaseSizeText = new TextBox();
         private readonly TextBox manualTargetHorizontalText = new TextBox();
         private readonly TextBox manualTargetAspectText = new TextBox();
-        private readonly ComboBox manualTargetOrientationCombo = new ComboBox();
+        private readonly ComboBox manualTargetOrientationCombo = new DarkComboBox();
         private readonly TextBox manualTargetSizeText = new TextBox();
-        private readonly ComboBox filterCombo = new ComboBox();
+        private readonly ComboBox filterCombo = new DarkComboBox();
         private readonly CheckBox inputCheck = new CheckBox();
         private readonly CheckBox windowMoveCheck = new CheckBox();
         private readonly CheckBox deviceHostCheck = new CheckBox();
         private readonly CheckBox streamModeCheck = new CheckBox();
-        private readonly CheckBox multiScreenBetaCheck = new CheckBox();
-        private readonly TabControl mappingTabs = new TabControl();
-        private readonly TabPage singleMappingPage = new TabPage();
-        private readonly TabPage multiMappingPage = new TabPage();
-        private readonly TabControl betaGroupTabs = new TabControl();
+        private readonly TabControl betaGroupTabs = new DarkTabControl();
         private readonly DataGridView betaPairGrid = new DataGridView();
-        private readonly Button addBetaGroupButton = new Button();
-        private readonly Button removeBetaGroupButton = new Button();
+        private readonly GlowButton addBetaGroupButton = new GlowButton();
+        private readonly GlowButton removeBetaGroupButton = new GlowButton();
         private readonly CheckBox vsyncCheck = new CheckBox();
-        private readonly Button calculateButton = new Button();
-        private readonly Button applyConfigButton = new Button();
-        private readonly Button startButton = new Button();
-        private readonly Button stopButton = new Button();
-        private readonly Button listButton = new Button();
+        private readonly GlowButton calculateButton = new GlowButton();
+        private readonly GlowButton applyConfigButton = new GlowButton();
+        private readonly GlowButton startButton = new GlowButton();
+        private readonly GlowButton stopButton = new GlowButton();
+        private readonly GlowButton listButton = new GlowButton();
+        private readonly GlowButton configButton = new GlowButton();
+        private readonly GlowButton startupButton = new GlowButton();
+        private readonly GlowButton languageButton = new GlowButton();
+        private readonly GlowButton lightweightButton = new GlowButton();
         private readonly TextBox logText = new TextBox();
         private readonly MenuStrip menu = new MenuStrip();
         private readonly ToolStripMenuItem settingsMenuItem = new ToolStripMenuItem();
@@ -126,45 +201,82 @@ namespace SBMSGui
         private readonly ToolStripMenuItem englishMenuItem = new ToolStripMenuItem();
         private readonly NotifyIcon trayIcon = new NotifyIcon();
         private readonly ContextMenuStrip trayMenu = new ContextMenuStrip();
+        private readonly ContextMenuStrip languagePopup = new ContextMenuStrip();
         private readonly ToolStripMenuItem trayOpenMenuItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem trayStopMenuItem = new ToolStripMenuItem();
         private readonly ToolStripMenuItem trayExitMenuItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem popupEnglishMenuItem = new ToolStripMenuItem();
+        private readonly ToolStripMenuItem popupChineseMenuItem = new ToolStripMenuItem();
+        private readonly System.Windows.Forms.Timer languagePopupCloseTimer = new System.Windows.Forms.Timer();
         private readonly Label statusLabel = new Label();
         private readonly Label routeLabel = new Label();
-        private readonly Panel configLockPanel = new Panel();
+        private readonly Panel configInlineHost = new BufferedPanel();
+        private readonly Panel configLockPanel = new BufferedPanel();
         private readonly Label configLockLabel = new Label();
+        private readonly GlowButton configLockBackButton = new GlowButton();
+        private RowStyle configInlineRowStyle;
 
         private Process process;
         private readonly List<Process> betaProcesses = new List<Process>();
         private Process deviceHostProcess;
         private readonly StringBuilder deviceHostLog = new StringBuilder();
         private string lastNativeArgs = "";
+        private string lastManagedVirtualResolution = "";
+        private string lastManagedVirtualRefresh = "";
+        private int lastManagedVirtualOrientation = DMDO_DEFAULT;
         private bool stoppingRequested;
+        private bool restartingAfterTopologyChange;
+        private bool bridgeStarting;
         private int nativeRestartCount;
         private readonly string root;
         private readonly string nativeExe;
         private readonly string deviceHostExe;
+        private readonly string userDataDir;
+        private readonly string configPath;
+        private readonly string logDirectory;
+        private readonly string sessionLogPath;
+        private readonly string latestLogPath;
+        private readonly string errorLogPath;
+        private readonly System.Windows.Forms.Timer configurationSaveTimer = new System.Windows.Forms.Timer();
         private readonly List<DisplayChoice> displays = new List<DisplayChoice>();
         private Form configForm;
         private bool english;
         private bool exiting;
+        private bool loadingConfiguration;
+        private bool configurationPersistenceReady;
+        private bool configurationFileLoaded;
         private bool updatingPresetCombos;
         private bool updatingConfigurationInputs;
         private bool updatingBetaPairGrid;
-        private bool multiMappingConfirmed;
+        private bool rebuildingGroupTabs;
+        private bool groupTabsEventsBound;
         private bool suppressStreamModePrompt;
+        private bool suppressBetaGroupTabChange;
+        private bool forceConfigLockForProbe;
+        private int selectedBetaGroupIndex;
+        private string pendingConfigSourceDevice = "";
+        private string pendingConfigTargetDevice = "";
+        private string pendingConfigLoadMessage = "";
 
-        private static readonly Color ThemeBack = Color.FromArgb(6, 12, 8);
-        private static readonly Color ThemePanel = Color.FromArgb(10, 22, 14);
-        private static readonly Color ThemePanel2 = Color.FromArgb(14, 32, 20);
-        private static readonly Color ThemeGreen = Color.FromArgb(190, 255, 210);
-        private static readonly Color ThemeMuted = Color.FromArgb(230, 255, 235);
-        private static readonly Color ThemeRed = Color.FromArgb(255, 70, 70);
+        private static readonly Color ThemeBack = Color.FromArgb(0, 10, 4);
+        private static readonly Color ThemeText = Color.White;
+        private static readonly Color ThemeActive = Color.FromArgb(72, 255, 0);
+        private static readonly Color ThemeRed = Color.Red;
+        private static readonly Color ThemePanel = ThemeBack;
+        private static readonly Color ThemePanel2 = ThemeBack;
+        private static readonly Color ThemeGreen = ThemeActive;
+        private static readonly Color ThemeMuted = ThemeText;
 
         private struct Resolution
         {
             public int Width;
             public int Height;
+        }
+
+        private sealed class DisplayModeCandidate
+        {
+            public Resolution Resolution;
+            public int Refresh;
         }
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -232,6 +344,7 @@ namespace SBMSGui
             public int Orientation;
             public int StrategyIndex;
             public double TargetSize;
+            public string Refresh;
         }
 
         private sealed class BridgePairSnapshot
@@ -244,7 +357,506 @@ namespace SBMSGui
             public string Orientation;
             public string Size;
             public string Strategy;
+            public string Refresh;
             public string Source;
+        }
+
+        private sealed class DarkComboBox : ComboBox
+        {
+            private const int WM_PAINT = 0x000F;
+            private const int WM_PRINT = 0x0317;
+            private const int WM_PRINTCLIENT = 0x0318;
+
+            public DarkComboBox()
+            {
+                FlatStyle = FlatStyle.Flat;
+                DrawMode = DrawMode.OwnerDrawFixed;
+            }
+
+            protected override void OnDropDown(EventArgs e)
+            {
+                DropDownWidth = Math.Max(Width, MeasureDropDownWidth());
+                base.OnDropDown(e);
+            }
+
+            protected override void OnSelectedIndexChanged(EventArgs e)
+            {
+                base.OnSelectedIndexChanged(e);
+                Invalidate();
+            }
+
+            protected override void OnTextChanged(EventArgs e)
+            {
+                base.OnTextChanged(e);
+                Invalidate();
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                base.WndProc(ref m);
+                if (m.Msg == WM_PAINT)
+                {
+                    PaintDarkChrome();
+                }
+                else if ((m.Msg == WM_PRINT || m.Msg == WM_PRINTCLIENT) && m.WParam != IntPtr.Zero)
+                {
+                    using (Graphics graphics = Graphics.FromHdc(m.WParam))
+                    {
+                        PaintDarkChrome(graphics);
+                    }
+                }
+            }
+
+            private void PaintDarkChrome()
+            {
+                if (!IsHandleCreated)
+                {
+                    return;
+                }
+                using (Graphics graphics = Graphics.FromHwnd(Handle))
+                {
+                    PaintDarkChrome(graphics);
+                }
+            }
+
+            private void PaintDarkChrome(Graphics graphics)
+            {
+                Rectangle bounds = ClientRectangle;
+                if (bounds.Width <= 0 || bounds.Height <= 0)
+                {
+                    return;
+                }
+                using (Brush background = new SolidBrush(ThemePanel))
+                {
+                    graphics.FillRectangle(background, bounds);
+                }
+                int buttonWidth = Math.Max(24, Math.Min(bounds.Height, bounds.Width));
+                Rectangle button = new Rectangle(Math.Max(bounds.Left, bounds.Right - buttonWidth), bounds.Top, buttonWidth, bounds.Height);
+                using (Brush background = new SolidBrush(ThemePanel))
+                {
+                    graphics.FillRectangle(background, button);
+                }
+                using (Pen border = new Pen(ThemeText))
+                {
+                    graphics.DrawRectangle(border, bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1);
+                    graphics.DrawRectangle(border, button.X, button.Y, button.Width - 1, button.Height - 1);
+                }
+
+                string text = Text;
+                Rectangle textBounds = new Rectangle(bounds.Left + 7, bounds.Top + 1, Math.Max(0, bounds.Width - buttonWidth - 12), bounds.Height - 2);
+                TextRenderer.DrawText(
+                    graphics,
+                    text,
+                    Font,
+                    textBounds,
+                    ThemeText,
+                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+
+                Point center = new Point(button.Left + button.Width / 2, button.Top + button.Height / 2 + 1);
+                Point[] arrow = new[]
+                {
+                    new Point(center.X - 4, center.Y - 2),
+                    new Point(center.X + 4, center.Y - 2),
+                    new Point(center.X, center.Y + 3)
+                };
+                using (Brush arrowBrush = new SolidBrush(ThemeText))
+                {
+                    graphics.FillPolygon(arrowBrush, arrow);
+                }
+            }
+
+            private int MeasureDropDownWidth()
+            {
+                int width = Width;
+                foreach (object item in Items)
+                {
+                    string text = Convert.ToString(item, CultureInfo.InvariantCulture);
+                    if (!string.IsNullOrEmpty(text))
+                    {
+                        width = Math.Max(width, TextRenderer.MeasureText(text, Font, Size.Empty, TextFormatFlags.NoPadding).Width + 42);
+                    }
+                }
+                return width;
+            }
+        }
+
+        private sealed class BufferedPanel : Panel
+        {
+            public BufferedPanel()
+            {
+                DoubleBuffered = true;
+                SetStyle(ControlStyles.AllPaintingInWmPaint |
+                         ControlStyles.OptimizedDoubleBuffer |
+                         ControlStyles.ResizeRedraw, true);
+            }
+        }
+
+        private sealed class DarkTabControl : TabControl
+        {
+            public DarkTabControl()
+            {
+                SetStyle(ControlStyles.UserPaint |
+                         ControlStyles.AllPaintingInWmPaint |
+                         ControlStyles.OptimizedDoubleBuffer |
+                         ControlStyles.ResizeRedraw, true);
+            }
+
+            protected override void OnSelectedIndexChanged(EventArgs e)
+            {
+                base.OnSelectedIndexChanged(e);
+                Invalidate();
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.Clear(ThemeBack);
+                for (int i = 0; i < TabPages.Count; ++i)
+                {
+                    Rectangle tabBounds = GetTabRect(i);
+                    bool selected = i == SelectedIndex;
+                    using (Brush background = new SolidBrush(ThemeBack))
+                    {
+                        e.Graphics.FillRectangle(background, tabBounds);
+                    }
+                    using (Pen border = new Pen(selected ? ThemeActive : ThemeText))
+                    {
+                        e.Graphics.DrawRectangle(border, tabBounds.X, tabBounds.Y, tabBounds.Width - 1, tabBounds.Height - 1);
+                    }
+                    if (selected)
+                    {
+                        using (Pen top = new Pen(ThemeActive, 2F))
+                        {
+                            e.Graphics.DrawLine(top, tabBounds.Left + 1, tabBounds.Top + 1, tabBounds.Right - 2, tabBounds.Top + 1);
+                        }
+                    }
+                    TextRenderer.DrawText(
+                        e.Graphics,
+                        TabPages[i].Text,
+                        Font,
+                        tabBounds,
+                        ThemeText,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+                }
+
+                Rectangle display = DisplayRectangle;
+                if (display.Width > 0 && display.Height > 0)
+                {
+                    using (Brush background = new SolidBrush(ThemeBack))
+                    {
+                        e.Graphics.FillRectangle(background, display);
+                    }
+                    using (Pen border = new Pen(ThemeText))
+                    {
+                        e.Graphics.DrawRectangle(border, display.X, display.Y, display.Width - 1, display.Height - 1);
+                    }
+                }
+            }
+        }
+
+        private sealed class GlowButton : Button
+        {
+            private bool hover;
+            private bool pressed;
+
+            public bool DangerFill { get; set; }
+            public bool ActiveFill { get; set; }
+            public bool Minimal { get; set; }
+            public bool ShowGlyph { get; set; }
+
+            public GlowButton()
+            {
+                SetStyle(ControlStyles.UserPaint |
+                         ControlStyles.AllPaintingInWmPaint |
+                         ControlStyles.OptimizedDoubleBuffer |
+                         ControlStyles.ResizeRedraw |
+                         ControlStyles.SupportsTransparentBackColor, true);
+                FlatStyle = FlatStyle.Flat;
+                UseVisualStyleBackColor = false;
+                BackColor = Color.Transparent;
+                ForeColor = ThemeText;
+                Height = 32;
+                Minimal = true;
+                ShowGlyph = true;
+                Cursor = Cursors.Hand;
+                TextAlign = ContentAlignment.MiddleCenter;
+            }
+
+            protected override void OnMouseEnter(EventArgs e)
+            {
+                hover = true;
+                Invalidate();
+                base.OnMouseEnter(e);
+            }
+
+            protected override void OnMouseLeave(EventArgs e)
+            {
+                hover = false;
+                pressed = false;
+                Invalidate();
+                base.OnMouseLeave(e);
+            }
+
+            protected override void OnMouseDown(MouseEventArgs mevent)
+            {
+                pressed = true;
+                Invalidate();
+                base.OnMouseDown(mevent);
+            }
+
+            protected override void OnMouseUp(MouseEventArgs mevent)
+            {
+                pressed = false;
+                Invalidate();
+                base.OnMouseUp(mevent);
+            }
+
+            protected override void OnTextChanged(EventArgs e)
+            {
+                base.OnTextChanged(e);
+                UpdateMinimumWidth();
+                Invalidate();
+            }
+
+            protected override void OnFontChanged(EventArgs e)
+            {
+                base.OnFontChanged(e);
+                UpdateMinimumWidth();
+                Invalidate();
+            }
+
+            protected override void OnSizeChanged(EventArgs e)
+            {
+                base.OnSizeChanged(e);
+                UpdateMinimumWidth();
+                Invalidate();
+            }
+
+            protected override void SetBoundsCore(int x, int y, int width, int height, BoundsSpecified specified)
+            {
+                int required = GetRequiredWidth(height);
+                if (required > 0 && width < required)
+                {
+                    width = required;
+                }
+                base.SetBoundsCore(x, y, width, height, specified);
+            }
+
+            public override Size GetPreferredSize(Size proposedSize)
+            {
+                Size preferred = base.GetPreferredSize(proposedSize);
+                int required = GetRequiredWidth(Height);
+                if (required > 0)
+                {
+                    preferred.Width = Math.Max(preferred.Width, required);
+                }
+                return preferred;
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                bool hot = hover || pressed || ActiveFill;
+                bool filled = hot;
+                Color fill = DangerFill ? ThemeRed : ThemeBack;
+                Color text = DangerFill ? (hot ? ThemeText : ThemeRed) : ThemeText;
+                Color corner = DangerFill ? (hot ? ThemeText : ThemeRed) : (hot ? ThemeActive : ThemeText);
+                Color border = DangerFill ? ThemeRed : (hot ? ThemeActive : ThemeText);
+                Rectangle rect = new Rectangle(1, 1, Width - 3, Height - 3);
+
+                using (Brush background = new SolidBrush(GetPaintBackColor()))
+                {
+                    e.Graphics.FillRectangle(background, ClientRectangle);
+                }
+                if (filled)
+                {
+                    using (Brush brush = new SolidBrush(fill))
+                    {
+                        e.Graphics.FillRectangle(brush, rect);
+                    }
+                }
+                using (Pen pen = new Pen(border))
+                {
+                    e.Graphics.DrawRectangle(pen, rect.X, rect.Y, rect.Width - 1, rect.Height - 1);
+                }
+                Rectangle textBounds = rect;
+                if (ShowGlyph && Width >= 48)
+                {
+                    DrawCornerGlyph(e.Graphics, rect, corner, hot);
+                    textBounds = GetTextBounds(rect);
+                }
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    Text,
+                    Font,
+                    textBounds,
+                    text,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+            }
+
+            private Color GetPaintBackColor()
+            {
+                if (Parent == null || Parent.BackColor.A == 0)
+                {
+                    return ThemeBack;
+                }
+                return Parent.BackColor;
+            }
+
+            private static int GetCornerSize(Rectangle bounds)
+            {
+                return Math.Min(bounds.Height - 3, Math.Max(24, bounds.Height - 8));
+            }
+
+            private Rectangle GetTextBounds(Rectangle bounds)
+            {
+                int inset = ShowGlyph && Width >= 48 ? GetCornerSize(bounds) + 18 : 0;
+                return new Rectangle(bounds.Left + inset, bounds.Top, Math.Max(0, bounds.Width - inset - 18), bounds.Height);
+            }
+
+            private int GetRequiredWidth(int height)
+            {
+                if (!ShowGlyph || string.IsNullOrEmpty(Text))
+                {
+                    return 0;
+                }
+                int corner = Math.Min(Math.Max(height - 6, 24), 34);
+                int textWidth = TextRenderer.MeasureText(Text, Font, Size.Empty, TextFormatFlags.NoPadding).Width;
+                return corner + 80 + textWidth;
+            }
+
+            private void UpdateMinimumWidth()
+            {
+                int required = GetRequiredWidth(Height);
+                if (required <= 0)
+                {
+                    return;
+                }
+                if (MinimumSize.Width != required)
+                {
+                    MinimumSize = new Size(required, MinimumSize.Height);
+                }
+                if (Width < required)
+                {
+                    Width = required;
+                }
+                if (Parent != null)
+                {
+                    Parent.PerformLayout();
+                }
+            }
+
+            private static void DrawCornerGlyph(Graphics graphics, Rectangle bounds, Color color, bool filled)
+            {
+                int corner = GetCornerSize(bounds);
+                Point topLeft = new Point(bounds.Left, bounds.Top);
+                Point topJoin = new Point(bounds.Left + corner, bounds.Top);
+                Point leftJoin = new Point(bounds.Left, bounds.Top + corner);
+
+                if (filled)
+                {
+                    using (Brush brush = new SolidBrush(color))
+                    {
+                        graphics.FillPolygon(brush, new[] { topLeft, topJoin, leftJoin });
+                    }
+                    return;
+                }
+
+                using (Pen pen = new Pen(color, 2.4F))
+                {
+                    pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Miter;
+                    graphics.DrawLine(pen, topLeft, topJoin);
+                    graphics.DrawLine(pen, topLeft, leftJoin);
+                    graphics.DrawLine(pen, leftJoin, topJoin);
+                }
+            }
+        }
+
+        private sealed class MinimalMenuRenderer : ToolStripRenderer
+        {
+            protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+            {
+                using (Brush brush = new SolidBrush(ThemeBack))
+                {
+                    e.Graphics.FillRectangle(brush, e.AffectedBounds);
+                }
+            }
+
+            protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+            {
+                Rectangle rect = new Rectangle(0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+                using (Pen pen = new Pen(ThemeText))
+                {
+                    e.Graphics.DrawRectangle(pen, rect);
+                }
+            }
+
+            protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+            {
+                ToolStripMenuItem item = e.Item as ToolStripMenuItem;
+                bool active = e.Item.Selected || (item != null && item.Checked);
+                Rectangle rect = new Rectangle(1, 1, e.Item.Width - 2, e.Item.Height - 2);
+                using (Brush brush = new SolidBrush(active ? ThemeActive : ThemeBack))
+                {
+                    e.Graphics.FillRectangle(brush, rect);
+                }
+                using (Pen pen = new Pen(ThemeText))
+                {
+                    e.Graphics.DrawRectangle(pen, rect);
+                }
+            }
+
+            protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+            {
+                ToolStripMenuItem item = e.Item as ToolStripMenuItem;
+                bool active = e.Item.Selected || (item != null && item.Checked);
+                Rectangle rect = new Rectangle(0, 0, e.Item.Width, e.Item.Height);
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    e.Text,
+                    e.TextFont,
+                    rect,
+                    active ? ThemeBack : ThemeText,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+            }
+
+            protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
+            {
+                ToolStripMenuItem item = e.Item as ToolStripMenuItem;
+                bool active = e.Item.Selected || (item != null && item.Checked);
+                Color color = active ? ThemeBack : ThemeText;
+                Rectangle bounds = e.ArrowRectangle;
+                Point center = new Point(bounds.Left + bounds.Width / 2, bounds.Top + bounds.Height / 2);
+                Point[] arrow = new[]
+                {
+                    new Point(center.X - 2, center.Y - 5),
+                    new Point(center.X - 2, center.Y + 5),
+                    new Point(center.X + 4, center.Y)
+                };
+                using (Brush brush = new SolidBrush(color))
+                {
+                    e.Graphics.FillPolygon(brush, arrow);
+                }
+            }
+
+            protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
+            {
+                Rectangle rect = new Rectangle(4, 4, Math.Max(16, e.Item.Height - 8), Math.Max(16, e.Item.Height - 8));
+                using (Pen pen = new Pen(ThemeText))
+                {
+                    e.Graphics.DrawRectangle(pen, rect);
+                    e.Graphics.DrawLine(pen, rect.Left + 4, rect.Top + rect.Height / 2, rect.Left + rect.Width / 2 - 1, rect.Bottom - 5);
+                    e.Graphics.DrawLine(pen, rect.Left + rect.Width / 2 - 1, rect.Bottom - 5, rect.Right - 4, rect.Top + 5);
+                }
+            }
+
+            protected override void OnRenderSeparator(ToolStripSeparatorRenderEventArgs e)
+            {
+                using (Pen pen = new Pen(ThemeText))
+                {
+                    int y = e.Item.Height / 2;
+                    e.Graphics.DrawLine(pen, 4, y, e.Item.Width - 4, y);
+                }
+            }
         }
 
         public MainForm()
@@ -252,6 +864,13 @@ namespace SBMSGui
             root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory));
             nativeExe = Path.Combine(root, "SBMSNative.exe");
             deviceHostExe = Path.Combine(root, "SBMSDeviceHost.exe");
+            userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
+            configPath = Path.Combine(userDataDir, "config.xml");
+            logDirectory = Path.Combine(userDataDir, "logs");
+            sessionLogPath = Path.Combine(logDirectory, "SBMS-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + ".log");
+            latestLogPath = Path.Combine(logDirectory, "latest.log");
+            errorLogPath = Path.Combine(logDirectory, "error.log");
+            InitializeDiagnostics();
 
             Text = AppName + " " + BuildLabel;
             StartPosition = FormStartPosition.CenterScreen;
@@ -260,10 +879,11 @@ namespace SBMSGui
             Font = new Font("Segoe UI", 9F);
             BackColor = ThemeBack;
 
-            sourceText.Text = "4550x2560";
+            sourceText.Text = "4552x2560";
             sourceText.ReadOnly = true;
             targetText.Text = "2560x1440";
             targetText.ReadOnly = true;
+            singleRefreshText.Text = "60";
             sourceDisplayCombo.DropDownStyle = ComboBoxStyle.DropDownList;
             targetDisplayCombo.DropDownStyle = ComboBoxStyle.DropDownList;
             primaryResolutionText.Text = "5120x2880";
@@ -302,14 +922,15 @@ namespace SBMSGui
             deviceHostCheck.Text = "管理虚拟显示器";
             deviceHostCheck.Checked = true;
             streamModeCheck.Text = "串流模式";
-            streamModeCheck.AutoSize = true;
-            multiScreenBetaCheck.Visible = false;
             ConfigureBetaPairGrid();
             addBetaGroupButton.Text = "+ 新增组 BETA";
             addBetaGroupButton.Width = 126;
+            addBetaGroupButton.AccessibleDescription = "risk";
             removeBetaGroupButton.Text = "删除组";
             removeBetaGroupButton.Width = 90;
             vsyncCheck.Text = "VSync";
+            vsyncCheck.Checked = true;
+            EnforceDefaultRuntimeOptions();
             calculateButton.Text = "计算";
             calculateButton.Width = 90;
             applyConfigButton.Text = "应用";
@@ -317,7 +938,8 @@ namespace SBMSGui
 
             BuildMainUi();
             BuildConfigForm();
-            ApplyTheme(configForm);
+            ApplyTheme(configInlineHost);
+            LoadConfiguration();
             calculateButton.Click += delegate { ApplyStrategy(true); };
             applyConfigButton.Click += delegate { ApplyConfigurationChanges(); };
             strategyCombo.SelectedIndexChanged += delegate { ApplyStrategy(false); };
@@ -339,45 +961,64 @@ namespace SBMSGui
             manualTargetOrientationCombo.SelectedIndexChanged += delegate { ApplyManualSelections(true); };
             manualTargetSizeText.TextChanged += delegate { ApplyManualSelections(true); };
             targetResolutionText.TextChanged += delegate { SyncTargetSelector(); };
+            singleRefreshText.TextChanged += delegate { SyncSingleRefreshToBetaRow(); };
             sourceDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             targetDisplayCombo.SelectedIndexChanged += delegate { SyncSelectedDisplaysToSelectors(); };
             streamModeCheck.CheckedChanged += delegate { OnStreamModeChanged(); };
             addBetaGroupButton.Click += delegate { AddBetaGroupFromUi(); };
-            removeBetaGroupButton.Click += delegate { RemoveSelectedBetaGroup(); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(); };
-            startButton.Click += delegate { StartBridge(); };
-            stopButton.Click += delegate { StopBridge(); };
+            removeBetaGroupButton.Click += delegate { RemoveSelectedBetaGroup(); RecalculateBetaPairGrid(false); UpdateRuntimeOptionState(false); };
+            startButton.Click += delegate { ToggleBridge(); };
+            configButton.Click += delegate { ShowConfigForm(); };
+            startupButton.Click += delegate { ToggleStartupFromButton(); };
+            languageButton.Click += delegate { ShowLanguagePopup(); };
+            languageButton.MouseEnter += delegate { ShowLanguagePopup(); };
+            lightweightButton.Click += delegate { ToggleLightweightMode(); };
             listButton.Click += delegate { RunList(); };
             FormClosing += OnFormClosing;
             FormClosed += delegate { trayIcon.Dispose(); };
+            ConfigureConfigurationPersistence();
             startupMenuItem.Checked = IsStartupEnabled();
-            lightweightMenuItem.Checked = true;
+            if (!configurationFileLoaded)
+            {
+                lightweightMenuItem.Checked = true;
+            }
             ApplyStrategy(false);
             RefreshDisplays();
             ApplyLanguage();
             UpdateRuntimeOptionState();
             ApplyTheme(this);
+            UpdateMainActionButtons();
+            configurationPersistenceReady = true;
+            SaveConfigurationNow(false);
             AppendLog("GUI版本 = " + BuildLabel);
+            AppendLog("配置文件 = " + configPath);
+            AppendLog("日志文件 = " + sessionLogPath);
+            if (!string.IsNullOrWhiteSpace(pendingConfigLoadMessage))
+            {
+                AppendLog(pendingConfigLoadMessage);
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            EnableDarkTitleBar(this);
         }
 
         private void BuildMainUi()
         {
-            menu.Dock = DockStyle.Top;
-            settingsMenuItem.DropDownItems.Add(configMenuItem);
             settingsMenuItem.DropDownItems.Add(startupMenuItem);
             languageMenuItem.DropDownItems.Add(chineseMenuItem);
             languageMenuItem.DropDownItems.Add(englishMenuItem);
             settingsMenuItem.DropDownItems.Add(languageMenuItem);
-            menu.Items.Add(settingsMenuItem);
-            menu.Items.Add(lightweightMenuItem);
-            Controls.Add(menu);
-            MainMenuStrip = menu;
 
             configMenuItem.Click += delegate { ShowConfigForm(); };
             startupMenuItem.CheckOnClick = true;
             startupMenuItem.Click += delegate { ToggleStartup(); };
             lightweightMenuItem.CheckOnClick = true;
-            chineseMenuItem.Click += delegate { english = false; ApplyLanguage(); };
-            englishMenuItem.Click += delegate { english = true; ApplyLanguage(); };
+            lightweightMenuItem.Click += delegate { OnLightweightMenuChanged(); };
+            chineseMenuItem.Click += delegate { english = false; ApplyLanguage(); ScheduleConfigurationSave(); };
+            englishMenuItem.Click += delegate { english = true; ApplyLanguage(); ScheduleConfigurationSave(); };
 
             trayMenu.Items.Add(trayOpenMenuItem);
             trayMenu.Items.Add(trayStopMenuItem);
@@ -391,18 +1032,24 @@ namespace SBMSGui
             trayIcon.Visible = false;
             trayIcon.DoubleClick += delegate { ShowMainWindow(); };
 
+            languagePopup.Items.Add(popupEnglishMenuItem);
+            languagePopup.Items.Add(popupChineseMenuItem);
+            ConfigureLanguagePopup();
+            popupEnglishMenuItem.Click += delegate { english = true; ApplyLanguage(); HideLanguagePopup(); ScheduleConfigurationSave(); };
+            popupChineseMenuItem.Click += delegate { english = false; ApplyLanguage(); HideLanguagePopup(); ScheduleConfigurationSave(); };
+
             var main = new TableLayoutPanel();
             main.Dock = DockStyle.Fill;
             main.Padding = new Padding(12, 10, 12, 12);
             main.ColumnCount = 1;
-            main.RowCount = 4;
+            main.RowCount = 5;
             main.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
             main.RowStyles.Add(new RowStyle(SizeType.Absolute, 150));
+            configInlineRowStyle = new RowStyle(SizeType.Absolute, 0);
+            main.RowStyles.Add(configInlineRowStyle);
             main.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             main.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
             Controls.Add(main);
-            main.BringToFront();
-            menu.BringToFront();
 
             var status = new TableLayoutPanel();
             status.Dock = DockStyle.Fill;
@@ -426,38 +1073,90 @@ namespace SBMSGui
             displayList.HorizontalScrollbar = true;
             main.Controls.Add(displayList, 0, 1);
 
+            configInlineHost.Dock = DockStyle.Fill;
+            configInlineHost.Visible = false;
+            configInlineHost.BackColor = ThemeBack;
+            main.Controls.Add(configInlineHost, 0, 2);
+
             logText.Dock = DockStyle.Fill;
             logText.Multiline = true;
-            logText.ScrollBars = ScrollBars.Vertical;
+            logText.ScrollBars = ScrollBars.None;
             logText.ReadOnly = true;
             logText.Font = new Font("Consolas", 10F);
             logText.BorderStyle = BorderStyle.FixedSingle;
             var logMenu = new ContextMenuStrip();
             logMenu.Items.Add("清空", null, delegate { logText.Clear(); });
             logText.ContextMenuStrip = logMenu;
-            main.Controls.Add(logText, 0, 2);
+            main.Controls.Add(logText, 0, 3);
+
+            var actionRow = new TableLayoutPanel();
+            actionRow.Dock = DockStyle.Fill;
+            actionRow.ColumnCount = 3;
+            actionRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            actionRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            actionRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            actionRow.Padding = new Padding(0, 6, 0, 0);
 
             var buttons = new FlowLayoutPanel();
-            buttons.Dock = DockStyle.Fill;
+            buttons.Dock = DockStyle.None;
+            buttons.AutoSize = true;
+            buttons.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             buttons.FlowDirection = FlowDirection.LeftToRight;
-            buttons.Padding = new Padding(0, 8, 0, 0);
+            buttons.WrapContents = false;
+            buttons.Padding = new Padding(0);
             startButton.Width = 110;
-            stopButton.Width = 110;
             listButton.Width = 120;
-            stopButton.Enabled = false;
+            startButton.ShowGlyph = true;
+            listButton.ShowGlyph = true;
+            startButton.Margin = new Padding(0, 0, 8, 0);
+            listButton.Margin = new Padding(0, 0, 8, 0);
             buttons.Controls.Add(startButton);
-            buttons.Controls.Add(stopButton);
             buttons.Controls.Add(listButton);
-            main.Controls.Add(buttons, 0, 3);
+
+            var quickButtons = new FlowLayoutPanel();
+            quickButtons.Dock = DockStyle.None;
+            quickButtons.AutoSize = true;
+            quickButtons.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            quickButtons.FlowDirection = FlowDirection.LeftToRight;
+            quickButtons.WrapContents = false;
+            quickButtons.Padding = new Padding(0);
+            configButton.Width = 92;
+            startupButton.Width = 78;
+            languageButton.Width = 86;
+            lightweightButton.Width = 122;
+            configButton.ShowGlyph = false;
+            languageButton.ShowGlyph = false;
+            startupButton.ShowGlyph = true;
+            lightweightButton.ShowGlyph = true;
+            configButton.Margin = new Padding(0);
+            languageButton.Margin = new Padding(0, 0, 8, 0);
+            lightweightButton.Margin = new Padding(0, 0, 8, 0);
+            quickButtons.Controls.Add(startupButton);
+            startupButton.Margin = new Padding(0, 0, 8, 0);
+            quickButtons.Controls.Add(lightweightButton);
+            quickButtons.Controls.Add(languageButton);
+            quickButtons.Controls.Add(configButton);
+            quickButtons.Height = 34;
+            quickButtons.MinimumSize = new Size(0, quickButtons.Height);
+
+            actionRow.Controls.Add(buttons, 0, 0);
+            actionRow.Controls.Add(new Panel(), 1, 0);
+            actionRow.Controls.Add(quickButtons, 2, 0);
+            main.Controls.Add(actionRow, 0, 4);
         }
 
         private void BuildConfigForm()
         {
+            configInlineHost.Controls.Clear();
             configForm = new Form();
             configForm.StartPosition = FormStartPosition.CenterParent;
             configForm.Size = new Size(1120, 780);
             configForm.MinimumSize = new Size(980, 700);
             configForm.ShowInTaskbar = false;
+            configForm.BackColor = ThemeBack;
+            configForm.ForeColor = ThemeText;
+            EnableDarkTitleBar(configForm);
+            configForm.HandleCreated += delegate { EnableDarkTitleBar(configForm); };
             configForm.FormClosing += delegate(object sender, FormClosingEventArgs e)
             {
                 e.Cancel = true;
@@ -466,96 +1165,83 @@ namespace SBMSGui
 
             var configHost = new Panel();
             configHost.Dock = DockStyle.Fill;
-            configForm.Controls.Add(configHost);
+            configInlineHost.Controls.Add(configHost);
 
             var panel = new TableLayoutPanel();
             panel.Dock = DockStyle.Fill;
             panel.Padding = new Padding(14);
-            panel.ColumnCount = 2;
-            panel.RowCount = 4;
-            panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
+            panel.ColumnCount = 1;
+            panel.RowCount = 3;
             panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
             configHost.Controls.Add(panel);
 
-            AddLabel(panel, "运行选项", 0);
-            panel.Controls.Add(CreateRuntimeOptionPanel(), 1, 0);
-
-            AddLabel(panel, "映射配置", 1);
             ConfigureInputTabs();
-            singleMappingPage.Text = T("单组映射");
-            singleMappingPage.Tag = "单组映射";
-            singleMappingPage.Controls.Clear();
-            singleMappingPage.Controls.Add(CreateSingleMappingPanel());
-            multiMappingPage.Text = T("多组映射 BETA");
-            multiMappingPage.Tag = "多组映射 BETA";
-            multiMappingPage.Controls.Clear();
-            multiMappingPage.Controls.Add(CreateBetaGroupPanel());
-            mappingTabs.Dock = DockStyle.Fill;
-            mappingTabs.TabPages.Clear();
-            mappingTabs.TabPages.Add(singleMappingPage);
-            panel.Controls.Add(mappingTabs, 1, 1);
+            ConfigureTabControl(betaGroupTabs);
+            betaGroupTabs.ItemSize = new Size(138, 32);
+            betaGroupTabs.Dock = DockStyle.Fill;
+            if (!groupTabsEventsBound)
+            {
+                betaGroupTabs.SelectedIndexChanged += delegate { OnBetaGroupTabChanged(); };
+                groupTabsEventsBound = true;
+            }
+            panel.Controls.Add(betaGroupTabs, 0, 0);
 
             var configButtons = new FlowLayoutPanel();
             configButtons.Dock = DockStyle.Fill;
             configButtons.FlowDirection = FlowDirection.LeftToRight;
-            var closeButton = new Button { Width = 100 };
-            closeButton.Click += delegate { configForm.Hide(); };
+            var closeButton = new GlowButton { Width = 100 };
+            closeButton.Click += delegate { ToggleInlineConfig(false); };
             closeButton.Tag = "关闭";
             applyConfigButton.Tag = "应用";
-            configButtons.Controls.Add(addBetaGroupButton);
             configButtons.Controls.Add(removeBetaGroupButton);
             configButtons.Controls.Add(applyConfigButton);
             configButtons.Controls.Add(closeButton);
-            panel.Controls.Add(configButtons, 1, 2);
+            panel.Controls.Add(configButtons, 0, 1);
 
             configLockPanel.Dock = DockStyle.Fill;
             configLockPanel.Name = "configLockPanel";
-            configLockPanel.BackColor = Color.FromArgb(18, 8, 8);
+            configLockPanel.BackColor = ThemeBack;
             configLockPanel.Visible = false;
+            var lockLayout = new TableLayoutPanel();
+            lockLayout.Dock = DockStyle.Fill;
+            lockLayout.BackColor = ThemeBack;
+            lockLayout.ColumnCount = 1;
+            lockLayout.RowCount = 4;
+            lockLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            lockLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+            lockLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 84));
+            lockLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+            lockLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
             configLockLabel.Dock = DockStyle.Fill;
             configLockLabel.Name = "configLockLabel";
             configLockLabel.TextAlign = ContentAlignment.MiddleCenter;
             configLockLabel.Font = new Font("Segoe UI", 24F, FontStyle.Bold);
             configLockLabel.ForeColor = ThemeRed;
-            configLockLabel.BackColor = Color.FromArgb(18, 8, 8);
-            configLockPanel.Controls.Add(configLockLabel);
+            configLockLabel.BackColor = ThemeBack;
+            lockLayout.Controls.Add(configLockLabel, 0, 1);
+            var lockButtonHost = new TableLayoutPanel();
+            lockButtonHost.Dock = DockStyle.Fill;
+            lockButtonHost.BackColor = ThemeBack;
+            lockButtonHost.ColumnCount = 3;
+            lockButtonHost.RowCount = 1;
+            lockButtonHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            lockButtonHost.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
+            lockButtonHost.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            configLockBackButton.Tag = "返回";
+            configLockBackButton.Width = 140;
+            configLockBackButton.Height = 36;
+            configLockBackButton.Dock = DockStyle.Fill;
+            configLockBackButton.Margin = new Padding(0);
+            configLockBackButton.Click += delegate { ToggleInlineConfig(false); };
+            lockButtonHost.Controls.Add(configLockBackButton, 1, 0);
+            lockLayout.Controls.Add(lockButtonHost, 0, 2);
+            configLockPanel.Controls.Add(lockLayout);
             configHost.Controls.Add(configLockPanel);
             configLockPanel.BringToFront();
             UpdateMappingTabs();
-        }
-
-        private Control CreateRuntimeOptionPanel()
-        {
-            ConfigureToggle(inputCheck, 96);
-            ConfigureToggle(windowMoveCheck, 96);
-            ConfigureToggle(deviceHostCheck, 134);
-            ConfigureToggle(streamModeCheck, 104);
-            ConfigureToggle(vsyncCheck, 76);
-            filterCombo.Width = 150;
-
-            var checks = new FlowLayoutPanel();
-            checks.Dock = DockStyle.Fill;
-            checks.FlowDirection = FlowDirection.LeftToRight;
-            checks.Padding = new Padding(0, 7, 0, 0);
-            checks.WrapContents = false;
-            checks.Controls.Add(inputCheck);
-            checks.Controls.Add(windowMoveCheck);
-            checks.Controls.Add(deviceHostCheck);
-            checks.Controls.Add(streamModeCheck);
-            checks.Controls.Add(vsyncCheck);
-            var filterLabel = new Label();
-            filterLabel.Tag = "缩放滤镜";
-            filterLabel.Text = T("缩放滤镜");
-            filterLabel.AutoSize = true;
-            filterLabel.TextAlign = ContentAlignment.MiddleLeft;
-            filterLabel.Padding = new Padding(14, 7, 2, 0);
-            checks.Controls.Add(filterLabel);
-            checks.Controls.Add(filterCombo);
-            return checks;
         }
 
         private Control CreateSingleMappingPanel()
@@ -569,100 +1255,201 @@ namespace SBMSGui
             panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
             panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
             panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-            panel.RowStyles.Add(new RowStyle(SizeType.Absolute, 1));
 
-            AddLabel(panel, "虚拟源", 0);
-            panel.Controls.Add(sourceDisplayCombo, 1, 0);
-            AddLabel(panel, "输出目标", 1);
-            panel.Controls.Add(targetDisplayCombo, 1, 1);
-            AddLabel(panel, "配置方式", 2);
-            panel.Controls.Add(configInputTabs, 1, 2);
-            AddLabel(panel, "尺寸策略", 3);
-            panel.Controls.Add(strategyCombo, 1, 3);
+            ConfigureToggle(streamModeCheck, 122, true);
+            AddLabel(panel, "模式", 0);
+            panel.Controls.Add(streamModeCheck, 1, 0);
+            AddLabel(panel, "虚拟源", 1);
+            panel.Controls.Add(sourceDisplayCombo, 1, 1);
+            AddLabel(panel, "输出目标", 2);
+            panel.Controls.Add(targetDisplayCombo, 1, 2);
+            AddLabel(panel, "配置方式", 3);
+            panel.Controls.Add(configInputTabs, 1, 3);
+            AddLabel(panel, "尺寸策略", 4);
+            panel.Controls.Add(strategyCombo, 1, 4);
 
             var sourcePanel = new FlowLayoutPanel();
             sourcePanel.Dock = DockStyle.Fill;
             sourcePanel.FlowDirection = FlowDirection.LeftToRight;
             sourcePanel.WrapContents = false;
-            sourceText.Width = 130;
-            targetText.Width = 130;
+            sourceText.Width = 120;
+            targetText.Width = 120;
+            singleRefreshText.Width = 58;
             sourcePanel.Controls.Add(sourceText);
             sourcePanel.Controls.Add(targetText);
+            sourcePanel.Controls.Add(CreateInlineLabel("刷新率"));
+            sourcePanel.Controls.Add(singleRefreshText);
             sourcePanel.Controls.Add(calculateButton);
-            AddLabel(panel, "映射结果", 4);
-            panel.Controls.Add(sourcePanel, 1, 4);
+            AddLabel(panel, "映射结果", 5);
+            panel.Controls.Add(sourcePanel, 1, 5);
             return panel;
-        }
-
-        private Control CreateBetaGroupPanel()
-        {
-            var host = new TableLayoutPanel();
-            host.Dock = DockStyle.Fill;
-            host.RowCount = 1;
-            host.ColumnCount = 1;
-            host.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            betaGroupTabs.Dock = DockStyle.Fill;
-            host.Controls.Add(betaGroupTabs, 0, 0);
-            return host;
         }
 
         private void UpdateMappingTabs()
         {
-            if (mappingTabs.TabPages.Count == 0)
+            UpdateMappingTabs(true);
+        }
+
+        private void UpdateMappingTabs(bool rebuild)
+        {
+            selectedBetaGroupIndex = Math.Max(0, Math.Min(selectedBetaGroupIndex, Math.Max(0, betaPairGrid.Rows.Count - 1)));
+            removeBetaGroupButton.Visible = betaPairGrid.Rows.Count > 1 && selectedBetaGroupIndex > 0;
+            if (rebuild)
             {
-                return;
+                RebuildBetaGroupTabs();
             }
-            bool multi = IsMultiMappingEnabled();
-            if (multi && !mappingTabs.TabPages.Contains(multiMappingPage))
+            else
             {
-                mappingTabs.TabPages.Add(multiMappingPage);
+                betaGroupTabs.Invalidate();
+                UpdateToggleVisuals();
             }
-            if (!multi && mappingTabs.TabPages.Contains(multiMappingPage))
-            {
-                mappingTabs.TabPages.Remove(multiMappingPage);
-            }
-            if (multi && mappingTabs.SelectedTab != multiMappingPage)
-            {
-                mappingTabs.SelectedTab = multiMappingPage;
-            }
-            if (!multi && mappingTabs.SelectedTab != singleMappingPage)
-            {
-                mappingTabs.SelectedTab = singleMappingPage;
-            }
-            removeBetaGroupButton.Visible = multi;
-            streamModeCheck.Visible = !multi;
-            RebuildBetaGroupTabs();
         }
 
         private void RebuildBetaGroupTabs()
         {
-            if (betaGroupTabs == null || betaGroupTabs.IsDisposed)
+            if (betaGroupTabs == null || betaGroupTabs.IsDisposed || betaGroupTabs.Parent == null || rebuildingGroupTabs)
+            {
+                return;
+            }
+            rebuildingGroupTabs = true;
+            SuspendRedraw(betaGroupTabs);
+            betaGroupTabs.SuspendLayout();
+            if (betaPairGrid.Rows.Count > 0 && betaGroupTabs.SelectedIndex >= 0 && betaGroupTabs.SelectedIndex < betaPairGrid.Rows.Count)
+            {
+                selectedBetaGroupIndex = betaGroupTabs.SelectedIndex;
+            }
+            int selected = Math.Max(0, Math.Min(selectedBetaGroupIndex, Math.Max(0, betaPairGrid.Rows.Count - 1)));
+            try
+            {
+                if (betaPairGrid.Rows.Count == 0 && betaPairGrid.Columns.Count > 0)
+                {
+                    updatingBetaPairGrid = true;
+                    try
+                    {
+                        AddBetaGroupRowInternal(CreateDefaultBetaPairSnapshot(""), false);
+                    }
+                    finally
+                    {
+                        updatingBetaPairGrid = false;
+                    }
+                }
+
+                betaGroupTabs.TabPages.Clear();
+                for (int i = 0; i < betaPairGrid.Rows.Count; ++i)
+                {
+                    TabPage page = new TabPage(GetBetaGroupTabText(i));
+                    page.BackColor = ThemeBack;
+                    page.ForeColor = ThemeGreen;
+                    page.Controls.Add(i == 0 ? CreateSingleMappingPanel() : CreateBetaGroupEditor(i));
+                    ApplyTheme(page);
+                    betaGroupTabs.TabPages.Add(page);
+                }
+                if (betaPairGrid.Rows.Count < MultiScreenBetaMaxTargets)
+                {
+                    TabPage addPage = new TabPage("+");
+                    addPage.Tag = "add";
+                    addPage.BackColor = ThemeBack;
+                    addPage.ForeColor = ThemeGreen;
+                    betaGroupTabs.TabPages.Add(addPage);
+                }
+                if (betaGroupTabs.TabPages.Count > 0)
+                {
+                    suppressBetaGroupTabChange = true;
+                    try
+                    {
+                        betaGroupTabs.SelectedIndex = Math.Max(0, Math.Min(selected, betaPairGrid.Rows.Count - 1));
+                    }
+                    finally
+                    {
+                        suppressBetaGroupTabChange = false;
+                    }
+                }
+            }
+            finally
+            {
+                betaGroupTabs.ResumeLayout(true);
+                ResumeRedraw(betaGroupTabs);
+                rebuildingGroupTabs = false;
+            }
+            UpdateToggleVisuals();
+        }
+
+        private static void SuspendRedraw(Control control)
+        {
+            if (control != null && control.IsHandleCreated)
+            {
+                SendMessage(control.Handle, WM_SETREDRAW, IntPtr.Zero, IntPtr.Zero);
+            }
+        }
+
+        private static void ResumeRedraw(Control control)
+        {
+            if (control != null && control.IsHandleCreated)
+            {
+                SendMessage(control.Handle, WM_SETREDRAW, new IntPtr(1), IntPtr.Zero);
+                control.Invalidate(true);
+            }
+        }
+
+        private string GetBetaGroupTabText(int rowIndex)
+        {
+            if (english)
+            {
+                return "Mapping group " + (rowIndex + 1).ToString(CultureInfo.InvariantCulture);
+            }
+            string[] numerals = { "一", "二", "三", "四", "五" };
+            string suffix = rowIndex >= 0 && rowIndex < numerals.Length
+                ? numerals[rowIndex]
+                : (rowIndex + 1).ToString(CultureInfo.InvariantCulture);
+            return "映射组" + suffix;
+        }
+
+        private void OnBetaGroupTabChanged()
+        {
+            if (rebuildingGroupTabs || suppressBetaGroupTabChange || betaGroupTabs.SelectedIndex < 0)
             {
                 return;
             }
             int selected = betaGroupTabs.SelectedIndex;
-            betaGroupTabs.TabPages.Clear();
-            if (!IsMultiMappingEnabled())
+            int addIndex = betaPairGrid.Rows.Count;
+            if (selected == addIndex && betaPairGrid.Rows.Count < MultiScreenBetaMaxTargets)
+            {
+                int previous = selectedBetaGroupIndex;
+                int previousCount = betaPairGrid.Rows.Count;
+                AddBetaGroupFromUi();
+                if (betaPairGrid.Rows.Count == previousCount)
+                {
+                    SelectBetaGroupTab(previous);
+                }
+                return;
+            }
+            if (selected < betaPairGrid.Rows.Count)
+            {
+                selectedBetaGroupIndex = selected;
+                UpdateRuntimeOptionState(false);
+            }
+        }
+
+        private void SelectBetaGroupTab(int rowIndex)
+        {
+            if (betaGroupTabs.TabPages.Count == 0 || betaPairGrid.Rows.Count == 0)
             {
                 return;
             }
-            for (int i = 0; i < betaPairGrid.Rows.Count; ++i)
+            selectedBetaGroupIndex = Math.Max(0, Math.Min(rowIndex, betaPairGrid.Rows.Count - 1));
+            suppressBetaGroupTabChange = true;
+            try
             {
-                TabPage page = new TabPage(T("组") + " " + (i + 1).ToString(CultureInfo.InvariantCulture));
-                page.BackColor = ThemeBack;
-                page.ForeColor = ThemeGreen;
-                page.Controls.Add(CreateBetaGroupEditor(i));
-                ApplyTheme(page);
-                betaGroupTabs.TabPages.Add(page);
+                betaGroupTabs.SelectedIndex = selectedBetaGroupIndex;
             }
-            if (betaGroupTabs.TabPages.Count > 0)
+            finally
             {
-                betaGroupTabs.SelectedIndex = Math.Max(0, Math.Min(selected, betaGroupTabs.TabPages.Count - 1));
+                suppressBetaGroupTabChange = false;
             }
-            UpdateToggleVisuals();
         }
 
         private Control CreateBetaGroupEditor(int rowIndex)
@@ -672,12 +1459,12 @@ namespace SBMSGui
             grid.Dock = DockStyle.Fill;
             grid.Padding = new Padding(0, 10, 0, 0);
             grid.ColumnCount = 2;
-            grid.RowCount = 8;
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
+            grid.RowCount = 9;
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             for (int i = 0; i < grid.RowCount; ++i)
             {
-                grid.RowStyles.Add(new RowStyle(i == 7 ? SizeType.Percent : SizeType.Absolute, i == 7 ? 100 : 42));
+                grid.RowStyles.Add(new RowStyle(i == 8 ? SizeType.Percent : SizeType.Absolute, i == 8 ? 100 : 36));
             }
 
             var enabledToggle = new CheckBox();
@@ -690,7 +1477,7 @@ namespace SBMSGui
                 if (rowIndex >= betaPairGrid.Rows.Count) return;
                 betaPairGrid.Rows[rowIndex].Cells[BetaColEnabled].Value = enabledToggle.Checked;
                 RecalculateBetaPairGrid(false);
-                UpdateRuntimeOptionState();
+                UpdateRuntimeOptionState(false);
             };
             AddLabel(grid, "启用", 0);
             grid.Controls.Add(enabledToggle, 1, 0);
@@ -698,20 +1485,81 @@ namespace SBMSGui
             var streamToggle = new CheckBox();
             streamToggle.Text = T("仅虚拟桌面");
             streamToggle.Checked = IsBetaRowStreamOnly(row);
-            ConfigureToggle(streamToggle, 142);
+            ConfigureToggle(streamToggle, 142, true);
             AddLabel(grid, "模式", 1);
             grid.Controls.Add(streamToggle, 1, 1);
 
-            var targetCombo = new ComboBox();
+            var horizontalText = CreateEditorTextBox(GetCellText(row, BetaColHorizontal));
+            var aspectText = CreateEditorTextBox(GetCellText(row, BetaColAspect));
+            var resolutionText = CreateEditorTextBox(GetBetaResolutionText(row));
+            var sizeText = CreateEditorTextBox(GetCellText(row, BetaColSize));
+            var refreshText = CreateEditorTextBox(GetCellText(row, BetaColRefresh));
+            var sourceOutput = CreateEditorTextBox(GetCellText(row, BetaColSource));
+            sourceOutput.ReadOnly = true;
+
+            var orientationCombo = new DarkComboBox();
+            orientationCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            orientationCombo.Items.AddRange(new object[] { "横屏", "竖屏", "横屏反向", "竖屏反向" });
+            SelectComboByText(orientationCombo, GetCellText(row, BetaColOrientation));
+
+            var strategyComboBox = new DarkComboBox();
+            strategyComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+            strategyComboBox.Items.AddRange(new object[] { "真实尺寸比例", "文字清晰优先", "直接使用源" });
+            SelectComboByText(strategyComboBox, GetCellText(row, BetaColStrategy));
+
+            horizontalText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColHorizontal, horizontalText.Text, sourceOutput); };
+            resolutionText.TextChanged += delegate { UpdateBetaResolutionFromText(rowIndex, resolutionText.Text, sourceOutput); };
+            aspectText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColAspect, aspectText.Text, sourceOutput); };
+            sizeText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColSize, sizeText.Text, sourceOutput); };
+            refreshText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColRefresh, refreshText.Text, sourceOutput); };
+            orientationCombo.SelectedIndexChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColOrientation, Convert.ToString(orientationCombo.SelectedItem, CultureInfo.InvariantCulture), sourceOutput); };
+            strategyComboBox.SelectedIndexChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColStrategy, Convert.ToString(strategyComboBox.SelectedItem, CultureInfo.InvariantCulture), sourceOutput); };
+
+            streamToggle.CheckedChanged += delegate
+            {
+                if (rowIndex >= betaPairGrid.Rows.Count) return;
+                if (streamToggle.Checked && !ShowRiskConfirmation("串流模式 BETA", "串流模式为BETA功能, 只创建虚拟桌面, 不复制到任何物理显示器"))
+                {
+                    streamToggle.Checked = false;
+                    UpdateToggleVisuals();
+                    return;
+                }
+                SetBetaRowStreamMode(rowIndex, streamToggle.Checked);
+                RecalculateBetaPairGrid(false);
+                RebuildBetaGroupTabs();
+                UpdateRuntimeOptionState(false);
+            };
+
+            if (streamToggle.Checked)
+            {
+                AddLabel(grid, "实际分辨率", 2);
+                resolutionText.Width = 150;
+                grid.Controls.Add(resolutionText, 1, 2);
+                AddLabel(grid, "实际尺寸", 3);
+                sizeText.Width = 72;
+                grid.Controls.Add(sizeText, 1, 3);
+                AddLabel(grid, "计算策略", 4);
+                strategyComboBox.Width = 138;
+                grid.Controls.Add(strategyComboBox, 1, 4);
+                AddLabel(grid, "刷新率", 5);
+                refreshText.Width = 72;
+                grid.Controls.Add(refreshText, 1, 5);
+                AddLabel(grid, "虚拟源", 6);
+                sourceOutput.Width = 150;
+                grid.Controls.Add(sourceOutput, 1, 6);
+                return grid;
+            }
+
+            var targetCombo = new DarkComboBox();
             targetCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            targetCombo.Dock = DockStyle.Fill;
+            targetCombo.Dock = DockStyle.Left;
+            targetCombo.Width = 720;
             foreach (DisplayChoice display in GetPhysicalDisplays())
             {
                 targetCombo.Items.Add(GetDisplayLabel(display));
             }
             string currentTarget = GetNormalTargetLabel(row);
             SelectComboByText(targetCombo, currentTarget);
-            targetCombo.Enabled = !streamToggle.Checked;
             targetCombo.SelectedIndexChanged += delegate
             {
                 if (rowIndex >= betaPairGrid.Rows.Count || IsBetaRowStreamOnly(betaPairGrid.Rows[rowIndex])) return;
@@ -729,45 +1577,6 @@ namespace SBMSGui
             };
             AddLabel(grid, "目标显示器", 2);
             grid.Controls.Add(targetCombo, 1, 2);
-
-            var horizontalText = CreateEditorTextBox(GetCellText(row, BetaColHorizontal));
-            var aspectText = CreateEditorTextBox(GetCellText(row, BetaColAspect));
-            var sizeText = CreateEditorTextBox(GetCellText(row, BetaColSize));
-            var sourceOutput = CreateEditorTextBox(GetCellText(row, BetaColSource));
-            sourceOutput.ReadOnly = true;
-
-            var orientationCombo = new ComboBox();
-            orientationCombo.DropDownStyle = ComboBoxStyle.DropDownList;
-            orientationCombo.Items.AddRange(new object[] { "横屏", "竖屏", "横屏反向", "竖屏反向" });
-            SelectComboByText(orientationCombo, GetCellText(row, BetaColOrientation));
-
-            var strategyComboBox = new ComboBox();
-            strategyComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
-            strategyComboBox.Items.AddRange(new object[] { "真实尺寸比例", "文字清晰优先", "直接使用源" });
-            SelectComboByText(strategyComboBox, GetCellText(row, BetaColStrategy));
-
-            horizontalText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColHorizontal, horizontalText.Text, sourceOutput); };
-            aspectText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColAspect, aspectText.Text, sourceOutput); };
-            sizeText.TextChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColSize, sizeText.Text, sourceOutput); };
-            orientationCombo.SelectedIndexChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColOrientation, Convert.ToString(orientationCombo.SelectedItem, CultureInfo.InvariantCulture), sourceOutput); };
-            strategyComboBox.SelectedIndexChanged += delegate { UpdateBetaCellFromText(rowIndex, BetaColStrategy, Convert.ToString(strategyComboBox.SelectedItem, CultureInfo.InvariantCulture), sourceOutput); };
-
-            streamToggle.CheckedChanged += delegate
-            {
-                if (rowIndex >= betaPairGrid.Rows.Count) return;
-                if (streamToggle.Checked && !ShowRiskConfirmation("串流模式", "串流模式只创建虚拟桌面，不复制到任何物理显示器"))
-                {
-                    streamToggle.Checked = false;
-                    UpdateToggleVisuals();
-                    return;
-                }
-                SetBetaRowStreamMode(rowIndex, streamToggle.Checked);
-                targetCombo.Enabled = !streamToggle.Checked;
-                RecalculateBetaPairGrid(false);
-                RebuildBetaGroupTabs();
-                UpdateRuntimeOptionState();
-            };
-
             AddLabel(grid, "横向像素", 3);
             grid.Controls.Add(horizontalText, 1, 3);
             AddLabel(grid, "比例", 4);
@@ -779,14 +1588,18 @@ namespace SBMSGui
             lower.Dock = DockStyle.Fill;
             lower.FlowDirection = FlowDirection.LeftToRight;
             lower.WrapContents = false;
-            lower.Controls.Add(CreateInlineLabel("尺寸"));
+            lower.Padding = new Padding(0, 1, 0, 0);
+            lower.Controls.Add(CreateInlineLabel("输出尺寸"));
             lower.Controls.Add(sizeText);
             lower.Controls.Add(CreateInlineLabel("策略"));
             lower.Controls.Add(strategyComboBox);
+            lower.Controls.Add(CreateInlineLabel("刷新率"));
+            lower.Controls.Add(refreshText);
             lower.Controls.Add(CreateInlineLabel("虚拟源"));
             lower.Controls.Add(sourceOutput);
             sizeText.Width = 72;
             strategyComboBox.Width = 138;
+            refreshText.Width = 72;
             sourceOutput.Width = 118;
             AddLabel(grid, "映射结果", 6);
             grid.Controls.Add(lower, 1, 6);
@@ -835,6 +1648,49 @@ namespace SBMSGui
             betaPairGrid.Rows[rowIndex].Cells[columnIndex].Value = value;
             RecalculateBetaPairGrid(false);
             sourceOutput.Text = GetCellText(betaPairGrid.Rows[rowIndex], BetaColSource);
+        }
+
+        private void UpdateBetaResolutionFromText(int rowIndex, string value, TextBox sourceOutput)
+        {
+            if (rowIndex < 0 || rowIndex >= betaPairGrid.Rows.Count)
+            {
+                return;
+            }
+
+            Resolution resolution;
+            if (!TryParseResolution(value, out resolution) || resolution.Width <= 0 || resolution.Height <= 0)
+            {
+                betaPairGrid.Rows[rowIndex].Cells[BetaColSource].Value = "参数无效";
+                sourceOutput.Text = "参数无效";
+                return;
+            }
+
+            int horizontal;
+            string aspect;
+            string orientation;
+            BuildResolutionParts(resolution, out horizontal, out aspect, out orientation);
+
+            updatingBetaPairGrid = true;
+            try
+            {
+                DataGridViewRow row = betaPairGrid.Rows[rowIndex];
+                row.Cells[BetaColHorizontal].Value = horizontal.ToString(CultureInfo.InvariantCulture);
+                row.Cells[BetaColAspect].Value = aspect;
+                row.Cells[BetaColOrientation].Value = orientation;
+            }
+            finally
+            {
+                updatingBetaPairGrid = false;
+            }
+
+            RecalculateBetaPairGrid(false);
+            sourceOutput.Text = GetCellText(betaPairGrid.Rows[rowIndex], BetaColSource);
+        }
+
+        private static string GetBetaResolutionText(DataGridViewRow row)
+        {
+            Resolution resolution;
+            return TryReadBetaResolutionSpec(row, out resolution) ? FormatResolution(resolution) : GetCellText(row, BetaColHorizontal);
         }
 
         private void SetBetaRowStreamMode(int rowIndex, bool streamOnly)
@@ -890,8 +1746,9 @@ namespace SBMSGui
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "横向像素", FillWeight = 72 });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "比例", FillWeight = 62 });
             betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "方向", FillWeight = 86, FlatStyle = FlatStyle.Flat });
-            betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "尺寸", FillWeight = 58 });
+            betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "输出尺寸", FillWeight = 64 });
             betaPairGrid.Columns.Add(new DataGridViewComboBoxColumn { HeaderText = "策略", FillWeight = 118, FlatStyle = FlatStyle.Flat });
+            betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "刷新率", FillWeight = 60 });
             betaPairGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "虚拟源", FillWeight = 92 });
 
             DataGridViewComboBoxColumn modeColumn = betaPairGrid.Columns[BetaColMode] as DataGridViewComboBoxColumn;
@@ -926,11 +1783,26 @@ namespace SBMSGui
                     e.Cancel = true;
                 }
             };
+            betaPairGrid.EditingControlShowing += delegate(object sender, DataGridViewEditingControlShowingEventArgs e)
+            {
+                ComboBox combo = e.Control as ComboBox;
+                if (combo != null)
+                {
+                    combo.BackColor = ThemeBack;
+                    combo.ForeColor = ThemeText;
+                    combo.FlatStyle = FlatStyle.Flat;
+                    combo.DrawMode = DrawMode.OwnerDrawFixed;
+                    combo.DrawItem -= DrawDarkComboItem;
+                    combo.DrawItem += DrawDarkComboItem;
+                    combo.DropDownWidth = MeasureComboDropDownWidth(combo);
+                }
+            };
             betaPairGrid.DataError += delegate(object sender, DataGridViewDataErrorEventArgs e) { e.ThrowException = false; };
         }
 
         private void ConfigureInputTabs()
         {
+            ConfigureTabControl(configInputTabs);
             configInputTabs.Dock = DockStyle.Fill;
             configInputTabs.TabPages.Clear();
             presetConfigPage.Text = T("预设");
@@ -952,7 +1824,7 @@ namespace SBMSGui
             AddHeaderRow(grid);
             AddLabel(grid, "基准", 1);
             grid.Controls.Add(CreatePresetPanel(primaryResolutionPresetCombo, primaryAspectPresetCombo, primaryOrientationPresetCombo, primarySizePresetCombo), 1, 1);
-            AddLabel(grid, "目标", 2);
+            AddLabel(grid, "输出目标", 2);
             grid.Controls.Add(CreatePresetPanel(targetResolutionPresetCombo, targetAspectPresetCombo, targetOrientationPresetCombo, targetSizePresetCombo), 1, 2);
             return grid;
         }
@@ -963,7 +1835,7 @@ namespace SBMSGui
             AddHeaderRow(grid);
             AddLabel(grid, "基准", 1);
             grid.Controls.Add(CreateManualInputPanel(manualBaseHorizontalText, manualBaseAspectText, manualBaseOrientationCombo, manualBaseSizeText), 1, 1);
-            AddLabel(grid, "目标", 2);
+            AddLabel(grid, "输出目标", 2);
             grid.Controls.Add(CreateManualInputPanel(manualTargetHorizontalText, manualTargetAspectText, manualTargetOrientationCombo, manualTargetSizeText), 1, 2);
             return grid;
         }
@@ -975,7 +1847,7 @@ namespace SBMSGui
             grid.Padding = new Padding(8, 8, 8, 4);
             grid.ColumnCount = 2;
             grid.RowCount = 3;
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 76));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 26));
             grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
@@ -985,15 +1857,28 @@ namespace SBMSGui
 
         private static void AddHeaderRow(TableLayoutPanel grid)
         {
-            var header = new Label
-            {
-                Text = "横向像素    比例        方向          尺寸",
-                Tag = "横向像素    比例        方向          尺寸",
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Consolas", 9F)
-            };
+            var header = new FlowLayoutPanel();
+            header.Dock = DockStyle.Fill;
+            header.FlowDirection = FlowDirection.LeftToRight;
+            header.WrapContents = false;
+            header.Controls.Add(CreateHeaderLabel("横向像素", 138));
+            header.Controls.Add(CreateHeaderLabel("比例", 86));
+            header.Controls.Add(CreateHeaderLabel("方向", 104));
+            header.Controls.Add(CreateHeaderLabel("实际尺寸", 108));
             grid.Controls.Add(header, 1, 0);
+        }
+
+        private static Label CreateHeaderLabel(string text, int width)
+        {
+            return new Label
+            {
+                Text = text,
+                Tag = text,
+                Width = width,
+                Height = 22,
+                Margin = new Padding(3, 0, 3, 0),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
         }
 
         private static void AddLabel(TableLayoutPanel panel, string text, int row)
@@ -1055,15 +1940,570 @@ namespace SBMSGui
 
         private void ShowConfigForm()
         {
-            if (configForm == null)
+            if (configInlineHost.Controls.Count == 0)
             {
                 BuildConfigForm();
-                ApplyTheme(configForm);
+                ApplyTheme(configInlineHost);
                 ApplyLanguage();
             }
             UpdateConfigLock();
-            configForm.Show(this);
-            configForm.Activate();
+            ToggleInlineConfig(true);
+        }
+
+        private void ShowLanguagePopup()
+        {
+            if (!languageButton.Visible)
+            {
+                return;
+            }
+            languageButton.ActiveFill = true;
+            languageButton.Invalidate();
+            if (languagePopup.Visible)
+            {
+                return;
+            }
+            languagePopup.Show(languageButton, new Point(0, -languagePopup.PreferredSize.Height));
+            languagePopupCloseTimer.Start();
+        }
+
+        private void ConfigureLanguagePopup()
+        {
+            languagePopup.RenderMode = ToolStripRenderMode.System;
+            languagePopup.Renderer = new MinimalMenuRenderer();
+            languagePopup.ShowCheckMargin = false;
+            languagePopup.ShowImageMargin = false;
+            languagePopup.Padding = new Padding(0);
+            languagePopup.Margin = new Padding(0);
+            languagePopup.AutoSize = true;
+            ConfigureLanguagePopupItem(popupEnglishMenuItem);
+            ConfigureLanguagePopupItem(popupChineseMenuItem);
+            languagePopup.Closed += delegate { HideLanguagePopup(); };
+            languagePopup.MouseLeave += delegate { CloseLanguagePopupIfPointerLeft(); };
+            languageButton.MouseLeave += delegate { CloseLanguagePopupIfPointerLeft(); };
+            languagePopupCloseTimer.Interval = 80;
+            languagePopupCloseTimer.Tick += delegate { CloseLanguagePopupIfPointerLeft(); };
+        }
+
+        private void ConfigureLanguagePopupItem(ToolStripMenuItem item)
+        {
+            item.AutoSize = false;
+            item.Size = new Size(Math.Max(languageButton.Width, 86), 34);
+            item.Margin = new Padding(0);
+            item.Padding = new Padding(0);
+            item.DisplayStyle = ToolStripItemDisplayStyle.Text;
+        }
+
+        private void CloseLanguagePopupIfPointerLeft()
+        {
+            if (!languagePopup.Visible)
+            {
+                languagePopupCloseTimer.Stop();
+                return;
+            }
+            Point cursor = Cursor.Position;
+            Rectangle buttonBounds = languageButton.RectangleToScreen(languageButton.ClientRectangle);
+            Rectangle popupBounds = languagePopup.Bounds;
+            if (!buttonBounds.Contains(cursor) && !popupBounds.Contains(cursor))
+            {
+                HideLanguagePopup();
+            }
+        }
+
+        private void HideLanguagePopup()
+        {
+            languagePopupCloseTimer.Stop();
+            if (languagePopup.Visible)
+            {
+                languagePopup.Close(ToolStripDropDownCloseReason.CloseCalled);
+            }
+            languageButton.ActiveFill = false;
+            languageButton.Invalidate();
+        }
+
+        private void ToggleStartupFromButton()
+        {
+            startupMenuItem.Checked = !startupMenuItem.Checked;
+            ToggleStartup();
+            UpdateMainActionButtons();
+        }
+
+        private void ToggleLightweightMode()
+        {
+            lightweightMenuItem.Checked = !lightweightMenuItem.Checked;
+            OnLightweightMenuChanged();
+        }
+
+        private void OnLightweightMenuChanged()
+        {
+            AppendLog(T(lightweightMenuItem.Checked ? "轻量模式开启" : "轻量模式关闭"));
+            UpdateStatus();
+            UpdateMainActionButtons();
+            ScheduleConfigurationSave();
+        }
+
+        private void InitializeDiagnostics()
+        {
+            try
+            {
+                Directory.CreateDirectory(userDataDir);
+                Directory.CreateDirectory(logDirectory);
+                File.WriteAllText(latestLogPath, "", Encoding.UTF8);
+                if (!File.Exists(errorLogPath))
+                {
+                    File.WriteAllText(errorLogPath, "", Encoding.UTF8);
+                }
+                WriteDiagnosticLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) + " session start build=" + BuildLabel, false);
+            }
+            catch
+            {
+            }
+        }
+
+        public static void WriteFatalError(string source, Exception exception)
+        {
+            try
+            {
+                string baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
+                string logs = Path.Combine(baseDir, "logs");
+                Directory.CreateDirectory(logs);
+                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) +
+                              " fatal[" + source + "] " +
+                              (exception == null ? "unknown" : exception.ToString());
+                File.AppendAllText(Path.Combine(logs, "error.log"), line + Environment.NewLine, Encoding.UTF8);
+                File.AppendAllText(Path.Combine(logs, "latest.log"), line + Environment.NewLine, Encoding.UTF8);
+            }
+            catch
+            {
+            }
+        }
+
+        private void LoadConfiguration()
+        {
+            loadingConfiguration = true;
+            try
+            {
+                if (!File.Exists(configPath))
+                {
+                    pendingConfigLoadMessage = "配置文件未找到, 已使用默认配置";
+                    return;
+                }
+
+                GuiConfigFile config;
+                var serializer = new XmlSerializer(typeof(GuiConfigFile));
+                using (FileStream stream = File.OpenRead(configPath))
+                {
+                    config = (GuiConfigFile)serializer.Deserialize(stream);
+                }
+                if (config == null)
+                {
+                    pendingConfigLoadMessage = "配置文件为空, 已使用默认配置";
+                    return;
+                }
+
+                ApplyConfiguration(config);
+                configurationFileLoaded = true;
+                pendingConfigLoadMessage = "配置已读取 = " + configPath;
+            }
+            catch (Exception ex)
+            {
+                pendingConfigLoadMessage = "配置读取失败: " + ex.Message;
+                WriteDiagnosticLine(DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + " " + pendingConfigLoadMessage, true);
+            }
+            finally
+            {
+                loadingConfiguration = false;
+            }
+        }
+
+        private void ApplyConfiguration(GuiConfigFile config)
+        {
+            english = config.English;
+            lightweightMenuItem.Checked = config.LightweightMode;
+            SetSelectedIndex(configInputTabs, config.ConfigTabIndex);
+            SetSelectedIndex(strategyCombo, config.StrategyIndex);
+            SetSelectedIndex(filterCombo, config.FilterIndex);
+            SetTextIfPresent(sourceText, config.SourceText);
+            SetTextIfPresent(targetText, config.TargetText);
+            SetTextIfPresent(singleRefreshText, config.SingleRefresh);
+            pendingConfigSourceDevice = config.SelectedSourceDevice ?? "";
+            pendingConfigTargetDevice = config.SelectedTargetDevice ?? "";
+
+            SetTextIfPresent(primaryResolutionText, config.PrimaryResolution);
+            SetTextIfPresent(primarySizeText, config.PrimarySize);
+            SetTextIfPresent(targetResolutionText, config.TargetResolution);
+            SetTextIfPresent(targetSizeText, config.TargetSize);
+            SetSelectedIndex(primaryResolutionPresetCombo, config.PrimaryResolutionPresetIndex);
+            SetSelectedIndex(primaryAspectPresetCombo, config.PrimaryAspectPresetIndex);
+            SetSelectedIndex(primaryOrientationPresetCombo, config.PrimaryOrientationPresetIndex);
+            SetSelectedIndex(primarySizePresetCombo, config.PrimarySizePresetIndex);
+            SetSelectedIndex(targetResolutionPresetCombo, config.TargetResolutionPresetIndex);
+            SetSelectedIndex(targetAspectPresetCombo, config.TargetAspectPresetIndex);
+            SetSelectedIndex(targetOrientationPresetCombo, config.TargetOrientationPresetIndex);
+            SetSelectedIndex(targetSizePresetCombo, config.TargetSizePresetIndex);
+
+            SetTextIfPresent(manualBaseHorizontalText, config.ManualBaseHorizontal);
+            SetTextIfPresent(manualBaseAspectText, config.ManualBaseAspect);
+            SetSelectedIndex(manualBaseOrientationCombo, config.ManualBaseOrientationIndex);
+            SetTextIfPresent(manualBaseSizeText, config.ManualBaseSize);
+            SetTextIfPresent(manualTargetHorizontalText, config.ManualTargetHorizontal);
+            SetTextIfPresent(manualTargetAspectText, config.ManualTargetAspect);
+            SetSelectedIndex(manualTargetOrientationCombo, config.ManualTargetOrientationIndex);
+            SetTextIfPresent(manualTargetSizeText, config.ManualTargetSize);
+
+            streamModeCheck.Checked = config.StreamMode;
+            inputCheck.Checked = config.InputMapping;
+            windowMoveCheck.Checked = config.WindowMove;
+            deviceHostCheck.Checked = config.DeviceHost;
+            vsyncCheck.Checked = config.VSync;
+            selectedBetaGroupIndex = Math.Max(0, config.SelectedBetaGroupIndex);
+
+            if (config.BetaPairs != null && config.BetaPairs.Count > 0)
+            {
+                var snapshots = new List<BridgePairSnapshot>();
+                foreach (GuiConfigBridgePair pair in config.BetaPairs)
+                {
+                    snapshots.Add(new BridgePairSnapshot
+                    {
+                        Enabled = pair.Enabled,
+                        Mode = pair.Mode,
+                        Target = pair.Target,
+                        Horizontal = pair.Horizontal,
+                        Aspect = pair.Aspect,
+                        Orientation = pair.Orientation,
+                        Size = pair.Size,
+                        Strategy = pair.Strategy,
+                        Refresh = pair.Refresh,
+                        Source = pair.Source
+                    });
+                }
+                RestoreBetaPairRows(snapshots, pendingConfigTargetDevice);
+            }
+        }
+
+        private void ConfigureConfigurationPersistence()
+        {
+            configurationSaveTimer.Interval = 700;
+            configurationSaveTimer.Tick += delegate
+            {
+                configurationSaveTimer.Stop();
+                SaveConfigurationNow(false);
+            };
+
+            EventHandler schedule = delegate { ScheduleConfigurationSave(); };
+            sourceText.TextChanged += schedule;
+            targetText.TextChanged += schedule;
+            singleRefreshText.TextChanged += schedule;
+            primaryResolutionText.TextChanged += schedule;
+            primarySizeText.TextChanged += schedule;
+            targetResolutionText.TextChanged += schedule;
+            targetSizeText.TextChanged += schedule;
+            manualBaseHorizontalText.TextChanged += schedule;
+            manualBaseAspectText.TextChanged += schedule;
+            manualBaseSizeText.TextChanged += schedule;
+            manualTargetHorizontalText.TextChanged += schedule;
+            manualTargetAspectText.TextChanged += schedule;
+            manualTargetSizeText.TextChanged += schedule;
+
+            sourceDisplayCombo.SelectedIndexChanged += schedule;
+            targetDisplayCombo.SelectedIndexChanged += schedule;
+            strategyCombo.SelectedIndexChanged += schedule;
+            primaryResolutionPresetCombo.SelectedIndexChanged += schedule;
+            primaryAspectPresetCombo.SelectedIndexChanged += schedule;
+            primaryOrientationPresetCombo.SelectedIndexChanged += schedule;
+            primarySizePresetCombo.SelectedIndexChanged += schedule;
+            targetResolutionPresetCombo.SelectedIndexChanged += schedule;
+            targetAspectPresetCombo.SelectedIndexChanged += schedule;
+            targetOrientationPresetCombo.SelectedIndexChanged += schedule;
+            targetSizePresetCombo.SelectedIndexChanged += schedule;
+            manualBaseOrientationCombo.SelectedIndexChanged += schedule;
+            manualTargetOrientationCombo.SelectedIndexChanged += schedule;
+            filterCombo.SelectedIndexChanged += schedule;
+            configInputTabs.SelectedIndexChanged += schedule;
+            betaGroupTabs.SelectedIndexChanged += schedule;
+
+            inputCheck.CheckedChanged += schedule;
+            windowMoveCheck.CheckedChanged += schedule;
+            deviceHostCheck.CheckedChanged += schedule;
+            streamModeCheck.CheckedChanged += schedule;
+            vsyncCheck.CheckedChanged += schedule;
+
+            betaPairGrid.RowsAdded += delegate { ScheduleConfigurationSave(); };
+            betaPairGrid.RowsRemoved += delegate { ScheduleConfigurationSave(); };
+            betaPairGrid.CellValueChanged += delegate { ScheduleConfigurationSave(); };
+        }
+
+        private void ScheduleConfigurationSave()
+        {
+            if (loadingConfiguration || !configurationPersistenceReady || exiting || updatingBetaPairGrid || rebuildingGroupTabs)
+            {
+                return;
+            }
+            configurationSaveTimer.Stop();
+            configurationSaveTimer.Start();
+        }
+
+        private void SaveConfigurationNow(bool announce)
+        {
+            if (loadingConfiguration)
+            {
+                return;
+            }
+            try
+            {
+                Directory.CreateDirectory(userDataDir);
+                GuiConfigFile config = CaptureConfiguration();
+                string tempPath = configPath + ".tmp";
+                var settings = new XmlWriterSettings
+                {
+                    Encoding = Encoding.UTF8,
+                    Indent = true,
+                    OmitXmlDeclaration = false
+                };
+                var serializer = new XmlSerializer(typeof(GuiConfigFile));
+                using (XmlWriter writer = XmlWriter.Create(tempPath, settings))
+                {
+                    serializer.Serialize(writer, config);
+                }
+                File.Copy(tempPath, configPath, true);
+                File.Delete(tempPath);
+                if (announce)
+                {
+                    AppendLog("配置已保存 = " + configPath);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppendLog("配置保存失败: " + ex.Message);
+            }
+        }
+
+        private GuiConfigFile CaptureConfiguration()
+        {
+            var config = new GuiConfigFile();
+            config.Version = 1;
+            config.SavedByBuild = BuildLabel;
+            config.English = english;
+            config.LightweightMode = lightweightMenuItem.Checked;
+            config.ConfigTabIndex = GetSelectedIndex(configInputTabs);
+            config.StrategyIndex = GetSelectedIndex(strategyCombo);
+            config.FilterIndex = GetSelectedIndex(filterCombo);
+            config.SourceText = GetText(sourceText);
+            config.TargetText = GetText(targetText);
+            config.SingleRefresh = GetText(singleRefreshText);
+            config.SelectedSourceDevice = GetSelectedDeviceName(sourceDisplayCombo);
+            config.SelectedTargetDevice = GetSelectedDeviceName(targetDisplayCombo);
+            config.PrimaryResolution = GetText(primaryResolutionText);
+            config.PrimarySize = GetText(primarySizeText);
+            config.TargetResolution = GetText(targetResolutionText);
+            config.TargetSize = GetText(targetSizeText);
+            config.PrimaryResolutionPresetIndex = GetSelectedIndex(primaryResolutionPresetCombo);
+            config.PrimaryAspectPresetIndex = GetSelectedIndex(primaryAspectPresetCombo);
+            config.PrimaryOrientationPresetIndex = GetSelectedIndex(primaryOrientationPresetCombo);
+            config.PrimarySizePresetIndex = GetSelectedIndex(primarySizePresetCombo);
+            config.TargetResolutionPresetIndex = GetSelectedIndex(targetResolutionPresetCombo);
+            config.TargetAspectPresetIndex = GetSelectedIndex(targetAspectPresetCombo);
+            config.TargetOrientationPresetIndex = GetSelectedIndex(targetOrientationPresetCombo);
+            config.TargetSizePresetIndex = GetSelectedIndex(targetSizePresetCombo);
+            config.ManualBaseHorizontal = GetText(manualBaseHorizontalText);
+            config.ManualBaseAspect = GetText(manualBaseAspectText);
+            config.ManualBaseOrientationIndex = GetSelectedIndex(manualBaseOrientationCombo);
+            config.ManualBaseSize = GetText(manualBaseSizeText);
+            config.ManualTargetHorizontal = GetText(manualTargetHorizontalText);
+            config.ManualTargetAspect = GetText(manualTargetAspectText);
+            config.ManualTargetOrientationIndex = GetSelectedIndex(manualTargetOrientationCombo);
+            config.ManualTargetSize = GetText(manualTargetSizeText);
+            config.StreamMode = streamModeCheck.Checked;
+            config.InputMapping = inputCheck.Checked;
+            config.WindowMove = windowMoveCheck.Checked;
+            config.DeviceHost = deviceHostCheck.Checked;
+            config.VSync = vsyncCheck.Checked;
+            config.SelectedBetaGroupIndex = Math.Max(0, selectedBetaGroupIndex);
+            config.BetaPairs.Clear();
+
+            foreach (BridgePairSnapshot snapshot in CaptureBetaPairSnapshots())
+            {
+                config.BetaPairs.Add(new GuiConfigBridgePair
+                {
+                    Enabled = snapshot.Enabled,
+                    Mode = snapshot.Mode,
+                    Target = snapshot.Target,
+                    Horizontal = snapshot.Horizontal,
+                    Aspect = snapshot.Aspect,
+                    Orientation = snapshot.Orientation,
+                    Size = snapshot.Size,
+                    Strategy = snapshot.Strategy,
+                    Refresh = snapshot.Refresh,
+                    Source = snapshot.Source
+                });
+            }
+            return config;
+        }
+
+        private static int GetSelectedIndex(ComboBox combo)
+        {
+            return combo == null ? -1 : combo.SelectedIndex;
+        }
+
+        private static int GetSelectedIndex(TabControl tabs)
+        {
+            return tabs == null ? -1 : tabs.SelectedIndex;
+        }
+
+        private static void SetSelectedIndex(ComboBox combo, int index)
+        {
+            if (combo != null && index >= 0 && index < combo.Items.Count)
+            {
+                combo.SelectedIndex = index;
+            }
+        }
+
+        private static void SetSelectedIndex(TabControl tabs, int index)
+        {
+            if (tabs != null && index >= 0 && index < tabs.TabPages.Count)
+            {
+                tabs.SelectedIndex = index;
+            }
+        }
+
+        private static void SetTextIfPresent(TextBox textBox, string value)
+        {
+            if (textBox != null && !string.IsNullOrWhiteSpace(value))
+            {
+                textBox.Text = value.Trim();
+            }
+        }
+
+        private static string GetText(TextBox textBox)
+        {
+            return textBox == null ? "" : (textBox.Text ?? "").Trim();
+        }
+
+        private void WriteDiagnosticLine(string line, bool error)
+        {
+            try
+            {
+                Directory.CreateDirectory(logDirectory);
+                string text = line + Environment.NewLine;
+                File.AppendAllText(sessionLogPath, text, Encoding.UTF8);
+                File.AppendAllText(latestLogPath, text, Encoding.UTF8);
+                if (error)
+                {
+                    File.AppendAllText(errorLogPath, text, Encoding.UTF8);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void ToggleInlineConfig(bool show)
+        {
+            configInlineHost.Visible = show;
+            if (configInlineRowStyle != null)
+            {
+                configInlineRowStyle.Height = show ? 460 : 0;
+            }
+            configButton.ActiveFill = show;
+            configButton.Invalidate();
+            PerformLayout();
+        }
+
+        internal string RunConfigProbe(string screenshotPath)
+        {
+            Show();
+            ShowConfigForm();
+            Application.DoEvents();
+            SleepWithUiPump(250);
+            Application.DoEvents();
+
+            if (configInlineHost.Controls.Count == 0)
+            {
+                throw new InvalidOperationException("configInlineHost unavailable");
+            }
+
+            BringToFront();
+            Activate();
+            Application.DoEvents();
+            SleepWithUiPump(250);
+            Application.DoEvents();
+
+            using (var bitmap = new Bitmap(configInlineHost.Width, configInlineHost.Height))
+            {
+                configInlineHost.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                bitmap.Save(screenshotPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+
+            var tabNames = new List<string>();
+            foreach (TabPage page in betaGroupTabs.TabPages)
+            {
+                tabNames.Add(page.Text);
+            }
+            string tabSummary = string.Join(" | ", tabNames.ToArray());
+            File.WriteAllText(screenshotPath + ".txt", tabSummary, Encoding.UTF8);
+            return tabSummary;
+        }
+
+        internal void RunRiskProbe(string screenshotPath)
+        {
+            Show();
+            ShowConfigForm();
+            Application.DoEvents();
+            SleepWithUiPump(250);
+            Application.DoEvents();
+            ShowRiskConfirmation("多组映射 BETA", "多组映射为BETA功能, 不确定稳定性", screenshotPath);
+        }
+
+        internal void RunStreamConfigProbe(string screenshotPath)
+        {
+            Show();
+            ShowConfigForm();
+            if (betaPairGrid.Rows.Count == 0)
+            {
+                AddBetaGroupRow(null, false);
+            }
+            if (betaPairGrid.Rows.Count == 1)
+            {
+                AddBetaGroupRow(null, false);
+            }
+            SetBetaRowStreamMode(1, true);
+            selectedBetaGroupIndex = 1;
+            RecalculateBetaPairGrid(false);
+            RebuildBetaGroupTabs();
+            SelectBetaGroupTab(1);
+            Application.DoEvents();
+            SleepWithUiPump(250);
+            Application.DoEvents();
+
+            using (var bitmap = new Bitmap(configInlineHost.Width, configInlineHost.Height))
+            {
+                configInlineHost.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                bitmap.Save(screenshotPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+        }
+
+        internal void RunLockProbe(string screenshotPath)
+        {
+            Show();
+            forceConfigLockForProbe = true;
+            ShowConfigForm();
+            UpdateConfigLock();
+            BringToFront();
+            Activate();
+            Application.DoEvents();
+            SleepWithUiPump(250);
+            Application.DoEvents();
+
+            using (var bitmap = new Bitmap(configLockPanel.Width, configLockPanel.Height))
+            {
+                configLockPanel.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                bitmap.Save(screenshotPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            string lockInfo =
+                "host=" + configInlineHost.Bounds +
+                " lock=" + configLockPanel.Bounds +
+                " visible=" + configLockPanel.Visible +
+                " index=" + (configLockPanel.Parent == null ? -1 : configLockPanel.Parent.Controls.GetChildIndex(configLockPanel));
+            File.WriteAllText(screenshotPath + ".txt", lockInfo, Encoding.UTF8);
         }
 
         private void ToggleStartup()
@@ -1076,6 +2516,7 @@ namespace SBMSGui
                 startupMenuItem.Checked = !requested;
             }
             AppendLog((requested ? T("开机自启开启") : T("开机自启关闭")) + ": " + output.Trim());
+            ScheduleConfigurationSave();
         }
 
         private bool EnableStartup(out string output)
@@ -1106,14 +2547,80 @@ namespace SBMSGui
                 p.StartInfo.RedirectStandardOutput = true;
                 p.StartInfo.RedirectStandardError = true;
                 p.StartInfo.CreateNoWindow = true;
-                p.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-                p.StartInfo.StandardErrorEncoding = Encoding.UTF8;
+                p.StartInfo.StandardOutputEncoding = Encoding.Default;
+                p.StartInfo.StandardErrorEncoding = Encoding.Default;
+                return CaptureProcessOutput(p, 10000, out output);
+            }
+        }
+
+        private static bool CaptureProcessOutput(Process p, int timeoutMs, out string output)
+        {
+            var buffer = new StringBuilder();
+            DataReceivedEventHandler appendLine = delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (e.Data == null)
+                {
+                    return;
+                }
+                lock (buffer)
+                {
+                    buffer.AppendLine(e.Data);
+                }
+            };
+
+            try
+            {
+                p.OutputDataReceived += appendLine;
+                p.ErrorDataReceived += appendLine;
                 p.Start();
-                string stdout = p.StandardOutput.ReadToEnd();
-                string stderr = p.StandardError.ReadToEnd();
-                p.WaitForExit(10000);
-                output = stdout + stderr;
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+                if (!p.WaitForExit(timeoutMs))
+                {
+                    KillProcessQuietly(p);
+                    lock (buffer)
+                    {
+                        output = "timeout: " + p.StartInfo.FileName + " " + p.StartInfo.Arguments + Environment.NewLine + buffer;
+                    }
+                    return false;
+                }
+                p.WaitForExit();
+                lock (buffer)
+                {
+                    output = buffer.ToString();
+                }
                 return p.ExitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                output = ex.Message;
+                return false;
+            }
+        }
+
+        private static void KillProcessQuietly(Process p)
+        {
+            try
+            {
+                if (p != null && !p.HasExited)
+                {
+                    p.Kill();
+                    p.WaitForExit(1000);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static void SleepWithUiPump(int milliseconds)
+        {
+            int deadline = Environment.TickCount + milliseconds;
+            while (Environment.TickCount < deadline)
+            {
+                Application.DoEvents();
+                int remaining = deadline - Environment.TickCount;
+                Thread.Sleep(Math.Max(1, Math.Min(50, remaining)));
             }
         }
 
@@ -1130,12 +2637,18 @@ namespace SBMSGui
             trayOpenMenuItem.Text = T("打开");
             trayStopMenuItem.Text = T("停止");
             trayExitMenuItem.Text = T("退出");
+            popupEnglishMenuItem.Text = "English";
+            popupChineseMenuItem.Text = "中文";
             trayIcon.Text = AppName;
             chineseMenuItem.Checked = !english;
             englishMenuItem.Checked = english;
-            startButton.Text = T("启动");
-            stopButton.Text = T("停止");
+            popupChineseMenuItem.Checked = !english;
+            popupEnglishMenuItem.Checked = english;
             listButton.Text = T("刷新列表");
+            configButton.Text = T("配置");
+            startupButton.Text = T("自启");
+            languageButton.Text = english ? "语言" : "lang";
+            lightweightButton.Text = T("轻量模式");
             calculateButton.Text = T("计算");
             applyConfigButton.Text = T("应用");
             addBetaGroupButton.Text = "+ " + T("新增组") + " BETA";
@@ -1144,24 +2657,23 @@ namespace SBMSGui
             windowMoveCheck.Text = T("迁移窗口");
             deviceHostCheck.Text = T("管理虚拟显示器");
             streamModeCheck.Text = T("串流模式");
-            singleMappingPage.Text = T("单组映射");
-            multiMappingPage.Text = T("多组映射 BETA");
-            if (configForm != null)
+            if (configInlineHost.Controls.Count > 0)
             {
-                configForm.Text = T("配置");
-                ApplyLanguageToControls(configForm);
+                ApplyLanguageToControls(configInlineHost);
             }
             ApplyBetaPairGridLanguage();
             RebuildBetaGroupTabs();
             configLockLabel.Text = T("配置已锁定") + Environment.NewLine + T("请先停止 SBMS");
+            configLockBackButton.Text = T("返回");
             ApplyComboTexts();
+            UpdateMainActionButtons();
             UpdateToggleVisuals();
             UpdateStatus();
         }
 
         private void ApplyBetaPairGridLanguage()
         {
-            if (betaPairGrid.Columns.Count < 9)
+            if (betaPairGrid.Columns.Count < 10)
             {
                 return;
             }
@@ -1171,8 +2683,9 @@ namespace SBMSGui
             betaPairGrid.Columns[BetaColHorizontal].HeaderText = T("横向像素");
             betaPairGrid.Columns[BetaColAspect].HeaderText = T("比例");
             betaPairGrid.Columns[BetaColOrientation].HeaderText = T("方向");
-            betaPairGrid.Columns[BetaColSize].HeaderText = T("尺寸");
+            betaPairGrid.Columns[BetaColSize].HeaderText = T("输出尺寸");
             betaPairGrid.Columns[BetaColStrategy].HeaderText = T("策略");
+            betaPairGrid.Columns[BetaColRefresh].HeaderText = T("刷新率");
             betaPairGrid.Columns[BetaColSource].HeaderText = T("虚拟源");
         }
 
@@ -1491,6 +3004,7 @@ namespace SBMSGui
                 case "设置": return "Settings";
                 case "配置": return "Configuration";
                 case "开机自启": return "Start with Windows";
+                case "自启": return "Startup";
                 case "轻量模式": return "Lightweight mode";
                 case "语言": return "Language";
                 case "打开": return "Open";
@@ -1509,6 +3023,7 @@ namespace SBMSGui
                 case "映射配置": return "Mapping";
                 case "单组映射": return "Single mapping";
                 case "多组映射 BETA": return "Multi-mapping BETA";
+                case "串流模式 BETA": return "Streaming mode BETA";
                 case "组": return "Group";
                 case "新增组": return "Add group";
                 case "删除组": return "Remove group";
@@ -1519,22 +3034,29 @@ namespace SBMSGui
                 case "串流目标": return "Streaming target";
                 case "仅虚拟桌面": return "Virtual only";
                 case "横向像素": return "Horizontal px";
+                case "实际分辨率": return "Actual resolution";
                 case "比例": return "Aspect";
                 case "方向": return "Orientation";
                 case "尺寸": return "Size";
+                case "实际尺寸": return "Actual size";
+                case "输出尺寸": return "Target size";
+                case "刷新率": return "Refresh rate";
+                case "计算策略": return "Sizing";
                 case "策略": return "Strategy";
                 case "如果不清楚这个选项的作用，请不要勾选": return "Do not enable this unless you know what it does";
                 case "多组映射支持为BETA功能, 不保证稳定性": return "Multi-mapping support is BETA and is not guaranteed stable";
+                case "多组映射为BETA功能, 不确定稳定性": return "Multi-mapping is a BETA feature and may be unstable";
+                case "串流模式为BETA功能, 不确定稳定性": return "Streaming mode is a BETA feature and may be unstable";
+                case "串流模式为BETA功能, 只创建虚拟桌面, 不复制到任何物理显示器": return "Streaming mode is BETA; it only creates a virtual desktop and does not copy it to a physical display";
                 case "串流模式只创建虚拟桌面，不复制到任何物理显示器": return "Streaming mode only creates a virtual desktop and does not copy it to a physical display";
                 case "确认": return "Confirm";
                 case "放弃更改": return "Cancel";
                 case "虚拟源": return "Virtual source";
-                case "输出目标": return "Target";
+                case "输出目标": return "Output target";
                 case "配置方式": return "Input";
                 case "预设": return "Preset";
                 case "手动": return "Manual";
                 case "基准": return "Base";
-                case "横向像素    比例        方向          尺寸": return "Horizontal px   aspect      orientation    size";
                 case "目标预设": return "Target preset";
                 case "目标屏参数": return "Target spec";
                 case "尺寸策略": return "Sizing";
@@ -1557,6 +3079,8 @@ namespace SBMSGui
                 case "整数2x": return "Integer 2x";
                 case "开机自启开启": return "Startup enabled";
                 case "开机自启关闭": return "Startup disabled";
+                case "轻量模式开启": return "Lightweight mode enabled";
+                case "轻量模式关闭": return "Lightweight mode disabled";
                 case "运行中": return "Running";
                 case "串流中": return "Streaming";
                 case "多屏BETA运行中": return "Multi-screen BETA running";
@@ -1568,6 +3092,7 @@ namespace SBMSGui
                 case "运行中配置已锁定": return "Configuration is locked while running";
                 case "配置已锁定": return "CONFIGURATION LOCKED";
                 case "请先停止 SBMS": return "Stop SBMS before changing settings";
+                case "返回": return "Back";
                 case "已隐藏到托盘": return "Hidden to tray";
                 default: return text;
             }
@@ -1586,6 +3111,9 @@ namespace SBMSGui
             trayMenu.BackColor = ThemePanel;
             trayMenu.ForeColor = ThemeGreen;
             ApplyThemeToMenuItems(trayMenu.Items);
+            languagePopup.BackColor = ThemePanel;
+            languagePopup.ForeColor = ThemeGreen;
+            ApplyThemeToMenuItems(languagePopup.Items);
         }
 
         private static void StyleControl(Control control)
@@ -1596,20 +3124,31 @@ namespace SBMSGui
             }
             if (control.Name == "configLockPanel")
             {
-                control.BackColor = Color.FromArgb(18, 8, 8);
+                control.BackColor = ThemeBack;
                 control.ForeColor = ThemeRed;
                 return;
             }
             if (control.Name == "configLockLabel")
             {
-                control.BackColor = Color.FromArgb(18, 8, 8);
+                control.BackColor = ThemeBack;
                 control.ForeColor = ThemeRed;
                 return;
             }
-            if (control is TextBox || control is ListBox || control is ComboBox)
+            if (control is TextBox || control is ListBox)
             {
                 control.BackColor = ThemePanel;
-                control.ForeColor = Color.White;
+                control.ForeColor = ThemeText;
+            }
+            else if (control is ComboBox)
+            {
+                ComboBox combo = (ComboBox)control;
+                combo.BackColor = ThemePanel;
+                combo.ForeColor = ThemeText;
+                combo.FlatStyle = FlatStyle.Flat;
+                combo.DrawMode = DrawMode.OwnerDrawFixed;
+                combo.DrawItem -= DrawDarkComboItem;
+                combo.DrawItem += DrawDarkComboItem;
+                combo.DropDownWidth = MeasureComboDropDownWidth(combo);
             }
             else if (control is DataGridView)
             {
@@ -1617,9 +3156,9 @@ namespace SBMSGui
                 grid.BackgroundColor = ThemePanel;
                 grid.GridColor = ThemeGreen;
                 grid.DefaultCellStyle.BackColor = ThemePanel;
-                grid.DefaultCellStyle.ForeColor = Color.White;
-                grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(8, 82, 33);
-                grid.DefaultCellStyle.SelectionForeColor = Color.White;
+                grid.DefaultCellStyle.ForeColor = ThemeText;
+                grid.DefaultCellStyle.SelectionBackColor = ThemeActive;
+                grid.DefaultCellStyle.SelectionForeColor = ThemeBack;
                 grid.ColumnHeadersDefaultCellStyle.BackColor = ThemePanel2;
                 grid.ColumnHeadersDefaultCellStyle.ForeColor = ThemeGreen;
                 grid.RowHeadersDefaultCellStyle.BackColor = ThemePanel2;
@@ -1627,10 +3166,8 @@ namespace SBMSGui
             }
             else if (control is Button)
             {
-                control.BackColor = ThemePanel2;
-                control.ForeColor = ThemeGreen;
-                ((Button)control).FlatStyle = FlatStyle.Flat;
-                ((Button)control).FlatAppearance.BorderColor = ThemeGreen;
+                Button button = (Button)control;
+                StyleButton(button, string.Equals(button.AccessibleDescription, "risk", StringComparison.OrdinalIgnoreCase), false);
             }
             else if (control is TabControl || control is TabPage)
             {
@@ -1645,12 +3182,17 @@ namespace SBMSGui
             CheckBox checkBox = control as CheckBox;
             if (checkBox != null)
             {
-                checkBox.ForeColor = ThemeMuted;
                 checkBox.FlatStyle = FlatStyle.Flat;
+                ApplyToggleVisual(checkBox);
             }
         }
 
         private static void ConfigureToggle(CheckBox checkBox, int width)
+        {
+            ConfigureToggle(checkBox, width, false);
+        }
+
+        private static void ConfigureToggle(CheckBox checkBox, int width, bool risk)
         {
             checkBox.Appearance = Appearance.Button;
             checkBox.AutoSize = false;
@@ -1660,6 +3202,12 @@ namespace SBMSGui
             checkBox.FlatStyle = FlatStyle.Flat;
             checkBox.FlatAppearance.BorderSize = 1;
             checkBox.Margin = new Padding(0, 0, 8, 0);
+            checkBox.AccessibleDescription = risk ? "risk" : "normal";
+            checkBox.UseVisualStyleBackColor = false;
+            checkBox.FlatAppearance.MouseOverBackColor = ThemeBack;
+            checkBox.FlatAppearance.MouseDownBackColor = ThemeActive;
+            checkBox.FlatAppearance.CheckedBackColor = ThemeActive;
+            ApplyToggleVisual(checkBox);
         }
 
         private void UpdateToggleVisuals()
@@ -1694,31 +3242,133 @@ namespace SBMSGui
             {
                 return;
             }
+            bool risk = string.Equals(checkBox.AccessibleDescription, "risk", StringComparison.OrdinalIgnoreCase);
+            Color line = risk ? ThemeRed : ThemeText;
             if (checkBox.Checked)
             {
-                checkBox.BackColor = Color.FromArgb(170, 245, 185);
-                checkBox.ForeColor = ThemeRed;
-                checkBox.FlatAppearance.BorderColor = ThemeRed;
+                checkBox.BackColor = risk ? ThemeRed : ThemeActive;
+                checkBox.ForeColor = risk ? ThemeText : ThemeBack;
             }
             else
             {
-                checkBox.BackColor = Color.FromArgb(10, 72, 32);
-                checkBox.ForeColor = Color.White;
-                checkBox.FlatAppearance.BorderColor = Color.FromArgb(35, 130, 65);
+                checkBox.BackColor = ThemeBack;
+                checkBox.ForeColor = line;
+            }
+            checkBox.FlatAppearance.BorderColor = line;
+        }
+
+        private static void ConfigureTabControl(TabControl tabs)
+        {
+            tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+            tabs.SizeMode = TabSizeMode.Fixed;
+            tabs.ItemSize = new Size(116, 30);
+            tabs.BackColor = ThemeBack;
+            tabs.ForeColor = ThemeText;
+            tabs.DrawItem -= DrawDarkTab;
+            tabs.DrawItem += DrawDarkTab;
+        }
+
+        private static void DrawDarkTab(object sender, DrawItemEventArgs e)
+        {
+            TabControl tabs = sender as TabControl;
+            if (tabs == null || e.Index < 0 || e.Index >= tabs.TabPages.Count)
+            {
+                return;
+            }
+            bool selected = e.Index == tabs.SelectedIndex;
+            Rectangle bounds = e.Bounds;
+            using (Brush background = new SolidBrush(ThemeBack))
+            {
+                e.Graphics.FillRectangle(background, bounds);
+            }
+            using (Pen border = new Pen(selected ? ThemeActive : ThemeText))
+            {
+                e.Graphics.DrawRectangle(border, bounds.X, bounds.Y, bounds.Width - 1, bounds.Height - 1);
+            }
+            if (selected)
+            {
+                using (Pen top = new Pen(ThemeActive, 2F))
+                {
+                    e.Graphics.DrawLine(top, bounds.Left + 1, bounds.Top + 1, bounds.Right - 2, bounds.Top + 1);
+                }
+            }
+            TextRenderer.DrawText(
+                e.Graphics,
+                tabs.TabPages[e.Index].Text,
+                tabs.Font,
+                bounds,
+                ThemeText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+        }
+
+        private static void DrawDarkComboItem(object sender, DrawItemEventArgs e)
+        {
+            ComboBox combo = sender as ComboBox;
+            if (combo == null)
+            {
+                return;
+            }
+            bool selected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+            using (Brush background = new SolidBrush(selected ? ThemeActive : ThemePanel))
+            {
+                e.Graphics.FillRectangle(background, e.Bounds);
+            }
+            string text = e.Index >= 0 && e.Index < combo.Items.Count
+                ? Convert.ToString(combo.Items[e.Index], CultureInfo.InvariantCulture)
+                : combo.Text;
+            TextRenderer.DrawText(
+                e.Graphics,
+                text,
+                combo.Font,
+                e.Bounds,
+                selected ? ThemeBack : ThemeText,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding | TextFormatFlags.NoClipping);
+        }
+
+        private static int MeasureComboDropDownWidth(ComboBox combo)
+        {
+            int width = combo.Width;
+            foreach (object item in combo.Items)
+            {
+                string text = Convert.ToString(item, CultureInfo.InvariantCulture);
+                if (!string.IsNullOrEmpty(text))
+                {
+                    width = Math.Max(width, TextRenderer.MeasureText(text, combo.Font, Size.Empty, TextFormatFlags.NoPadding).Width + 42);
+                }
+            }
+            return width;
+        }
+
+        private static void EnableDarkTitleBar(Form form)
+        {
+            if (form == null || !form.IsHandleCreated)
+            {
+                return;
+            }
+            int enabled = 1;
+            if (DwmSetWindowAttribute(form.Handle, 20, ref enabled, sizeof(int)) != 0)
+            {
+                DwmSetWindowAttribute(form.Handle, 19, ref enabled, sizeof(int));
             }
         }
 
         private bool ShowRiskConfirmation(string title, string message)
+        {
+            return ShowRiskConfirmation(title, message, null);
+        }
+
+        private bool ShowRiskConfirmation(string title, string message, string screenshotPath)
         {
             Form owner = configForm != null && configForm.Visible ? configForm : this;
             using (var dialog = new Form())
             {
                 dialog.FormBorderStyle = FormBorderStyle.None;
                 dialog.StartPosition = FormStartPosition.Manual;
-                dialog.Bounds = owner.Bounds;
+                Rectangle ownerClientBounds = owner.RectangleToScreen(owner.ClientRectangle);
+                dialog.Bounds = ownerClientBounds;
                 dialog.ShowInTaskbar = false;
                 dialog.TopMost = owner.TopMost;
-                dialog.BackColor = Color.FromArgb(18, 4, 4);
+                dialog.BackColor = ThemeBack;
                 dialog.BackgroundImage = CaptureBlurredBackground(owner);
                 dialog.BackgroundImageLayout = ImageLayout.Stretch;
 
@@ -1726,75 +3376,116 @@ namespace SBMSGui
                 layout.Dock = DockStyle.Fill;
                 layout.BackColor = Color.Transparent;
                 layout.ColumnCount = 1;
-                layout.RowCount = 4;
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
-                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
-                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 76));
-                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+                layout.RowCount = 3;
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
+                layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 154));
+                layout.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
                 dialog.Controls.Add(layout);
 
                 var titleLabel = new Label();
                 titleLabel.Text = T(message);
                 titleLabel.Dock = DockStyle.Fill;
                 titleLabel.TextAlign = ContentAlignment.MiddleCenter;
-                titleLabel.Font = new Font("Segoe UI", 28F, FontStyle.Bold);
+                titleLabel.Font = new Font("Segoe UI", english ? 22F : 28F, FontStyle.Bold);
                 titleLabel.ForeColor = ThemeRed;
                 titleLabel.BackColor = Color.Transparent;
+                titleLabel.Padding = new Padding(36, 0, 36, 0);
                 layout.Controls.Add(titleLabel, 0, 1);
-
-                var subtitleLabel = new Label();
-                subtitleLabel.Text = T(title);
-                subtitleLabel.Dock = DockStyle.Fill;
-                subtitleLabel.TextAlign = ContentAlignment.TopCenter;
-                subtitleLabel.Font = new Font("Consolas", 15F, FontStyle.Bold);
-                subtitleLabel.ForeColor = Color.White;
-                subtitleLabel.BackColor = Color.Transparent;
-                layout.Controls.Add(subtitleLabel, 0, 2);
 
                 var buttons = new FlowLayoutPanel();
                 buttons.Dock = DockStyle.Bottom;
-                buttons.Height = 58;
+                buttons.Height = 68;
                 buttons.FlowDirection = FlowDirection.RightToLeft;
-                buttons.Padding = new Padding(0, 0, 28, 18);
+                buttons.WrapContents = false;
+                buttons.Padding = new Padding(0, 0, 28, 24);
                 buttons.BackColor = Color.Transparent;
-                var confirm = new Button { Text = T("确认"), Width = 110, Height = 34, DialogResult = DialogResult.OK };
-                var cancel = new Button { Text = T("放弃更改"), Width = 120, Height = 34, DialogResult = DialogResult.Cancel };
+                var confirm = new GlowButton { Text = T("确认"), Width = 170, Height = 36, DialogResult = DialogResult.OK };
+                var cancel = new GlowButton { Text = T("放弃更改"), Width = 210, Height = 36, DialogResult = DialogResult.Cancel };
                 StyleRiskButton(confirm, true);
                 StyleRiskButton(cancel, false);
                 buttons.Controls.Add(confirm);
                 buttons.Controls.Add(cancel);
-                dialog.Controls.Add(buttons);
+                layout.Controls.Add(buttons, 0, 2);
                 dialog.AcceptButton = confirm;
                 dialog.CancelButton = cancel;
-                return dialog.ShowDialog(owner) == DialogResult.OK;
+                System.Windows.Forms.Timer probeTimer = null;
+                if (!string.IsNullOrEmpty(screenshotPath))
+                {
+                    probeTimer = new System.Windows.Forms.Timer();
+                    probeTimer.Interval = 350;
+                    probeTimer.Tick += delegate
+                    {
+                        probeTimer.Stop();
+                        CaptureDialog(dialog, screenshotPath);
+                        dialog.DialogResult = DialogResult.Cancel;
+                        dialog.Close();
+                    };
+                    probeTimer.Start();
+                }
+                DialogResult result = dialog.ShowDialog(owner);
+                if (probeTimer != null)
+                {
+                    probeTimer.Dispose();
+                }
+                return result == DialogResult.OK;
+            }
+        }
+
+        private static void CaptureDialog(Form dialog, string screenshotPath)
+        {
+            if (dialog.Width <= 0 || dialog.Height <= 0)
+            {
+                return;
+            }
+            using (var bitmap = new Bitmap(dialog.Width, dialog.Height))
+            {
+                dialog.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                bitmap.Save(screenshotPath, System.Drawing.Imaging.ImageFormat.Png);
             }
         }
 
         private static void StyleRiskButton(Button button, bool danger)
         {
-            button.FlatStyle = FlatStyle.Flat;
-            button.BackColor = danger ? Color.FromArgb(190, 255, 210) : Color.FromArgb(10, 72, 32);
-            button.ForeColor = danger ? ThemeRed : Color.White;
-            button.FlatAppearance.BorderColor = danger ? ThemeRed : Color.FromArgb(35, 130, 65);
+            StyleButton(button, danger, danger);
         }
 
-        private static Bitmap CaptureBlurredBackground(Form owner)
+        private static void StyleButton(Button button, bool danger, bool active)
         {
-            int width = Math.Max(1, owner.Bounds.Width);
-            int height = Math.Max(1, owner.Bounds.Height);
+            GlowButton glowButton = button as GlowButton;
+            if (glowButton != null)
+            {
+                glowButton.DangerFill = danger;
+                glowButton.ActiveFill = active;
+                glowButton.FlatAppearance.BorderSize = 0;
+                glowButton.FlatAppearance.MouseOverBackColor = ThemeBack;
+                glowButton.FlatAppearance.MouseDownBackColor = ThemeBack;
+                glowButton.Invalidate();
+                return;
+            }
+            button.FlatStyle = FlatStyle.Flat;
+            button.UseVisualStyleBackColor = false;
+            button.BackColor = active ? (danger ? ThemeRed : ThemeActive) : ThemeBack;
+            button.ForeColor = active ? (danger ? ThemeText : ThemeBack) : (danger ? ThemeRed : ThemeText);
+            button.FlatAppearance.BorderColor = danger ? ThemeRed : ThemeText;
+            button.FlatAppearance.BorderSize = 1;
+            button.FlatAppearance.MouseOverBackColor = ThemePanel;
+            button.FlatAppearance.MouseDownBackColor = ThemeActive;
+        }
+
+        private static Bitmap CaptureBlurredBackground(Control source)
+        {
+            int width = Math.Max(1, source.ClientSize.Width);
+            int height = Math.Max(1, source.ClientSize.Height);
             Bitmap capture = new Bitmap(width, height);
             try
             {
-                using (Graphics graphics = Graphics.FromImage(capture))
-                {
-                    graphics.CopyFromScreen(owner.Bounds.Location, Point.Empty, owner.Bounds.Size);
-                }
+                source.DrawToBitmap(capture, new Rectangle(0, 0, width, height));
             }
             catch
             {
                 using (Graphics graphics = Graphics.FromImage(capture))
                 {
-                    graphics.Clear(Color.FromArgb(18, 4, 4));
+                    graphics.Clear(ThemeBack);
                 }
             }
             int smallWidth = Math.Max(1, width / 14);
@@ -1810,7 +3501,7 @@ namespace SBMSGui
             {
                 graphics.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                 graphics.DrawImage(small, new Rectangle(0, 0, width, height));
-                using (Brush brush = new SolidBrush(Color.FromArgb(120, 4, 0, 0)))
+                using (Brush brush = new SolidBrush(Color.FromArgb(180, ThemeBack)))
                 {
                     graphics.FillRectangle(brush, new Rectangle(0, 0, width, height));
                 }
@@ -1822,7 +3513,7 @@ namespace SBMSGui
 
         private void UpdateConfigLock()
         {
-            bool locked = IsBridgeRunning();
+            bool locked = forceConfigLockForProbe || IsBridgeRunning();
             configLockPanel.Visible = locked;
             if (locked)
             {
@@ -1834,7 +3525,7 @@ namespace SBMSGui
         {
             if (!suppressStreamModePrompt && streamModeCheck.Checked)
             {
-                if (!ShowRiskConfirmation("串流模式", "串流模式只创建虚拟桌面，不复制到任何物理显示器"))
+                if (!ShowRiskConfirmation("串流模式 BETA", "串流模式为BETA功能, 只创建虚拟桌面, 不复制到任何物理显示器"))
                 {
                     suppressStreamModePrompt = true;
                     streamModeCheck.Checked = false;
@@ -1844,21 +3535,8 @@ namespace SBMSGui
                 }
             }
             ApplyStreamModeToBetaPairGrid();
-            UpdateRuntimeOptionState();
+            UpdateRuntimeOptionState(false);
             UpdateToggleVisuals();
-            UpdateStatus();
-        }
-
-        private void OnMultiScreenBetaChanged()
-        {
-            if (IsMultiMappingEnabled())
-            {
-                if (!deviceHostCheck.Checked)
-                {
-                    deviceHostCheck.Checked = true;
-                }
-            }
-            UpdateRuntimeOptionState();
             UpdateStatus();
         }
 
@@ -1872,6 +3550,12 @@ namespace SBMSGui
             bool streamOnly = streamModeCheck.Checked && !IsMultiMappingEnabled();
             betaPairGrid.Columns[BetaColTarget].HeaderText = T("目标显示器");
             betaPairGrid.Columns[BetaColTarget].ReadOnly = streamOnly;
+            if (IsMultiMappingEnabled())
+            {
+                SyncFirstBetaRowFromSingleControls();
+                RebuildBetaGroupTabs();
+                return;
+            }
 
             updatingBetaPairGrid = true;
             try
@@ -1907,13 +3591,112 @@ namespace SBMSGui
             {
                 updatingBetaPairGrid = false;
             }
+            SyncFirstBetaRowFromSingleControls();
             RebuildBetaGroupTabs();
+        }
+
+        private void SyncFirstBetaRowFromSingleControls()
+        {
+            if (updatingBetaPairGrid || betaPairGrid.Columns.Count <= BetaColSource || betaPairGrid.Rows.Count == 0)
+            {
+                return;
+            }
+
+            updatingBetaPairGrid = true;
+            try
+            {
+                DataGridViewRow row = betaPairGrid.Rows[0];
+                row.Cells[BetaColEnabled].Value = true;
+                bool streamOnly = streamModeCheck.Checked;
+                row.Cells[BetaColMode].Value = streamOnly ? "串流" : "输出";
+                DisplayChoice targetDisplay = null;
+                if (streamOnly)
+                {
+                    row.Tag = null;
+                    string streamLabel = "串流目标 1";
+                    AddComboItemIfMissing(BetaColTarget, streamLabel);
+                    row.Cells[BetaColTarget].Value = streamLabel;
+                }
+                else
+                {
+                    targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice ??
+                                    FindDisplayByTargetLabel(targetText.Text.Trim()) ??
+                                    GetDefaultPhysicalDisplay("");
+                    if (targetDisplay != null)
+                    {
+                        row.Tag = targetDisplay;
+                        string targetLabel = GetDisplayLabel(targetDisplay);
+                        AddComboItemIfMissing(BetaColTarget, targetLabel);
+                        row.Cells[BetaColTarget].Value = targetLabel;
+                    }
+                }
+
+                Resolution targetResolution;
+                if (TryParseResolution(targetResolutionText.Text.Trim(), out targetResolution))
+                {
+                    int horizontal;
+                    string aspect;
+                    string orientation;
+                    BuildResolutionParts(targetResolution, out horizontal, out aspect, out orientation);
+                    row.Cells[BetaColHorizontal].Value = horizontal.ToString(CultureInfo.InvariantCulture);
+                    row.Cells[BetaColAspect].Value = aspect;
+                    row.Cells[BetaColOrientation].Value = orientation;
+                }
+
+                string targetSize = targetSizeText.Text.Trim();
+                double parsedSize;
+                if (TryParseSize(targetSize, out parsedSize) && parsedSize > 0.0)
+                {
+                    row.Cells[BetaColSize].Value = targetSize;
+                }
+
+                row.Cells[BetaColStrategy].Value = GetStrategyTextForIndex(strategyCombo.SelectedIndex);
+                row.Cells[BetaColRefresh].Value = GetRefreshOrDefault(singleRefreshText.Text, targetDisplay);
+                row.Cells[BetaColSource].Value = sourceText.Text.Trim();
+            }
+            finally
+            {
+                updatingBetaPairGrid = false;
+            }
+            RecalculateBetaPairGrid(false);
+        }
+
+        private void SyncSingleRefreshToBetaRow()
+        {
+            if (updatingBetaPairGrid || betaPairGrid.Columns.Count <= BetaColSource || betaPairGrid.Rows.Count == 0)
+            {
+                return;
+            }
+
+            betaPairGrid.Rows[0].Cells[BetaColRefresh].Value = singleRefreshText.Text.Trim();
+        }
+
+        private static string GetStrategyTextForIndex(int index)
+        {
+            if (index == 1)
+            {
+                return "文字清晰优先";
+            }
+            if (index == 2)
+            {
+                return "直接使用源";
+            }
+            return "真实尺寸比例";
         }
 
         private void UpdateRuntimeOptionState()
         {
+            UpdateRuntimeOptionState(true);
+        }
+
+        private void UpdateRuntimeOptionState(bool rebuildTabs)
+        {
+            EnforceDefaultRuntimeOptions();
             bool multiBeta = IsMultiMappingEnabled();
             bool streamOnly = streamModeCheck.Checked && !multiBeta;
+            bool allMultiRowsStreamOnly = multiBeta && CountEnabledBetaPairs() > 0 &&
+                                          CountEnabledStreamOnlyBetaPairs() == CountEnabledBetaPairs();
+            bool hasNativeOutput = !streamOnly && !allMultiRowsStreamOnly;
             if ((streamOnly || multiBeta) && !deviceHostCheck.Checked)
             {
                 deviceHostCheck.Checked = true;
@@ -1921,19 +3704,30 @@ namespace SBMSGui
 
             bool bridgeRunning = IsBridgeRunning();
             deviceHostCheck.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
-            targetDisplayCombo.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
-            targetText.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
+            targetDisplayCombo.Enabled = !streamModeCheck.Checked && !bridgeRunning;
+            targetText.Enabled = !streamModeCheck.Checked && !bridgeRunning;
             betaPairGrid.Enabled = multiBeta && !bridgeRunning;
-            addBetaGroupButton.Enabled = !bridgeRunning && betaPairGrid.Rows.Count < MultiScreenBetaMaxTargets;
-            removeBetaGroupButton.Enabled = multiBeta && !bridgeRunning && betaPairGrid.Rows.Count > 1;
-            filterCombo.Enabled = (!streamOnly || multiBeta) && !bridgeRunning;
-            inputCheck.Enabled = !streamOnly && !bridgeRunning;
-            windowMoveCheck.Enabled = !streamOnly && !bridgeRunning;
-            vsyncCheck.Enabled = !streamOnly && !bridgeRunning;
+            addBetaGroupButton.Enabled = !bridgeRunning;
+            removeBetaGroupButton.Enabled = !bridgeRunning;
+            filterCombo.Enabled = hasNativeOutput && !bridgeRunning;
+            inputCheck.Enabled = hasNativeOutput && !bridgeRunning;
+            windowMoveCheck.Enabled = hasNativeOutput && !bridgeRunning;
+            vsyncCheck.Enabled = hasNativeOutput && !bridgeRunning;
             streamModeCheck.Enabled = !bridgeRunning;
-            multiScreenBetaCheck.Checked = multiBeta;
-            UpdateMappingTabs();
+            UpdateMappingTabs(rebuildTabs);
             UpdateToggleVisuals();
+        }
+
+        private void EnforceDefaultRuntimeOptions()
+        {
+            inputCheck.Checked = true;
+            windowMoveCheck.Checked = true;
+            deviceHostCheck.Checked = true;
+            vsyncCheck.Checked = true;
+            if (filterCombo.Items.Count > 0 && filterCombo.SelectedIndex < 0)
+            {
+                filterCombo.SelectedIndex = 0;
+            }
         }
 
         private static void ApplyThemeToMenuItems(ToolStripItemCollection items)
@@ -1957,7 +3751,7 @@ namespace SBMSGui
             bool running = IsBridgeRunning();
             bool multiConfigured = IsMultiMappingEnabled();
             bool streamOnly = streamModeCheck.Checked && !multiConfigured && running && (process == null || process.HasExited);
-            bool multiBeta = multiConfigured && running && (HasRunningBetaProcess() || deviceHostProcess != null);
+            bool multiBeta = multiConfigured && running && (HasRunningBetaProcess() || IsDeviceHostRunning());
             statusLabel.Text = AppName + " // " + T(running ? (multiBeta ? "多屏BETA运行中" : (streamOnly ? "串流中" : "运行中")) : "待机");
             if (multiConfigured)
             {
@@ -1977,6 +3771,37 @@ namespace SBMSGui
                 routeLabel.Text = T("源") + " " + sourceText.Text.Trim() + "  >  " + T("目标") + " " + targetText.Text.Trim();
             }
             trayStopMenuItem.Enabled = running;
+            UpdateMainActionButtons();
+        }
+
+        private void UpdateMainActionButtons()
+        {
+            bool running = IsBridgeRunning();
+            startButton.Text = T(running ? "停止" : "启动");
+            startButton.DangerFill = running;
+            startButton.ActiveFill = false;
+            startButton.Minimal = !running;
+            startButton.Invalidate();
+            startupButton.ActiveFill = startupMenuItem.Checked;
+            startupButton.DangerFill = false;
+            startupButton.Minimal = true;
+            startupButton.Invalidate();
+            languageButton.ActiveFill = false;
+            languageButton.DangerFill = false;
+            languageButton.Minimal = true;
+            languageButton.Invalidate();
+            lightweightButton.ActiveFill = lightweightMenuItem.Checked;
+            lightweightButton.DangerFill = false;
+            lightweightButton.Minimal = true;
+            lightweightButton.Invalidate();
+            configButton.DangerFill = false;
+            configButton.ActiveFill = configInlineHost.Visible;
+            configButton.Minimal = true;
+            configButton.Invalidate();
+            listButton.DangerFill = false;
+            listButton.ActiveFill = false;
+            listButton.Minimal = true;
+            listButton.Invalidate();
         }
 
         private void RefreshDisplays()
@@ -1991,6 +3816,14 @@ namespace SBMSGui
             if (string.IsNullOrWhiteSpace(previousTargetDevice) && IsDisplayDeviceSelector(targetText.Text.Trim()))
             {
                 previousTargetDevice = targetText.Text.Trim();
+            }
+            if (string.IsNullOrWhiteSpace(previousSourceDevice) && !string.IsNullOrWhiteSpace(pendingConfigSourceDevice))
+            {
+                previousSourceDevice = pendingConfigSourceDevice;
+            }
+            if (string.IsNullOrWhiteSpace(previousTargetDevice) && !string.IsNullOrWhiteSpace(pendingConfigTargetDevice))
+            {
+                previousTargetDevice = pendingConfigTargetDevice;
             }
 
             displays.Clear();
@@ -2032,6 +3865,8 @@ namespace SBMSGui
             SelectDefaultDisplays(previousSourceDevice, previousTargetDevice);
             RefreshBetaTargetChoices();
             RestoreBetaPairRows(betaSnapshots, previousTargetDevice);
+            pendingConfigSourceDevice = "";
+            pendingConfigTargetDevice = "";
             SyncSelectedDisplaysToSelectors();
             ApplyStreamModeToBetaPairGrid();
             RecalculateBetaPairGrid(false);
@@ -2094,6 +3929,7 @@ namespace SBMSGui
                     Orientation = GetCellText(row, BetaColOrientation),
                     Size = GetCellText(row, BetaColSize),
                     Strategy = GetCellText(row, BetaColStrategy),
+                    Refresh = GetCellText(row, BetaColRefresh),
                     Source = GetCellText(row, BetaColSource)
                 });
             }
@@ -2164,12 +4000,9 @@ namespace SBMSGui
 
             if (userAdded)
             {
-                multiMappingConfirmed = true;
-                multiScreenBetaCheck.Checked = true;
-                ApplyStreamModeToBetaPairGrid();
                 AppendLog("已新增 BETA 配置组");
                 UpdateMappingTabs();
-                RebuildBetaGroupTabs();
+                ScheduleConfigurationSave();
             }
         }
 
@@ -2180,43 +4013,46 @@ namespace SBMSGui
                 UpdateConfigLock();
                 return;
             }
-            if (!multiMappingConfirmed)
+            if (betaPairGrid.Rows.Count >= 1)
             {
-                if (!ShowRiskConfirmation("多组映射 BETA", "多组映射支持为BETA功能, 不保证稳定性"))
+                if (!ShowRiskConfirmation("多组映射 BETA", "多组映射为BETA功能, 不确定稳定性"))
                 {
                     return;
                 }
-                multiMappingConfirmed = true;
-                multiScreenBetaCheck.Checked = true;
             }
             if (betaPairGrid.Rows.Count == 0)
             {
                 AddBetaGroupRow(null, false);
             }
-            AddBetaGroupRow(null, true);
-            RecalculateBetaPairGrid(false);
-            UpdateRuntimeOptionState();
-            if (mappingTabs.TabPages.Contains(multiMappingPage))
+            SuspendRedraw(configInlineHost);
+            try
             {
-                mappingTabs.SelectedTab = multiMappingPage;
+                SyncFirstBetaRowFromSingleControls();
+                AddBetaGroupRow(null, true);
+                RecalculateBetaPairGrid(false);
+                selectedBetaGroupIndex = Math.Max(0, betaPairGrid.Rows.Count - 1);
+                UpdateRuntimeOptionState(false);
+                SelectBetaGroupTab(selectedBetaGroupIndex);
             }
-            if (betaGroupTabs.TabPages.Count > 0)
+            finally
             {
-                betaGroupTabs.SelectedIndex = betaGroupTabs.TabPages.Count - 1;
+                ResumeRedraw(configInlineHost);
             }
         }
 
         private void AddBetaGroupRowInternal(BridgePairSnapshot snapshot, bool selectNewRow)
         {
-            DisplayChoice display = FindDisplayByTargetLabel(snapshot.Target) ?? GetDefaultPhysicalDisplay("");
+            string savedTargetLabel = snapshot != null ? (snapshot.Target ?? "").Trim() : "";
+            DisplayChoice display = FindDisplayByTargetLabel(savedTargetLabel) ?? GetDefaultPhysicalDisplay("");
             string rowMode = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Mode) ? snapshot.Mode : "输出";
             bool streamOnly = IsStreamModeText(rowMode);
-            string targetLabel = streamOnly ? "" : (display != null ? GetDisplayLabel(display) : "");
+            string targetLabel = streamOnly ? "" : (!string.IsNullOrWhiteSpace(savedTargetLabel) ? savedTargetLabel : (display != null ? GetDisplayLabel(display) : ""));
             string rowHorizontal = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Horizontal) ? snapshot.Horizontal : "2560";
             string rowAspect = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Aspect) ? snapshot.Aspect : "16:9";
             string rowOrientation = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Orientation) ? snapshot.Orientation : "横屏";
             string rowSize = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Size) ? snapshot.Size : (display != null ? GuessTargetSize(display) : "24");
             string rowStrategy = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Strategy) ? snapshot.Strategy : "真实尺寸比例";
+            string rowRefresh = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Refresh) ? snapshot.Refresh : GetRefreshOrDefault("", display);
             string rowSource = snapshot != null ? snapshot.Source : "";
             bool enabled = snapshot == null || snapshot.Enabled;
 
@@ -2224,8 +4060,12 @@ namespace SBMSGui
             {
                 targetLabel = "串流目标 " + (betaPairGrid.Rows.Count + 1).ToString(CultureInfo.InvariantCulture);
             }
+            else if (display != null)
+            {
+                targetLabel = GetDisplayLabel(display);
+            }
             AddComboItemIfMissing(BetaColTarget, targetLabel);
-            int index = betaPairGrid.Rows.Add(enabled, streamOnly ? "串流" : "输出", targetLabel, rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowSource);
+            int index = betaPairGrid.Rows.Add(enabled, streamOnly ? "串流" : "输出", targetLabel, rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowRefresh, rowSource);
             betaPairGrid.Rows[index].Tag = streamOnly ? null : display;
             if (display != null && snapshot != null && string.IsNullOrWhiteSpace(snapshot.Horizontal))
             {
@@ -2264,6 +4104,7 @@ namespace SBMSGui
                 Orientation = orientation,
                 Size = display != null ? GuessTargetSize(display) : "24",
                 Strategy = "真实尺寸比例",
+                Refresh = display != null ? GetRefreshOrDefault(display.Refresh, display) : "60",
                 Source = ""
             };
         }
@@ -2278,17 +4119,19 @@ namespace SBMSGui
 
             int index = betaGroupTabs.SelectedIndex >= 0 ? betaGroupTabs.SelectedIndex :
                         (betaPairGrid.CurrentRow != null ? betaPairGrid.CurrentRow.Index : betaPairGrid.Rows.Count - 1);
+            if (index == 0)
+            {
+                AppendLog("组 1 为基准组，不能删除");
+                return;
+            }
             if (index >= 0 && index < betaPairGrid.Rows.Count)
             {
                 betaPairGrid.Rows.RemoveAt(index);
             }
-            if (betaPairGrid.Rows.Count <= 1)
-            {
-                multiMappingConfirmed = false;
-                multiScreenBetaCheck.Checked = false;
-            }
+            selectedBetaGroupIndex = Math.Max(0, Math.Min(index - 1, betaPairGrid.Rows.Count - 1));
             UpdateMappingTabs();
-            RebuildBetaGroupTabs();
+            SelectBetaGroupTab(selectedBetaGroupIndex);
+            ScheduleConfigurationSave();
         }
 
         private List<DisplayChoice> GetPhysicalDisplays()
@@ -2402,6 +4245,7 @@ namespace SBMSGui
             row.Cells[BetaColAspect].Value = aspect;
             row.Cells[BetaColOrientation].Value = orientation;
             row.Cells[BetaColSize].Value = GuessTargetSize(display);
+            row.Cells[BetaColRefresh].Value = GetRefreshOrDefault("", display);
         }
 
         private void OnBetaPairGridCellValueChanged(DataGridViewCellEventArgs e)
@@ -2496,7 +4340,7 @@ namespace SBMSGui
 
         private bool IsMultiMappingEnabled()
         {
-            return multiMappingConfirmed && betaPairGrid.Rows.Count > 1;
+            return betaPairGrid.Rows.Count > 1;
         }
 
         private bool IsBetaRowStreamOnly(int rowIndex)
@@ -2540,23 +4384,15 @@ namespace SBMSGui
             {
                 foreach (DataGridViewRow row in betaPairGrid.Rows)
                 {
-                    int strategy = GetBetaRowStrategyIndex(row);
-                    if (strategy == 2)
-                    {
-                        continue;
-                    }
-
                     Resolution targetResolution;
                     double targetSize;
-                    if (!TryReadBetaTargetSpec(row, out targetResolution, out targetSize))
+                    Resolution source;
+                    if (!TryCalculateBetaRowSource(row, baseResolution, baseSize, out targetResolution, out targetSize, out source))
                     {
                         row.Cells[BetaColSource].Value = "参数无效";
                         continue;
                     }
 
-                    Resolution source = strategy == 1
-                        ? CalculateQualitySource(baseResolution, targetResolution, baseSize, targetSize)
-                        : CalculatePhysicalSource(baseResolution, targetResolution, baseSize, targetSize);
                     row.Cells[BetaColSource].Value = FormatResolution(source);
                 }
             }
@@ -2576,6 +4412,17 @@ namespace SBMSGui
             pairs = new List<BridgePairConfig>();
             message = "";
             RecalculateBetaPairGrid(false);
+            Resolution baseResolution;
+            double baseSize;
+            if (!TryParseResolution(primaryResolutionText.Text, out baseResolution) ||
+                !TryParseSize(primarySizeText.Text, out baseSize) ||
+                baseResolution.Width <= 0 ||
+                baseResolution.Height <= 0 ||
+                baseSize <= 0.0)
+            {
+                message = "多组映射基准参数无效";
+                return false;
+            }
 
             foreach (DataGridViewRow row in betaPairGrid.Rows)
             {
@@ -2594,18 +4441,13 @@ namespace SBMSGui
 
                 Resolution targetResolution;
                 double targetSize;
-                if (!TryReadBetaTargetSpec(row, out targetResolution, out targetSize))
+                Resolution sourceResolution;
+                if (!TryCalculateBetaRowSource(row, baseResolution, baseSize, out targetResolution, out targetSize, out sourceResolution))
                 {
                     message = "多组映射参数无效: " + GetCellText(row, BetaColTarget);
                     return false;
                 }
-
-                Resolution sourceResolution;
-                if (!TryParseResolution(GetCellText(row, BetaColSource), out sourceResolution))
-                {
-                    message = "多组映射虚拟源无效: " + GetCellText(row, BetaColTarget);
-                    return false;
-                }
+                row.Cells[BetaColSource].Value = FormatResolution(sourceResolution);
 
                 pairs.Add(new BridgePairConfig
                 {
@@ -2615,7 +4457,8 @@ namespace SBMSGui
                     SourceResolution = sourceResolution,
                     Orientation = GetOrientationMode(GetCellText(row, BetaColOrientation)),
                     StrategyIndex = GetBetaRowStrategyIndex(row),
-                    TargetSize = targetSize
+                    TargetSize = targetSize,
+                    Refresh = GetRefreshOrDefault(GetCellText(row, BetaColRefresh), targetDisplay)
                 });
             }
 
@@ -2630,6 +4473,36 @@ namespace SBMSGui
                 return false;
             }
             return true;
+        }
+
+        private static bool TryCalculateBetaRowSource(
+            DataGridViewRow row,
+            Resolution baseResolution,
+            double baseSize,
+            out Resolution targetResolution,
+            out double targetSize,
+            out Resolution sourceResolution)
+        {
+            sourceResolution = new Resolution();
+            if (!TryReadBetaTargetSpec(row, out targetResolution, out targetSize))
+            {
+                return false;
+            }
+
+            int strategy = GetBetaRowStrategyIndex(row);
+            if (strategy == 2)
+            {
+                sourceResolution = targetResolution;
+            }
+            else if (strategy == 1)
+            {
+                sourceResolution = CalculateQualitySource(baseResolution, targetResolution, baseSize, targetSize);
+            }
+            else
+            {
+                sourceResolution = CalculatePhysicalSource(baseResolution, targetResolution, baseSize, targetSize);
+            }
+            return sourceResolution.Width > 0 && sourceResolution.Height > 0;
         }
 
         private static bool IsBetaRowEnabled(DataGridViewRow row)
@@ -2648,14 +4521,24 @@ namespace SBMSGui
         {
             targetResolution = new Resolution();
             targetSize = 0.0;
+            if (!TryReadBetaResolutionSpec(row, out targetResolution) ||
+                !TryParseSize(GetCellText(row, BetaColSize), out targetSize) ||
+                targetSize <= 0.0)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        private static bool TryReadBetaResolutionSpec(DataGridViewRow row, out Resolution targetResolution)
+        {
+            targetResolution = new Resolution();
             int horizontal;
             int aspectW;
             int aspectH;
             if (!int.TryParse(GetCellText(row, BetaColHorizontal), out horizontal) ||
                 horizontal <= 0 ||
-                !TryParseAspectText(GetCellText(row, BetaColAspect), out aspectW, out aspectH) ||
-                !TryParseSize(GetCellText(row, BetaColSize), out targetSize) ||
-                targetSize <= 0.0)
+                !TryParseAspectText(GetCellText(row, BetaColAspect), out aspectW, out aspectH))
             {
                 return false;
             }
@@ -2744,6 +4627,20 @@ namespace SBMSGui
                 }
             }
             return "24";
+        }
+
+        private static string GetRefreshOrDefault(string refreshText, DisplayChoice display)
+        {
+            int refresh;
+            if (int.TryParse((refreshText ?? "").Trim(), out refresh) && refresh > 0)
+            {
+                return refresh.ToString(CultureInfo.InvariantCulture);
+            }
+            if (display != null && int.TryParse((display.Refresh ?? "").Trim(), out refresh) && refresh > 0)
+            {
+                return refresh.ToString(CultureInfo.InvariantCulture);
+            }
+            return "60";
         }
 
         private void SelectDefaultDisplays(string previousSourceDevice, string previousTargetDevice)
@@ -2859,6 +4756,10 @@ namespace SBMSGui
             {
                 targetText.Text = targetDisplay.DeviceName;
                 targetResolutionText.Text = targetDisplay.Resolution;
+                if (string.IsNullOrWhiteSpace(singleRefreshText.Text))
+                {
+                    singleRefreshText.Text = GetRefreshOrDefault("", targetDisplay);
+                }
                 if (!updatingConfigurationInputs && configInputTabs.TabPages.Count > 0 && configInputTabs.SelectedIndex == 1)
                 {
                     PopulateManualTargetFromResolution(targetDisplay.Resolution);
@@ -2977,14 +4878,30 @@ namespace SBMSGui
             RefreshDisplays();
             RecalculateBetaPairGrid(true);
             AppendLog(T("配置已应用"));
+            SaveConfigurationNow(true);
         }
 
         private static Resolution CalculatePhysicalSource(Resolution primary, Resolution target, double primarySize, double targetSize)
         {
-            double ratio = targetSize / primarySize;
-            int width = RoundEven(primary.Width * ratio);
+            double primaryPhysicalWidth = CalculatePhysicalWidth(primary, primarySize);
+            double targetPhysicalWidth = CalculatePhysicalWidth(target, targetSize);
+            if (primaryPhysicalWidth <= 0.0 || targetPhysicalWidth <= 0.0 || target.Width <= 0)
+            {
+                return new Resolution { Width = 1, Height = 1 };
+            }
+
+            double primaryPixelsPerInchX = primary.Width / primaryPhysicalWidth;
+            int width = RoundEven(targetPhysicalWidth * primaryPixelsPerInchX);
             int height = RoundEven(width * target.Height / (double)target.Width);
             return new Resolution { Width = Math.Max(width, 1), Height = Math.Max(height, 1) };
+        }
+
+        private static double CalculatePhysicalWidth(Resolution resolution, double diagonalInches)
+        {
+            double width = resolution.Width;
+            double height = resolution.Height;
+            double diagonalPixels = Math.Sqrt(width * width + height * height);
+            return diagonalPixels <= 0.0 ? 0.0 : diagonalInches * width / diagonalPixels;
         }
 
         private static Resolution CalculateQualitySource(Resolution primary, Resolution target, double primarySize, double targetSize)
@@ -3105,12 +5022,30 @@ namespace SBMSGui
             return resolution.Width + "x" + resolution.Height;
         }
 
-        private void StartBridge()
+        private void ToggleBridge()
         {
             if (IsBridgeRunning())
             {
+                StopBridge();
+            }
+            else
+            {
+                StartBridge();
+            }
+        }
+
+        private void StartBridge()
+        {
+            if (IsBridgeRunning() || bridgeStarting)
+            {
                 return;
             }
+            bridgeStarting = true;
+            startButton.Enabled = false;
+            try
+            {
+            SyncFirstBetaRowFromSingleControls();
+            EnforceDefaultRuntimeOptions();
             bool multiBeta = IsMultiMappingEnabled();
             bool streamOnly = streamModeCheck.Checked && !multiBeta;
             bool manageVirtualDisplay = deviceHostCheck.Checked || streamOnly;
@@ -3164,40 +5099,64 @@ namespace SBMSGui
             string sourceResolutionForFilter = requestedSource;
             DisplayChoice selectedTargetForArgs = targetDisplayCombo.SelectedItem as DisplayChoice;
             string targetResolutionForFilter = selectedTargetForArgs != null ? selectedTargetForArgs.Resolution : targetResolutionText.Text.Trim();
+            lastManagedVirtualResolution = "";
+            lastManagedVirtualRefresh = "";
+            lastManagedVirtualOrientation = DMDO_DEFAULT;
 
             if (manageVirtualDisplay)
             {
-                StartDeviceHost();
+                int virtualDeviceCount = multiBeta ? betaPairs.Count : 1;
+                if (!StartDeviceHost(virtualDeviceCount))
+                {
+                    AbortBridgeStart("虚拟显示器 host 启动失败，已停止桥接");
+                    return;
+                }
                 if (multiBeta)
                 {
                     List<DisplayChoice> virtualSources;
-                    if (!WaitForVirtualSources(betaPairs.Count, 30000, out virtualSources))
+                    string virtualWaitFailure;
+                    if (!WaitForVirtualSources(betaPairs.Count, 30000, out virtualSources, out virtualWaitFailure))
                     {
-                        AppendLog("等待多屏 BETA 虚拟显示器超时，needed=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture));
-                        StopDeviceHost();
+                        AbortBridgeStart(string.IsNullOrWhiteSpace(virtualWaitFailure)
+                            ? "等待多屏 BETA 虚拟显示器超时，needed=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture)
+                            : virtualWaitFailure);
                         return;
                     }
 
                     for (int i = 0; i < betaPairs.Count && i < virtualSources.Count; ++i)
                     {
                         string modeMessage;
-                        if (TryApplyDisplayMode(virtualSources[i].DeviceName, betaPairs[i].SourceResolution, virtualSources[i].Refresh, betaPairs[i].Orientation, out modeMessage))
+                        Resolution appliedResolution;
+                        string appliedRefresh;
+                        if (!TryApplyDisplayMode(virtualSources[i].DeviceName, betaPairs[i].SourceResolution, betaPairs[i].Refresh, betaPairs[i].Orientation, out appliedResolution, out appliedRefresh, out modeMessage))
                         {
-                            AppendLog(modeMessage);
+                            AbortBridgeStart(modeMessage);
+                            return;
                         }
-                        else
+                        AppendLog(modeMessage);
+                        betaPairs[i].SourceResolution = appliedResolution;
+                        betaPairs[i].Refresh = appliedRefresh;
+
+                        DisplayChoice confirmedSource;
+                        if (!WaitForVirtualSourceMode(virtualSources[i].DeviceName, appliedResolution, 5000, out confirmedSource))
                         {
-                            AppendLog(modeMessage);
+                            AbortBridgeStart("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] 虚拟模式未确认: " + virtualSources[i].DeviceName + " -> " + FormatResolution(appliedResolution));
+                            return;
                         }
+                        virtualSources[i] = confirmedSource;
+                        betaPairs[i].Refresh = confirmedSource.Refresh;
+                        AppendLog("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] 虚拟模式已确认: " + confirmedSource.DeviceName + " " + confirmedSource.Resolution + "@" + confirmedSource.Refresh);
                     }
-                    Thread.Sleep(500);
                     RefreshDisplays();
-                    virtualSources = GetCurrentVirtualSources(betaPairs.Count);
+                    for (int i = 0; i < betaPairs.Count && i < betaPairGrid.Rows.Count; ++i)
+                    {
+                        betaPairGrid.Rows[i].Cells[BetaColSource].Value = FormatResolution(betaPairs[i].SourceResolution);
+                        betaPairGrid.Rows[i].Cells[BetaColRefresh].Value = betaPairs[i].Refresh;
+                    }
 
                     if (virtualSources.Count < betaPairs.Count)
                     {
-                        AppendLog("多屏 BETA 虚拟源数量不足，virtual=" + virtualSources.Count.ToString(CultureInfo.InvariantCulture) + " groups=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture));
-                        StopDeviceHost();
+                        AbortBridgeStart("多屏 BETA 虚拟源数量不足，virtual=" + virtualSources.Count.ToString(CultureInfo.InvariantCulture) + " groups=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture));
                         return;
                     }
 
@@ -3217,8 +5176,7 @@ namespace SBMSGui
 
                     if (!StartMultiScreenBeta(virtualSources, betaPairs))
                     {
-                        StopDeviceHost();
-                        SetRunning(false);
+                        AbortBridgeStart("多屏 BETA 启动失败，已停止虚拟显示器 host");
                         return;
                     }
                     SetRunning(true);
@@ -3227,9 +5185,12 @@ namespace SBMSGui
                 }
 
                 DisplayChoice virtualSource;
-                if (!WaitForAnyVirtualSource(30000, out virtualSource))
+                string singleVirtualWaitFailure;
+                if (!WaitForAnyVirtualSource(30000, out virtualSource, out singleVirtualWaitFailure))
                 {
-                    AppendLog("等待虚拟显示器超时，requested=" + requestedSource);
+                    string waitMessage = string.IsNullOrWhiteSpace(singleVirtualWaitFailure)
+                        ? "等待虚拟显示器超时，requested=" + requestedSource
+                        : singleVirtualWaitFailure;
                     if (deviceHostProcess != null && deviceHostProcess.HasExited)
                     {
                         AppendLog("虚拟显示器 host 已退出，exit=" + deviceHostProcess.ExitCode);
@@ -3238,7 +5199,7 @@ namespace SBMSGui
                             AppendLog(deviceHostLog.ToString().TrimEnd());
                         }
                     }
-                    StopDeviceHost();
+                    AbortBridgeStart(waitMessage);
                     return;
                 }
                 AppendLog("虚拟显示器已就位: " + virtualSource);
@@ -3249,36 +5210,40 @@ namespace SBMSGui
                 {
                     AppendLog("请求虚拟模式: " + requestedSource);
                     string modeMessage;
-                    if (TryApplyDisplayMode(virtualSource.DeviceName, requestedResolution, virtualSource.Refresh, GetSelectedDisplayOrientation(), out modeMessage))
+                    string requestedRefresh = GetSingleMappingRefresh(virtualSource);
+                    Resolution appliedResolution;
+                    string appliedRefresh;
+                    if (TryApplyDisplayMode(virtualSource.DeviceName, requestedResolution, requestedRefresh, GetSelectedDisplayOrientation(), out appliedResolution, out appliedRefresh, out modeMessage))
                     {
                         AppendLog(modeMessage);
                         DisplayChoice switchedSource;
-                        if (WaitForVirtualSource(requestedSource, 5000, out switchedSource))
+                        if (WaitForVirtualSourceMode(virtualSource.DeviceName, appliedResolution, 5000, out switchedSource))
                         {
                             virtualSource = switchedSource;
+                            requestedSource = FormatResolution(appliedResolution);
+                            sourceText.Text = requestedSource;
                             AppendLog("虚拟模式已确认: " + virtualSource);
                         }
                         else
                         {
                             RefreshDisplays();
-                            DisplayChoice refreshedSource;
-                            if (TryGetSelectedOrFirstVirtualSource(virtualSource.DeviceName, out refreshedSource))
-                            {
-                                virtualSource = refreshedSource;
-                            }
-                            AppendLog("虚拟模式切换后未确认到目标分辨率，当前: " + virtualSource.Resolution);
+                            AbortBridgeStart("虚拟模式切换后未确认到目标分辨率，停止启动: requested=" + requestedSource + " applied=" + FormatResolution(appliedResolution));
+                            return;
                         }
                     }
                     else
                     {
-                        AppendLog(modeMessage);
-                        AppendLog("使用当前虚拟模式继续: " + virtualSource.Resolution);
+                        AbortBridgeStart(modeMessage);
+                        return;
                     }
                 }
 
                 sourceSelector = virtualSource.DeviceName;
                 sourceResolutionForFilter = virtualSource.Resolution;
                 sourceText.Text = sourceSelector;
+                lastManagedVirtualResolution = virtualSource.Resolution;
+                lastManagedVirtualRefresh = GetSingleMappingRefresh(virtualSource);
+                lastManagedVirtualOrientation = GetSelectedDisplayOrientation();
                 RefreshDisplays();
                 SelectComboByDevice(sourceDisplayCombo, sourceSelector);
             }
@@ -3294,32 +5259,32 @@ namespace SBMSGui
             }
 
             var args = new StringBuilder();
-            args.Append("--source ").Append(Quote(sourceSelector));
-            args.Append(" --target ").Append(Quote(targetText.Text.Trim()));
-            args.Append(" --filter ").Append(Quote(GetFilterArgument(sourceResolutionForFilter, targetResolutionForFilter)));
-            if (!inputCheck.Checked)
-            {
-                args.Append(" --no-input");
-            }
-            if (!windowMoveCheck.Checked)
-            {
-                args.Append(" --no-window-move");
-            }
-            if (vsyncCheck.Checked)
-            {
-                args.Append(" --vsync");
-            }
+            args.Append(BuildSingleNativeArgs(sourceSelector, sourceResolutionForFilter, targetText.Text.Trim(), targetResolutionForFilter));
             AppendSelectedDisplayLog();
             lastNativeArgs = args.ToString();
             stoppingRequested = false;
             nativeRestartCount = 0;
             AppendLog("native 参数: " + lastNativeArgs);
-            StartNativeProcess(lastNativeArgs, false);
+            if (!StartNativeProcess(lastNativeArgs, false))
+            {
+                AbortBridgeStart("native 启动失败，已停止桥接");
+                return;
+            }
             SetRunning(true);
             AppendLog("已启动");
+            }
+            finally
+            {
+                bridgeStarting = false;
+                if (!IsBridgeRunning())
+                {
+                    startButton.Enabled = true;
+                    UpdateMainActionButtons();
+                }
+            }
         }
 
-        private void StartNativeProcess(string args, bool restarted)
+        private bool StartNativeProcess(string args, bool restarted)
         {
             process = CreateProcess(args);
             Process startedProcess = process;
@@ -3346,25 +5311,135 @@ namespace SBMSGui
                     {
                         ++nativeRestartCount;
                         AppendLog("检测到显示拓扑变化，重启 native 输出 " + nativeRestartCount + "/5");
-                        RefreshDisplays();
-                        if (deviceHostCheck.Checked && !WaitForSourceDisplay(sourceText.Text.Trim(), 10000))
+                        if (!TryRestartNativeAfterTopologyChange())
                         {
-                            AppendLog("重启前等待虚拟显示器超时");
-                            StopDeviceHost();
-                            SetRunning(false);
-                            return;
+                            AbortBridgeStart("native 重启失败，已停止桥接");
                         }
-                        StartNativeProcess(lastNativeArgs, true);
                         return;
                     }
                     StopDeviceHost();
                     SetRunning(false);
                 });
             };
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
+            try
+            {
+                process.Start();
+                process.BeginOutputReadLine();
+                process.BeginErrorReadLine();
+            }
+            catch (Exception ex)
+            {
+                AppendLog((restarted ? "native 重启失败: " : "native 启动失败: ") + ex.Message);
+                process = null;
+                return false;
+            }
             AppendLog(restarted ? "native 已重启" : "native 已启动");
+            return true;
+        }
+
+        private bool TryRestartNativeAfterTopologyChange()
+        {
+            if (!deviceHostCheck.Checked)
+            {
+                return StartNativeProcess(lastNativeArgs, true);
+            }
+
+            /*
+             * Issue #1: a topology change must restart native output without
+             * stopping the managed virtual display host.
+             *
+             * DXGI desktop duplication intentionally returns DXGI_ERROR_ACCESS_LOST when the
+             * Windows display topology changes. The virtual monitor itself usually survives,
+             * but its \\.\DISPLAYxx name can be reassigned while Windows rebuilds the desktop.
+             *
+             * The old code waited for sourceText, which had already been overwritten with the
+             * previous \\.\DISPLAYxx id. After a layout change that id often no longer existed,
+             * so the GUI timed out and stopped the host. Recovery must therefore start from
+             * the current display list: find the managed virtual monitor again, restore the
+             * requested mode if Windows reset it, then rebuild native arguments with the new
+             * device names.
+             */
+            DisplayChoice virtualSource;
+            string waitFailure;
+            if (!WaitForAnyVirtualSource(10000, out virtualSource, out waitFailure))
+            {
+                AppendLog(string.IsNullOrWhiteSpace(waitFailure)
+                    ? "拓扑变化后未重新发现虚拟显示器"
+                    : waitFailure);
+                return false;
+            }
+
+            Resolution desiredResolution;
+            if (TryParseResolution(lastManagedVirtualResolution, out desiredResolution) &&
+                !string.Equals(virtualSource.Resolution, lastManagedVirtualResolution, StringComparison.OrdinalIgnoreCase))
+            {
+                string modeMessage;
+                Resolution appliedResolution;
+                string appliedRefresh;
+                if (!TryApplyDisplayMode(virtualSource.DeviceName, desiredResolution, lastManagedVirtualRefresh, lastManagedVirtualOrientation, out appliedResolution, out appliedRefresh, out modeMessage))
+                {
+                    AppendLog(modeMessage);
+                    return false;
+                }
+
+                AppendLog(modeMessage);
+                DisplayChoice switchedSource;
+                if (!WaitForVirtualSourceMode(virtualSource.DeviceName, appliedResolution, 5000, out switchedSource))
+                {
+                    AppendLog("拓扑变化后虚拟模式未确认: " + virtualSource.DeviceName + " -> " + FormatResolution(appliedResolution));
+                    return false;
+                }
+
+                virtualSource = switchedSource;
+                lastManagedVirtualResolution = virtualSource.Resolution;
+                lastManagedVirtualRefresh = virtualSource.Refresh;
+            }
+
+            RefreshDisplays();
+            SelectComboByDevice(sourceDisplayCombo, virtualSource.DeviceName);
+            sourceText.Text = virtualSource.DeviceName;
+
+            DisplayChoice targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice;
+            if (targetDisplay != null)
+            {
+                targetText.Text = targetDisplay.DeviceName;
+                targetResolutionText.Text = targetDisplay.Resolution;
+            }
+
+            string targetSelector = targetText.Text.Trim();
+            if (string.IsNullOrWhiteSpace(targetSelector))
+            {
+                AppendLog("拓扑变化后未找到目标显示器");
+                return false;
+            }
+
+            string targetResolutionForFilter = targetDisplay != null ? targetDisplay.Resolution : targetResolutionText.Text.Trim();
+            lastNativeArgs = BuildSingleNativeArgs(virtualSource.DeviceName, virtualSource.Resolution, targetSelector, targetResolutionForFilter);
+            AppendLog("拓扑变化后重新选择源: " + virtualSource);
+            AppendSelectedDisplayLog();
+            AppendLog("native 参数: " + lastNativeArgs);
+            return StartNativeProcess(lastNativeArgs, true);
+        }
+
+        private string BuildSingleNativeArgs(string sourceSelector, string sourceResolutionForFilter, string targetSelector, string targetResolutionForFilter)
+        {
+            var args = new StringBuilder();
+            args.Append("--source ").Append(Quote(sourceSelector));
+            args.Append(" --target ").Append(Quote(targetSelector));
+            args.Append(" --filter ").Append(Quote(GetFilterArgument(sourceResolutionForFilter, targetResolutionForFilter)));
+            if (!inputCheck.Checked)
+            {
+                args.Append(" --no-input");
+            }
+            if (!windowMoveCheck.Checked)
+            {
+                args.Append(" --no-window-move");
+            }
+            if (vsyncCheck.Checked)
+            {
+                args.Append(" --vsync");
+            }
+            return args.ToString();
         }
 
         private bool StartMultiScreenBeta(List<DisplayChoice> virtualSources, List<BridgePairConfig> pairs)
@@ -3438,12 +5513,13 @@ namespace SBMSGui
                     {
                         return;
                     }
-                    AppendLog("多屏 BETA 子进程异常退出，停止全部桥接");
-                    stoppingRequested = true;
+                    if (exitCode == NativeTopologyChangedExitCode)
+                    {
+                        RestartBridgeAfterTopologyChange("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "]");
+                        return;
+                    }
                     RemoveExitedBetaProcesses();
-                    StopBetaProcesses();
-                    StopDeviceHost();
-                    SetRunning(false);
+                    AbortBridgeStart("多屏 BETA 子进程异常退出，已停止全部桥接");
                 });
             };
             try
@@ -3472,6 +5548,52 @@ namespace SBMSGui
             return true;
         }
 
+        private void RestartBridgeAfterTopologyChange(string source)
+        {
+            if (stoppingRequested || restartingAfterTopologyChange)
+            {
+                return;
+            }
+            if (nativeRestartCount >= 5)
+            {
+                AbortBridgeStart("显示拓扑变化重建次数过多，停止桥接");
+                return;
+            }
+
+            int restartCount = nativeRestartCount + 1;
+            nativeRestartCount = restartCount;
+            restartingAfterTopologyChange = true;
+            AppendLog("检测到显示拓扑变化，重建桥接 " + restartCount.ToString(CultureInfo.InvariantCulture) + "/5: " + source);
+            try
+            {
+                stoppingRequested = true;
+                StopBetaProcesses();
+                if (process != null && !process.HasExited)
+                {
+                    process.CloseMainWindow();
+                    PostCloseToProcess(process.Id);
+                    if (!process.WaitForExit(3000))
+                    {
+                        process.Kill();
+                    }
+                }
+                process = null;
+                StopDeviceHost();
+                SetRunning(false);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                stoppingRequested = false;
+                restartingAfterTopologyChange = false;
+            }
+
+            StartBridge();
+            nativeRestartCount = restartCount;
+        }
+
         private void AppendSelectedDisplayLog()
         {
             DisplayChoice sourceDisplay = sourceDisplayCombo.SelectedItem as DisplayChoice;
@@ -3480,17 +5602,19 @@ namespace SBMSGui
             AppendLog("选择目标: " + (targetDisplay != null ? targetDisplay.ToString() : targetText.Text.Trim()));
         }
 
-        private void StartDeviceHost()
+        private bool StartDeviceHost(int virtualDeviceCount)
         {
-            if (deviceHostProcess != null && !deviceHostProcess.HasExited)
+            if (IsDeviceHostRunning())
             {
-                return;
+                return true;
             }
 
             SignalDeviceHostStop();
             deviceHostLog.Length = 0;
+            int requestedCount = Math.Max(1, Math.Min(virtualDeviceCount, 3));
             deviceHostProcess = new Process();
             deviceHostProcess.StartInfo.FileName = deviceHostExe;
+            deviceHostProcess.StartInfo.Arguments = "--count " + requestedCount.ToString(CultureInfo.InvariantCulture);
             deviceHostProcess.StartInfo.WorkingDirectory = root;
             deviceHostProcess.StartInfo.UseShellExecute = false;
             deviceHostProcess.StartInfo.RedirectStandardOutput = true;
@@ -3498,23 +5622,274 @@ namespace SBMSGui
             deviceHostProcess.StartInfo.CreateNoWindow = true;
             deviceHostProcess.StartInfo.StandardOutputEncoding = Encoding.UTF8;
             deviceHostProcess.StartInfo.StandardErrorEncoding = Encoding.UTF8;
+            deviceHostProcess.EnableRaisingEvents = true;
             deviceHostProcess.OutputDataReceived += OnOutput;
             deviceHostProcess.ErrorDataReceived += OnOutput;
             deviceHostProcess.OutputDataReceived += OnDeviceHostOutput;
             deviceHostProcess.ErrorDataReceived += OnDeviceHostOutput;
-            deviceHostProcess.Start();
-            deviceHostProcess.BeginOutputReadLine();
-            deviceHostProcess.BeginErrorReadLine();
-            AppendLog("虚拟显示器 host 已启动");
+            Process startedHost = deviceHostProcess;
+            deviceHostProcess.Exited += delegate
+            {
+                BeginInvoke((Action)delegate
+                {
+                    if (deviceHostProcess != startedHost)
+                    {
+                        return;
+                    }
+                    int exitCode = GetProcessExitCode(startedHost);
+                    AppendLog("虚拟显示器 host 已退出 exit=" + exitCode.ToString(CultureInfo.InvariantCulture));
+                    deviceHostProcess = null;
+                    if (stoppingRequested || exiting)
+                    {
+                        RefreshDisplays();
+                        UpdateStatus();
+                        return;
+                    }
+                    AbortBridgeStart("虚拟显示器 host 异常退出，已停止桥接");
+                });
+            };
+
+            try
+            {
+                deviceHostProcess.Start();
+                deviceHostProcess.BeginOutputReadLine();
+                deviceHostProcess.BeginErrorReadLine();
+            }
+            catch (Exception ex)
+            {
+                AppendLog("虚拟显示器 host 启动失败: " + ex.Message);
+                deviceHostProcess = null;
+                return false;
+            }
+            AppendLog("虚拟显示器 host 已启动 count=" + requestedCount.ToString(CultureInfo.InvariantCulture));
+            return true;
+        }
+
+        private bool TryGetVirtualDisplayLoadFailure(ref int nextProblemCheck, out string message)
+        {
+            message = "";
+            if (Environment.TickCount < nextProblemCheck)
+            {
+                return false;
+            }
+
+            nextProblemCheck = Environment.TickCount + 3000;
+            return TryGetIddSampleDriverProblem(out message);
+        }
+
+        private static bool TryGetIddSampleDriverProblem(out string message)
+        {
+            message = "";
+            string output;
+            RunTool("pnputil.exe", "/enum-devices /instanceid \"SWD\\IDDSAMPLEDRIVER\\IDDSAMPLEDRIVER\" /drivers /properties", out output);
+            if (string.IsNullOrWhiteSpace(output))
+            {
+                return false;
+            }
+
+            var details = new List<string>();
+            string statusLine = FindOutputLine(output, "Status:");
+            string problemLine = FindOutputLine(output, "Problem Code:");
+            string hasProblemValue = FindPropertyValue(output, "DEVPKEY_Device_HasProblem");
+
+            bool hasProblemLine = !string.IsNullOrWhiteSpace(problemLine) &&
+                                  problemLine.IndexOf("CM_PROB_NONE", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                  !Regex.IsMatch(problemLine, @"Problem Code:\s*0\b", RegexOptions.IgnoreCase);
+            bool statusFailed = !string.IsNullOrWhiteSpace(statusLine) &&
+                                (statusLine.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 statusLine.IndexOf("problem", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 statusLine.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0);
+            bool propertyFailed = string.Equals(hasProblemValue, "TRUE", StringComparison.OrdinalIgnoreCase);
+
+            if (!hasProblemLine && !statusFailed && !propertyFailed)
+            {
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(statusLine))
+            {
+                details.Add(statusLine);
+            }
+            if (!string.IsNullOrWhiteSpace(problemLine))
+            {
+                details.Add(problemLine);
+            }
+            if (!string.IsNullOrWhiteSpace(hasProblemValue))
+            {
+                details.Add("HasProblem=" + hasProblemValue);
+            }
+
+            string problemStatusLine = FindOutputLine(output, "Problem Status:");
+            if (!string.IsNullOrWhiteSpace(problemStatusLine))
+            {
+                details.Add(problemStatusLine);
+            }
+            string configLine = FindPropertyValue(output, "DEVPKEY_Device_ConfigurationId");
+            if (!string.IsNullOrWhiteSpace(configLine))
+            {
+                details.Add("Configuration=" + configLine);
+            }
+            string infPathLine = FindPropertyValue(output, "DEVPKEY_Device_DriverInfPath");
+            if (!string.IsNullOrWhiteSpace(infPathLine))
+            {
+                details.Add("DriverInf=" + infPathLine);
+            }
+            string versionLine = FindPropertyValue(output, "DEVPKEY_Device_DriverVersion");
+            if (!string.IsNullOrWhiteSpace(versionLine))
+            {
+                details.Add("DriverVersion=" + versionLine);
+            }
+            string driverLine = FindOutputLine(output, "Driver Name:");
+            if (!string.IsNullOrWhiteSpace(driverLine))
+            {
+                details.Add(driverLine);
+            }
+            string serviceLine = FindOutputLine(output, "Service:");
+            if (!string.IsNullOrWhiteSpace(serviceLine))
+            {
+                details.Add(serviceLine);
+            }
+            AddRecentKernelPnpDetails(details);
+
+            message = "虚拟显示器驱动加载失败: " + string.Join("; ", details.ToArray());
+            return true;
+        }
+
+        private static void AddRecentKernelPnpDetails(List<string> details)
+        {
+            try
+            {
+                var query = new EventLogQuery(
+                    "Microsoft-Windows-Kernel-PnP/Configuration",
+                    PathType.LogName,
+                    "*[System[EventID=411]]");
+                query.ReverseDirection = true;
+
+                using (var reader = new EventLogReader(query))
+                {
+                    for (int i = 0; i < 24; ++i)
+                    {
+                        EventRecord record = reader.ReadEvent();
+                        if (record == null)
+                        {
+                            break;
+                        }
+                        try
+                        {
+                            if (AddKernelPnpRecordDetails(details, record))
+                            {
+                                break;
+                            }
+                        }
+                        finally
+                        {
+                            record.Dispose();
+                        }
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private static bool AddKernelPnpRecordDetails(List<string> details, EventRecord record)
+        {
+            string xml = record.ToXml();
+            var doc = new XmlDocument();
+            doc.LoadXml(xml);
+
+            string deviceId = FindEventDataValue(doc, "DeviceInstanceId");
+            if (deviceId.IndexOf("IddSampleDriver", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                return false;
+            }
+
+            AddDetail(details, "KernelPnP=411");
+            AddDetail(details, "KernelDriver=" + FindEventDataValue(doc, "DriverName"));
+            AddDetail(details, "KernelService=" + FindEventDataValue(doc, "ServiceName"));
+            AddDetail(details, "KernelUpperFilters=" + FindEventDataValue(doc, "UpperFilters"));
+            AddDetail(details, "KernelProblem=" + FindEventDataValue(doc, "Problem"));
+            AddDetail(details, "KernelProblemStatus=" + FindEventDataValue(doc, "Status"));
+            return true;
+        }
+
+        private static string FindEventDataValue(XmlDocument doc, string name)
+        {
+            XmlNode node = doc.SelectSingleNode("//*[local-name()='Data' and @Name='" + name + "']");
+            return node == null ? "" : node.InnerText.Trim();
+        }
+
+        private static void AddDetail(List<string> details, string detail)
+        {
+            if (string.IsNullOrWhiteSpace(detail))
+            {
+                return;
+            }
+            foreach (string existing in details)
+            {
+                if (string.Equals(existing, detail, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+            }
+            details.Add(detail);
+        }
+
+        private static string FindPropertyValue(string text, string propertyName)
+        {
+            string[] lines = text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            for (int i = 0; i < lines.Length; ++i)
+            {
+                if (lines[i].IndexOf(propertyName, StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    continue;
+                }
+                for (int j = i + 1; j < lines.Length; ++j)
+                {
+                    string value = lines[j].Trim();
+                    if (value.Length == 0)
+                    {
+                        continue;
+                    }
+                    if (value.IndexOf("[", StringComparison.Ordinal) >= 0 &&
+                        value.IndexOf("]", StringComparison.Ordinal) >= 0)
+                    {
+                        return "";
+                    }
+                    return value;
+                }
+            }
+            return "";
+        }
+
+        private static string FindOutputLine(string text, string prefix)
+        {
+            foreach (string rawLine in text.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                string line = rawLine.Trim();
+                if (line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    return line;
+                }
+            }
+            return "";
         }
 
         private bool WaitForSourceDisplay(string source, int timeoutMs)
         {
             var deadline = Environment.TickCount + timeoutMs;
+            int nextProblemCheck = Environment.TickCount + 1500;
             while (Environment.TickCount < deadline)
             {
                 if (deviceHostProcess != null && deviceHostProcess.HasExited)
                 {
+                    return false;
+                }
+                string loadFailure;
+                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out loadFailure))
+                {
+                    AppendLog(loadFailure);
                     return false;
                 }
                 var list = CaptureNativeOutput("--list");
@@ -3524,18 +5899,24 @@ namespace SBMSGui
                     RefreshDisplays();
                     return true;
                 }
-                Thread.Sleep(500);
+                SleepWithUiPump(500);
             }
             return false;
         }
 
-        private bool WaitForAnyVirtualSource(int timeoutMs, out DisplayChoice source)
+        private bool WaitForAnyVirtualSource(int timeoutMs, out DisplayChoice source, out string failureMessage)
         {
             var deadline = Environment.TickCount + timeoutMs;
+            int nextProblemCheck = Environment.TickCount + 1500;
             source = null;
+            failureMessage = "";
             while (Environment.TickCount < deadline)
             {
                 if (deviceHostProcess != null && deviceHostProcess.HasExited)
+                {
+                    return false;
+                }
+                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out failureMessage))
                 {
                     return false;
                 }
@@ -3545,18 +5926,24 @@ namespace SBMSGui
                     RefreshDisplays();
                     return true;
                 }
-                Thread.Sleep(500);
+                SleepWithUiPump(500);
             }
             return false;
         }
 
-        private bool WaitForVirtualSources(int minimumCount, int timeoutMs, out List<DisplayChoice> sources)
+        private bool WaitForVirtualSources(int minimumCount, int timeoutMs, out List<DisplayChoice> sources, out string failureMessage)
         {
             var deadline = Environment.TickCount + timeoutMs;
+            int nextProblemCheck = Environment.TickCount + 1500;
             sources = new List<DisplayChoice>();
+            failureMessage = "";
             while (Environment.TickCount < deadline)
             {
                 if (deviceHostProcess != null && deviceHostProcess.HasExited)
+                {
+                    return false;
+                }
+                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out failureMessage))
                 {
                     return false;
                 }
@@ -3568,7 +5955,7 @@ namespace SBMSGui
                     sources = GetCurrentVirtualSources(minimumCount);
                     return sources.Count >= minimumCount;
                 }
-                Thread.Sleep(500);
+                SleepWithUiPump(500);
             }
             return false;
         }
@@ -3608,11 +5995,18 @@ namespace SBMSGui
         private bool WaitForVirtualSource(string selector, int timeoutMs, out DisplayChoice source)
         {
             var deadline = Environment.TickCount + timeoutMs;
+            int nextProblemCheck = Environment.TickCount + 1500;
             source = null;
             while (Environment.TickCount < deadline)
             {
                 if (deviceHostProcess != null && deviceHostProcess.HasExited)
                 {
+                    return false;
+                }
+                string loadFailure;
+                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out loadFailure))
+                {
+                    AppendLog(loadFailure);
                     return false;
                 }
                 var list = CaptureNativeOutput("--list");
@@ -3621,7 +6015,35 @@ namespace SBMSGui
                     RefreshDisplays();
                     return true;
                 }
-                Thread.Sleep(500);
+                SleepWithUiPump(500);
+            }
+            return false;
+        }
+
+        private bool WaitForVirtualSourceMode(string deviceName, Resolution resolution, int timeoutMs, out DisplayChoice source)
+        {
+            var deadline = Environment.TickCount + timeoutMs;
+            int nextProblemCheck = Environment.TickCount + 1500;
+            source = null;
+            while (Environment.TickCount < deadline)
+            {
+                if (deviceHostProcess != null && deviceHostProcess.HasExited)
+                {
+                    return false;
+                }
+                string loadFailure;
+                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out loadFailure))
+                {
+                    AppendLog(loadFailure);
+                    return false;
+                }
+                var list = CaptureNativeOutput("--list");
+                if (TryFindVirtualSourceMode(deviceName, resolution, list, out source))
+                {
+                    RefreshDisplays();
+                    return true;
+                }
+                SleepWithUiPump(500);
             }
             return false;
         }
@@ -3685,6 +6107,33 @@ namespace SBMSGui
             return false;
         }
 
+        private static bool TryFindVirtualSourceMode(string deviceName, Resolution resolution, string listOutput, out DisplayChoice source)
+        {
+            source = null;
+            string resolutionText = FormatResolution(resolution);
+            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                DisplayChoice display;
+                if (!TryParseDisplayLine(rawLine.Trim(), out display) || !display.Virtual)
+                {
+                    continue;
+                }
+                if (string.Equals(display.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(display.Resolution, resolutionText, StringComparison.OrdinalIgnoreCase))
+                {
+                    source = display;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private string GetSingleMappingRefresh(DisplayChoice fallbackDisplay)
+        {
+            DisplayChoice targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice;
+            return GetRefreshOrDefault(singleRefreshText.Text, targetDisplay ?? fallbackDisplay);
+        }
+
         private int GetSelectedDisplayOrientation()
         {
             ComboBox orientationCombo = configInputTabs.TabPages.Count > 0 && configInputTabs.SelectedIndex == 1
@@ -3699,8 +6148,135 @@ namespace SBMSGui
             }
         }
 
-        private static bool TryApplyDisplayMode(string deviceName, Resolution resolution, string refreshText, int orientation, out string message)
+        private static bool SameResolution(Resolution left, Resolution right)
         {
+            return left.Width == right.Width && left.Height == right.Height;
+        }
+
+        private static List<DisplayModeCandidate> GetDisplayModeCandidates(string deviceName)
+        {
+            var candidates = new List<DisplayModeCandidate>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int modeIndex = 0; modeIndex < 1024; ++modeIndex)
+            {
+                var mode = new DEVMODE();
+                mode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+                if (!EnumDisplaySettings(deviceName, modeIndex, ref mode))
+                {
+                    break;
+                }
+                if (mode.dmPelsWidth <= 0 || mode.dmPelsHeight <= 0)
+                {
+                    continue;
+                }
+
+                string key = mode.dmPelsWidth.ToString(CultureInfo.InvariantCulture) + "x" +
+                             mode.dmPelsHeight.ToString(CultureInfo.InvariantCulture) + "@" +
+                             mode.dmDisplayFrequency.ToString(CultureInfo.InvariantCulture);
+                if (seen.Contains(key))
+                {
+                    continue;
+                }
+
+                seen.Add(key);
+                candidates.Add(new DisplayModeCandidate
+                {
+                    Resolution = new Resolution { Width = mode.dmPelsWidth, Height = mode.dmPelsHeight },
+                    Refresh = mode.dmDisplayFrequency
+                });
+            }
+            return candidates;
+        }
+
+        private static bool TrySelectSupportedDisplayMode(string deviceName, Resolution requestedResolution, string requestedRefreshText, out Resolution selectedResolution, out string selectedRefreshText, out string snapMessage)
+        {
+            selectedResolution = requestedResolution;
+            selectedRefreshText = requestedRefreshText;
+            snapMessage = "";
+
+            List<DisplayModeCandidate> candidates = GetDisplayModeCandidates(deviceName);
+            if (candidates.Count == 0)
+            {
+                return false;
+            }
+
+            int requestedRefresh;
+            bool hasRequestedRefresh = int.TryParse(requestedRefreshText, out requestedRefresh) && requestedRefresh > 0;
+            double requestedAspect = requestedResolution.Height > 0
+                ? requestedResolution.Width / (double)requestedResolution.Height
+                : 0.0;
+            DisplayModeCandidate best = null;
+            double bestScore = double.MaxValue;
+
+            for (int i = 0; i < candidates.Count; ++i)
+            {
+                DisplayModeCandidate candidate = candidates[i];
+                bool exactResolution = SameResolution(candidate.Resolution, requestedResolution);
+                double aspect = candidate.Resolution.Height > 0
+                    ? candidate.Resolution.Width / (double)candidate.Resolution.Height
+                    : 0.0;
+                double aspectError = requestedAspect > 0.0
+                    ? Math.Abs(aspect - requestedAspect) / requestedAspect
+                    : 0.0;
+                if (!exactResolution && aspectError > 0.02)
+                {
+                    continue;
+                }
+
+                double sizeError = Math.Abs(candidate.Resolution.Width - requestedResolution.Width) +
+                                   Math.Abs(candidate.Resolution.Height - requestedResolution.Height);
+                double refreshError = 0.0;
+                if (hasRequestedRefresh && candidate.Refresh > 0)
+                {
+                    refreshError = Math.Abs(candidate.Refresh - requestedRefresh) * 0.05;
+                }
+                else if (!hasRequestedRefresh && candidate.Refresh > 0)
+                {
+                    refreshError = -candidate.Refresh * 0.001;
+                }
+                double score = (exactResolution ? 0.0 : sizeError + aspectError * 10000.0) + refreshError;
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = candidate;
+                }
+            }
+
+            if (best == null)
+            {
+                return false;
+            }
+
+            selectedResolution = best.Resolution;
+            selectedRefreshText = best.Refresh > 0
+                ? best.Refresh.ToString(CultureInfo.InvariantCulture)
+                : requestedRefreshText;
+
+            if (!SameResolution(selectedResolution, requestedResolution) ||
+                (hasRequestedRefresh && best.Refresh > 0 && best.Refresh != requestedRefresh))
+            {
+                snapMessage = "虚拟模式贴合可用模式: requested=" + FormatResolution(requestedResolution) +
+                              (hasRequestedRefresh ? "@" + requestedRefresh.ToString(CultureInfo.InvariantCulture) : "") +
+                              " applied=" + FormatResolution(selectedResolution) +
+                              (best.Refresh > 0 ? "@" + best.Refresh.ToString(CultureInfo.InvariantCulture) : "");
+            }
+            return true;
+        }
+
+        private static bool TryApplyDisplayMode(string deviceName, Resolution resolution, string refreshText, int orientation, out Resolution appliedResolution, out string appliedRefresh, out string message)
+        {
+            appliedResolution = resolution;
+            appliedRefresh = refreshText;
+            Resolution selectedResolution;
+            string selectedRefreshText;
+            string snapMessage;
+            if (!TrySelectSupportedDisplayMode(deviceName, resolution, refreshText, out selectedResolution, out selectedRefreshText, out snapMessage))
+            {
+                selectedResolution = resolution;
+                selectedRefreshText = refreshText;
+                snapMessage = "";
+            }
+
             var devMode = new DEVMODE();
             devMode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
             if (!EnumDisplaySettings(deviceName, ENUM_CURRENT_SETTINGS, ref devMode))
@@ -3710,9 +6286,9 @@ namespace SBMSGui
             }
 
             int refresh;
-            bool hasRefresh = int.TryParse(refreshText, out refresh) && refresh > 0;
-            devMode.dmPelsWidth = resolution.Width;
-            devMode.dmPelsHeight = resolution.Height;
+            bool hasRefresh = int.TryParse(selectedRefreshText, out refresh) && refresh > 0;
+            devMode.dmPelsWidth = selectedResolution.Width;
+            devMode.dmPelsHeight = selectedResolution.Height;
             devMode.dmDisplayOrientation = orientation;
             devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION;
             if (hasRefresh)
@@ -3724,7 +6300,10 @@ namespace SBMSGui
             int result = ChangeDisplaySettingsEx(deviceName, ref devMode, IntPtr.Zero, 0, IntPtr.Zero);
             if (result == DISP_CHANGE_SUCCESSFUL)
             {
-                message = "虚拟模式切换成功: " + deviceName + " -> " + FormatResolution(resolution) + (hasRefresh ? "@" + refresh : "") + " orientation=" + orientation;
+                appliedResolution = selectedResolution;
+                appliedRefresh = hasRefresh ? refresh.ToString(CultureInfo.InvariantCulture) : selectedRefreshText;
+                message = (snapMessage.Length > 0 ? snapMessage + "; " : "") +
+                          "虚拟模式切换成功: " + deviceName + " -> " + FormatResolution(selectedResolution) + (hasRefresh ? "@" + refresh.ToString(CultureInfo.InvariantCulture) : "") + " orientation=" + orientation;
                 return true;
             }
 
@@ -3734,12 +6313,16 @@ namespace SBMSGui
                 result = ChangeDisplaySettingsEx(deviceName, ref devMode, IntPtr.Zero, 0, IntPtr.Zero);
                 if (result == DISP_CHANGE_SUCCESSFUL)
                 {
-                    message = "虚拟模式切换成功: " + deviceName + " -> " + FormatResolution(resolution) + " orientation=" + orientation;
+                    appliedResolution = selectedResolution;
+                    appliedRefresh = "";
+                    message = (snapMessage.Length > 0 ? snapMessage + "; " : "") +
+                              "虚拟模式切换成功: " + deviceName + " -> " + FormatResolution(selectedResolution) + " orientation=" + orientation;
                     return true;
                 }
             }
 
-            message = "虚拟模式切换失败: " + deviceName + " -> " + FormatResolution(resolution) + " result=" + result;
+            message = (snapMessage.Length > 0 ? snapMessage + "; " : "") +
+                      "虚拟模式切换失败: " + deviceName + " -> " + FormatResolution(selectedResolution) + " result=" + result;
             return false;
         }
 
@@ -3747,11 +6330,12 @@ namespace SBMSGui
         {
             using (var p = CreateProcess(args))
             {
-                p.Start();
-                string stdout = p.StandardOutput.ReadToEnd();
-                string stderr = p.StandardError.ReadToEnd();
-                p.WaitForExit(3000);
-                return stdout + Environment.NewLine + stderr;
+                string output;
+                if (CaptureProcessOutput(p, 3000, out output))
+                {
+                    return output;
+                }
+                return output.Length > 0 ? output : "SBMSNative error: " + args;
             }
         }
 
@@ -3830,6 +6414,67 @@ namespace SBMSGui
             betaProcesses.Clear();
         }
 
+        private void AbortBridgeStart(string message)
+        {
+            if (!string.IsNullOrWhiteSpace(message))
+            {
+                AppendLog(message);
+            }
+
+            stoppingRequested = true;
+            StopBetaProcesses();
+            if (process != null)
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.CloseMainWindow();
+                        PostCloseToProcess(process.Id);
+                        if (!process.WaitForExit(3000))
+                        {
+                            process.Kill();
+                        }
+                    }
+                }
+                catch
+                {
+                }
+                process = null;
+            }
+
+            StopDeviceHost();
+            if (!WaitForVirtualDisplaysToClear(5000))
+            {
+                AppendLog("虚拟显示器未在超时内全部移除，已刷新当前列表");
+            }
+            else
+            {
+                RefreshDisplays();
+            }
+            lastNativeArgs = "";
+            nativeRestartCount = 0;
+            restartingAfterTopologyChange = false;
+            stoppingRequested = false;
+            SetRunning(false);
+        }
+
+        private bool WaitForVirtualDisplaysToClear(int timeoutMs)
+        {
+            var deadline = Environment.TickCount + timeoutMs;
+            while (Environment.TickCount < deadline)
+            {
+                string list = CaptureNativeOutput("--list");
+                if (ParseVirtualSources(list).Count == 0)
+                {
+                    return true;
+                }
+                SleepWithUiPump(250);
+            }
+            RefreshDisplays();
+            return false;
+        }
+
         private void StopBridge()
         {
             stoppingRequested = true;
@@ -3861,7 +6506,19 @@ namespace SBMSGui
         {
             return (process != null && !process.HasExited) ||
                    HasRunningBetaProcess() ||
-                   (deviceHostProcess != null && !deviceHostProcess.HasExited);
+                   IsDeviceHostRunning();
+        }
+
+        private bool IsDeviceHostRunning()
+        {
+            try
+            {
+                return deviceHostProcess != null && !deviceHostProcess.HasExited;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private bool HasRunningBetaProcess()
@@ -3910,20 +6567,19 @@ namespace SBMSGui
                 IsBridgeRunning())
             {
                 e.Cancel = true;
+                SaveConfigurationNow(false);
                 HideToTray();
                 return;
             }
 
             trayIcon.Visible = false;
+            SaveConfigurationNow(false);
             StopBridge();
         }
 
         private void HideToTray()
         {
-            if (configForm != null)
-            {
-                configForm.Hide();
-            }
+            ToggleInlineConfig(false);
             Hide();
             trayIcon.Visible = true;
             UpdateStatus();
@@ -3943,6 +6599,7 @@ namespace SBMSGui
         {
             exiting = true;
             trayIcon.Visible = false;
+            SaveConfigurationNow(false);
             StopBridge();
             Close();
         }
@@ -4027,11 +6684,70 @@ namespace SBMSGui
 
         private void AppendLog(string text)
         {
-            logText.AppendText(DateTime.Now.ToString("HH:mm:ss.fff") + " " + text + Environment.NewLine);
+            if (text == null)
+            {
+                text = "";
+            }
+            string normalized = text.Replace("\r\n", "\n").Replace('\r', '\n');
+            string[] lines = normalized.Split('\n');
+            foreach (string rawLine in lines)
+            {
+                if (rawLine.Length == 0)
+                {
+                    continue;
+                }
+                AppendLogLine(rawLine);
+            }
             if (text.IndexOf("0x80070005", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                logText.AppendText(DateTime.Now.ToString("HH:mm:ss.fff") + " 需要管理员权限创建虚拟显示器，请以管理员身份运行 GUI。" + Environment.NewLine);
+                AppendLogLine("需要管理员权限创建虚拟显示器，请以管理员身份运行 GUI。");
             }
+        }
+
+        private void AppendLogLine(string text)
+        {
+            string line = DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + " " + text;
+            logText.AppendText(line + Environment.NewLine);
+            WriteDiagnosticLine(line, IsErrorLogLine(text));
+        }
+
+        private static bool IsErrorLogLine(string text)
+        {
+            if (text == null)
+            {
+                return false;
+            }
+            string lower = text.ToLowerInvariant();
+            if (lower.IndexOf("failed", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("failure", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("exception", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("timeout", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("hasproblem=true", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("problem code", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("problem status", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("失败", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("错误", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("异常", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("超时", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("找不到", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("未确认", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("不足", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("无效", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                lower.IndexOf("强制结束", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+            Match exitMatch = Regex.Match(text, @"exit\s*=\s*(-?\d+)", RegexOptions.IgnoreCase);
+            if (exitMatch.Success)
+            {
+                int exitCode;
+                if (int.TryParse(exitMatch.Groups[1].Value, out exitCode))
+                {
+                    return exitCode != 0;
+                }
+            }
+            return false;
         }
 
         private static int GetProcessExitCode(Process p)
@@ -4048,11 +6764,12 @@ namespace SBMSGui
 
         private void SetRunning(bool running)
         {
-            startButton.Enabled = !running;
-            stopButton.Enabled = running;
+            startButton.Enabled = true;
+            stopButton.Enabled = true;
             displayList.Enabled = true;
             sourceText.Enabled = true;
             targetText.Enabled = true;
+            singleRefreshText.Enabled = true;
             sourceDisplayCombo.Enabled = true;
             targetDisplayCombo.Enabled = true;
             strategyCombo.Enabled = true;
@@ -4084,7 +6801,6 @@ namespace SBMSGui
             windowMoveCheck.Enabled = true;
             deviceHostCheck.Enabled = true;
             streamModeCheck.Enabled = true;
-            multiScreenBetaCheck.Enabled = true;
             betaPairGrid.Enabled = true;
             addBetaGroupButton.Enabled = true;
             removeBetaGroupButton.Enabled = true;
@@ -4131,10 +6847,67 @@ namespace SBMSGui
     internal static class Program
     {
         [STAThread]
-        private static void Main()
+        private static void Main(string[] args)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+            {
+                MainForm.WriteFatalError("thread", e.Exception);
+            };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+            {
+                Exception exception = e.ExceptionObject as Exception;
+                if (exception == null)
+                {
+                    exception = new Exception(Convert.ToString(e.ExceptionObject, CultureInfo.InvariantCulture));
+                }
+                MainForm.WriteFatalError("domain", exception);
+            };
+            if (args.Length >= 2 && string.Equals(args[0], "--config-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var form = new MainForm())
+                {
+                    string tabs = form.RunConfigProbe(args[1]);
+                    Console.WriteLine("config_probe_tabs=" + tabs);
+                }
+                Application.ExitThread();
+                Environment.Exit(0);
+                return;
+            }
+            if (args.Length >= 2 && string.Equals(args[0], "--risk-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var form = new MainForm())
+                {
+                    form.RunRiskProbe(args[1]);
+                    Console.WriteLine("risk_probe=" + args[1]);
+                }
+                Application.ExitThread();
+                Environment.Exit(0);
+                return;
+            }
+            if (args.Length >= 2 && string.Equals(args[0], "--stream-config-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var form = new MainForm())
+                {
+                    form.RunStreamConfigProbe(args[1]);
+                    Console.WriteLine("stream_config_probe=" + args[1]);
+                }
+                Application.ExitThread();
+                Environment.Exit(0);
+                return;
+            }
+            if (args.Length >= 2 && string.Equals(args[0], "--lock-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                using (var form = new MainForm())
+                {
+                    form.RunLockProbe(args[1]);
+                    Console.WriteLine("lock_probe=" + args[1]);
+                }
+                Application.ExitThread();
+                Environment.Exit(0);
+                return;
+            }
             Application.Run(new MainForm());
         }
     }

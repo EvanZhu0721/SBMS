@@ -1,6 +1,7 @@
 param(
     [switch] $SkipBuild,
-    [switch] $SkipProgramFiles
+    [switch] $SkipProgramFiles,
+    [switch] $SkipSourceCopy
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,6 +13,8 @@ $ReleaseDir = Join-Path $ReleaseRoot "SBMS"
 $CoreDir = Join-Path $Documents "SBMS-Core-Source"
 $ZipPath = Join-Path $ReleaseRoot "SBMS.zip"
 $ProgramFilesDir = Join-Path $env:ProgramFiles "SBMS"
+$ExistingDriverDir = Join-Path $ReleaseDir "driver"
+$DriverBackupDir = Join-Path ([System.IO.Path]::GetTempPath()) ("SBMS-driver-backup-" + [System.Guid]::NewGuid().ToString("N"))
 
 function Assert-ChildPath {
     param(
@@ -33,9 +36,11 @@ function Reset-Directory {
     )
     $fullPath = Assert-ChildPath -Path $Path -Parent $Parent
     if (Test-Path -LiteralPath $fullPath) {
-        Remove-Item -LiteralPath $fullPath -Recurse -Force
+        Get-ChildItem -LiteralPath $fullPath -Force |
+            Remove-Item -Recurse -Force
+    } else {
+        New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
     }
-    New-Item -ItemType Directory -Path $fullPath -Force | Out-Null
     return $fullPath
 }
 
@@ -90,10 +95,13 @@ if (-not $SkipBuild) {
     & (Join-Path $Root "build-sbms-driver.ps1")
 }
 
-$ReleaseRoot = Reset-Directory -Path $ReleaseRoot -Parent $Documents
-$ReleaseDir = New-Item -ItemType Directory -Path $ReleaseDir -Force
-$ReleaseDir = $ReleaseDir.FullName
-$CoreDir = Reset-DirectoryKeepingGit -Path $CoreDir -Parent $Documents
+if (Test-Path -LiteralPath $ExistingDriverDir) {
+    New-Item -ItemType Directory -Path $DriverBackupDir -Force | Out-Null
+    Copy-Item -LiteralPath $ExistingDriverDir -Destination $DriverBackupDir -Recurse -Force
+}
+
+New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
+$ReleaseDir = Reset-Directory -Path $ReleaseDir -Parent $ReleaseRoot
 
 $sourceFiles = @(
     ".gitignore",
@@ -113,32 +121,41 @@ $sourceFiles = @(
     "check-displays.py",
     "package-sbms.ps1"
 )
-foreach ($file in $sourceFiles) {
-    Copy-RequiredFile -RelativePath $file -Destination $CoreDir
-}
-
 $sourceDirs = @(
     "gui",
     "installer",
     "device-host",
     "native-output-demo",
+    "driver-stable",
     "Windows-driver-samples\video\IndirectDisplay",
     "msbuild-vctargets-v170"
 )
-foreach ($dir in $sourceDirs) {
-    Copy-RequiredDirectory -RelativePath $dir -DestinationRoot $CoreDir
+
+$rootFull = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+$coreFull = [System.IO.Path]::GetFullPath($CoreDir).TrimEnd('\')
+if ($SkipSourceCopy -or [System.String]::Equals($rootFull, $coreFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+    Write-Host "Core source copy skipped: $CoreDir"
+} else {
+    $CoreDir = Reset-DirectoryKeepingGit -Path $CoreDir -Parent $Documents
+    foreach ($file in $sourceFiles) {
+        Copy-RequiredFile -RelativePath $file -Destination $CoreDir
+    }
+
+    foreach ($dir in $sourceDirs) {
+        Copy-RequiredDirectory -RelativePath $dir -DestinationRoot $CoreDir
+    }
+
+    $generatedDirectoryNames = @(".vs", "x64", "Debug", "Release", "ipch", "__pycache__")
+    Get-ChildItem -LiteralPath $CoreDir -Recurse -Directory -Force |
+        Where-Object { $generatedDirectoryNames -contains $_.Name } |
+        Sort-Object FullName -Descending |
+        Remove-Item -Recurse -Force
+
+    $generatedExtensions = @(".exe", ".dll", ".obj", ".pdb", ".ilk", ".lib", ".exp", ".cat", ".cer", ".log")
+    Get-ChildItem -LiteralPath $CoreDir -Recurse -File -Force |
+        Where-Object { $generatedExtensions -contains $_.Extension.ToLowerInvariant() } |
+        Remove-Item -Force
 }
-
-$generatedDirectoryNames = @(".vs", "x64", "Debug", "Release", "ipch", "__pycache__")
-Get-ChildItem -LiteralPath $CoreDir -Recurse -Directory -Force |
-    Where-Object { $generatedDirectoryNames -contains $_.Name } |
-    Sort-Object FullName -Descending |
-    Remove-Item -Recurse -Force
-
-$generatedExtensions = @(".exe", ".dll", ".obj", ".pdb", ".ilk", ".lib", ".exp", ".cat", ".cer", ".log")
-Get-ChildItem -LiteralPath $CoreDir -Recurse -File -Force |
-    Where-Object { $generatedExtensions -contains $_.Extension.ToLowerInvariant() } |
-    Remove-Item -Force
 
 $releaseFiles = @(
     "SBMS.exe",
@@ -158,17 +175,28 @@ foreach ($file in $releaseFiles) {
 }
 
 $driverPackage = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release\IddSampleDriver"
-if (-not (Test-Path -LiteralPath $driverPackage)) {
-    throw "Missing built driver package: $driverPackage"
-}
 $driverReleaseDir = New-Item -ItemType Directory -Path (Join-Path $ReleaseDir "driver") -Force
-Copy-Item -LiteralPath $driverPackage -Destination $driverReleaseDir.FullName -Recurse -Force
+if (Test-Path -LiteralPath $driverPackage) {
+    Copy-Item -LiteralPath $driverPackage -Destination $driverReleaseDir.FullName -Recurse -Force
+} else {
+    $driverBackupPackage = Join-Path $DriverBackupDir "driver\IddSampleDriver"
+    if (-not (Test-Path -LiteralPath $driverBackupPackage)) {
+        throw "Missing built driver package: $driverPackage"
+    }
+    Copy-Item -LiteralPath $driverBackupPackage -Destination $driverReleaseDir.FullName -Recurse -Force
+    Write-Host "Driver package reused from previous release."
+}
 
 $driverCer = Get-ChildItem -LiteralPath (Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release") -Filter "IddSampleDriver.cer" -File -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if ($driverCer) {
     Copy-Item -LiteralPath $driverCer.FullName -Destination (Join-Path $ReleaseDir "driver") -Force
+} else {
+    $driverCerBackup = Join-Path $DriverBackupDir "driver\IddSampleDriver.cer"
+    if (Test-Path -LiteralPath $driverCerBackup) {
+        Copy-Item -LiteralPath $driverCerBackup -Destination (Join-Path $ReleaseDir "driver") -Force
+    }
 }
 
 if (Test-Path -LiteralPath $ZipPath) {

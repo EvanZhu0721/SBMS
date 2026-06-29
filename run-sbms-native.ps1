@@ -47,8 +47,8 @@ function Wait-SBMSSource {
         if ($HostProcess -and $HostProcess.HasExited) {
             return $false
         }
-        $list = & $Exe --list 2>&1 | Out-String
-        if (Test-SBMSVirtualSource -Selector $Selector -ListOutput $list) {
+        $displayListText = & $Exe --list 2>&1 | Out-String
+        if (Test-SBMSVirtualSource -Selector $Selector -ListOutput $displayListText) {
             return $true
         }
         Start-Sleep -Milliseconds 500
@@ -61,6 +61,15 @@ function Test-SBMSVirtualSource {
         [string] $Selector,
         [string] $ListOutput
     )
+    return -not [string]::IsNullOrWhiteSpace((Get-SBMSVirtualSourceDevice -Selector $Selector -ListOutput $ListOutput))
+}
+
+function Get-SBMSVirtualSourceDevice {
+    param(
+        [string] $Selector,
+        [string] $ListOutput
+    )
+    $devices = New-Object System.Collections.Generic.List[string]
     foreach ($line in ($ListOutput -split "`r?`n")) {
         if ($line -notmatch '^\s*(\\\\\.\\DISPLAY\d+)(?: primary)?: pos=\S+ mode=(\d+x\d+)@\d+ name=(.+)$') {
             continue
@@ -73,10 +82,17 @@ function Test-SBMSVirtualSource {
             continue
         }
         if ($device -ieq $Selector -or $resolution -ieq $Selector) {
-            return $true
+            $devices.Add($device)
         }
     }
-    return $false
+
+    if ($devices.Count -eq 0) {
+        return $null
+    }
+
+    return $devices |
+        Sort-Object { if ($_ -match 'DISPLAY(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue } } |
+        Select-Object -First 1
 }
 
 $Args = @("--source", $Source, "--target", $Target, "--filter", $Filter)
@@ -118,6 +134,14 @@ try {
             }
         }
         throw "Timed out waiting for source display: $Source"
+    }
+    $displayListText = & $Exe --list 2>&1 | Out-String
+    $resolvedSource = Get-SBMSVirtualSourceDevice -Selector $Source -ListOutput $displayListText
+    if (-not [string]::IsNullOrWhiteSpace($resolvedSource)) {
+        if ($resolvedSource -ine $Source) {
+            Write-Host "Resolved virtual source $Source -> $resolvedSource"
+        }
+        $Args[1] = $resolvedSource
     }
     & $Exe $Args
     $ExitCode = $LASTEXITCODE

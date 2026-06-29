@@ -28,7 +28,7 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $Source
+& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Xml.dll $Source
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

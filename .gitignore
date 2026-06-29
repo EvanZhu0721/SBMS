@@ -13,6 +13,8 @@
 # Visual Studio / WDK
 .vs/
 x64/
+!msbuild-vctargets-v170/Platforms/x64/
+!msbuild-vctargets-v170/Platforms/x64/**
 Debug/
 Release/
 ipch/
