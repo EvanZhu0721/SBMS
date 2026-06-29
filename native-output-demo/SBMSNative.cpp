@@ -5,11 +5,18 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <dxgi1_2.h>
+#include <bcrypt.h>
+#include <setupapi.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <cwctype>
+#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
@@ -21,6 +28,7 @@ using Microsoft::WRL::ComPtr;
 struct DisplayInfo {
     std::wstring name;
     std::wstring text;
+    std::wstring sunshineId;
     RECT rect{};
     DWORD frequency = 0;
     bool primary = false;
@@ -635,6 +643,362 @@ static std::wstring ToLower(std::wstring value) {
     return value;
 }
 
+static std::wstring AsciiToWide(const std::string& value) {
+    return std::wstring(value.begin(), value.end());
+}
+
+struct DisplayConfigPathEntry {
+    std::wstring gdiDeviceName;
+    std::wstring monitorDevicePath;
+};
+
+struct MonitorDeviceBinding {
+    std::wstring devicePathLower;
+    std::wstring instanceId;
+    std::vector<std::byte> edid;
+};
+
+static void AppendWideBytes(std::vector<std::byte>& target, const std::wstring& value) {
+    const auto* first = reinterpret_cast<const std::byte*>(value.data());
+    target.insert(target.end(), first, first + value.size() * sizeof(wchar_t));
+}
+
+static std::vector<std::byte> WideBytes(const std::wstring& value) {
+    std::vector<std::byte> bytes;
+    AppendWideBytes(bytes, value);
+    return bytes;
+}
+
+static bool QueryActiveDisplayConfig(
+    UINT32 flags,
+    std::vector<DISPLAYCONFIG_PATH_INFO>& paths,
+    std::vector<DISPLAYCONFIG_MODE_INFO>& modes) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        UINT32 pathCount = 0;
+        UINT32 modeCount = 0;
+        LONG status = GetDisplayConfigBufferSizes(flags, &pathCount, &modeCount);
+        if (status != ERROR_SUCCESS || pathCount == 0) {
+            return false;
+        }
+
+        paths.assign(pathCount, DISPLAYCONFIG_PATH_INFO{});
+        modes.assign(modeCount, DISPLAYCONFIG_MODE_INFO{});
+        status = QueryDisplayConfig(
+            flags,
+            &pathCount,
+            paths.data(),
+            &modeCount,
+            modes.data(),
+            nullptr);
+        if (status == ERROR_SUCCESS) {
+            paths.resize(pathCount);
+            modes.resize(modeCount);
+            return true;
+        }
+        if (status != ERROR_INSUFFICIENT_BUFFER) {
+            return false;
+        }
+    }
+    return false;
+}
+
+static bool TryGetSourceGdiName(const DISPLAYCONFIG_PATH_INFO& path, std::wstring& name) {
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME sourceName{};
+    sourceName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+    sourceName.header.size = sizeof(sourceName);
+    sourceName.header.adapterId = path.sourceInfo.adapterId;
+    sourceName.header.id = path.sourceInfo.id;
+    if (DisplayConfigGetDeviceInfo(&sourceName.header) != ERROR_SUCCESS) {
+        return false;
+    }
+    name = sourceName.viewGdiDeviceName;
+    return !name.empty();
+}
+
+static bool TryGetMonitorDevicePath(const DISPLAYCONFIG_PATH_INFO& path, std::wstring& devicePath) {
+    DISPLAYCONFIG_TARGET_DEVICE_NAME targetName{};
+    targetName.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+    targetName.header.size = sizeof(targetName);
+    targetName.header.adapterId = path.targetInfo.adapterId;
+    targetName.header.id = path.targetInfo.id;
+    if (DisplayConfigGetDeviceInfo(&targetName.header) != ERROR_SUCCESS) {
+        return false;
+    }
+    devicePath = targetName.monitorDevicePath;
+    return !devicePath.empty();
+}
+
+static std::vector<DisplayConfigPathEntry> QueryActiveDisplayConfigPathEntries() {
+    UINT32 flags = QDC_ONLY_ACTIVE_PATHS;
+#ifdef QDC_VIRTUAL_MODE_AWARE
+    flags |= QDC_VIRTUAL_MODE_AWARE;
+#endif
+
+    std::vector<DISPLAYCONFIG_PATH_INFO> paths;
+    std::vector<DISPLAYCONFIG_MODE_INFO> modes;
+    if (!QueryActiveDisplayConfig(flags, paths, modes) &&
+        flags != QDC_ONLY_ACTIVE_PATHS) {
+        QueryActiveDisplayConfig(QDC_ONLY_ACTIVE_PATHS, paths, modes);
+    }
+
+    std::vector<DisplayConfigPathEntry> entries;
+    for (const auto& path : paths) {
+        DisplayConfigPathEntry entry;
+        if (TryGetSourceGdiName(path, entry.gdiDeviceName) &&
+            TryGetMonitorDevicePath(path, entry.monitorDevicePath)) {
+            entries.push_back(entry);
+        }
+    }
+    return entries;
+}
+
+static std::vector<MonitorDeviceBinding> EnumerateMonitorDeviceBindings() {
+    static const GUID kMonitorInterfaceGuid = {
+        0xe6f07b5f,
+        0xee97,
+        0x4a90,
+        {0xb0, 0x76, 0x33, 0xf5, 0x7b, 0xf4, 0xea, 0xa7}};
+
+    std::vector<MonitorDeviceBinding> bindings;
+    HDEVINFO devices = SetupDiGetClassDevsW(
+        &kMonitorInterfaceGuid,
+        nullptr,
+        nullptr,
+        DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+    if (devices == INVALID_HANDLE_VALUE) {
+        return bindings;
+    }
+
+    for (DWORD index = 0;; ++index) {
+        SP_DEVICE_INTERFACE_DATA interfaceData{};
+        interfaceData.cbSize = sizeof(interfaceData);
+        if (!SetupDiEnumDeviceInterfaces(devices, nullptr, &kMonitorInterfaceGuid, index, &interfaceData)) {
+            if (GetLastError() == ERROR_NO_MORE_ITEMS) {
+                break;
+            }
+            continue;
+        }
+
+        DWORD requiredSize = 0;
+        SetupDiGetDeviceInterfaceDetailW(devices, &interfaceData, nullptr, 0, &requiredSize, nullptr);
+        if (requiredSize == 0) {
+            continue;
+        }
+
+        std::vector<BYTE> detailBuffer(requiredSize);
+        auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detailBuffer.data());
+        detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+        SP_DEVINFO_DATA deviceData{};
+        deviceData.cbSize = sizeof(deviceData);
+        if (!SetupDiGetDeviceInterfaceDetailW(
+                devices,
+                &interfaceData,
+                detail,
+                requiredSize,
+                nullptr,
+                &deviceData)) {
+            continue;
+        }
+
+        MonitorDeviceBinding binding;
+        binding.devicePathLower = ToLower(detail->DevicePath);
+
+        wchar_t instanceId[512]{};
+        if (SetupDiGetDeviceInstanceIdW(
+                devices,
+                &deviceData,
+                instanceId,
+                static_cast<DWORD>(std::size(instanceId)),
+                nullptr)) {
+            binding.instanceId = instanceId;
+        }
+
+        HKEY deviceKey = SetupDiOpenDevRegKey(
+            devices,
+            &deviceData,
+            DICS_FLAG_GLOBAL,
+            0,
+            DIREG_DEV,
+            KEY_READ);
+        if (deviceKey != INVALID_HANDLE_VALUE) {
+            DWORD valueType = 0;
+            DWORD valueSize = 0;
+            if (RegQueryValueExW(deviceKey, L"EDID", nullptr, &valueType, nullptr, &valueSize) == ERROR_SUCCESS &&
+                valueType == REG_BINARY &&
+                valueSize > 0) {
+                binding.edid.resize(valueSize);
+                if (RegQueryValueExW(
+                        deviceKey,
+                        L"EDID",
+                        nullptr,
+                        &valueType,
+                        reinterpret_cast<LPBYTE>(binding.edid.data()),
+                        &valueSize) != ERROR_SUCCESS) {
+                    binding.edid.clear();
+                } else {
+                    binding.edid.resize(valueSize);
+                }
+            }
+            RegCloseKey(deviceKey);
+        }
+
+        bindings.push_back(binding);
+    }
+
+    SetupDiDestroyDeviceInfoList(devices);
+    return bindings;
+}
+
+static std::vector<std::byte> BuildSunshineDeviceIdPayload(
+    const std::wstring& monitorDevicePath,
+    const std::vector<MonitorDeviceBinding>& monitorBindings) {
+    const std::wstring wantedPath = ToLower(monitorDevicePath);
+    for (const auto& binding : monitorBindings) {
+        if (binding.devicePathLower != wantedPath ||
+            binding.instanceId.empty() ||
+            binding.edid.empty()) {
+            continue;
+        }
+
+        const std::wstring& instanceId = binding.instanceId;
+        const size_t firstAmp = instanceId.find(L'&');
+        const size_t unstablePart = firstAmp == std::wstring::npos
+            ? std::wstring::npos
+            : instanceId.find(L'&', firstAmp + 1);
+        const size_t semiStablePart = unstablePart == std::wstring::npos
+            ? std::wstring::npos
+            : instanceId.find(L'&', unstablePart + 1);
+        if (semiStablePart == std::wstring::npos) {
+            break;
+        }
+
+        std::vector<std::byte> payload = binding.edid;
+        AppendWideBytes(payload, instanceId.substr(0, unstablePart));
+        AppendWideBytes(payload, instanceId.substr(semiStablePart));
+        return payload;
+    }
+
+    return WideBytes(monitorDevicePath);
+}
+
+static bool Sha1Digest(
+    const std::vector<unsigned char>& data,
+    std::array<unsigned char, 20>& digest) {
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    DWORD objectLength = 0;
+    DWORD resultLength = 0;
+    std::vector<unsigned char> hashObject;
+    bool ok = false;
+
+    do {
+        NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA1_ALGORITHM, nullptr, 0);
+        if (status < 0) {
+            break;
+        }
+        status = BCryptGetProperty(
+            algorithm,
+            BCRYPT_OBJECT_LENGTH,
+            reinterpret_cast<PUCHAR>(&objectLength),
+            sizeof(objectLength),
+            &resultLength,
+            0);
+        if (status < 0 || objectLength == 0) {
+            break;
+        }
+        hashObject.resize(objectLength);
+        status = BCryptCreateHash(
+            algorithm,
+            &hash,
+            hashObject.data(),
+            objectLength,
+            nullptr,
+            0,
+            0);
+        if (status < 0) {
+            break;
+        }
+        status = BCryptHashData(
+            hash,
+            const_cast<PUCHAR>(data.data()),
+            static_cast<ULONG>(data.size()),
+            0);
+        if (status < 0) {
+            break;
+        }
+        status = BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0);
+        ok = status >= 0;
+    } while (false);
+
+    if (hash != nullptr) {
+        BCryptDestroyHash(hash);
+    }
+    if (algorithm != nullptr) {
+        BCryptCloseAlgorithmProvider(algorithm, 0);
+    }
+    return ok;
+}
+
+static std::wstring FormatSunshineUuid(std::array<unsigned char, 16> uuidBytes) {
+    uuidBytes[6] = static_cast<unsigned char>((uuidBytes[6] & 0x0f) | 0x50);
+    uuidBytes[8] = static_cast<unsigned char>((uuidBytes[8] & 0x3f) | 0x80);
+
+    std::ostringstream os;
+    os << std::hex << std::nouppercase << std::setfill('0') << "{";
+    for (size_t i = 0; i < uuidBytes.size(); ++i) {
+        if (i == 4 || i == 6 || i == 8 || i == 10) {
+            os << "-";
+        }
+        os << std::setw(2) << static_cast<unsigned int>(uuidBytes[i]);
+    }
+    os << "}";
+    return AsciiToWide(os.str());
+}
+
+static std::wstring BuildSunshineDisplayId(const std::vector<std::byte>& payload) {
+    if (payload.empty()) {
+        return L"";
+    }
+
+    std::vector<unsigned char> namespacedPayload(16, 0);
+    const auto* payloadBytes = reinterpret_cast<const unsigned char*>(payload.data());
+    namespacedPayload.insert(namespacedPayload.end(), payloadBytes, payloadBytes + payload.size());
+
+    std::array<unsigned char, 20> digest{};
+    if (!Sha1Digest(namespacedPayload, digest)) {
+        return L"";
+    }
+
+    std::array<unsigned char, 16> uuidBytes{};
+    std::copy_n(digest.begin(), uuidBytes.size(), uuidBytes.begin());
+    return FormatSunshineUuid(uuidBytes);
+}
+
+static std::wstring ResolveSunshineDisplayId(
+    const std::wstring& gdiDeviceName,
+    const std::vector<DisplayConfigPathEntry>& pathEntries,
+    const std::vector<MonitorDeviceBinding>& monitorBindings) {
+    /*
+     * Issue #6: Sunshine/libdisplaydevice does not use \\.\DISPLAYxx as its
+     * streaming output selector. It maps that transient GDI name to the active
+     * DisplayConfig monitorDevicePath, then builds a UUID-v5-like identifier
+     * from EDID plus the stable parts of the monitor instance id. If EDID data
+     * is unavailable, Sunshine falls back to hashing monitorDevicePath itself.
+     *
+     * SBMS exposes the same value in --list so the GUI can print a copy-ready
+     * Sunshine display id immediately after a stream-only virtual desktop is
+     * created, without scraping Sunshine logs or changing the interaction flow.
+     */
+    const std::wstring wantedName = ToLower(gdiDeviceName);
+    for (const auto& entry : pathEntries) {
+        if (ToLower(entry.gdiDeviceName) != wantedName) {
+            continue;
+        }
+        return BuildSunshineDisplayId(BuildSunshineDeviceIdPayload(entry.monitorDevicePath, monitorBindings));
+    }
+    return L"";
+}
+
 static bool TryParseResolution(const std::wstring& value, int& width, int& height) {
     auto pos = value.find(L'x');
     if (pos == std::wstring::npos) {
@@ -661,6 +1025,8 @@ static bool IsVirtualDisplay(const DisplayInfo& display) {
 
 static std::vector<DisplayInfo> EnumDisplays() {
     std::vector<DisplayInfo> displays;
+    const std::vector<DisplayConfigPathEntry> pathEntries = QueryActiveDisplayConfigPathEntries();
+    const std::vector<MonitorDeviceBinding> monitorBindings = EnumerateMonitorDeviceBindings();
     for (DWORD i = 0;; ++i) {
         DISPLAY_DEVICEW device{};
         device.cb = sizeof(device);
@@ -680,6 +1046,7 @@ static std::vector<DisplayInfo> EnumDisplays() {
         DisplayInfo info;
         info.name = device.DeviceName;
         info.text = device.DeviceString;
+        info.sunshineId = ResolveSunshineDisplayId(info.name, pathEntries, monitorBindings);
         info.rect.left = mode.dmPosition.x;
         info.rect.top = mode.dmPosition.y;
         info.rect.right = mode.dmPosition.x + static_cast<LONG>(mode.dmPelsWidth);
@@ -836,7 +1203,11 @@ static void PrintList() {
         std::wcout << L"  " << display.name << (display.primary ? L" primary" : L"")
                    << L": pos=" << display.rect.left << L"," << display.rect.top
                    << L" mode=" << Width(display.rect) << L"x" << Height(display.rect)
-                   << L"@" << display.frequency << L" name=" << display.text << L"\n";
+                   << L"@" << display.frequency;
+        if (!display.sunshineId.empty()) {
+            std::wcout << L" sunshine=" << display.sunshineId;
+        }
+        std::wcout << L" name=" << display.text << L"\n";
     }
 
     std::wcout << L"\nDXGI outputs:\n";
@@ -1222,9 +1593,7 @@ float4 PSMain(VSOut input) : SV_TARGET {
 
         ComPtr<ID3D11Texture2D> shaderTexture;
         ComPtr<ID3D11ShaderResourceView> srv;
-        UINT64 presented = 0;
         auto started = std::chrono::steady_clock::now();
-        auto lastStat = std::chrono::steady_clock::now();
 
         while (g_running) {
             if (args.seconds > 0) {
@@ -1322,15 +1691,6 @@ float4 PSMain(VSOut input) : SV_TARGET {
 
             ID3D11ShaderResourceView* nullSrv[] = {nullptr};
             context->PSSetShaderResources(0, 1, nullSrv);
-
-            ++presented;
-            auto now = std::chrono::steady_clock::now();
-            std::chrono::duration<double> elapsed = now - lastStat;
-            if (elapsed.count() >= 1.0) {
-                std::cout << "present_fps=" << (presented / elapsed.count()) << "\n";
-                presented = 0;
-                lastStat = now;
-            }
         }
 
         CleanupInputMapper();

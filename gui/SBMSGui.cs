@@ -96,7 +96,7 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-29.066-beta";
+        private const string BuildLabel = "2026-06-29.067-beta";
         private const int WM_SETREDRAW = 0x000B;
         private const int MultiScreenBetaMaxTargets = 2;
         private const int DisplayTopologySettleTimeoutMs = 7000;
@@ -326,6 +326,7 @@ namespace SBMSGui
             public string Resolution;
             public string Refresh;
             public string Name;
+            public string SunshineId;
             public bool Primary;
             public bool Virtual;
 
@@ -3879,19 +3880,20 @@ namespace SBMSGui
         private static bool TryParseDisplayLine(string line, out DisplayChoice display)
         {
             display = null;
-            Match match = Regex.Match(line, @"^(\\\\\.\\DISPLAY\d+)( primary)?\: pos=[^ ]+ mode=(\d+x\d+)@(\d+) name=(.+)$");
+            Match match = Regex.Match(line, @"^(\\\\\.\\DISPLAY\d+)( primary)?\: pos=[^ ]+ mode=(\d+x\d+)@(\d+)(?: sunshine=(\{[0-9a-fA-F-]{36}\}))? name=(.+)$");
             if (!match.Success)
             {
                 return false;
             }
 
-            string name = match.Groups[5].Value.Trim();
+            string name = match.Groups[6].Value.Trim();
             display = new DisplayChoice
             {
                 DeviceName = match.Groups[1].Value,
                 Primary = match.Groups[2].Success,
                 Resolution = match.Groups[3].Value,
                 Refresh = match.Groups[4].Value,
+                SunshineId = match.Groups[5].Success ? match.Groups[5].Value : "",
                 Name = name,
                 Virtual = IsVirtualDisplayName(name)
             };
@@ -5105,6 +5107,7 @@ namespace SBMSGui
             lastManagedVirtualResolution = "";
             lastManagedVirtualRefresh = "";
             lastManagedVirtualOrientation = DMDO_DEFAULT;
+            DisplayChoice streamOnlyVirtualSource = null;
 
             if (manageVirtualDisplay)
             {
@@ -5223,6 +5226,7 @@ namespace SBMSGui
                         lastNativeArgs = "";
                         SetRunning(true);
                         AppendLog("多组虚拟桌面模式已启动: " + betaPairs.Count.ToString(CultureInfo.InvariantCulture) + " 个虚拟源");
+                        AppendStreamOnlySunshineDisplayIds(virtualSources, betaPairs);
                         return;
                     }
 
@@ -5296,6 +5300,7 @@ namespace SBMSGui
                 lastManagedVirtualResolution = virtualSource.Resolution;
                 lastManagedVirtualRefresh = GetSingleMappingRefresh(virtualSource);
                 lastManagedVirtualOrientation = GetSelectedDisplayOrientation();
+                streamOnlyVirtualSource = virtualSource;
                 RefreshDisplays();
                 SelectComboByDevice(sourceDisplayCombo, sourceSelector);
             }
@@ -5306,6 +5311,11 @@ namespace SBMSGui
                 stoppingRequested = false;
                 nativeRestartCount = 0;
                 AppendLog("串流模式已启动：仅创建虚拟桌面，未启动 native 输出");
+                DisplayChoice selectedVirtualSource = streamOnlyVirtualSource ?? sourceDisplayCombo.SelectedItem as DisplayChoice;
+                if (selectedVirtualSource != null && selectedVirtualSource.Virtual)
+                {
+                    AppendSunshineDisplayIdLog("串流模式", selectedVirtualSource);
+                }
                 SetRunning(true);
                 return;
             }
@@ -5531,6 +5541,7 @@ namespace SBMSGui
                 if (pair.StreamOnly)
                 {
                     AppendLog("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] 仅虚拟桌面: " + source.DeviceName);
+                    AppendSunshineDisplayIdLog("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "]", source);
                     continue;
                 }
                 DisplayChoice target = pair.TargetDisplay;
@@ -5853,6 +5864,7 @@ namespace SBMSGui
                 {
                     SetRunning(true);
                     AppendLog("拓扑变化后仍为仅虚拟桌面模式，未启动 native 输出");
+                    AppendStreamOnlySunshineDisplayIds(virtualSources, betaPairs);
                     return;
                 }
 
@@ -5882,6 +5894,42 @@ namespace SBMSGui
             DisplayChoice targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice;
             AppendLog("选择源: " + (sourceDisplay != null ? sourceDisplay.ToString() : sourceText.Text.Trim()));
             AppendLog("选择目标: " + (targetDisplay != null ? targetDisplay.ToString() : targetText.Text.Trim()));
+        }
+
+        private void AppendSunshineDisplayIdLog(string prefix, DisplayChoice source)
+        {
+            if (source == null)
+            {
+                return;
+            }
+
+            /*
+             * Issue #6: Sunshine asks for its own stable display id instead of the
+             * transient Windows \\.\DISPLAYxx name. SBMSNative resolves that id during
+             * --list, and the GUI prints it only for stream-only virtual desktops so the
+             * user can paste the exact value into Sunshine after the managed virtual
+             * source has been created and mode-confirmed.
+             */
+            if (!string.IsNullOrWhiteSpace(source.SunshineId))
+            {
+                AppendLog(prefix + " Sunshine显示器ID: " + source.SunshineId + " (" + source.DeviceName + ")");
+            }
+            else
+            {
+                AppendLog(prefix + " Sunshine显示器ID未解析: " + source.DeviceName);
+            }
+        }
+
+        private void AppendStreamOnlySunshineDisplayIds(List<DisplayChoice> virtualSources, List<BridgePairConfig> pairs)
+        {
+            int count = Math.Min(virtualSources.Count, pairs.Count);
+            for (int i = 0; i < count; ++i)
+            {
+                if (pairs[i].StreamOnly)
+                {
+                    AppendSunshineDisplayIdLog("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "]", virtualSources[i]);
+                }
+            }
         }
 
         private bool StartDeviceHost(int virtualDeviceCount)

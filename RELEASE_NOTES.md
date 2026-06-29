@@ -1,5 +1,13 @@
 # SBMS Release Notes
 
+## 2026-06-29.067-beta
+
+- Added Sunshine-compatible display id discovery to `SBMSNative.exe --list` by resolving each active `\\.\DISPLAYxx` through DisplayConfig and monitor interface data.
+- Printed copy-ready Sunshine display ids for single stream-only mode and multi-screen BETA stream-only mapping groups after the managed virtual source is created and confirmed.
+- Stopped native output from writing per-second `present_fps` lines to the terminal during bridge rendering.
+- Added Issue #6 comments near the Sunshine id discovery and stream-only logging logic.
+- Bumped the GUI and setup build labels to `2026-06-29.067-beta`.
+
 ## 2026-06-29.066-beta
 
 - Added a dedicated native exit code for transient virtual-source enumeration misses so the GUI can recover when Windows briefly hides or renumbers a BETA virtual display during mode/topology commits.
