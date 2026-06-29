@@ -1,5 +1,12 @@
 # SBMS Release Notes
 
+## 2026-06-29.069-beta
+
+- Removed the cumulative 5-recovery fuse from single native and multi-screen BETA topology/source recovery, so repeated Windows Settings layout or orientation edits no longer stop bridge recovery just because earlier recoveries succeeded in the same run.
+- Kept recoverable native display/source exits on the existing restart/rebind path while leaving the virtual display host alive during BETA topology recovery.
+- Added Issue #8 comments near the single-output and BETA recovery logic.
+- Bumped the GUI and setup build labels to `2026-06-29.069-beta`.
+
 ## 2026-06-29.068-beta
 
 - Added rollbackable `跟随Windows BETA` behavior for BETA topology recovery, defaulting on for this release while keeping the old strict SBMS-restore path available by unchecking it.

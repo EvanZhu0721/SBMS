@@ -23,7 +23,7 @@ namespace SBMSSetup
         private readonly GlowButton languageButton = new GlowButton();
         private readonly string setupLogPath;
         private bool english = true;
-        private const string SetupBuildLabel = "2026-06-29.068-beta";
+        private const string SetupBuildLabel = "2026-06-29.069-beta";
 
         private static readonly Color ThemeBack = Color.FromArgb(0, 10, 4);
         private static readonly Color ThemeText = Color.White;

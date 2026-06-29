@@ -100,7 +100,7 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-29.068-beta";
+        private const string BuildLabel = "2026-06-29.069-beta";
         private const int WM_SETREDRAW = 0x000B;
         private const int MultiScreenBetaMaxTargets = 2;
         private const int DisplayTopologySettleTimeoutMs = 7000;
@@ -235,7 +235,6 @@ namespace SBMSGui
         private bool stoppingRequested;
         private bool restartingAfterTopologyChange;
         private bool bridgeStarting;
-        private int nativeRestartCount;
         private readonly string root;
         private readonly string nativeExe;
         private readonly string deviceHostExe;
@@ -5303,7 +5302,6 @@ namespace SBMSGui
                     {
                         process = null;
                         stoppingRequested = false;
-                        nativeRestartCount = 0;
                         lastNativeArgs = "";
                         SetRunning(true);
                         AppendLog("多组虚拟桌面模式已启动: " + betaPairs.Count.ToString(CultureInfo.InvariantCulture) + " 个虚拟源");
@@ -5390,7 +5388,6 @@ namespace SBMSGui
             {
                 lastNativeArgs = "";
                 stoppingRequested = false;
-                nativeRestartCount = 0;
                 AppendLog("串流模式已启动：仅创建虚拟桌面，未启动 native 输出");
                 DisplayChoice selectedVirtualSource = streamOnlyVirtualSource ?? sourceDisplayCombo.SelectedItem as DisplayChoice;
                 if (selectedVirtualSource != null && selectedVirtualSource.Virtual)
@@ -5406,7 +5403,6 @@ namespace SBMSGui
             AppendSelectedDisplayLog();
             lastNativeArgs = args.ToString();
             stoppingRequested = false;
-            nativeRestartCount = 0;
             AppendLog("native 参数: " + lastNativeArgs);
             if (!StartNativeProcess(lastNativeArgs, false))
             {
@@ -5450,10 +5446,16 @@ namespace SBMSGui
                         SetRunning(false);
                         return;
                     }
-                    if (!stoppingRequested && IsRecoverableNativeDisplayExit(exitCode) && nativeRestartCount < 5)
+                    if (!stoppingRequested && IsRecoverableNativeDisplayExit(exitCode))
                     {
-                        ++nativeRestartCount;
-                        AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出 " + nativeRestartCount + "/5");
+                        /*
+                         * Issue #8: Do not cap recoverable single-output restarts with a
+                         * cumulative counter. Windows can emit several transient source or
+                         * topology failures while the user is still editing layout, and the
+                         * bridge should keep trying instead of carrying an old recovery count
+                         * until it kills the current session.
+                         */
+                        AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出");
                         if (!TryRestartNativeAfterTopologyChange())
                         {
                             AbortBridgeStart("native 重启失败，已停止桥接");
@@ -5600,17 +5602,8 @@ namespace SBMSGui
 
         private bool StartMultiScreenBeta(List<DisplayChoice> virtualSources, List<BridgePairConfig> pairs)
         {
-            return StartMultiScreenBeta(virtualSources, pairs, true);
-        }
-
-        private bool StartMultiScreenBeta(List<DisplayChoice> virtualSources, List<BridgePairConfig> pairs, bool resetRestartCounter)
-        {
             StopBetaProcesses();
             stoppingRequested = false;
-            if (resetRestartCounter)
-            {
-                nativeRestartCount = 0;
-            }
             lastNativeArgs = "";
             process = null;
 
@@ -5950,16 +5943,14 @@ namespace SBMSGui
             {
                 return;
             }
-            if (nativeRestartCount >= 5)
-            {
-                AbortBridgeStart("显示拓扑/虚拟源恢复次数过多，停止桥接");
-                return;
-            }
-
-            int restartCount = nativeRestartCount + 1;
-            nativeRestartCount = restartCount;
             restartingAfterTopologyChange = true;
-            AppendLog("检测到显示拓扑/虚拟源变化，恢复 native 输出 " + restartCount.ToString(CultureInfo.InvariantCulture) + "/5: " + source);
+            /*
+             * Issue #8: This path intentionally has no recovery-count fuse. Windows Settings
+             * may produce multiple short-lived topology/source snapshots while a user rotates
+             * or drags virtual monitors. Treat each recoverable exit as a fresh chance to
+             * settle, rebind, and rebuild native output while the device host stays alive.
+             */
+            AppendLog("检测到显示拓扑/虚拟源变化，恢复 native 输出: " + source);
             try
             {
                 /*
@@ -6033,7 +6024,7 @@ namespace SBMSGui
                     return;
                 }
 
-                if (!StartMultiScreenBeta(virtualSources, betaPairs, false))
+                if (!StartMultiScreenBeta(virtualSources, betaPairs))
                 {
                     AppendLog("拓扑变化后 native 输出恢复失败，虚拟显示器保持运行，可手动停止后重试");
                     return;
@@ -6050,7 +6041,6 @@ namespace SBMSGui
                 stoppingRequested = false;
                 restartingAfterTopologyChange = false;
             }
-            nativeRestartCount = restartCount;
         }
 
         private void AppendSelectedDisplayLog()
@@ -6948,7 +6938,6 @@ namespace SBMSGui
                 RefreshDisplays();
             }
             lastNativeArgs = "";
-            nativeRestartCount = 0;
             restartingAfterTopologyChange = false;
             stoppingRequested = false;
             SetRunning(false);
