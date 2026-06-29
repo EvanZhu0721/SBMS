@@ -95,9 +95,11 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-29.064-beta";
+        private const string BuildLabel = "2026-06-29.065-beta";
         private const int WM_SETREDRAW = 0x000B;
         private const int MultiScreenBetaMaxTargets = 2;
+        private const int DisplayTopologySettleTimeoutMs = 7000;
+        private const int DisplayTopologyStableSamples = 2;
         private const int BetaColEnabled = 0;
         private const int BetaColMode = 1;
         private const int BetaColTarget = 2;
@@ -5444,9 +5446,17 @@ namespace SBMSGui
 
         private bool StartMultiScreenBeta(List<DisplayChoice> virtualSources, List<BridgePairConfig> pairs)
         {
+            return StartMultiScreenBeta(virtualSources, pairs, true);
+        }
+
+        private bool StartMultiScreenBeta(List<DisplayChoice> virtualSources, List<BridgePairConfig> pairs, bool resetRestartCounter)
+        {
             StopBetaProcesses();
             stoppingRequested = false;
-            nativeRestartCount = 0;
+            if (resetRestartCounter)
+            {
+                nativeRestartCount = 0;
+            }
             lastNativeArgs = "";
             process = null;
 
@@ -5548,6 +5558,145 @@ namespace SBMSGui
             return true;
         }
 
+        private bool WaitForDisplayTopologyToSettle(int timeoutMs, out string message)
+        {
+            message = "";
+            string previousSignature = "";
+            int stableSamples = 0;
+            var deadline = Environment.TickCount + timeoutMs;
+
+            while (Environment.TickCount < deadline)
+            {
+                if (deviceHostProcess != null && deviceHostProcess.HasExited)
+                {
+                    message = "拓扑变化恢复时虚拟显示器 host 已退出";
+                    return false;
+                }
+
+                string listOutput = CaptureNativeOutput("--list");
+                string signature = BuildDisplayListSignature(listOutput);
+                if (!string.IsNullOrWhiteSpace(signature) &&
+                    string.Equals(signature, previousSignature, StringComparison.Ordinal))
+                {
+                    ++stableSamples;
+                    if (stableSamples >= DisplayTopologyStableSamples)
+                    {
+                        RefreshDisplays();
+                        return true;
+                    }
+                }
+                else
+                {
+                    previousSignature = signature;
+                    stableSamples = string.IsNullOrWhiteSpace(signature) ? 0 : 1;
+                }
+
+                SleepWithUiPump(500);
+            }
+
+            message = "等待显示拓扑稳定超时";
+            return false;
+        }
+
+        private static string BuildDisplayListSignature(string listOutput)
+        {
+            var lines = new List<string>();
+            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            {
+                string line = rawLine.Trim();
+                DisplayChoice display;
+                if (TryParseDisplayLine(line, out display))
+                {
+                    lines.Add(line);
+                }
+            }
+            lines.Sort(StringComparer.OrdinalIgnoreCase);
+            return string.Join("\n", lines.ToArray());
+        }
+
+        private bool RebindBetaTargetDisplays(out string message)
+        {
+            message = "";
+            RefreshDisplays();
+            RefreshBetaTargetChoices();
+
+            updatingBetaPairGrid = true;
+            try
+            {
+                foreach (DataGridViewRow row in betaPairGrid.Rows)
+                {
+                    if (!IsBetaRowEnabled(row) || IsBetaRowStreamOnly(row))
+                    {
+                        continue;
+                    }
+
+                    DisplayChoice previousTarget = row.Tag as DisplayChoice;
+                    string requestedLabel = GetCellText(row, BetaColTarget);
+                    DisplayChoice target = FindDisplayByTargetLabel(requestedLabel);
+                    if (target == null && previousTarget != null)
+                    {
+                        target = GetDefaultPhysicalDisplay(previousTarget.DeviceName);
+                    }
+                    if (target == null)
+                    {
+                        message = "拓扑变化后未找到 BETA 目标显示器: " + requestedLabel;
+                        return false;
+                    }
+
+                    string targetLabel = GetDisplayLabel(target);
+                    AddComboItemIfMissing(BetaColTarget, targetLabel);
+                    row.Tag = target;
+                    row.Cells[BetaColTarget].Value = targetLabel;
+                }
+            }
+            finally
+            {
+                updatingBetaPairGrid = false;
+            }
+
+            return true;
+        }
+
+        private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, out string message)
+        {
+            message = "";
+            int count = Math.Min(virtualSources.Count, betaPairs.Count);
+            for (int i = 0; i < count; ++i)
+            {
+                DisplayChoice source = virtualSources[i];
+                BridgePairConfig pair = betaPairs[i];
+                string desiredResolution = FormatResolution(pair.SourceResolution);
+                if (string.Equals(source.Resolution, desiredResolution, StringComparison.OrdinalIgnoreCase))
+                {
+                    pair.Refresh = source.Refresh;
+                    continue;
+                }
+
+                string modeMessage;
+                Resolution appliedResolution;
+                string appliedRefresh;
+                if (!TryApplyDisplayMode(source.DeviceName, pair.SourceResolution, pair.Refresh, pair.Orientation, out appliedResolution, out appliedRefresh, out modeMessage))
+                {
+                    message = modeMessage;
+                    return false;
+                }
+
+                AppendLog(modeMessage);
+                DisplayChoice confirmedSource;
+                if (!WaitForVirtualSourceMode(source.DeviceName, appliedResolution, 5000, out confirmedSource))
+                {
+                    message = "拓扑变化后虚拟模式未确认: " + source.DeviceName + " -> " + FormatResolution(appliedResolution);
+                    return false;
+                }
+
+                virtualSources[i] = confirmedSource;
+                pair.SourceResolution = appliedResolution;
+                pair.Refresh = confirmedSource.Refresh;
+            }
+
+            return true;
+        }
+
         private void RestartBridgeAfterTopologyChange(string source)
         {
             if (stoppingRequested || restartingAfterTopologyChange)
@@ -5563,9 +5712,21 @@ namespace SBMSGui
             int restartCount = nativeRestartCount + 1;
             nativeRestartCount = restartCount;
             restartingAfterTopologyChange = true;
-            AppendLog("检测到显示拓扑变化，重建桥接 " + restartCount.ToString(CultureInfo.InvariantCulture) + "/5: " + source);
+            AppendLog("检测到显示拓扑变化，恢复 native 输出 " + restartCount.ToString(CultureInfo.InvariantCulture) + "/5: " + source);
             try
             {
+                /*
+                 * Issue #4: Windows Settings applies a display-layout edit while the
+                 * SBMS software devices are still part of the active topology. Closing
+                 * the device host here calls SwDeviceClose, which removes the virtual
+                 * monitors in the middle of that transaction and can make Windows roll
+                 * the topology change back.
+                 *
+                 * DXGI desktop duplication is allowed to die on topology changes, so the
+                 * short-lived native mirror processes are stopped and recreated. The
+                 * long-lived software-device host is deliberately kept alive until the
+                 * user explicitly stops SBMS or exits the GUI.
+                 */
                 stoppingRequested = true;
                 StopBetaProcesses();
                 if (process != null && !process.HasExited)
@@ -5578,8 +5739,60 @@ namespace SBMSGui
                     }
                 }
                 process = null;
-                StopDeviceHost();
-                SetRunning(false);
+
+                stoppingRequested = false;
+
+                string recoveryMessage;
+                if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, out recoveryMessage))
+                {
+                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    return;
+                }
+
+                if (!RebindBetaTargetDisplays(out recoveryMessage))
+                {
+                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    return;
+                }
+
+                List<BridgePairConfig> betaPairs;
+                if (!TryGetEnabledBridgePairs(false, out betaPairs, out recoveryMessage))
+                {
+                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    return;
+                }
+
+                List<DisplayChoice> virtualSources;
+                if (!WaitForVirtualSources(betaPairs.Count, 15000, out virtualSources, out recoveryMessage))
+                {
+                    AppendLog((string.IsNullOrWhiteSpace(recoveryMessage)
+                        ? "拓扑变化后等待虚拟显示器超时"
+                        : recoveryMessage) + "，虚拟显示器保持运行，可手动停止后重试");
+                    return;
+                }
+
+                if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, out recoveryMessage))
+                {
+                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    return;
+                }
+
+                int outputPairCount = CountOutputBridgePairs(betaPairs);
+                if (outputPairCount == 0)
+                {
+                    SetRunning(true);
+                    AppendLog("拓扑变化后仍为仅虚拟桌面模式，未启动 native 输出");
+                    return;
+                }
+
+                if (!StartMultiScreenBeta(virtualSources, betaPairs, false))
+                {
+                    AppendLog("拓扑变化后 native 输出恢复失败，虚拟显示器保持运行，可手动停止后重试");
+                    return;
+                }
+
+                SetRunning(true);
+                AppendLog("拓扑变化后 native 输出已恢复，虚拟显示器 host 未重启");
             }
             catch
             {
@@ -5589,8 +5802,6 @@ namespace SBMSGui
                 stoppingRequested = false;
                 restartingAfterTopologyChange = false;
             }
-
-            StartBridge();
             nativeRestartCount = restartCount;
         }
 

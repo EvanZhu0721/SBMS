@@ -1,5 +1,13 @@
 # SBMS Release Notes
 
+## 2026-06-29.065-beta
+
+- Kept the virtual display host alive during multi-screen BETA topology-change recovery so Windows layout edits no longer lose the software display devices while the topology is being applied.
+- Reworked multi-screen BETA recovery to stop and restart only the native DXGI output processes after display enumeration settles.
+- Rebound BETA target rows to the current physical display ids before restarting native output, avoiding stale `\\.\DISPLAYxx` selectors after Windows renumbers displays.
+- Added Issue #4 logic comments near the host-stable topology recovery path.
+- Bumped the GUI and setup build labels to `2026-06-29.065-beta`.
+
 ## 2026-06-29.064-beta
 
 - Added root `CONTEXT.md` as the first-read project context and made the GitHub issue-first workflow mandatory for every bug fix and feature.
