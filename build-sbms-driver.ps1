@@ -197,7 +197,15 @@ if (-not (Test-Path $WdkIncludeRoot)) {
 }
 
 $SdkVersion = Get-ChildItem $WdkIncludeRoot -Directory |
-    Where-Object { (Test-Path (Join-Path $_.FullName "um\windows.h")) -and (Test-Path (Join-Path $WdkRoot "Lib\$($_.Name)")) } |
+    Where-Object {
+        $candidateVersion = $_.Name
+        (Test-Path (Join-Path $_.FullName "um\windows.h")) -and
+        (Test-Path (Join-Path $WdkRoot "Lib\$candidateVersion")) -and
+        (Test-Path (Join-Path $WdkRoot "build\$candidateVersion\WindowsDriver.Common.targets")) -and
+        (Test-Path (Join-Path $WdkRoot "build\$candidateVersion\WindowsDriver.Default.props")) -and
+        (Test-Path (Join-Path $WdkRoot "build\$candidateVersion\$Platform\WindowsUserModeDriver\WDK.$Platform.WindowsUserModeDriver.props")) -and
+        (Test-Path (Join-Path $WdkRoot "build\$candidateVersion\$Platform\WindowsApplicationForDrivers\WDK.$Platform.WindowsApplicationForDrivers.props"))
+    } |
     Sort-Object Name -Descending |
     Select-Object -First 1 -ExpandProperty Name
 
@@ -228,17 +236,25 @@ if (-not $WdfVersion) {
     throw "UMDF headers not found under $wdfIncludeRoot"
 }
 
-$VCTargetsRoot = $null
+$VCTargetsCandidates = @()
 if ($InstallPath) {
-    $VCTargetsRoot = Join-Path $InstallPath "MSBuild\Microsoft\VC\v170"
+    $VCTargetsCandidates += Join-Path $InstallPath "MSBuild\Microsoft\VC\v170"
 }
-$LocalVCTargetsPath = Join-Path $Root "msbuild-vctargets-v170\"
+$MSBuildRoot = Split-Path (Split-Path (Split-Path $MSBuild -Parent) -Parent) -Parent
+$VCTargetsCandidates += Join-Path $MSBuildRoot "Microsoft\VC\v170"
+$VCTargetsRoot = Find-FirstExistingPath -Paths $VCTargetsCandidates
+
+$LocalVCTargetsPath = Join-Path $Root "msbuild-vctargets-v170"
 $LocalPlatformPath = Join-Path $LocalVCTargetsPath "Platforms\$Platform"
 $hasLocalWdkToolset = $false
 if ((Test-Path $LocalVCTargetsPath) -and (Test-Path $LocalPlatformPath)) {
     $localUserModeToolset = Join-Path $LocalPlatformPath "PlatformToolsets\WindowsUserModeDriver10.0"
     $localAppDriverToolset = Join-Path $LocalPlatformPath "PlatformToolsets\WindowsApplicationForDrivers10.0"
-    $hasLocalWdkToolset = (Test-Path $localUserModeToolset) -and (Test-Path $localAppDriverToolset)
+    $hasLocalWdkToolset =
+        (Test-Path (Join-Path $localUserModeToolset "Toolset.props")) -and
+        (Test-Path (Join-Path $localUserModeToolset "Toolset.targets")) -and
+        (Test-Path (Join-Path $localAppDriverToolset "Toolset.props")) -and
+        (Test-Path (Join-Path $localAppDriverToolset "Toolset.targets"))
 }
 $hasIntegratedWdkToolset = $false
 if ($VCTargetsRoot) {
@@ -246,7 +262,8 @@ if ($VCTargetsRoot) {
     $appDriverToolset = Join-Path $VCTargetsRoot "Platforms\$Platform\PlatformToolsets\WindowsApplicationForDrivers10.0"
     $hasIntegratedWdkToolset = (Test-Path $userModeToolset) -and (Test-Path $appDriverToolset)
 }
-$missingWdkToolset = -not ($hasIntegratedWdkToolset -or $hasLocalWdkToolset)
+$canStageLocalWdkToolset = $hasLocalWdkToolset -and (Test-Path $VCTargetsRoot)
+$missingWdkToolset = -not ($hasIntegratedWdkToolset -or $canStageLocalWdkToolset)
 
 Write-Host "Using MSBuild: $MSBuild"
 Write-Host "Building: $Solution"
@@ -255,8 +272,8 @@ Write-Host "Using UMDF: $WdfVersion"
 if ($missingWdkToolset) {
     throw "WDK Visual Studio platform toolsets are missing for '$Platform'. Install the WDK VS integration or keep the minimal msbuild-vctargets-v170\Platforms\$Platform overlay in this source tree. SBMS intentionally does not fall back to a prebuilt driver DLL."
 }
-if ($hasLocalWdkToolset) {
-    Write-Host "Using local WDK VCTargetsPath overlay: $LocalVCTargetsPath"
+if ($canStageLocalWdkToolset -and -not $hasIntegratedWdkToolset) {
+    Write-Host "Using installed Visual C++ targets with the local WDK PlatformToolsets overlay."
 }
 
 $BuildArgs = @(
@@ -267,27 +284,46 @@ $BuildArgs = @(
     "/p:Platform=$Platform",
     "/p:WindowsTargetPlatformVersion=$SdkVersion",
     "/p:TargetPlatformVersion=$SdkVersion",
+    "/p:WDKBuildFolder=$SdkVersion",
+    "/p:WDKContentRoot=$WdkRoot\",
+    "/p:WdkContentRoot=$WdkRoot\",
     "/p:SkipPackageVerification=true",
     "/p:ApiValidator_Enable=false",
     "/p:RunCodeAnalysis=false",
-    "/p:EnablePREfast=false"
+    "/p:EnablePREfast=false",
+    "/nr:false"
 )
 
-if ($hasLocalWdkToolset) {
-    # Issue #3: keep only the minimal WDK MSBuild overlay needed to build the
-    # source driver; prebuilt fallback driver DLLs stay out of the repository.
-    $BuildArgs += "/p:VCTargetsPath=$LocalVCTargetsPath"
-} elseif ((Test-Path $LocalVCTargetsPath) -and -not (Test-Path $LocalPlatformPath)) {
-    Write-Host "Skipping local VCTargetsPath overlay because it does not contain platform '$Platform': $LocalVCTargetsPath"
-}
+$StagedVCTargetsPath = $null
+try {
+    if ($canStageLocalWdkToolset -and -not $hasIntegratedWdkToolset) {
+        # Issue #9: VCTargetsPath must remain a complete, version-matched Visual
+        # C++ tree. Stage the installed tree and overlay only the two WDK
+        # PlatformToolsets instead of vendoring Visual Studio task assemblies.
+        $StagedVCTargetsPath = Join-Path ([IO.Path]::GetTempPath()) ("SBMS-VCTargets-" + [guid]::NewGuid().ToString("N"))
+        Copy-Item -LiteralPath $VCTargetsRoot -Destination $StagedVCTargetsPath -Recurse -Force
+        $stagedToolsetsPath = Join-Path $StagedVCTargetsPath "Platforms\$Platform\PlatformToolsets"
+        foreach ($toolsetPath in @($localUserModeToolset, $localAppDriverToolset)) {
+            Copy-Item -LiteralPath $toolsetPath -Destination $stagedToolsetsPath -Recurse -Force
+        }
+        $BuildArgs += "/p:VCTargetsPath=$StagedVCTargetsPath\"
+    }
 
-$buildStarted = Get-Date
-& $MSBuild @BuildArgs
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
+    $buildStarted = Get-Date
+    & $MSBuild @BuildArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "MSBuild failed with exit code $LASTEXITCODE."
+    }
 
-New-DriverPackage -WdfVersion $WdfVersion
+    New-DriverPackage -WdfVersion $WdfVersion
+} finally {
+    if ($StagedVCTargetsPath -and (Test-Path $StagedVCTargetsPath)) {
+        Remove-Item -LiteralPath $StagedVCTargetsPath -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path $StagedVCTargetsPath) {
+            Write-Warning "Temporary Visual C++ targets could not be removed: $StagedVCTargetsPath"
+        }
+    }
+}
 
 Write-Host ""
 Write-Host "Build finished. Driver package found under:"

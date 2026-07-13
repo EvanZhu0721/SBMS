@@ -1,9 +1,9 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildThisFileDirectory)ImportBefore\*.targets" Condition="Exists('$(MSBuildThisFileDirectory)ImportBefore')" />
   <PropertyGroup>
-    <WDKContentRoot Condition="'$(WDKContentRoot)' == ''">C:\Program Files (x86)\Windows Kits\10\</WDKContentRoot>
+    <WDKContentRoot Condition="'$(WDKContentRoot)' == ''">$(WindowsSdkDir)</WDKContentRoot>
     <WdkContentRoot Condition="'$(WdkContentRoot)' == ''">$(WDKContentRoot)</WdkContentRoot>
-    <WDKBuildFolder Condition="'$(WDKBuildFolder)' == ''">10.0.26100.0</WDKBuildFolder>
+    <WDKBuildFolder Condition="'$(WDKBuildFolder)' == ''">$(WindowsTargetPlatformVersion)</WDKBuildFolder>
     <VisualStudioVersion Condition="'$(VisualStudioVersion)' == ''">17.0</VisualStudioVersion>
     <IsDriverAppToolset>true</IsDriverAppToolset>
     <DriverTargetPlatform Condition="'$(DriverTargetPlatform)' == ''">Windows Driver</DriverTargetPlatform>
