@@ -28,3 +28,6 @@ __pycache__/
 # Local release artifacts
 SBMS-Release/
 SBMS-Core-Source/
+
+# Local Obsidian development vault (Issue #11)
+/SBMS-Dev-Vault/

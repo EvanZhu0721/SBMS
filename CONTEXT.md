@@ -18,6 +18,28 @@ changed or merged.
 - Do not use issue comments as a replacement for readable code. The issue note
   should capture why the logic exists, not narrate every line.
 
+## Local Obsidian Development Record
+
+The local `SBMS-Dev-Vault/` directory is the live development record. It is
+intentionally excluded from Git by Issue #11.
+
+- GitHub Issues are the source of truth for feature and bug identity/status.
+- Use one vault note per GitHub Issue; name it `<issue-number> <short-title>.md`.
+- Update `01 Current Status.md` when work starts, reaches a meaningful
+  checkpoint, becomes blocked, or finishes.
+- Record release-level changes in the matching note under `Versions/`.
+- Never place credentials, signing keys, private user data, or raw diagnostic
+  dumps in the vault.
+
+## Versioning
+
+- `VERSION` is the single source of truth for the SBMS product version.
+- Use Semantic Versioning and `v<version>` Git tags for releases.
+- Use `-dev.N`, `-alpha.N`, `-beta.N`, and `-rc.N` prerelease suffixes.
+- Update `CHANGELOG.md` and the matching local Obsidian version note as part of
+  each release Issue.
+- Follow `docs/VERSIONING.md` for increment and release rules.
+
 ## Current Engineering Bias
 
 - Preserve the existing GUI interaction model unless a change is explicitly
