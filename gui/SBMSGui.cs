@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Diagnostics.Eventing.Reader;
 using System.Drawing;
 using System.Globalization;
@@ -11,89 +10,13 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using System.Xml;
-using System.Xml.Serialization;
 
 namespace SBMSGui
 {
-    public sealed class GuiConfigBridgePair
-    {
-        public bool Enabled;
-        public string Mode;
-        public string Target;
-        public string Horizontal;
-        public string Aspect;
-        public string Orientation;
-        public string Size;
-        public string Strategy;
-        public string Refresh;
-        public string Source;
-    }
-
-    public sealed class GuiConfigFile
-    {
-        public int Version;
-        public string SavedByBuild;
-        public bool English;
-        public bool LightweightMode;
-        public int ConfigTabIndex;
-        public int StrategyIndex;
-        public int FilterIndex;
-        public string SourceText;
-        public string TargetText;
-        public string SingleRefresh;
-        public string SelectedSourceDevice;
-        public string SelectedTargetDevice;
-        public string PrimaryResolution;
-        public string PrimarySize;
-        public string TargetResolution;
-        public string TargetSize;
-        public int PrimaryResolutionPresetIndex;
-        public int PrimaryAspectPresetIndex;
-        public int PrimaryOrientationPresetIndex;
-        public int PrimarySizePresetIndex;
-        public int TargetResolutionPresetIndex;
-        public int TargetAspectPresetIndex;
-        public int TargetOrientationPresetIndex;
-        public int TargetSizePresetIndex;
-        public string ManualBaseHorizontal;
-        public string ManualBaseAspect;
-        public int ManualBaseOrientationIndex;
-        public string ManualBaseSize;
-        public string ManualTargetHorizontal;
-        public string ManualTargetAspect;
-        public int ManualTargetOrientationIndex;
-        public string ManualTargetSize;
-        public bool StreamMode;
-        public bool InputMapping;
-        public bool WindowMove;
-        public bool DeviceHost;
-        public bool VSync;
-        // Issue #7: persisted rollback switch for the BETA mode that absorbs
-        // valid Windows Settings display edits during topology recovery.
-        public bool FollowWindowsTopologyBeta;
-        public int SelectedBetaGroupIndex;
-        public List<GuiConfigBridgePair> BetaPairs;
-
-        public GuiConfigFile()
-        {
-            Version = 1;
-            FollowWindowsTopologyBeta = true;
-            BetaPairs = new List<GuiConfigBridgePair>();
-        }
-    }
-
     internal sealed class MainForm : Form
     {
-        private const int WM_CLOSE = 0x0010;
-        private const uint EVENT_MODIFY_STATE = 0x0002;
         private const int NativeTopologyChangedExitCode = 100;
         private const int NativeSourceUnavailableExitCode = 101;
-        private const int ENUM_CURRENT_SETTINGS = -1;
-        private const int DISP_CHANGE_SUCCESSFUL = 0;
-        private const int DM_PELSWIDTH = 0x00080000;
-        private const int DM_PELSHEIGHT = 0x00100000;
-        private const int DM_DISPLAYFREQUENCY = 0x00400000;
-        private const int DM_DISPLAYORIENTATION = 0x00000080;
         private const int DMDO_DEFAULT = 0;
         private const int DMDO_90 = 1;
         private const int DMDO_180 = 2;
@@ -115,32 +38,6 @@ namespace SBMSGui
         private const int BetaColStrategy = 7;
         private const int BetaColRefresh = 8;
         private const int BetaColSource = 9;
-
-        private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern bool EnumWindows(EnumWindowsProc enumProc, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint processId);
-
-        [DllImport("user32.dll")]
-        private static extern bool PostMessage(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-        private static extern IntPtr OpenEvent(uint desiredAccess, bool inheritHandle, string name);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool SetEvent(IntPtr handle);
-
-        [DllImport("kernel32.dll", SetLastError = true)]
-        private static extern bool CloseHandle(IntPtr handle);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern bool EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE devMode);
-
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern int ChangeDisplaySettingsEx(string deviceName, ref DEVMODE devMode, IntPtr hwnd, int flags, IntPtr lParam);
 
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int attributeValue, int attributeSize);
@@ -224,22 +121,24 @@ namespace SBMSGui
         private readonly GlowButton configLockBackButton = new GlowButton();
         private RowStyle configInlineRowStyle;
 
-        private Process process;
-        private readonly List<Process> betaProcesses = new List<Process>();
-        private Process deviceHostProcess;
-        private readonly StringBuilder deviceHostLog = new StringBuilder();
+        private readonly NativeProcessSupervisor nativeSupervisor;
+        private readonly DeviceHostSupervisor deviceHostSupervisor;
+        private readonly BridgeLifecycle lifecycle = new BridgeLifecycle();
         private string lastNativeArgs = "";
         private string lastManagedVirtualResolution = "";
         private string lastManagedVirtualRefresh = "";
         private int lastManagedVirtualOrientation = DMDO_DEFAULT;
         private bool stoppingRequested;
-        private bool restartingAfterTopologyChange;
-        private bool bridgeStarting;
         private readonly string root;
         private readonly string nativeExe;
         private readonly string deviceHostExe;
         private readonly string userDataDir;
         private readonly string configPath;
+        private readonly IConfigurationStore configurationStore = new XmlConfigurationStore();
+        private readonly IDisplayModeService displayModeService = new DisplayModeService();
+        private readonly ITopologyDiscoveryService topologyDiscoveryService = new TopologyDiscoveryService();
+        private readonly ITopologyRecoveryService topologyRecoveryService;
+        private int recoveryProblemCheck;
         private readonly string logDirectory;
         private readonly string sessionLogPath;
         private readonly string latestLogPath;
@@ -273,83 +172,6 @@ namespace SBMSGui
         private static readonly Color ThemePanel2 = ThemeBack;
         private static readonly Color ThemeGreen = ThemeActive;
         private static readonly Color ThemeMuted = ThemeText;
-
-        private struct Resolution
-        {
-            public int Width;
-            public int Height;
-        }
-
-        private sealed class DisplayModeCandidate
-        {
-            public Resolution Resolution;
-            public int Refresh;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-        private struct DEVMODE
-        {
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-            public string dmDeviceName;
-            public short dmSpecVersion;
-            public short dmDriverVersion;
-            public short dmSize;
-            public short dmDriverExtra;
-            public int dmFields;
-            public int dmPositionX;
-            public int dmPositionY;
-            public int dmDisplayOrientation;
-            public int dmDisplayFixedOutput;
-            public short dmColor;
-            public short dmDuplex;
-            public short dmYResolution;
-            public short dmTTOption;
-            public short dmCollate;
-            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
-            public string dmFormName;
-            public short dmLogPixels;
-            public int dmBitsPerPel;
-            public int dmPelsWidth;
-            public int dmPelsHeight;
-            public int dmDisplayFlags;
-            public int dmDisplayFrequency;
-            public int dmICMMethod;
-            public int dmICMIntent;
-            public int dmMediaType;
-            public int dmDitherType;
-            public int dmReserved1;
-            public int dmReserved2;
-            public int dmPanningWidth;
-            public int dmPanningHeight;
-        }
-
-        private sealed class DisplayChoice
-        {
-            public int Number;
-            public string DeviceName;
-            public string Resolution;
-            public string Refresh;
-            public string Name;
-            public string SunshineId;
-            public int Orientation;
-            public bool Primary;
-            public bool Virtual;
-
-            public override string ToString()
-            {
-                return Number + "  " + DeviceName + "  " + Resolution + "@" + Refresh +
-                       (Primary ? "  基准" : "") +
-                       (Virtual ? "  虚拟" : "") +
-                       "  " + Name;
-            }
-        }
-
-        private sealed class DisplayRuntimeMode
-        {
-            public Resolution Resolution;
-            public string Refresh;
-            public int Orientation;
-        }
 
         private sealed class BridgePairConfig
         {
@@ -881,6 +703,26 @@ namespace SBMSGui
             root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory));
             nativeExe = Path.Combine(root, "SBMSNative.exe");
             deviceHostExe = Path.Combine(root, "SBMSDeviceHost.exe");
+            nativeSupervisor = new NativeProcessSupervisor(
+                nativeExe,
+                root,
+                delegate(string line) { BeginInvoke((Action)delegate { AppendLog("[native] " + line); }); },
+                delegate(Action action) { BeginInvoke(action); });
+            deviceHostSupervisor = new DeviceHostSupervisor(
+                deviceHostExe,
+                root,
+                delegate(string line) { BeginInvoke((Action)delegate { AppendLog("[host] " + line); }); },
+                delegate(Action action) { BeginInvoke(action); });
+            recoveryProblemCheck = Environment.TickCount + 1500;
+            topologyRecoveryService = new TopologyRecoveryService(
+                delegate { return CaptureNativeOutput("--list"); },
+                IsDeviceHostRunning,
+                ParseVirtualSources,
+                delegate(string deviceName, Resolution resolution, string output)
+                {
+                    return topologyDiscoveryService.FindVirtualSourceMode(output, deviceName, resolution, GetCurrentDisplayModeOrNull);
+                },
+                (Func<string>)ProbeVirtualDisplayLoadFailure);
             userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
             configPath = Path.Combine(userDataDir, "config.xml");
             logDirectory = Path.Combine(userDataDir, "logs");
@@ -2105,18 +1947,13 @@ namespace SBMSGui
             loadingConfiguration = true;
             try
             {
-                if (!File.Exists(configPath))
+                if (!configurationStore.Exists(configPath))
                 {
                     pendingConfigLoadMessage = "配置文件未找到, 已使用默认配置";
                     return;
                 }
 
-                GuiConfigFile config;
-                var serializer = new XmlSerializer(typeof(GuiConfigFile));
-                using (FileStream stream = File.OpenRead(configPath))
-                {
-                    config = (GuiConfigFile)serializer.Deserialize(stream);
-                }
+                GuiConfigFile config = configurationStore.Load(configPath);
                 if (config == null)
                 {
                     pendingConfigLoadMessage = "配置文件为空, 已使用默认配置";
@@ -2275,22 +2112,8 @@ namespace SBMSGui
             }
             try
             {
-                Directory.CreateDirectory(userDataDir);
                 GuiConfigFile config = CaptureConfiguration();
-                string tempPath = configPath + ".tmp";
-                var settings = new XmlWriterSettings
-                {
-                    Encoding = Encoding.UTF8,
-                    Indent = true,
-                    OmitXmlDeclaration = false
-                };
-                var serializer = new XmlSerializer(typeof(GuiConfigFile));
-                using (XmlWriter writer = XmlWriter.Create(tempPath, settings))
-                {
-                    serializer.Serialize(writer, config);
-                }
-                File.Copy(tempPath, configPath, true);
-                File.Delete(tempPath);
+                configurationStore.Save(configPath, config);
                 if (announce)
                 {
                     AppendLog("配置已保存 = " + configPath);
@@ -2565,78 +2388,7 @@ namespace SBMSGui
 
         private static bool RunTool(string fileName, string arguments, out string output)
         {
-            using (var p = new Process())
-            {
-                p.StartInfo.FileName = fileName;
-                p.StartInfo.Arguments = arguments;
-                p.StartInfo.UseShellExecute = false;
-                p.StartInfo.RedirectStandardOutput = true;
-                p.StartInfo.RedirectStandardError = true;
-                p.StartInfo.CreateNoWindow = true;
-                p.StartInfo.StandardOutputEncoding = Encoding.Default;
-                p.StartInfo.StandardErrorEncoding = Encoding.Default;
-                return CaptureProcessOutput(p, 10000, out output);
-            }
-        }
-
-        private static bool CaptureProcessOutput(Process p, int timeoutMs, out string output)
-        {
-            var buffer = new StringBuilder();
-            DataReceivedEventHandler appendLine = delegate(object sender, DataReceivedEventArgs e)
-            {
-                if (e.Data == null)
-                {
-                    return;
-                }
-                lock (buffer)
-                {
-                    buffer.AppendLine(e.Data);
-                }
-            };
-
-            try
-            {
-                p.OutputDataReceived += appendLine;
-                p.ErrorDataReceived += appendLine;
-                p.Start();
-                p.BeginOutputReadLine();
-                p.BeginErrorReadLine();
-                if (!p.WaitForExit(timeoutMs))
-                {
-                    KillProcessQuietly(p);
-                    lock (buffer)
-                    {
-                        output = "timeout: " + p.StartInfo.FileName + " " + p.StartInfo.Arguments + Environment.NewLine + buffer;
-                    }
-                    return false;
-                }
-                p.WaitForExit();
-                lock (buffer)
-                {
-                    output = buffer.ToString();
-                }
-                return p.ExitCode == 0;
-            }
-            catch (Exception ex)
-            {
-                output = ex.Message;
-                return false;
-            }
-        }
-
-        private static void KillProcessQuietly(Process p)
-        {
-            try
-            {
-                if (p != null && !p.HasExited)
-                {
-                    p.Kill();
-                    p.WaitForExit(1000);
-                }
-            }
-            catch
-            {
-            }
+            return ProcessRunner.Capture(fileName, arguments, "", Encoding.Default, 10000, out output);
         }
 
         private static void SleepWithUiPump(int milliseconds)
@@ -3542,7 +3294,7 @@ namespace SBMSGui
 
         private void UpdateConfigLock()
         {
-            bool locked = forceConfigLockForProbe || IsBridgeRunning();
+            bool locked = forceConfigLockForProbe || IsBridgeSessionActive();
             configLockPanel.Visible = locked;
             if (locked)
             {
@@ -3731,7 +3483,7 @@ namespace SBMSGui
                 deviceHostCheck.Checked = true;
             }
 
-            bool bridgeRunning = IsBridgeRunning();
+            bool bridgeRunning = IsBridgeSessionActive();
             deviceHostCheck.Enabled = !streamOnly && !multiBeta && !bridgeRunning;
             targetDisplayCombo.Enabled = !streamModeCheck.Checked && !bridgeRunning;
             targetText.Enabled = !streamModeCheck.Checked && !bridgeRunning;
@@ -3778,10 +3530,30 @@ namespace SBMSGui
         private void UpdateStatus()
         {
             bool running = IsBridgeRunning();
+            bool active = IsBridgeSessionActive();
             bool multiConfigured = IsMultiMappingEnabled();
-            bool streamOnly = streamModeCheck.Checked && !multiConfigured && running && (process == null || process.HasExited);
+            bool streamOnly = streamModeCheck.Checked && !multiConfigured && running && !nativeSupervisor.IsPrimaryRunning;
             bool multiBeta = multiConfigured && running && (HasRunningBetaProcess() || IsDeviceHostRunning());
-            statusLabel.Text = AppName + " // " + T(running ? (multiBeta ? "多屏BETA运行中" : (streamOnly ? "串流中" : "运行中")) : "待机");
+            string stateText;
+            switch (lifecycle.State)
+            {
+                case BridgeState.Starting:
+                    stateText = "启动中";
+                    break;
+                case BridgeState.Recovering:
+                    stateText = "恢复中";
+                    break;
+                case BridgeState.Stopping:
+                    stateText = "停止中";
+                    break;
+                case BridgeState.Error:
+                    stateText = running ? "异常（资源仍在运行）" : "异常";
+                    break;
+                default:
+                    stateText = running ? (multiBeta ? "多屏BETA运行中" : (streamOnly ? "串流中" : "运行中")) : "待机";
+                    break;
+            }
+            statusLabel.Text = AppName + " // " + T(stateText);
             if (multiConfigured)
             {
                 int pairCount = Math.Max(1, CountEnabledBetaPairs());
@@ -3799,13 +3571,13 @@ namespace SBMSGui
             {
                 routeLabel.Text = T("源") + " " + sourceText.Text.Trim() + "  >  " + T("目标") + " " + targetText.Text.Trim();
             }
-            trayStopMenuItem.Enabled = running;
+            trayStopMenuItem.Enabled = active;
             UpdateMainActionButtons();
         }
 
         private void UpdateMainActionButtons()
         {
-            bool running = IsBridgeRunning();
+            bool running = IsBridgeSessionActive();
             startButton.Text = T(running ? "停止" : "启动");
             startButton.DangerFill = running;
             startButton.ActiveFill = false;
@@ -3868,22 +3640,17 @@ namespace SBMSGui
             }
 
             string output = CaptureNativeOutput("--list");
-            foreach (string rawLine in output.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
+            foreach (DisplayChoice display in topologyDiscoveryService.Parse(output, GetCurrentDisplayModeOrNull))
             {
-                DisplayChoice display;
-                if (TryParseDisplayLine(rawLine.Trim(), out display))
+                displays.Add(display);
+                displayList.Items.Add(display);
+                if (display.Virtual)
                 {
-                    display.Number = displays.Count + 1;
-                    displays.Add(display);
-                    displayList.Items.Add(display);
-                    if (display.Virtual)
-                    {
-                        sourceDisplayCombo.Items.Add(display);
-                    }
-                    else
-                    {
-                        targetDisplayCombo.Items.Add(display);
-                    }
+                    sourceDisplayCombo.Items.Add(display);
+                }
+                else
+                {
+                    targetDisplayCombo.Items.Add(display);
                 }
             }
 
@@ -3902,61 +3669,15 @@ namespace SBMSGui
             UpdateStatus();
         }
 
-        private static bool TryParseDisplayLine(string line, out DisplayChoice display)
+        private bool TryParseDisplayLine(string line, out DisplayChoice display)
         {
-            display = null;
-            Match match = Regex.Match(line, @"^(\\\\\.\\DISPLAY\d+)( primary)?\: pos=[^ ]+ mode=(\d+x\d+)@(\d+)(?: sunshine=(\{[0-9a-fA-F-]{36}\}))? name=(.+)$");
-            if (!match.Success)
-            {
-                return false;
-            }
-
-            string name = match.Groups[6].Value.Trim();
-            DisplayRuntimeMode runtimeMode;
-            bool hasRuntimeMode = TryGetCurrentDisplayMode(match.Groups[1].Value, out runtimeMode);
-            display = new DisplayChoice
-            {
-                DeviceName = match.Groups[1].Value,
-                Primary = match.Groups[2].Success,
-                Resolution = hasRuntimeMode ? FormatResolution(runtimeMode.Resolution) : match.Groups[3].Value,
-                Refresh = hasRuntimeMode && !string.IsNullOrWhiteSpace(runtimeMode.Refresh) ? runtimeMode.Refresh : match.Groups[4].Value,
-                SunshineId = match.Groups[5].Success ? match.Groups[5].Value : "",
-                Name = name,
-                Orientation = hasRuntimeMode ? runtimeMode.Orientation : DMDO_DEFAULT,
-                Virtual = IsVirtualDisplayName(name)
-            };
-            return true;
+            return topologyDiscoveryService.TryParseLine(line, GetCurrentDisplayModeOrNull, out display);
         }
 
-        private static bool TryGetCurrentDisplayMode(string deviceName, out DisplayRuntimeMode mode)
+        private DisplayRuntimeMode GetCurrentDisplayModeOrNull(string deviceName)
         {
-            mode = null;
-            var devMode = new DEVMODE();
-            devMode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
-            if (!EnumDisplaySettings(deviceName, ENUM_CURRENT_SETTINGS, ref devMode) ||
-                devMode.dmPelsWidth <= 0 ||
-                devMode.dmPelsHeight <= 0)
-            {
-                return false;
-            }
-
-            mode = new DisplayRuntimeMode
-            {
-                Resolution = new Resolution { Width = devMode.dmPelsWidth, Height = devMode.dmPelsHeight },
-                Refresh = devMode.dmDisplayFrequency > 0
-                    ? devMode.dmDisplayFrequency.ToString(CultureInfo.InvariantCulture)
-                    : "",
-                Orientation = NormalizeDisplayOrientation(devMode.dmDisplayOrientation)
-            };
-            return true;
-        }
-
-        private static bool IsVirtualDisplayName(string name)
-        {
-            string lower = name.ToLowerInvariant();
-            return lower.Contains("iddsample") ||
-                   lower.Contains("displaybridge") ||
-                   lower.Contains("sbms");
+            DisplayRuntimeMode mode;
+            return displayModeService.TryGetCurrentMode(deviceName, out mode) ? mode : null;
         }
 
         private static string GetSelectedDeviceName(ComboBox combo)
@@ -4649,22 +4370,9 @@ namespace SBMSGui
             return DMDO_DEFAULT;
         }
 
-        private static int NormalizeDisplayOrientation(int orientation)
+        private string GetOrientationText(int orientation)
         {
-            switch (orientation)
-            {
-                case DMDO_90:
-                case DMDO_180:
-                case DMDO_270:
-                    return orientation;
-                default:
-                    return DMDO_DEFAULT;
-            }
-        }
-
-        private static string GetOrientationText(int orientation)
-        {
-            switch (NormalizeDisplayOrientation(orientation))
+            switch (displayModeService.NormalizeOrientation(orientation))
             {
                 case DMDO_90:
                     return "竖屏";
@@ -4679,13 +4387,7 @@ namespace SBMSGui
 
         private static void BuildResolutionParts(Resolution resolution, out int horizontal, out string aspect, out string orientation)
         {
-            bool portrait = resolution.Height > resolution.Width;
-            horizontal = portrait ? resolution.Height : resolution.Width;
-            int aspectW = Math.Max(resolution.Width, resolution.Height);
-            int aspectH = Math.Min(resolution.Width, resolution.Height);
-            int divisor = GreatestCommonDivisor(aspectW, aspectH);
-            aspect = (aspectW / divisor).ToString(CultureInfo.InvariantCulture) + ":" + (aspectH / divisor).ToString(CultureInfo.InvariantCulture);
-            orientation = portrait ? "竖屏" : "横屏";
+            ResolutionMath.BuildParts(resolution, out horizontal, out aspect, out orientation);
         }
 
         private static string GuessTargetSize(DisplayChoice display)
@@ -4968,43 +4670,33 @@ namespace SBMSGui
 
         private static Resolution CalculatePhysicalSource(Resolution primary, Resolution target, double primarySize, double targetSize)
         {
-            double primaryPhysicalWidth = CalculatePhysicalWidth(primary, primarySize);
-            double targetPhysicalWidth = CalculatePhysicalWidth(target, targetSize);
-            if (primaryPhysicalWidth <= 0.0 || targetPhysicalWidth <= 0.0 || target.Width <= 0)
-            {
-                return new Resolution { Width = 1, Height = 1 };
-            }
+            return ResolutionMath.CalculatePhysicalSource(primary, target, primarySize, targetSize);
+        }
 
-            double primaryPixelsPerInchX = primary.Width / primaryPhysicalWidth;
-            int width = RoundEven(targetPhysicalWidth * primaryPixelsPerInchX);
-            int height = RoundEven(width * target.Height / (double)target.Width);
-            return new Resolution { Width = Math.Max(width, 1), Height = Math.Max(height, 1) };
+        private bool SleepWithLifecyclePump(int milliseconds, long generation)
+        {
+            int deadline = Environment.TickCount + milliseconds;
+            while (Environment.TickCount < deadline)
+            {
+                Application.DoEvents();
+                if (!lifecycle.IsCurrent(generation) || lifecycle.State == BridgeState.Stopping)
+                {
+                    return false;
+                }
+                int remaining = deadline - Environment.TickCount;
+                Thread.Sleep(Math.Max(1, Math.Min(50, remaining)));
+            }
+            return lifecycle.IsCurrent(generation) && lifecycle.State != BridgeState.Stopping;
         }
 
         private static double CalculatePhysicalWidth(Resolution resolution, double diagonalInches)
         {
-            double width = resolution.Width;
-            double height = resolution.Height;
-            double diagonalPixels = Math.Sqrt(width * width + height * height);
-            return diagonalPixels <= 0.0 ? 0.0 : diagonalInches * width / diagonalPixels;
+            return ResolutionMath.CalculatePhysicalWidth(resolution, diagonalInches);
         }
 
         private static Resolution CalculateQualitySource(Resolution primary, Resolution target, double primarySize, double targetSize)
         {
-            Resolution physical = CalculatePhysicalSource(primary, target, primarySize, targetSize);
-            int bestScale = 1;
-            int bestError = int.MaxValue;
-            for (int scale = 1; scale <= 4; ++scale)
-            {
-                int width = target.Width * scale;
-                int error = Math.Abs(width - physical.Width);
-                if (error < bestError)
-                {
-                    bestError = error;
-                    bestScale = scale;
-                }
-            }
-            return new Resolution { Width = target.Width * bestScale, Height = target.Height * bestScale };
+            return ResolutionMath.CalculateQualitySource(primary, target, primarySize, targetSize);
         }
 
         private bool TryCalculateStrategySource(out Resolution source)
@@ -5038,78 +4730,42 @@ namespace SBMSGui
 
         private static bool IsExact2x(Resolution source, Resolution target)
         {
-            return source.Width == target.Width * 2 && source.Height == target.Height * 2;
+            return ResolutionMath.IsExact2x(source, target);
         }
 
         private static int RoundEven(double value)
         {
-            int rounded = (int)Math.Round(value);
-            return (rounded % 2 == 0) ? rounded : rounded + 1;
+            return ResolutionMath.RoundEven(value);
         }
 
         private static int GreatestCommonDivisor(int a, int b)
         {
-            a = Math.Abs(a);
-            b = Math.Abs(b);
-            while (b != 0)
-            {
-                int t = a % b;
-                a = b;
-                b = t;
-            }
-            return Math.Max(a, 1);
+            return ResolutionMath.GreatestCommonDivisor(a, b);
         }
 
         private static bool TryParseResolution(string text, out Resolution resolution)
         {
-            resolution = new Resolution();
-            string[] parts = text.Trim().ToLowerInvariant().Split('x');
-            if (parts.Length != 2)
-            {
-                return false;
-            }
-            int width;
-            int height;
-            if (!int.TryParse(parts[0].Trim(), out width) || !int.TryParse(parts[1].Trim(), out height))
-            {
-                return false;
-            }
-            resolution.Width = width;
-            resolution.Height = height;
-            return true;
+            return ResolutionMath.TryParseResolution(text, out resolution);
         }
 
         private static bool TryParseSize(string text, out double value)
         {
-            string normalized = text.Trim().Replace(',', '.');
-            return double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+            return ResolutionMath.TryParseSize(text, out value);
         }
 
         private static bool TryParseAspectText(string text, out int width, out int height)
         {
-            width = 0;
-            height = 0;
-            string normalized = text.Trim().Replace('：', ':').Replace('/', ':');
-            string[] parts = normalized.Split(':');
-            if (parts.Length != 2 ||
-                !int.TryParse(parts[0].Trim(), out width) ||
-                !int.TryParse(parts[1].Trim(), out height) ||
-                width <= 0 ||
-                height <= 0)
-            {
-                return false;
-            }
-            return true;
+            return ResolutionMath.TryParseAspect(text, out width, out height);
         }
 
         private static string FormatResolution(Resolution resolution)
         {
-            return resolution.Width + "x" + resolution.Height;
+            return ResolutionMath.Format(resolution);
         }
 
         private void ToggleBridge()
         {
-            if (IsBridgeRunning())
+            if (IsBridgeSessionActive())
             {
                 StopBridge();
             }
@@ -5121,12 +4777,15 @@ namespace SBMSGui
 
         private void StartBridge()
         {
-            if (IsBridgeRunning() || bridgeStarting)
+            if (IsBridgeSessionActive())
             {
                 return;
             }
-            bridgeStarting = true;
+            BridgeState previousState = lifecycle.State;
+            long bridgeGeneration = lifecycle.BeginStart();
+            LogLifecycleTransition(previousState, "用户请求启动");
             startButton.Enabled = false;
+            UpdateLifecycleUi();
             try
             {
             SyncFirstBetaRowFromSingleControls();
@@ -5194,18 +4853,18 @@ namespace SBMSGui
                 int virtualDeviceCount = multiBeta ? betaPairs.Count : 1;
                 if (!StartDeviceHost(virtualDeviceCount))
                 {
-                    AbortBridgeStart("虚拟显示器 host 启动失败，已停止桥接");
+                    AbortBridgeStart("虚拟显示器 host 启动失败，已停止桥接", bridgeGeneration);
                     return;
                 }
                 if (multiBeta)
                 {
                     List<DisplayChoice> virtualSources;
                     string virtualWaitFailure;
-                    if (!WaitForVirtualSources(betaPairs.Count, 30000, out virtualSources, out virtualWaitFailure))
+                    if (!WaitForVirtualSources(betaPairs.Count, 30000, bridgeGeneration, out virtualSources, out virtualWaitFailure))
                     {
                         AbortBridgeStart(string.IsNullOrWhiteSpace(virtualWaitFailure)
                             ? "等待多屏 BETA 虚拟显示器超时，needed=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture)
-                            : virtualWaitFailure);
+                            : virtualWaitFailure, bridgeGeneration);
                         return;
                     }
 
@@ -5214,9 +4873,9 @@ namespace SBMSGui
                         string modeMessage;
                         Resolution appliedResolution;
                         string appliedRefresh;
-                        if (!TryApplyDisplayMode(virtualSources[i].DeviceName, betaPairs[i].SourceResolution, betaPairs[i].Refresh, betaPairs[i].Orientation, out appliedResolution, out appliedRefresh, out modeMessage))
+                        if (!displayModeService.TryApplyMode(virtualSources[i].DeviceName, betaPairs[i].SourceResolution, betaPairs[i].Refresh, betaPairs[i].Orientation, out appliedResolution, out appliedRefresh, out modeMessage))
                         {
-                            AbortBridgeStart(modeMessage);
+                            AbortBridgeStart(modeMessage, bridgeGeneration);
                             return;
                         }
                         AppendLog(modeMessage);
@@ -5224,9 +4883,9 @@ namespace SBMSGui
                         betaPairs[i].Refresh = appliedRefresh;
 
                         DisplayChoice confirmedSource;
-                        if (!WaitForVirtualSourceMode(virtualSources[i].DeviceName, appliedResolution, 5000, out confirmedSource))
+                        if (!WaitForVirtualSourceMode(virtualSources[i].DeviceName, appliedResolution, 5000, bridgeGeneration, out confirmedSource))
                         {
-                            AbortBridgeStart("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] 虚拟模式未确认: " + virtualSources[i].DeviceName + " -> " + FormatResolution(appliedResolution));
+                            AbortBridgeStart("BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) + "] 虚拟模式未确认: " + virtualSources[i].DeviceName + " -> " + FormatResolution(appliedResolution), bridgeGeneration);
                             return;
                         }
                         virtualSources[i] = confirmedSource;
@@ -5251,35 +4910,35 @@ namespace SBMSGui
                      * them during the settle window.
                      */
                     string startupRecoveryMessage;
-                    if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, out startupRecoveryMessage))
+                    if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, bridgeGeneration, out startupRecoveryMessage))
                     {
-                        AbortBridgeStart(startupRecoveryMessage);
+                        AbortBridgeStart(startupRecoveryMessage, bridgeGeneration);
                         return;
                     }
 
                     if (!RebindBetaTargetDisplays(out startupRecoveryMessage))
                     {
-                        AbortBridgeStart(startupRecoveryMessage);
+                        AbortBridgeStart(startupRecoveryMessage, bridgeGeneration);
                         return;
                     }
 
                     if (!TryGetEnabledBridgePairs(false, out betaPairs, out startupRecoveryMessage))
                     {
-                        AbortBridgeStart(startupRecoveryMessage);
+                        AbortBridgeStart(startupRecoveryMessage, bridgeGeneration);
                         return;
                     }
 
-                    if (!WaitForVirtualSources(betaPairs.Count, 15000, out virtualSources, out virtualWaitFailure))
+                    if (!WaitForVirtualSources(betaPairs.Count, 15000, bridgeGeneration, out virtualSources, out virtualWaitFailure))
                     {
                         AbortBridgeStart(string.IsNullOrWhiteSpace(virtualWaitFailure)
                             ? "BETA 启动前等待虚拟显示器稳定超时，needed=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture)
-                            : virtualWaitFailure);
+                            : virtualWaitFailure, bridgeGeneration);
                         return;
                     }
 
-                    if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, out startupRecoveryMessage))
+                    if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, bridgeGeneration, out startupRecoveryMessage))
                     {
-                        AbortBridgeStart(startupRecoveryMessage);
+                        AbortBridgeStart(startupRecoveryMessage, bridgeGeneration);
                         return;
                     }
 
@@ -5291,7 +4950,7 @@ namespace SBMSGui
 
                     if (virtualSources.Count < betaPairs.Count)
                     {
-                        AbortBridgeStart("多屏 BETA 虚拟源数量不足，virtual=" + virtualSources.Count.ToString(CultureInfo.InvariantCulture) + " groups=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture));
+                        AbortBridgeStart("多屏 BETA 虚拟源数量不足，virtual=" + virtualSources.Count.ToString(CultureInfo.InvariantCulture) + " groups=" + betaPairs.Count.ToString(CultureInfo.InvariantCulture), bridgeGeneration);
                         return;
                     }
 
@@ -5300,10 +4959,9 @@ namespace SBMSGui
                     int streamPairCount = betaPairs.Count - outputPairCount;
                     if (outputPairCount == 0)
                     {
-                        process = null;
                         stoppingRequested = false;
                         lastNativeArgs = "";
-                        SetRunning(true);
+                        CompleteBridgeStart(bridgeGeneration);
                         AppendLog("多组虚拟桌面模式已启动: " + betaPairs.Count.ToString(CultureInfo.InvariantCulture) + " 个虚拟源");
                         AppendStreamOnlySunshineDisplayIds(virtualSources, betaPairs);
                         return;
@@ -5311,30 +4969,30 @@ namespace SBMSGui
 
                     if (!StartMultiScreenBeta(virtualSources, betaPairs))
                     {
-                        AbortBridgeStart("多屏 BETA 启动失败，已停止虚拟显示器 host");
+                        AbortBridgeStart("多屏 BETA 启动失败，已停止虚拟显示器 host", bridgeGeneration);
                         return;
                     }
-                    SetRunning(true);
+                    CompleteBridgeStart(bridgeGeneration);
                     AppendLog("多屏 BETA 已启动: 输出 " + outputPairCount.ToString(CultureInfo.InvariantCulture) + " 组, 串流 " + streamPairCount.ToString(CultureInfo.InvariantCulture) + " 组");
                     return;
                 }
 
                 DisplayChoice virtualSource;
                 string singleVirtualWaitFailure;
-                if (!WaitForAnyVirtualSource(30000, out virtualSource, out singleVirtualWaitFailure))
+                if (!WaitForAnyVirtualSource(30000, bridgeGeneration, out virtualSource, out singleVirtualWaitFailure))
                 {
                     string waitMessage = string.IsNullOrWhiteSpace(singleVirtualWaitFailure)
                         ? "等待虚拟显示器超时，requested=" + requestedSource
                         : singleVirtualWaitFailure;
-                    if (deviceHostProcess != null && deviceHostProcess.HasExited)
+                    if (!IsDeviceHostRunning())
                     {
-                        AppendLog("虚拟显示器 host 已退出，exit=" + deviceHostProcess.ExitCode);
-                        if (deviceHostLog.Length > 0)
+                        AppendLog("虚拟显示器 host 已退出");
+                        if (!string.IsNullOrWhiteSpace(deviceHostSupervisor.OutputSnapshot))
                         {
-                            AppendLog(deviceHostLog.ToString().TrimEnd());
+                            AppendLog(deviceHostSupervisor.OutputSnapshot.TrimEnd());
                         }
                     }
-                    AbortBridgeStart(waitMessage);
+                    AbortBridgeStart(waitMessage, bridgeGeneration);
                     return;
                 }
                 AppendLog("虚拟显示器已就位: " + virtualSource);
@@ -5348,11 +5006,11 @@ namespace SBMSGui
                     string requestedRefresh = GetSingleMappingRefresh(virtualSource);
                     Resolution appliedResolution;
                     string appliedRefresh;
-                    if (TryApplyDisplayMode(virtualSource.DeviceName, requestedResolution, requestedRefresh, GetSelectedDisplayOrientation(), out appliedResolution, out appliedRefresh, out modeMessage))
+                    if (displayModeService.TryApplyMode(virtualSource.DeviceName, requestedResolution, requestedRefresh, GetSelectedDisplayOrientation(), out appliedResolution, out appliedRefresh, out modeMessage))
                     {
                         AppendLog(modeMessage);
                         DisplayChoice switchedSource;
-                        if (WaitForVirtualSourceMode(virtualSource.DeviceName, appliedResolution, 5000, out switchedSource))
+                        if (WaitForVirtualSourceMode(virtualSource.DeviceName, appliedResolution, 5000, bridgeGeneration, out switchedSource))
                         {
                             virtualSource = switchedSource;
                             requestedSource = FormatResolution(appliedResolution);
@@ -5362,13 +5020,13 @@ namespace SBMSGui
                         else
                         {
                             RefreshDisplays();
-                            AbortBridgeStart("虚拟模式切换后未确认到目标分辨率，停止启动: requested=" + requestedSource + " applied=" + FormatResolution(appliedResolution));
+                            AbortBridgeStart("虚拟模式切换后未确认到目标分辨率，停止启动: requested=" + requestedSource + " applied=" + FormatResolution(appliedResolution), bridgeGeneration);
                             return;
                         }
                     }
                     else
                     {
-                        AbortBridgeStart(modeMessage);
+                        AbortBridgeStart(modeMessage, bridgeGeneration);
                         return;
                     }
                 }
@@ -5394,7 +5052,7 @@ namespace SBMSGui
                 {
                     AppendSunshineDisplayIdLog("串流模式", selectedVirtualSource);
                 }
-                SetRunning(true);
+                CompleteBridgeStart(bridgeGeneration);
                 return;
             }
 
@@ -5406,15 +5064,32 @@ namespace SBMSGui
             AppendLog("native 参数: " + lastNativeArgs);
             if (!StartNativeProcess(lastNativeArgs, false))
             {
-                AbortBridgeStart("native 启动失败，已停止桥接");
+                AbortBridgeStart("native 启动失败，已停止桥接", bridgeGeneration);
                 return;
             }
-            SetRunning(true);
+            CompleteBridgeStart(bridgeGeneration);
             AppendLog("已启动");
             }
             finally
             {
-                bridgeStarting = false;
+                if (lifecycle.IsCurrent(bridgeGeneration) && lifecycle.State == BridgeState.Starting)
+                {
+                    BridgeState incompleteState = lifecycle.State;
+                    if (IsBridgeRunning())
+                    {
+                        lifecycle.MarkError(bridgeGeneration, "桥接启动未完成");
+                        LogLifecycleTransition(incompleteState, "桥接启动未完成");
+                    }
+                    else
+                    {
+                        long idleGeneration = lifecycle.BeginStop();
+                        LogLifecycleTransition(incompleteState, "启动已取消");
+                        incompleteState = lifecycle.State;
+                        lifecycle.MarkIdle(idleGeneration);
+                        LogLifecycleTransition(incompleteState, "没有创建运行资源");
+                    }
+                    UpdateLifecycleUi();
+                }
                 if (!IsBridgeRunning())
                 {
                     startButton.Enabled = true;
@@ -5425,57 +5100,47 @@ namespace SBMSGui
 
         private bool StartNativeProcess(string args, bool restarted)
         {
-            process = CreateProcess(args);
-            Process startedProcess = process;
-            process.EnableRaisingEvents = true;
-            process.OutputDataReceived += OnOutput;
-            process.ErrorDataReceived += OnOutput;
-            process.Exited += delegate
+            long processGeneration = lifecycle.Generation;
+            string error;
+            bool started = nativeSupervisor.StartPrimary(args, delegate(int exitCode)
             {
-                BeginInvoke((Action)delegate
+                if (!lifecycle.IsCurrent(processGeneration))
                 {
-                    int exitCode = GetProcessExitCode(startedProcess);
-                    AppendLog("native 进程已退出 exit=" + exitCode);
-                    if (process != startedProcess)
-                    {
-                        return;
-                    }
-                    if (stoppingRequested)
-                    {
-                        StopDeviceHost();
-                        SetRunning(false);
-                        return;
-                    }
-                    if (!stoppingRequested && IsRecoverableNativeDisplayExit(exitCode))
-                    {
-                        /*
-                         * Issue #8: Do not cap recoverable single-output restarts with a
-                         * cumulative counter. Windows can emit several transient source or
-                         * topology failures while the user is still editing layout, and the
-                         * bridge should keep trying instead of carrying an old recovery count
-                         * until it kills the current session.
-                         */
-                        AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出");
-                        if (!TryRestartNativeAfterTopologyChange())
+                    return;
+                }
+                AppendLog("native 进程已退出 exit=" + exitCode);
+                if (stoppingRequested)
+                {
+                    return;
+                }
+                if (IsRecoverableNativeDisplayExit(exitCode))
+                {
+                    AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出");
+                        BridgeState previousState = lifecycle.State;
+                        if (!lifecycle.BeginRecovery(processGeneration))
                         {
-                            AbortBridgeStart("native 重启失败，已停止桥接");
+                            return;
                         }
-                        return;
+                        LogLifecycleTransition(previousState, GetRecoverableNativeExitMessage(exitCode));
+                    UpdateLifecycleUi();
+                    if (!TryRestartNativeAfterTopologyChange(processGeneration))
+                    {
+                        AbortBridgeStart("native 重启失败，已停止桥接", processGeneration);
                     }
-                    StopDeviceHost();
-                    SetRunning(false);
-                });
-            };
-            try
+                    else
+                    {
+                        previousState = lifecycle.State;
+                        lifecycle.MarkRunning(processGeneration);
+                        LogLifecycleTransition(previousState, "native 输出恢复完成");
+                        UpdateLifecycleUi();
+                    }
+                    return;
+                }
+                AbortBridgeStart("native 输出异常退出，已停止桥接", processGeneration);
+            }, out error);
+            if (!started)
             {
-                process.Start();
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-            }
-            catch (Exception ex)
-            {
-                AppendLog((restarted ? "native 重启失败: " : "native 启动失败: ") + ex.Message);
-                process = null;
+                AppendLog((restarted ? "native 重启失败: " : "native 启动失败: ") + error);
                 return false;
             }
             AppendLog(restarted ? "native 已重启" : "native 已启动");
@@ -5495,7 +5160,7 @@ namespace SBMSGui
                 : "检测到显示拓扑变化";
         }
 
-        private bool TryRestartNativeAfterTopologyChange()
+        private bool TryRestartNativeAfterTopologyChange(long generation)
         {
             if (!deviceHostCheck.Checked)
             {
@@ -5519,7 +5184,7 @@ namespace SBMSGui
              */
             DisplayChoice virtualSource;
             string waitFailure;
-            if (!WaitForAnyVirtualSource(10000, out virtualSource, out waitFailure))
+            if (!WaitForAnyVirtualSource(10000, generation, out virtualSource, out waitFailure))
             {
                 AppendLog(string.IsNullOrWhiteSpace(waitFailure)
                     ? "拓扑变化后未重新发现虚拟显示器"
@@ -5534,7 +5199,7 @@ namespace SBMSGui
                 string modeMessage;
                 Resolution appliedResolution;
                 string appliedRefresh;
-                if (!TryApplyDisplayMode(virtualSource.DeviceName, desiredResolution, lastManagedVirtualRefresh, lastManagedVirtualOrientation, out appliedResolution, out appliedRefresh, out modeMessage))
+                if (!displayModeService.TryApplyMode(virtualSource.DeviceName, desiredResolution, lastManagedVirtualRefresh, lastManagedVirtualOrientation, out appliedResolution, out appliedRefresh, out modeMessage))
                 {
                     AppendLog(modeMessage);
                     return false;
@@ -5542,7 +5207,7 @@ namespace SBMSGui
 
                 AppendLog(modeMessage);
                 DisplayChoice switchedSource;
-                if (!WaitForVirtualSourceMode(virtualSource.DeviceName, appliedResolution, 5000, out switchedSource))
+                if (!WaitForVirtualSourceMode(virtualSource.DeviceName, appliedResolution, 5000, generation, out switchedSource))
                 {
                     AppendLog("拓扑变化后虚拟模式未确认: " + virtualSource.DeviceName + " -> " + FormatResolution(appliedResolution));
                     return false;
@@ -5605,7 +5270,6 @@ namespace SBMSGui
             StopBetaProcesses();
             stoppingRequested = false;
             lastNativeArgs = "";
-            process = null;
 
             int count = Math.Min(virtualSources.Count, pairs.Count);
             for (int i = 0; i < count; ++i)
@@ -5655,119 +5319,60 @@ namespace SBMSGui
 
         private bool StartBetaNativeProcess(string args, int index)
         {
-            Process betaProcess = CreateProcess(args);
-            betaProcesses.Add(betaProcess);
-            betaProcess.EnableRaisingEvents = true;
-            betaProcess.OutputDataReceived += OnOutput;
-            betaProcess.ErrorDataReceived += OnOutput;
-            Process startedProcess = betaProcess;
-            betaProcess.Exited += delegate
+            long processGeneration = lifecycle.Generation;
+            string error;
+            bool started = nativeSupervisor.StartBeta(args, index, delegate(int exitedIndex, int exitCode)
             {
-                BeginInvoke((Action)delegate
+                if (!lifecycle.IsCurrent(processGeneration))
                 {
-                    int exitCode = GetProcessExitCode(startedProcess);
-                    AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 已退出 exit=" + exitCode.ToString(CultureInfo.InvariantCulture));
-                    if (stoppingRequested)
-                    {
-                        return;
-                    }
-                    /*
-                     * Issue #5: BETA native can be created immediately after virtual mode
-                     * changes, while Windows is still committing the display topology. A
-                     * dedicated source-unavailable exit means the native process did not
-                     * crash; it only saw a stale/missing \\.\DISPLAYxx snapshot. Recover by
-                     * keeping the host alive and rebuilding native processes from the latest
-                     * display enumeration.
-                     */
-                    if (IsRecoverableNativeDisplayExit(exitCode))
-                    {
-                        RestartBridgeAfterTopologyChange("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] " + GetRecoverableNativeExitMessage(exitCode));
-                        return;
-                    }
-                    RemoveExitedBetaProcesses();
-                    AbortBridgeStart("多屏 BETA 子进程异常退出，已停止全部桥接");
-                });
-            };
-            try
-            {
-                betaProcess.Start();
-                betaProcess.BeginOutputReadLine();
-                betaProcess.BeginErrorReadLine();
-            }
-            catch (Exception ex)
-            {
-                AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 启动失败: " + ex.Message);
-                try
-                {
-                    betaProcesses.Remove(betaProcess);
-                    if (!betaProcess.HasExited)
-                    {
-                        betaProcess.Kill();
-                    }
+                    return;
                 }
-                catch
+                AppendLog("beta native[" + exitedIndex.ToString(CultureInfo.InvariantCulture) + "] 已退出 exit=" + exitCode.ToString(CultureInfo.InvariantCulture));
+                if (stoppingRequested)
                 {
+                    return;
                 }
+                if (IsRecoverableNativeDisplayExit(exitCode))
+                {
+                    RestartBridgeAfterTopologyChange("beta native[" + exitedIndex.ToString(CultureInfo.InvariantCulture) + "] " + GetRecoverableNativeExitMessage(exitCode), processGeneration);
+                    return;
+                }
+                nativeSupervisor.RemoveExitedBetaProcesses();
+                AbortBridgeStart("多屏 BETA 子进程异常退出，已停止全部桥接", processGeneration);
+            }, out error);
+            if (!started)
+            {
+                AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 启动失败: " + error);
                 return false;
             }
             AppendLog("beta native[" + index.ToString(CultureInfo.InvariantCulture) + "] 已启动");
             return true;
         }
 
-        private bool WaitForDisplayTopologyToSettle(int timeoutMs, out string message)
+        private bool WaitForDisplayTopologyToSettle(int timeoutMs, long generation, out string message)
         {
-            message = "";
-            string previousSignature = "";
-            int stableSamples = 0;
-            var deadline = Environment.TickCount + timeoutMs;
-
-            while (Environment.TickCount < deadline)
+            string signature;
+            bool settled = topologyRecoveryService.WaitForStable(
+                timeoutMs,
+                DisplayTopologyStableSamples,
+                BuildDisplayListSignature,
+                delegate(int delay) { return SleepWithLifecyclePump(delay, generation); },
+                out signature);
+            if (settled)
             {
-                if (deviceHostProcess != null && deviceHostProcess.HasExited)
-                {
-                    message = "拓扑变化恢复时虚拟显示器 host 已退出";
-                    return false;
-                }
-
-                string listOutput = CaptureNativeOutput("--list");
-                string signature = BuildDisplayListSignature(listOutput);
-                if (!string.IsNullOrWhiteSpace(signature) &&
-                    string.Equals(signature, previousSignature, StringComparison.Ordinal))
-                {
-                    ++stableSamples;
-                    if (stableSamples >= DisplayTopologyStableSamples)
-                    {
-                        RefreshDisplays();
-                        return true;
-                    }
-                }
-                else
-                {
-                    previousSignature = signature;
-                    stableSamples = string.IsNullOrWhiteSpace(signature) ? 0 : 1;
-                }
-
-                SleepWithUiPump(500);
+                RefreshDisplays();
+                message = "";
+                return true;
             }
-
-            message = "等待显示拓扑稳定超时";
+            message = !string.IsNullOrWhiteSpace(topologyRecoveryService.LastFailure)
+                ? topologyRecoveryService.LastFailure
+                : (!lifecycle.IsCurrent(generation) ? "显示拓扑等待已取消" : (!IsDeviceHostRunning() ? "拓扑变化恢复时虚拟显示器 host 已退出" : "等待显示拓扑稳定超时"));
             return false;
         }
 
-        private static string BuildDisplayListSignature(string listOutput)
+        private string BuildDisplayListSignature(string listOutput)
         {
-            var lines = new List<string>();
-            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                string line = rawLine.Trim();
-                DisplayChoice display;
-                if (TryParseDisplayLine(line, out display))
-                {
-                    lines.Add(line);
-                }
-            }
-            lines.Sort(StringComparer.OrdinalIgnoreCase);
-            return string.Join("\n", lines.ToArray());
+            return topologyDiscoveryService.BuildSignature(listOutput);
         }
 
         private bool RebindBetaTargetDisplays(out string message)
@@ -5813,12 +5418,12 @@ namespace SBMSGui
             return true;
         }
 
-        private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, out string message)
+        private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, long generation, out string message)
         {
-            return RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, false, out message);
+            return RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, false, generation, out message);
         }
 
-        private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, bool absorbWindowsRuntimeMode, out string message)
+        private bool RestoreBetaVirtualModesAfterTopologyChange(List<DisplayChoice> virtualSources, List<BridgePairConfig> betaPairs, bool absorbWindowsRuntimeMode, long generation, out string message)
         {
             message = "";
             int count = Math.Min(virtualSources.Count, betaPairs.Count);
@@ -5850,7 +5455,7 @@ namespace SBMSGui
                 string modeMessage;
                 Resolution appliedResolution;
                 string appliedRefresh;
-                if (!TryApplyDisplayMode(source.DeviceName, pair.SourceResolution, pair.Refresh, pair.Orientation, out appliedResolution, out appliedRefresh, out modeMessage))
+                if (!displayModeService.TryApplyMode(source.DeviceName, pair.SourceResolution, pair.Refresh, pair.Orientation, out appliedResolution, out appliedRefresh, out modeMessage))
                 {
                     message = modeMessage;
                     return false;
@@ -5858,7 +5463,7 @@ namespace SBMSGui
 
                 AppendLog(modeMessage);
                 DisplayChoice confirmedSource;
-                if (!WaitForVirtualSourceMode(source.DeviceName, appliedResolution, 5000, out confirmedSource))
+                if (!WaitForVirtualSourceMode(source.DeviceName, appliedResolution, 5000, generation, out confirmedSource))
                 {
                     message = "拓扑变化后虚拟模式未确认: " + source.DeviceName + " -> " + FormatResolution(appliedResolution);
                     return false;
@@ -5886,8 +5491,8 @@ namespace SBMSGui
             }
 
             string runtimeRefresh = string.IsNullOrWhiteSpace(source.Refresh) ? pair.Refresh : source.Refresh;
-            int runtimeOrientation = NormalizeDisplayOrientation(source.Orientation);
-            bool changed = !SameResolution(runtimeResolution, pair.SourceResolution) ||
+            int runtimeOrientation = displayModeService.NormalizeOrientation(source.Orientation);
+            bool changed = !DisplayModeService.SameResolution(runtimeResolution, pair.SourceResolution) ||
                            !string.Equals(runtimeRefresh, pair.Refresh, StringComparison.OrdinalIgnoreCase) ||
                            runtimeOrientation != pair.Orientation;
 
@@ -5937,13 +5542,15 @@ namespace SBMSGui
             }
         }
 
-        private void RestartBridgeAfterTopologyChange(string source)
+        private void RestartBridgeAfterTopologyChange(string source, long generation)
         {
-            if (stoppingRequested || restartingAfterTopologyChange)
+            BridgeState previousState = lifecycle.State;
+            if (stoppingRequested || !lifecycle.BeginRecovery(generation))
             {
                 return;
             }
-            restartingAfterTopologyChange = true;
+            LogLifecycleTransition(previousState, source);
+            UpdateLifecycleUi();
             /*
              * Issue #8: This path intentionally has no recovery-count fuse. Windows Settings
              * may produce multiple short-lived topology/source snapshots while a user rotates
@@ -5967,58 +5574,52 @@ namespace SBMSGui
                  */
                 stoppingRequested = true;
                 StopBetaProcesses();
-                if (process != null && !process.HasExited)
-                {
-                    process.CloseMainWindow();
-                    PostCloseToProcess(process.Id);
-                    if (!process.WaitForExit(3000))
-                    {
-                        process.Kill();
-                    }
-                }
-                process = null;
+                nativeSupervisor.StopPrimary(AppendLog);
 
                 stoppingRequested = false;
 
                 string recoveryMessage;
-                if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, out recoveryMessage))
+                if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, generation, out recoveryMessage))
                 {
-                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    FailBridgeRecovery(generation, recoveryMessage);
                     return;
                 }
 
                 if (!RebindBetaTargetDisplays(out recoveryMessage))
                 {
-                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    FailBridgeRecovery(generation, recoveryMessage);
                     return;
                 }
 
                 List<BridgePairConfig> betaPairs;
                 if (!TryGetEnabledBridgePairs(false, out betaPairs, out recoveryMessage))
                 {
-                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    FailBridgeRecovery(generation, recoveryMessage);
                     return;
                 }
 
                 List<DisplayChoice> virtualSources;
-                if (!WaitForVirtualSources(betaPairs.Count, 15000, out virtualSources, out recoveryMessage))
+                if (!WaitForVirtualSources(betaPairs.Count, 15000, generation, out virtualSources, out recoveryMessage))
                 {
-                    AppendLog((string.IsNullOrWhiteSpace(recoveryMessage)
+                    FailBridgeRecovery(generation, (string.IsNullOrWhiteSpace(recoveryMessage)
                         ? "拓扑变化后等待虚拟显示器超时"
-                        : recoveryMessage) + "，虚拟显示器保持运行，可手动停止后重试");
+                        : recoveryMessage));
                     return;
                 }
 
-                if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, followWindowsTopologyCheck.Checked, out recoveryMessage))
+                if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, followWindowsTopologyCheck.Checked, generation, out recoveryMessage))
                 {
-                    AppendLog(recoveryMessage + "，虚拟显示器保持运行，可手动停止后重试");
+                    FailBridgeRecovery(generation, recoveryMessage);
                     return;
                 }
 
                 int outputPairCount = CountOutputBridgePairs(betaPairs);
                 if (outputPairCount == 0)
                 {
-                    SetRunning(true);
+                    BridgeState recoveredState = lifecycle.State;
+                    lifecycle.MarkRunning(generation);
+                    LogLifecycleTransition(recoveredState, "仅虚拟桌面恢复完成");
+                    UpdateLifecycleUi();
                     AppendLog("拓扑变化后仍为仅虚拟桌面模式，未启动 native 输出");
                     AppendStreamOnlySunshineDisplayIds(virtualSources, betaPairs);
                     return;
@@ -6026,20 +5627,23 @@ namespace SBMSGui
 
                 if (!StartMultiScreenBeta(virtualSources, betaPairs))
                 {
-                    AppendLog("拓扑变化后 native 输出恢复失败，虚拟显示器保持运行，可手动停止后重试");
+                    FailBridgeRecovery(generation, "拓扑变化后 native 输出恢复失败");
                     return;
                 }
 
-                SetRunning(true);
+                BridgeState runningState = lifecycle.State;
+                lifecycle.MarkRunning(generation);
+                LogLifecycleTransition(runningState, "多屏 native 输出恢复完成");
+                UpdateLifecycleUi();
                 AppendLog("拓扑变化后 native 输出已恢复，虚拟显示器 host 未重启");
             }
-            catch
+            catch (Exception ex)
             {
+                FailBridgeRecovery(generation, "拓扑变化恢复异常: " + ex.Message);
             }
             finally
             {
                 stoppingRequested = false;
-                restartingAfterTopologyChange = false;
             }
         }
 
@@ -6094,56 +5698,22 @@ namespace SBMSGui
                 return true;
             }
 
-            SignalDeviceHostStop();
-            deviceHostLog.Length = 0;
+            long hostGeneration = lifecycle.Generation;
+            recoveryProblemCheck = Environment.TickCount + 1500;
             int requestedCount = Math.Max(1, Math.Min(virtualDeviceCount, 3));
-            deviceHostProcess = new Process();
-            deviceHostProcess.StartInfo.FileName = deviceHostExe;
-            deviceHostProcess.StartInfo.Arguments = "--count " + requestedCount.ToString(CultureInfo.InvariantCulture);
-            deviceHostProcess.StartInfo.WorkingDirectory = root;
-            deviceHostProcess.StartInfo.UseShellExecute = false;
-            deviceHostProcess.StartInfo.RedirectStandardOutput = true;
-            deviceHostProcess.StartInfo.RedirectStandardError = true;
-            deviceHostProcess.StartInfo.CreateNoWindow = true;
-            deviceHostProcess.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-            deviceHostProcess.StartInfo.StandardErrorEncoding = Encoding.UTF8;
-            deviceHostProcess.EnableRaisingEvents = true;
-            deviceHostProcess.OutputDataReceived += OnOutput;
-            deviceHostProcess.ErrorDataReceived += OnOutput;
-            deviceHostProcess.OutputDataReceived += OnDeviceHostOutput;
-            deviceHostProcess.ErrorDataReceived += OnDeviceHostOutput;
-            Process startedHost = deviceHostProcess;
-            deviceHostProcess.Exited += delegate
+            string error;
+            bool started = deviceHostSupervisor.Start(requestedCount, delegate(int exitCode)
             {
-                BeginInvoke((Action)delegate
+                if (!lifecycle.IsCurrent(hostGeneration))
                 {
-                    if (deviceHostProcess != startedHost)
-                    {
-                        return;
-                    }
-                    int exitCode = GetProcessExitCode(startedHost);
-                    AppendLog("虚拟显示器 host 已退出 exit=" + exitCode.ToString(CultureInfo.InvariantCulture));
-                    deviceHostProcess = null;
-                    if (stoppingRequested || exiting)
-                    {
-                        RefreshDisplays();
-                        UpdateStatus();
-                        return;
-                    }
-                    AbortBridgeStart("虚拟显示器 host 异常退出，已停止桥接");
-                });
-            };
-
-            try
+                    return;
+                }
+                AppendLog("虚拟显示器 host 已退出 exit=" + exitCode.ToString(CultureInfo.InvariantCulture));
+                AbortBridgeStart("虚拟显示器 host 异常退出，已停止桥接", hostGeneration);
+            }, out error);
+            if (!started)
             {
-                deviceHostProcess.Start();
-                deviceHostProcess.BeginOutputReadLine();
-                deviceHostProcess.BeginErrorReadLine();
-            }
-            catch (Exception ex)
-            {
-                AppendLog("虚拟显示器 host 启动失败: " + ex.Message);
-                deviceHostProcess = null;
+                AppendLog("虚拟显示器 host 启动失败: " + error);
                 return false;
             }
             AppendLog("虚拟显示器 host 已启动 count=" + requestedCount.ToString(CultureInfo.InvariantCulture));
@@ -6361,86 +5931,41 @@ namespace SBMSGui
             return "";
         }
 
-        private bool WaitForSourceDisplay(string source, int timeoutMs)
+        private bool WaitForAnyVirtualSource(int timeoutMs, long generation, out DisplayChoice source, out string failureMessage)
         {
-            var deadline = Environment.TickCount + timeoutMs;
-            int nextProblemCheck = Environment.TickCount + 1500;
-            while (Environment.TickCount < deadline)
+            bool found = topologyRecoveryService.WaitForAny(
+                timeoutMs,
+                delegate(int delay) { return SleepWithLifecyclePump(delay, generation); },
+                out source);
+            failureMessage = topologyRecoveryService.LastFailure;
+            if (found)
             {
-                if (deviceHostProcess != null && deviceHostProcess.HasExited)
-                {
-                    return false;
-                }
-                string loadFailure;
-                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out loadFailure))
-                {
-                    AppendLog(loadFailure);
-                    return false;
-                }
-                var list = CaptureNativeOutput("--list");
-                DisplayChoice display;
-                if (TryFindVirtualSource(source, list, out display))
-                {
-                    RefreshDisplays();
-                    return true;
-                }
-                SleepWithUiPump(500);
+                RefreshDisplays();
             }
-            return false;
+            else if (string.IsNullOrWhiteSpace(failureMessage) && !lifecycle.IsCurrent(generation))
+            {
+                failureMessage = "等待虚拟显示器已取消";
+            }
+            return found;
         }
 
-        private bool WaitForAnyVirtualSource(int timeoutMs, out DisplayChoice source, out string failureMessage)
+        private bool WaitForVirtualSources(int minimumCount, int timeoutMs, long generation, out List<DisplayChoice> sources, out string failureMessage)
         {
-            var deadline = Environment.TickCount + timeoutMs;
-            int nextProblemCheck = Environment.TickCount + 1500;
-            source = null;
-            failureMessage = "";
-            while (Environment.TickCount < deadline)
+            bool found = topologyRecoveryService.WaitForCount(
+                minimumCount,
+                timeoutMs,
+                delegate(int delay) { return SleepWithLifecyclePump(delay, generation); },
+                out sources);
+            failureMessage = topologyRecoveryService.LastFailure;
+            if (found)
             {
-                if (deviceHostProcess != null && deviceHostProcess.HasExited)
-                {
-                    return false;
-                }
-                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out failureMessage))
-                {
-                    return false;
-                }
-                var list = CaptureNativeOutput("--list");
-                if (TryFindFirstVirtualSource(list, out source))
-                {
-                    RefreshDisplays();
-                    return true;
-                }
-                SleepWithUiPump(500);
+                RefreshDisplays();
+                sources = GetCurrentVirtualSources(minimumCount);
+                return sources.Count >= minimumCount;
             }
-            return false;
-        }
-
-        private bool WaitForVirtualSources(int minimumCount, int timeoutMs, out List<DisplayChoice> sources, out string failureMessage)
-        {
-            var deadline = Environment.TickCount + timeoutMs;
-            int nextProblemCheck = Environment.TickCount + 1500;
-            sources = new List<DisplayChoice>();
-            failureMessage = "";
-            while (Environment.TickCount < deadline)
+            if (string.IsNullOrWhiteSpace(failureMessage) && !lifecycle.IsCurrent(generation))
             {
-                if (deviceHostProcess != null && deviceHostProcess.HasExited)
-                {
-                    return false;
-                }
-                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out failureMessage))
-                {
-                    return false;
-                }
-                string list = CaptureNativeOutput("--list");
-                sources = ParseVirtualSources(list);
-                if (sources.Count >= minimumCount)
-                {
-                    RefreshDisplays();
-                    sources = GetCurrentVirtualSources(minimumCount);
-                    return sources.Count >= minimumCount;
-                }
-                SleepWithUiPump(500);
+                failureMessage = "等待虚拟显示器已取消";
             }
             return false;
         }
@@ -6463,72 +5988,34 @@ namespace SBMSGui
             return sources;
         }
 
-        private static List<DisplayChoice> ParseVirtualSources(string listOutput)
+        private List<DisplayChoice> ParseVirtualSources(string listOutput)
         {
-            var sources = new List<DisplayChoice>();
-            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                DisplayChoice display;
-                if (TryParseDisplayLine(rawLine.Trim(), out display) && display.Virtual)
-                {
-                    sources.Add(display);
-                }
-            }
-            return sources;
+            return topologyDiscoveryService.Parse(listOutput, GetCurrentDisplayModeOrNull)
+                .FindAll(delegate(DisplayChoice display) { return display.Virtual; });
         }
 
-        private bool WaitForVirtualSource(string selector, int timeoutMs, out DisplayChoice source)
+        private string ProbeVirtualDisplayLoadFailure()
         {
-            var deadline = Environment.TickCount + timeoutMs;
-            int nextProblemCheck = Environment.TickCount + 1500;
-            source = null;
-            while (Environment.TickCount < deadline)
-            {
-                if (deviceHostProcess != null && deviceHostProcess.HasExited)
-                {
-                    return false;
-                }
-                string loadFailure;
-                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out loadFailure))
-                {
-                    AppendLog(loadFailure);
-                    return false;
-                }
-                var list = CaptureNativeOutput("--list");
-                if (TryFindVirtualSource(selector, list, out source))
-                {
-                    RefreshDisplays();
-                    return true;
-                }
-                SleepWithUiPump(500);
-            }
-            return false;
+            string message;
+            return TryGetVirtualDisplayLoadFailure(ref recoveryProblemCheck, out message) ? message : "";
         }
 
-        private bool WaitForVirtualSourceMode(string deviceName, Resolution resolution, int timeoutMs, out DisplayChoice source)
+        private bool WaitForVirtualSourceMode(string deviceName, Resolution resolution, int timeoutMs, long generation, out DisplayChoice source)
         {
-            var deadline = Environment.TickCount + timeoutMs;
-            int nextProblemCheck = Environment.TickCount + 1500;
-            source = null;
-            while (Environment.TickCount < deadline)
+            bool found = topologyRecoveryService.WaitForMode(
+                deviceName,
+                resolution,
+                timeoutMs,
+                delegate(int delay) { return SleepWithLifecyclePump(delay, generation); },
+                out source);
+            if (found)
             {
-                if (deviceHostProcess != null && deviceHostProcess.HasExited)
-                {
-                    return false;
-                }
-                string loadFailure;
-                if (TryGetVirtualDisplayLoadFailure(ref nextProblemCheck, out loadFailure))
-                {
-                    AppendLog(loadFailure);
-                    return false;
-                }
-                var list = CaptureNativeOutput("--list");
-                if (TryFindVirtualSourceMode(deviceName, resolution, list, out source))
-                {
-                    RefreshDisplays();
-                    return true;
-                }
-                SleepWithUiPump(500);
+                RefreshDisplays();
+                return true;
+            }
+            if (!string.IsNullOrWhiteSpace(topologyRecoveryService.LastFailure))
+            {
+                AppendLog(topologyRecoveryService.LastFailure);
             }
             return false;
         }
@@ -6557,62 +6044,6 @@ namespace SBMSGui
             return false;
         }
 
-        private static bool TryFindFirstVirtualSource(string listOutput, out DisplayChoice source)
-        {
-            source = null;
-            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                DisplayChoice display;
-                if (TryParseDisplayLine(rawLine.Trim(), out display) && display.Virtual)
-                {
-                    source = display;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private static bool TryFindVirtualSource(string selector, string listOutput, out DisplayChoice source)
-        {
-            source = null;
-            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                DisplayChoice display;
-                if (!TryParseDisplayLine(rawLine.Trim(), out display) || !display.Virtual)
-                {
-                    continue;
-                }
-                if (string.Equals(display.DeviceName, selector, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(display.Resolution, selector, StringComparison.OrdinalIgnoreCase))
-                {
-                    source = display;
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        private static bool TryFindVirtualSourceMode(string deviceName, Resolution resolution, string listOutput, out DisplayChoice source)
-        {
-            source = null;
-            string resolutionText = FormatResolution(resolution);
-            foreach (string rawLine in listOutput.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None))
-            {
-                DisplayChoice display;
-                if (!TryParseDisplayLine(rawLine.Trim(), out display) || !display.Virtual)
-                {
-                    continue;
-                }
-                if (string.Equals(display.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(display.Resolution, resolutionText, StringComparison.OrdinalIgnoreCase))
-                {
-                    source = display;
-                    return true;
-                }
-            }
-            return false;
-        }
-
         private string GetSingleMappingRefresh(DisplayChoice fallbackDisplay)
         {
             DisplayChoice targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice;
@@ -6633,195 +6064,14 @@ namespace SBMSGui
             }
         }
 
-        private static bool SameResolution(Resolution left, Resolution right)
-        {
-            return left.Width == right.Width && left.Height == right.Height;
-        }
-
-        private static List<DisplayModeCandidate> GetDisplayModeCandidates(string deviceName)
-        {
-            var candidates = new List<DisplayModeCandidate>();
-            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            for (int modeIndex = 0; modeIndex < 1024; ++modeIndex)
-            {
-                var mode = new DEVMODE();
-                mode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
-                if (!EnumDisplaySettings(deviceName, modeIndex, ref mode))
-                {
-                    break;
-                }
-                if (mode.dmPelsWidth <= 0 || mode.dmPelsHeight <= 0)
-                {
-                    continue;
-                }
-
-                string key = mode.dmPelsWidth.ToString(CultureInfo.InvariantCulture) + "x" +
-                             mode.dmPelsHeight.ToString(CultureInfo.InvariantCulture) + "@" +
-                             mode.dmDisplayFrequency.ToString(CultureInfo.InvariantCulture);
-                if (seen.Contains(key))
-                {
-                    continue;
-                }
-
-                seen.Add(key);
-                candidates.Add(new DisplayModeCandidate
-                {
-                    Resolution = new Resolution { Width = mode.dmPelsWidth, Height = mode.dmPelsHeight },
-                    Refresh = mode.dmDisplayFrequency
-                });
-            }
-            return candidates;
-        }
-
-        private static bool TrySelectSupportedDisplayMode(string deviceName, Resolution requestedResolution, string requestedRefreshText, out Resolution selectedResolution, out string selectedRefreshText, out string snapMessage)
-        {
-            selectedResolution = requestedResolution;
-            selectedRefreshText = requestedRefreshText;
-            snapMessage = "";
-
-            List<DisplayModeCandidate> candidates = GetDisplayModeCandidates(deviceName);
-            if (candidates.Count == 0)
-            {
-                return false;
-            }
-
-            int requestedRefresh;
-            bool hasRequestedRefresh = int.TryParse(requestedRefreshText, out requestedRefresh) && requestedRefresh > 0;
-            double requestedAspect = requestedResolution.Height > 0
-                ? requestedResolution.Width / (double)requestedResolution.Height
-                : 0.0;
-            DisplayModeCandidate best = null;
-            double bestScore = double.MaxValue;
-
-            for (int i = 0; i < candidates.Count; ++i)
-            {
-                DisplayModeCandidate candidate = candidates[i];
-                bool exactResolution = SameResolution(candidate.Resolution, requestedResolution);
-                double aspect = candidate.Resolution.Height > 0
-                    ? candidate.Resolution.Width / (double)candidate.Resolution.Height
-                    : 0.0;
-                double aspectError = requestedAspect > 0.0
-                    ? Math.Abs(aspect - requestedAspect) / requestedAspect
-                    : 0.0;
-                if (!exactResolution && aspectError > 0.02)
-                {
-                    continue;
-                }
-
-                double sizeError = Math.Abs(candidate.Resolution.Width - requestedResolution.Width) +
-                                   Math.Abs(candidate.Resolution.Height - requestedResolution.Height);
-                double refreshError = 0.0;
-                if (hasRequestedRefresh && candidate.Refresh > 0)
-                {
-                    refreshError = Math.Abs(candidate.Refresh - requestedRefresh) * 0.05;
-                }
-                else if (!hasRequestedRefresh && candidate.Refresh > 0)
-                {
-                    refreshError = -candidate.Refresh * 0.001;
-                }
-                double score = (exactResolution ? 0.0 : sizeError + aspectError * 10000.0) + refreshError;
-                if (score < bestScore)
-                {
-                    bestScore = score;
-                    best = candidate;
-                }
-            }
-
-            if (best == null)
-            {
-                return false;
-            }
-
-            selectedResolution = best.Resolution;
-            selectedRefreshText = best.Refresh > 0
-                ? best.Refresh.ToString(CultureInfo.InvariantCulture)
-                : requestedRefreshText;
-
-            if (!SameResolution(selectedResolution, requestedResolution) ||
-                (hasRequestedRefresh && best.Refresh > 0 && best.Refresh != requestedRefresh))
-            {
-                snapMessage = "虚拟模式贴合可用模式: requested=" + FormatResolution(requestedResolution) +
-                              (hasRequestedRefresh ? "@" + requestedRefresh.ToString(CultureInfo.InvariantCulture) : "") +
-                              " applied=" + FormatResolution(selectedResolution) +
-                              (best.Refresh > 0 ? "@" + best.Refresh.ToString(CultureInfo.InvariantCulture) : "");
-            }
-            return true;
-        }
-
-        private static bool TryApplyDisplayMode(string deviceName, Resolution resolution, string refreshText, int orientation, out Resolution appliedResolution, out string appliedRefresh, out string message)
-        {
-            appliedResolution = resolution;
-            appliedRefresh = refreshText;
-            Resolution selectedResolution;
-            string selectedRefreshText;
-            string snapMessage;
-            if (!TrySelectSupportedDisplayMode(deviceName, resolution, refreshText, out selectedResolution, out selectedRefreshText, out snapMessage))
-            {
-                selectedResolution = resolution;
-                selectedRefreshText = refreshText;
-                snapMessage = "";
-            }
-
-            var devMode = new DEVMODE();
-            devMode.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
-            if (!EnumDisplaySettings(deviceName, ENUM_CURRENT_SETTINGS, ref devMode))
-            {
-                message = "读取虚拟显示器当前模式失败: " + deviceName;
-                return false;
-            }
-
-            int refresh;
-            bool hasRefresh = int.TryParse(selectedRefreshText, out refresh) && refresh > 0;
-            devMode.dmPelsWidth = selectedResolution.Width;
-            devMode.dmPelsHeight = selectedResolution.Height;
-            devMode.dmDisplayOrientation = orientation;
-            devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION;
-            if (hasRefresh)
-            {
-                devMode.dmDisplayFrequency = refresh;
-                devMode.dmFields |= DM_DISPLAYFREQUENCY;
-            }
-
-            int result = ChangeDisplaySettingsEx(deviceName, ref devMode, IntPtr.Zero, 0, IntPtr.Zero);
-            if (result == DISP_CHANGE_SUCCESSFUL)
-            {
-                appliedResolution = selectedResolution;
-                appliedRefresh = hasRefresh ? refresh.ToString(CultureInfo.InvariantCulture) : selectedRefreshText;
-                message = (snapMessage.Length > 0 ? snapMessage + "; " : "") +
-                          "虚拟模式切换成功: " + deviceName + " -> " + FormatResolution(selectedResolution) + (hasRefresh ? "@" + refresh.ToString(CultureInfo.InvariantCulture) : "") + " orientation=" + orientation;
-                return true;
-            }
-
-            if (hasRefresh)
-            {
-                devMode.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYORIENTATION;
-                result = ChangeDisplaySettingsEx(deviceName, ref devMode, IntPtr.Zero, 0, IntPtr.Zero);
-                if (result == DISP_CHANGE_SUCCESSFUL)
-                {
-                    appliedResolution = selectedResolution;
-                    appliedRefresh = "";
-                    message = (snapMessage.Length > 0 ? snapMessage + "; " : "") +
-                              "虚拟模式切换成功: " + deviceName + " -> " + FormatResolution(selectedResolution) + " orientation=" + orientation;
-                    return true;
-                }
-            }
-
-            message = (snapMessage.Length > 0 ? snapMessage + "; " : "") +
-                      "虚拟模式切换失败: " + deviceName + " -> " + FormatResolution(selectedResolution) + " result=" + result;
-            return false;
-        }
-
         private string CaptureNativeOutput(string args)
         {
-            using (var p = CreateProcess(args))
+            string output;
+            if (nativeSupervisor.Capture(args, 3000, out output))
             {
-                string output;
-                if (CaptureProcessOutput(p, 3000, out output))
-                {
-                    return output;
-                }
-                return output.Length > 0 ? output : "SBMSNative error: " + args;
+                return output;
             }
+            return output.Length > 0 ? output : "SBMSNative error: " + args;
         }
 
         private void RunList()
@@ -6832,75 +6082,24 @@ namespace SBMSGui
                 return;
             }
             RefreshDisplays();
-            var list = CreateProcess("--list");
-            list.OutputDataReceived += OnOutput;
-            list.ErrorDataReceived += OnOutput;
-            list.Start();
-            list.BeginOutputReadLine();
-            list.BeginErrorReadLine();
-        }
-
-        private Process CreateProcess(string args)
-        {
-            var p = new Process();
-            p.StartInfo.FileName = nativeExe;
-            p.StartInfo.Arguments = args;
-            p.StartInfo.WorkingDirectory = root;
-            p.StartInfo.UseShellExecute = false;
-            p.StartInfo.RedirectStandardOutput = true;
-            p.StartInfo.RedirectStandardError = true;
-            p.StartInfo.CreateNoWindow = true;
-            p.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-            p.StartInfo.StandardErrorEncoding = Encoding.UTF8;
-            return p;
+            AppendLog(CaptureNativeOutput("--list").TrimEnd());
         }
 
         private void StopBetaProcesses()
         {
-            for (int i = betaProcesses.Count - 1; i >= 0; --i)
-            {
-                Process betaProcess = betaProcesses[i];
-                if (betaProcess == null)
-                {
-                    continue;
-                }
-                try
-                {
-                    if (!betaProcess.HasExited)
-                    {
-                        betaProcess.CloseMainWindow();
-                        PostCloseToProcess(betaProcess.Id);
-                    }
-                }
-                catch
-                {
-                }
-            }
-
-            for (int i = betaProcesses.Count - 1; i >= 0; --i)
-            {
-                Process betaProcess = betaProcesses[i];
-                if (betaProcess == null)
-                {
-                    continue;
-                }
-                try
-                {
-                    if (!betaProcess.HasExited && !betaProcess.WaitForExit(3000))
-                    {
-                        AppendLog("beta native 正常关闭超时，强制结束");
-                        betaProcess.Kill();
-                    }
-                }
-                catch
-                {
-                }
-            }
-            betaProcesses.Clear();
+            nativeSupervisor.StopAllBeta(AppendLog);
         }
 
-        private void AbortBridgeStart(string message)
+        private void AbortBridgeStart(string message, long expectedGeneration)
         {
+            if (!lifecycle.IsCurrent(expectedGeneration))
+            {
+                return;
+            }
+            BridgeState previousState = lifecycle.State;
+            long cleanupGeneration = lifecycle.BeginStop();
+            LogLifecycleTransition(previousState, "启动/运行失败，开始清理");
+            UpdateLifecycleUi();
             if (!string.IsNullOrWhiteSpace(message))
             {
                 AppendLog(message);
@@ -6908,25 +6107,7 @@ namespace SBMSGui
 
             stoppingRequested = true;
             StopBetaProcesses();
-            if (process != null)
-            {
-                try
-                {
-                    if (!process.HasExited)
-                    {
-                        process.CloseMainWindow();
-                        PostCloseToProcess(process.Id);
-                        if (!process.WaitForExit(3000))
-                        {
-                            process.Kill();
-                        }
-                    }
-                }
-                catch
-                {
-                }
-                process = null;
-            }
+            nativeSupervisor.StopPrimary(AppendLog);
 
             StopDeviceHost();
             if (!WaitForVirtualDisplaysToClear(5000))
@@ -6938,109 +6119,83 @@ namespace SBMSGui
                 RefreshDisplays();
             }
             lastNativeArgs = "";
-            restartingAfterTopologyChange = false;
             stoppingRequested = false;
-            SetRunning(false);
+            previousState = lifecycle.State;
+            lifecycle.MarkError(cleanupGeneration, message);
+            LogLifecycleTransition(previousState, message);
+            UpdateLifecycleUi();
         }
 
         private bool WaitForVirtualDisplaysToClear(int timeoutMs)
         {
-            var deadline = Environment.TickCount + timeoutMs;
-            while (Environment.TickCount < deadline)
+            bool cleared = topologyRecoveryService.WaitForClear(timeoutMs, delegate(int delay)
             {
-                string list = CaptureNativeOutput("--list");
-                if (ParseVirtualSources(list).Count == 0)
-                {
-                    return true;
-                }
-                SleepWithUiPump(250);
+                SleepWithUiPump(delay);
+                return true;
+            });
+            if (!cleared)
+            {
+                RefreshDisplays();
             }
-            RefreshDisplays();
-            return false;
+            return cleared;
         }
 
         private void StopBridge()
         {
+            BridgeState previousState = lifecycle.State;
+            long stopGeneration = lifecycle.BeginStop();
+            LogLifecycleTransition(previousState, "用户请求停止");
             stoppingRequested = true;
+            UpdateLifecycleUi();
             StopBetaProcesses();
-            if (process == null || process.HasExited)
-            {
-                StopDeviceHost();
-                SetRunning(false);
-                return;
-            }
-            try
-            {
-                process.CloseMainWindow();
-                PostCloseToProcess(process.Id);
-                if (!process.WaitForExit(3000))
-                {
-                    AppendLog("正常关闭超时，强制结束");
-                    process.Kill();
-                }
-            }
-            catch
-            {
-            }
+            nativeSupervisor.StopPrimary(AppendLog);
             StopDeviceHost();
-            SetRunning(false);
+            lastNativeArgs = "";
+            stoppingRequested = false;
+            previousState = lifecycle.State;
+            lifecycle.MarkIdle(stopGeneration);
+            LogLifecycleTransition(previousState, "资源清理完成");
+            UpdateLifecycleUi();
         }
 
         private bool IsBridgeRunning()
         {
-            return (process != null && !process.HasExited) ||
-                   HasRunningBetaProcess() ||
+            return nativeSupervisor.IsAnyRunning ||
                    IsDeviceHostRunning();
+        }
+
+        private void FailBridgeRecovery(long generation, string message)
+        {
+            string detail = string.IsNullOrWhiteSpace(message) ? "拓扑变化恢复失败" : message;
+            AppendLog(detail + "，虚拟显示器保持运行，可手动停止后重试");
+            BridgeState previousState = lifecycle.State;
+            lifecycle.MarkError(generation, detail);
+            LogLifecycleTransition(previousState, detail);
+            UpdateLifecycleUi();
+        }
+
+        private bool IsBridgeSessionActive()
+        {
+            return IsBridgeRunning() ||
+                   lifecycle.State == BridgeState.Starting ||
+                   lifecycle.State == BridgeState.Running ||
+                   lifecycle.State == BridgeState.Recovering ||
+                   lifecycle.State == BridgeState.Stopping;
         }
 
         private bool IsDeviceHostRunning()
         {
-            try
-            {
-                return deviceHostProcess != null && !deviceHostProcess.HasExited;
-            }
-            catch
-            {
-                return false;
-            }
+            return deviceHostSupervisor.IsRunning;
         }
 
         private bool HasRunningBetaProcess()
         {
-            for (int i = 0; i < betaProcesses.Count; ++i)
-            {
-                Process betaProcess = betaProcesses[i];
-                try
-                {
-                    if (betaProcess != null && !betaProcess.HasExited)
-                    {
-                        return true;
-                    }
-                }
-                catch
-                {
-                }
-            }
-            return false;
+            return nativeSupervisor.HasRunningBetaProcess;
         }
 
         private void RemoveExitedBetaProcesses()
         {
-            for (int i = betaProcesses.Count - 1; i >= 0; --i)
-            {
-                Process betaProcess = betaProcesses[i];
-                try
-                {
-                    if (betaProcess == null || betaProcess.HasExited)
-                    {
-                        betaProcesses.RemoveAt(i);
-                    }
-                }
-                catch
-                {
-                    betaProcesses.RemoveAt(i);
-                }
-            }
+            nativeSupervisor.RemoveExitedBetaProcesses();
         }
 
         private void OnFormClosing(object sender, FormClosingEventArgs e)
@@ -7090,49 +6245,7 @@ namespace SBMSGui
 
         private void StopDeviceHost()
         {
-            if (deviceHostProcess == null)
-            {
-                return;
-            }
-
-            SignalDeviceHostStop();
-            try
-            {
-                if (!deviceHostProcess.WaitForExit(4000))
-                {
-                    AppendLog("虚拟显示器 host 正常关闭超时，强制结束");
-                    deviceHostProcess.Kill();
-                }
-            }
-            catch
-            {
-            }
-            deviceHostProcess = null;
-        }
-
-        private static void SignalDeviceHostStop()
-        {
-            IntPtr handle = OpenEvent(EVENT_MODIFY_STATE, false, "Local\\SBMSDeviceHostStop");
-            if (handle == IntPtr.Zero)
-            {
-                return;
-            }
-            SetEvent(handle);
-            CloseHandle(handle);
-        }
-
-        private static void PostCloseToProcess(int processId)
-        {
-            EnumWindows(delegate(IntPtr hwnd, IntPtr lParam)
-            {
-                uint pid;
-                GetWindowThreadProcessId(hwnd, out pid);
-                if (pid == (uint)processId)
-                {
-                    PostMessage(hwnd, WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
-                }
-                return true;
-            }, IntPtr.Zero);
+            deviceHostSupervisor.Stop(AppendLog);
         }
 
         private static bool IsRunningAsAdministrator()
@@ -7140,30 +6253,6 @@ namespace SBMSGui
             var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
             var principal = new System.Security.Principal.WindowsPrincipal(identity);
             return principal.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-        }
-
-        private void OnOutput(object sender, DataReceivedEventArgs e)
-        {
-            if (e.Data == null)
-            {
-                return;
-            }
-            string prefix = sender == deviceHostProcess ? "[host] " :
-                            sender == process ? "[native] " :
-                            "[cmd] ";
-            BeginInvoke((Action)delegate { AppendLog(prefix + e.Data); });
-        }
-
-        private void OnDeviceHostOutput(object sender, DataReceivedEventArgs e)
-        {
-            if (e.Data == null)
-            {
-                return;
-            }
-            lock (deviceHostLog)
-            {
-                deviceHostLog.AppendLine(e.Data);
-            }
         }
 
         private void AppendLog(string text)
@@ -7234,19 +6323,7 @@ namespace SBMSGui
             return false;
         }
 
-        private static int GetProcessExitCode(Process p)
-        {
-            try
-            {
-                return p != null && p.HasExited ? p.ExitCode : -1;
-            }
-            catch
-            {
-                return -1;
-            }
-        }
-
-        private void SetRunning(bool running)
+        private void RefreshBridgeUi()
         {
             startButton.Enabled = true;
             stopButton.Enabled = true;
@@ -7292,6 +6369,28 @@ namespace SBMSGui
             UpdateRuntimeOptionState();
             UpdateConfigLock();
             UpdateStatus();
+        }
+
+        private void CompleteBridgeStart(long generation)
+        {
+            BridgeState previousState = lifecycle.State;
+            lifecycle.MarkRunning(generation);
+            LogLifecycleTransition(previousState, "桥接资源已就绪");
+            UpdateLifecycleUi();
+        }
+
+        private void UpdateLifecycleUi()
+        {
+            RefreshBridgeUi();
+        }
+
+        private void LogLifecycleTransition(BridgeState previousState, string reason)
+        {
+            if (previousState == lifecycle.State)
+            {
+                return;
+            }
+            AppendLog(BridgeLifecycle.FormatTransition(previousState, lifecycle.State, lifecycle.Generation, reason));
         }
 
         private string GetFilterArgument()
