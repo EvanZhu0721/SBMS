@@ -2,18 +2,24 @@
 
 `test-sbms-hardware.ps1` records evidence for the hardware-sensitive GUI acceptance criteria. It does not install or remove a driver, start or stop SBMS, or change display topology. It writes a local evidence directory and, when available, runs `SBMSNative.exe --list` as a read-only probe.
 
-Driver installation is a separate, explicitly authorized operation. The current installation entry point is:
+Boot-policy and display-driver changes are governed by [Safe hardware lab](SAFE-HARDWARE-LAB.md). Its Gate A/B/C sequence, independent recovery requirements, and one-change-per-boot rule are mandatory. The first implementation phase creates and tests the lab scripts only; it does not execute them or change this machine.
+
+Driver installation is a separate, explicitly authorized operation. The current low-level installation primitive is:
 
 ```powershell
 .\build-sbms-driver.ps1
 .\install-sbms-driver.ps1 -Force
 ```
 
-Do not use `tools/install-idd-driver.ps1` for acceptance testing. It is a legacy prototype path with direct certificate, registry, and system-directory mutations.
+Do not run that primitive directly on a primary workstation. It is not a transactional lab orchestrator and currently stops processes, removes existing device/package state, and installs a test package. It may be used only after Safe Hardware Lab Gate C owns the exact payload and rollback plan.
+
+Do not use `tools/install-idd-driver.ps1` or `README-install.md` as an acceptance procedure. They are legacy prototype material; the latter is retained only as a deprecation pointer.
 
 ## Preflight
 
-Run the audit before changing the driver or display session:
+This audit is an observer, not the complete safe-lab preflight. Safe Hardware Lab Gate A must also capture BCD, Code Integrity, BitLocker, pending reboot, startup tasks, every display-class package, and active physical DisplayConfig paths.
+
+Run the observer before changing the driver or display session:
 
 ```powershell
 .\test-sbms-hardware.ps1 -Scenario AuditOnly
