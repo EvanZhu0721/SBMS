@@ -56,6 +56,18 @@ SBMSNative.exe
 SBMSDeviceHost.exe
 ```
 
+## Validation
+
+Run the source-level GUI checks without changing the driver or display topology:
+
+```powershell
+.\test-sbms-gui-core.ps1
+.\test-sbms-gui.ps1
+.\test-sbms-hardware.ps1 -Scenario AuditOnly
+```
+
+Real virtual-display acceptance is documented in [docs/HARDWARE-VALIDATION.md](docs/HARDWARE-VALIDATION.md). Hardware scenarios are recorded separately and never pass when critical native-enumeration or GUI lifecycle evidence is missing.
+
 Install or refresh the test driver:
 
 ```powershell
