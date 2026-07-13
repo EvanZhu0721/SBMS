@@ -123,6 +123,8 @@
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <!-- Issue #9: /ZI is incompatible with the WDK Control Flow Guard flags. -->
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <WppEnabled>true</WppEnabled>
       <WppRecorderEnabled>true</WppRecorderEnabled>
       <WppScanConfigurationData Condition="'%(ClCompile.ScanConfigurationData)' == ''">trace.h</WppScanConfigurationData>
@@ -158,6 +160,8 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
     <ClCompile>
+      <!-- Issue #9: /ZI is incompatible with the WDK Control Flow Guard flags. -->
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <WppEnabled>true</WppEnabled>
       <WppRecorderEnabled>true</WppRecorderEnabled>
       <WppScanConfigurationData Condition="'%(ClCompile.ScanConfigurationData)' == ''">trace.h</WppScanConfigurationData>

@@ -40,6 +40,13 @@ Run from an elevated PowerShell when driver install or the device host is needed
 .\build-sbms-gui.ps1
 ```
 
+The driver build supports `Release|x64` and `Debug|x64`, discovers the installed
+Windows SDK/UMDF versions, and never falls back to a prebuilt driver. If WDK
+Visual Studio integration is missing but the WDK itself is installed, Issue #9
+allows the script to stage the installed Visual C++ v170 targets temporarily
+and overlay only the repository's minimal WDK platform-toolset metadata. The
+temporary targets tree is removed after both successful and failed builds.
+
 Outputs:
 
 ```text
