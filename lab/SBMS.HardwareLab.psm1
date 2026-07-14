@@ -299,6 +299,39 @@ function Get-SBMSBcdTokenGuids {
     return @($values | Select-Object -Unique)
 }
 
+function Get-SBMSBcdEntrySections {
+    param([string]$Text)
+    $lines = @(([string]$Text) -split '\r?\n')
+    $separators = New-Object Collections.Generic.List[int]
+    for ($index = 0; $index -lt $lines.Count; $index++) {
+        if ($lines[$index] -match '^\s*-{3,}\s*$') { $separators.Add($index) }
+    }
+    if ($separators.Count -eq 0) { return @([string]$Text) }
+    $sections = New-Object Collections.Generic.List[string]
+    for ($sectionIndex = 0; $sectionIndex -lt $separators.Count; $sectionIndex++) {
+        $start = $separators[$sectionIndex] + 1
+        $end = if ($sectionIndex + 1 -lt $separators.Count) { $separators[$sectionIndex + 1] - 2 } else { $lines.Count - 1 }
+        if ($end -lt $start) { continue }
+        $sections.Add(($lines[$start..$end] -join "`r`n"))
+    }
+    return @($sections)
+}
+
+function Get-SBMSBcdPrimaryIdentifierGuids {
+    param([string]$Text)
+    $identifiers = New-Object Collections.Generic.List[string]
+    foreach ($section in @(Get-SBMSBcdEntrySections -Text $Text)) {
+        foreach ($line in @(([string]$section) -split '\r?\n')) {
+            $guids = @(Get-SBMSGidsFromText -Text $line)
+            if ($guids.Count -eq 0) { continue }
+            if ($guids.Count -ne 1) { throw 'The first GUID-bearing BCD entry field was ambiguous.' }
+            $identifiers.Add($guids[0])
+            break
+        }
+    }
+    return @($identifiers)
+}
+
 function Get-SBMSBcdState {
     param([Parameter(Mandatory = $true)][hashtable]$Adapter)
     $bootmgr = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', '{bootmgr}', '/v')
@@ -311,14 +344,12 @@ function Get-SBMSBcdState {
             throw "BCD read failed (exit $($item.ExitCode)): $detail"
         }
     }
-    $currentIds = @(Get-SBMSBcdTokenGuids -Text $current.StdOut -Token 'identifier')
-    $defaultIds = @(Get-SBMSBcdTokenGuids -Text $default.StdOut -Token 'identifier')
-    if ($currentIds.Count -ne 1 -or $defaultIds.Count -ne 1) { throw 'Could not uniquely parse the identifier element for current/default BCD entries.' }
-    $managerDefault = @(Get-SBMSBcdTokenGuids -Text $bootmgr.StdOut -Token 'default')
-    if ($managerDefault.Count -ne 1) { throw 'Could not unambiguously parse bootmgr default. Mutation is blocked.' }
+    $currentIds = @(Get-SBMSBcdPrimaryIdentifierGuids -Text $current.StdOut)
+    $defaultIds = @(Get-SBMSBcdPrimaryIdentifierGuids -Text $default.StdOut)
+    if ($currentIds.Count -ne 1 -or $defaultIds.Count -ne 1) { throw 'Could not uniquely parse the primary identifier for current/default BCD entries.' }
     return [ordered]@{
         currentGuid = $currentIds[0]
-        defaultGuid = $managerDefault[0]
+        defaultGuid = $defaultIds[0]
         resolvedDefaultGuid = $defaultIds[0]
         displayOrder = @(Get-SBMSBcdTokenGuids -Text $bootmgr.StdOut -Token 'displayorder')
         bootSequence = @(Get-SBMSBcdTokenGuids -Text $bootmgr.StdOut -Token 'bootsequence')
@@ -405,7 +436,7 @@ function Test-SBMSCloneOwnershipReadback {
     param([hashtable]$Adapter, [string]$CloneGuid, [string]$Description)
     $result = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $CloneGuid, '/v')
     if ($result.ExitCode -ne 0) { return $false }
-    $ids = @(Get-SBMSBcdTokenGuids -Text $result.StdOut -Token 'identifier')
+    $ids = @(Get-SBMSBcdPrimaryIdentifierGuids -Text $result.StdOut)
     $descriptions = @([regex]::Matches([string]$result.StdOut, '(?im)^\s*description\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value.Trim() })
     $hasId = ($ids.Count -eq 1 -and $ids[0] -eq $CloneGuid)
     $hasDescription = ($descriptions.Count -eq 1 -and $descriptions[0] -ceq $Description)
@@ -429,15 +460,13 @@ function Get-SBMSOwnedCloneCandidates {
     )
     $all = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', 'all', '/v')
     if ($all.ExitCode -ne 0) { throw "BCD ownership read-back failed: $($all.StdErr)" }
-    # Entry boundaries are identifier elements, not blank-line formatting. This
-    # remains stable when localized headings or extra recovery elements appear.
-    $blocks = @([regex]::Split([string]$all.StdOut, '(?im)(?=^\s*identifier\s+)'))
+    $blocks = @(Get-SBMSBcdEntrySections -Text $all.StdOut)
     $candidates = New-Object Collections.Generic.List[string]
     foreach ($block in $blocks) {
         $descriptionMatches = @([regex]::Matches($block, '(?im)^\s*description\s+(.+?)\s*$'))
         if ($descriptionMatches.Count -ne 1) { continue }
         if ($descriptionMatches[0].Groups[1].Value.Trim() -cne $Description) { continue }
-        $identifiers = @(Get-SBMSBcdTokenGuids -Text $block -Token 'identifier')
+        $identifiers = @(Get-SBMSBcdPrimaryIdentifierGuids -Text $block)
         if ($identifiers.Count -ne 1) { continue }
         if ($ExcludedGuids -notcontains $identifiers[0]) { $candidates.Add($identifiers[0]) }
     }

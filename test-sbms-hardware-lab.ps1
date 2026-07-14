@@ -64,7 +64,7 @@ function Get-FixtureText {
 }
 
 function New-FakeState {
-    param([string]$CopyFixture = 'copy-output.zh-CN.txt')
+    param([string]$CopyFixture = 'copy-output.zh-CN.txt', [string]$IdentifierLabel = 'identifier')
     return [ordered]@{
         CurrentGuid = $script:CurrentGuid
         DefaultGuid = $script:DefaultGuid
@@ -80,6 +80,7 @@ function New-FakeState {
         RestartSuccesses = 0
         RestartFailuresRemaining = 0
         CopyFixture = $CopyFixture
+        IdentifierLabel = $IdentifierLabel
         CopyCreatesClone = $true
         CopyCloneCount = 1
         WatchdogInstallFails = $false
@@ -117,7 +118,7 @@ function Add-FakeCall {
 
 function Get-FakeBootManagerText {
     param($State)
-    $text = "Windows Boot Manager`r`n--------------------`r`nidentifier              {bootmgr}`r`ndefault                 $($State.DefaultGuid)`r`n"
+    $text = "Windows Boot Manager`r`n--------------------`r`n$($State.IdentifierLabel)              {bootmgr}`r`ndefault                 $($State.DefaultGuid)`r`n"
     $text += "displayorder            " + (@($State.DisplayOrder) -join "`r`n                        ") + "`r`n"
     if (@($State.BootSequence).Count -gt 0) {
         $text += "bootsequence            " + (@($State.BootSequence) -join "`r`n                        ") + "`r`n"
@@ -127,7 +128,7 @@ function Get-FakeBootManagerText {
 
 function Get-FakeLoaderText {
     param($State, [string]$Guid, [string]$Description, [bool]$TestSigning, [string]$TestSigningText)
-    $text = "Windows Boot Loader`r`nidentifier              $Guid`r`n"
+    $text = "Windows Boot Loader`r`n--------------------`r`n$($State.IdentifierLabel)              $Guid`r`n"
     if ($State.LoaderTranscriptHasExtraGuids) {
         $text += "recoverysequence        $script:ExtraGuid`r`nresumeobject            {55555555-5555-5555-5555-555555555555}`r`n"
     }
@@ -353,9 +354,13 @@ function New-FakeAdapter {
 }
 
 function New-TestContext {
-    param([string]$CopyFixture = 'copy-output.zh-CN.txt', [ValidateSet('RecoveryDrill', 'TestSigning')][string]$Profile = 'RecoveryDrill')
+    param(
+        [string]$CopyFixture = 'copy-output.zh-CN.txt',
+        [ValidateSet('RecoveryDrill', 'TestSigning')][string]$Profile = 'RecoveryDrill',
+        [string]$IdentifierLabel = 'identifier'
+    )
     $runId = [guid]::NewGuid().ToString()
-    $state = New-FakeState -CopyFixture $CopyFixture
+    $state = New-FakeState -CopyFixture $CopyFixture -IdentifierLabel $IdentifierLabel
     return [pscustomobject][ordered]@{
         RunId = $runId
         RunRoot = (Join-Path $script:TestRoot ([guid]::NewGuid().ToString('N')))
@@ -534,6 +539,36 @@ try {
         Assert-Equal $script:CloneGuid $result.cloneGuid 'Localized copy output parsed the wrong GUID.'
         Assert-Equal 1 $ctx.State.Clones.Count 'Prepare did not create exactly one clone.'
         Assert-Equal 1 $ctx.State.Tasks.Count 'Prepare did not install exactly one verified watchdog.'
+        Assert-ProductionLoadersUntouched -State $ctx.State
+    }
+
+    Invoke-TestCase 'Audit parses zh-CN identifier labels for bootmgr current and default' {
+        $identifierLabel = Get-FixtureText -Name 'identifier-label.zh-CN.txt'
+        $ctx = New-TestContext -IdentifierLabel $identifierLabel
+        $result = Invoke-SBMSHardwareLab -Phase Audit -Profile RecoveryDrill -RunId $ctx.RunId -RunRoot $ctx.RunRoot -Adapter $ctx.Adapter
+        Assert-Equal $script:CurrentGuid $result.current.currentGuid 'Audit did not parse the zh-CN current identifier.'
+        Assert-Equal $script:DefaultGuid $result.current.defaultGuid 'Audit did not parse the zh-CN bootmgr default.'
+        Assert-Equal $script:DefaultGuid $result.current.resolvedDefaultGuid 'Audit did not parse the zh-CN default-entry identifier.'
+        Assert-Equal 0 $ctx.State.MutationCalls 'zh-CN Audit performed a mutation.'
+    }
+
+    Invoke-TestCase 'Prepare parses zh-CN identifier labels across all BCD read-backs' {
+        $identifierLabel = Get-FixtureText -Name 'identifier-label.zh-CN.txt'
+        $ctx = New-TestContext -IdentifierLabel $identifierLabel
+        $result = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        Assert-Equal 'Prepared' $result.state 'Prepare failed with zh-CN identifier labels.'
+        Assert-Equal $script:CloneGuid $result.cloneGuid 'Prepare parsed the wrong clone under zh-CN identifier labels.'
+        Assert-Equal 1 $ctx.State.Clones.Count 'Prepare did not preserve exactly one zh-CN-enumerated clone.'
+        Assert-ProductionLoadersUntouched -State $ctx.State
+    }
+
+    Invoke-TestCase 'Ownership reconcile parses zh-CN identifier labels in enum all' {
+        $identifierLabel = Get-FixtureText -Name 'identifier-label.zh-CN.txt'
+        $ctx = New-TestContext -CopyFixture 'copy-output.zero.txt' -IdentifierLabel $identifierLabel
+        $result = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        Assert-Equal 'Prepared' $result.state 'Ownership reconcile failed with zh-CN identifier labels.'
+        Assert-Equal $script:CloneGuid $result.cloneGuid 'Ownership reconcile selected the wrong zh-CN-enumerated clone.'
+        Assert-Equal 1 $ctx.State.Clones.Count 'Ownership reconcile did not retain exactly one clone.'
         Assert-ProductionLoadersUntouched -State $ctx.State
     }
 
