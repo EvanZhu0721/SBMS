@@ -145,3 +145,17 @@ These cases require the independent physical output, SSH from a second computer 
 The completed lab must write hashed, Run-ID-bound artifacts: baseline, plan, payload manifest, BCD state, startup state, PnP and Driver Store inventory, DisplayConfig paths, watchdog journal, SSH proof, post-boot checks, rollback plan, rollback verification, and final summary. Phase 1 currently writes only its boot-lab manifest, snapshots, and application-level journal; these are ACL-protected review artifacts, not cryptographically immutable records.
 
 `PASS` means the current gate's required evidence agrees with its plan. `FAIL` means a requirement was contradicted. `INCONCLUSIVE` means required evidence is missing. Only `PASS` unlocks the next gate.
+
+## 2026-07-14 RecoveryDrill evidence
+
+The first real `RecoveryDrill` completed on the development host under Run ID `2c129d7d-677e-401c-b495-0367ab060dda`:
+
+- BitLocker was fully decrypted with protection off, and a live second-computer SSH session was established before Arm.
+- Prepare created one exact-description clone and one Run-ID-bound SYSTEM boot task. Arm set `bootsequence` to that clone only; Test Signing and display-driver state were not changed.
+- The first reboot entered the clone. At the three-minute deadline the emergency inline watchdog requested one return reboot and disabled its task. The final boot used the unchanged default loader.
+- Post-boot evidence contained both restart-intent and restart-requested markers. The RX 7900 XTX physical output was healthy at `5120x2880 @ 165 Hz`.
+- Final Rollback removed the exact watchdog and clone. Read-back proved `current == default == {55c7dfa7-c7ae-11ef-92f3-e5427153df1d}`, the original single-entry `displayorder`, an empty `bootsequence`, no task, and a `Cleaned` manifest with no error.
+
+This rehearsal exposed and fixed Windows PowerShell 5.1 collection binding, localized BCD parsing, `bcdedit /copy` display-order behavior, localized missing-entry exit semantics, Task Scheduler SYSTEM XML normalization, and omitted schema-default `Enabled` nodes. The reboot used the emergency inline fallback because SYSTEM's effective Windows PowerShell policy blocked the frozen `.ps1`; commit `d00bc34` now adds process-scoped `ExecutionPolicy Bypass` only after the outer encoded action proves both ACL-locked frozen files match their pinned SHA-256 values. That rich-path fix has 54/54 tests in both Windows PowerShell 5.1 and PowerShell 7, but still requires a separate real reboot qualification before it can replace the fallback evidence above.
+
+This result qualifies the one-time BCD return-reboot mechanism only. Gate B Test Signing and Gate C driver mutation remain hard-blocked.
