@@ -770,10 +770,15 @@ try {
         Assert-Equal ([string]$manifest.watchdogPlan.moduleSha256) (Get-FileHash -LiteralPath $frozenModule -Algorithm SHA256).Hash 'Frozen module hash read-back mismatched.'
         Assert-True ($ctx.State.SecuredRunDirectories.Count -ge 1) 'Run directory was never secured.'
         $task = @($ctx.State.Tasks.Values)[0]
+        Assert-True ([string]$task.arguments).StartsWith('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ', [StringComparison]::Ordinal) 'Scheduled task does not explicitly allow the hash-pinned frozen watchdog under SYSTEM execution policy.'
         $encoded = ([string]$task.arguments -split ' ')[-1]
         $decodedAction = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
         Assert-True ($decodedAction.Contains($frozenScript)) 'Scheduled task encoded action is not bound to the frozen script.'
         Assert-True (-not $decodedAction.Contains((Join-Path $root 'lab\Invoke-SBMSLabWatchdog.ps1'))) 'Scheduled task encoded action remained bound to the mutable source script.'
+        Assert-True ($decodedAction.Contains([string]$manifest.watchdogPlan.scriptSha256)) 'Scheduled task action is not pinned to the frozen script hash.'
+        Assert-True ($decodedAction.Contains([string]$manifest.watchdogPlan.moduleSha256)) 'Scheduled task action is not pinned to the frozen module hash.'
+        Assert-True ($decodedAction.Contains('(Get-FileHash -LiteralPath $rich -Algorithm SHA256).Hash -cne $richSha')) 'Scheduled task action does not verify the frozen script hash before invocation.'
+        Assert-True ($decodedAction.Contains('(Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash -cne $moduleSha')) 'Scheduled task action does not verify the frozen module hash before invocation.'
         Assert-True ($decodedAction.Contains('/r /f /t 5 /d p:0:0')) 'Inline watchdog fallback does not use the fixed five-second restart timeout.'
         Assert-True ($decodedAction.Contains('$LASTEXITCODE -eq 0')) 'Inline watchdog fallback can persist the terminal marker without a successful restart request.'
     }

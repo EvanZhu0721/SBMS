@@ -465,7 +465,9 @@ function Get-SBMSWatchdogExpectedArguments {
     $values = @(
         [string]$Specification.scriptPath, [string]$Specification.runDirectory,
         [string]$Specification.runId, [string]$Specification.taskName,
-        [string]$Specification.profile, [string]$Specification.acknowledgement
+        [string]$Specification.profile, [string]$Specification.acknowledgement,
+        [string]$Specification.modulePath, [string]$Specification.scriptSha256,
+        [string]$Specification.moduleSha256
     )
     if (@($values | Where-Object { $_ -match "['`0`r`n]" }).Count -gt 0) {
         throw 'Watchdog arguments must not contain whitespace, quotes, CR, or LF.'
@@ -478,6 +480,9 @@ function Get-SBMSWatchdogExpectedArguments {
         ('$profile=''{0}''' -f [string]$Specification.profile)
         ('$ack=''{0}''' -f [string]$Specification.acknowledgement)
         ('$rich=''{0}''' -f [string]$Specification.scriptPath)
+        ('$module=''{0}''' -f [string]$Specification.modulePath)
+        ('$richSha=''{0}''' -f [string]$Specification.scriptSha256)
+        ('$moduleSha=''{0}''' -f [string]$Specification.moduleSha256)
         'function Invoke-Fallback {'
         ' if(-not(Test-Path -LiteralPath $rd -PathType Container)){New-Item -ItemType Directory -Path $rd -Force|Out-Null}'
         ' $utf=New-Object Text.UTF8Encoding($false)'
@@ -489,10 +494,15 @@ function Get-SBMSWatchdogExpectedArguments {
         ' if($LASTEXITCODE -eq 0 -and -not(Test-Path -LiteralPath $terminalPath)){try{$s=New-Object IO.FileStream($terminalPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read);try{$b=$utf.GetBytes(([DateTime]::UtcNow.ToString(''o''))+" requested`n");$s.Write($b,0,$b.Length);$s.Flush($true)}finally{$s.Dispose()}}catch [IO.IOException]{}}'
         ' if(Test-Path -LiteralPath $terminalPath -PathType Leaf){& (Join-Path $env:SystemRoot ''System32\schtasks.exe'') /Change /TN $task /Disable *> $null}'
         '}'
-        'try{& $rich -RunDirectory $rd -RunId $runId -TaskName $task -Profile $profile -Execute -Acknowledgement $ack}catch{Invoke-Fallback}'
+        'try{if(-not (Test-Path -LiteralPath $rich -PathType Leaf) -or -not (Test-Path -LiteralPath $module -PathType Leaf)){Invoke-Fallback;return};if((Get-FileHash -LiteralPath $rich -Algorithm SHA256).Hash -cne $richSha -or (Get-FileHash -LiteralPath $module -Algorithm SHA256).Hash -cne $moduleSha){Invoke-Fallback;return};& $rich -RunDirectory $rd -RunId $runId -TaskName $task -Profile $profile -Execute -Acknowledgement $ack}catch{Invoke-Fallback}'
     )
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes(($scriptLines -join "`r`n")))
-    return "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded"
+    # The task runs as SYSTEM, whose effective Windows PowerShell policy can be
+    # Restricted even when the interactive operator has CurrentUser=RemoteSigned.
+    # This process is allowed to invoke only the ACL-locked, hash-pinned frozen
+    # watchdog selected above; make that trust decision explicit at the process
+    # boundary instead of silently falling into the emergency inline restart.
+    return "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
 }
 
 function Test-SBMSCloneOwnershipProbe {
