@@ -14,5 +14,8 @@
     { "role": "driver-dll", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/IddSampleDriver/IddSampleDriver.dll" }
   ],
   "blockingNamePattern": "(?i)SBMS|IddSample|Indirect Display|Virtual Display|DisplayBridge|Parsec|spacedesk|Duet Display|Miracast|Wireless Display|Remote Display",
-  "allowedDisplayProviderPattern": "(?i)^(Advanced Micro Devices.*|AMD|Intel.*|NVIDIA.*|Microsoft)$"
+  "allowedDisplayProviderPattern": "(?i)^(Advanced Micro Devices.*|AMD|Intel.*|NVIDIA.*|Microsoft)$",
+  "allowedStartupIdentityPatterns": [
+    "^\\\\SBMS Osaka Reverse SSH Tunnel$"
+  ]
 }

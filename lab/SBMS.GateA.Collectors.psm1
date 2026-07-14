@@ -44,9 +44,9 @@ function Invoke-SBMSGitText {
 }
 
 function Get-SBMSClassification {
-    param([string]$Identity, $Policy, [switch]$DisplayProvider)
+    param([string]$Identity, [string]$Provider, $Policy, [switch]$DisplayProvider)
     if ($Identity -match [string]$Policy.blockingNamePattern) { return 'blocking' }
-    if ($DisplayProvider -and $Identity -match [string]$Policy.allowedDisplayProviderPattern) { return 'allowed' }
+    if ($DisplayProvider -and $Provider -match [string]$Policy.allowedDisplayProviderPattern) { return 'allowed' }
     'unknown'
 }
 
@@ -170,7 +170,7 @@ function Get-SBMSGateARealEvidence {
             [pscustomobject][ordered]@{
                 publishedName=[string]$_.Driver; originalFileName=[string]$_.OriginalFileName; provider=[string]$_.ProviderName
                 version=[string]$_.Version; date=[string]$_.Date; className=[string]$_.ClassName
-                classification=(Get-SBMSClassification $identity $policy -DisplayProvider)
+                classification=(Get-SBMSClassification -Identity $identity -Provider ([string]$_.ProviderName) -Policy $policy -DisplayProvider)
             }
         } | Sort-Object publishedName)
         $pnputil = Join-Path $env:SystemRoot 'System32\pnputil.exe'
@@ -212,16 +212,18 @@ function Get-SBMSGateARealEvidence {
                 $arguments = if ($null -ne $_.PSObject.Properties['Arguments']) { [string]$_.Arguments } else { '' }
                 @($execute,$arguments) -join ' '
             }) -join '; '
-            $identity = @([string]$task.TaskPath,[string]$task.TaskName,$actionText) -join ' '
-            $classification = if ($identity -match [string]$policy.blockingNamePattern) { 'blocking' } elseif ([string]$task.TaskPath -like '\Microsoft\*') { 'allowed' } else { 'unknown' }
-            $entries.Add([pscustomobject][ordered]@{ kind='ScheduledTask'; identity=([string]$task.TaskPath+[string]$task.TaskName); actions=$actionText; classification=$classification })
+            $taskIdentity = [string]$task.TaskPath + [string]$task.TaskName
+            $identity = @($taskIdentity,$actionText) -join ' '
+            $explicitlyAllowed = @($policy.allowedStartupIdentityPatterns | Where-Object { $taskIdentity -match [string]$_ }).Count -gt 0
+            $classification = if ($explicitlyAllowed) { 'allowed' } elseif ($identity -match [string]$policy.blockingNamePattern) { 'blocking' } elseif ([string]::IsNullOrWhiteSpace($actionText)) { 'unknown' } else { 'allowed' }
+            $entries.Add([pscustomobject][ordered]@{ kind='ScheduledTask'; identity=$taskIdentity; actions=$actionText; classification=$classification })
         }
         foreach ($key in @('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce','Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce')) {
             if (-not (Test-Path -LiteralPath $key)) { continue }
             $item = Get-ItemProperty -LiteralPath $key -ErrorAction Stop
             foreach ($property in @($item.PSObject.Properties | Where-Object { $_.Name -notmatch '^PS' })) {
                 $identity = @($property.Name,[string]$property.Value) -join ' '
-                $classification = if ($identity -match [string]$policy.blockingNamePattern) { 'blocking' } else { 'unknown' }
+                $classification = if ($identity -match [string]$policy.blockingNamePattern) { 'blocking' } elseif ([string]::IsNullOrWhiteSpace([string]$property.Value)) { 'unknown' } else { 'allowed' }
                 $entries.Add([pscustomobject][ordered]@{ kind='RunKey'; identity=$key+'::'+$property.Name; actions=[string]$property.Value; classification=$classification })
             }
         }
