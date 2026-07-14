@@ -38,6 +38,67 @@ function Get-SBMSGateAObjectHash {
     try { ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '') } finally { $sha.Dispose() }
 }
 
+function Get-SBMSGateAStringHash {
+    param([Parameter(Mandatory)][string]$Value)
+    $bytes = $script:Utf8NoBom.GetBytes($Value)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '') } finally { $sha.Dispose() }
+}
+
+function New-SBMSGateAChallenge {
+    param([Parameter(Mandatory)][string]$GateDirectory, [Parameter(Mandatory)][string]$RunId, [Parameter(Mandatory)][string]$StableDigest)
+    $bytes = New-Object byte[] 32
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    $nonce = [Convert]::ToBase64String($bytes)
+    $state = [pscustomobject][ordered]@{
+        schemaVersion = 1; runId = $RunId; stableDigest = $StableDigest
+        challengeSha256 = Get-SBMSGateAStringHash $nonce
+        issuedUtc = Get-SBMSGateAUtc; expiresUtc = [DateTime]::UtcNow.AddMinutes(30).ToString('o')
+        expiresUnixSeconds = [DateTimeOffset]::UtcNow.AddMinutes(30).ToUnixTimeSeconds(); consumedUtc = $null
+    }
+    Write-SBMSGateAAtomic (Join-Path $GateDirectory 'remote-challenge.json') ($state | ConvertTo-Json -Depth 10)
+    $nonce
+}
+
+function Confirm-SBMSGateARemoteHealth {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][guid]$RunId,
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)][string]$Challenge,
+        [Parameter(Mandatory)][scriptblock]$CaptureSession,
+        [switch]$BitLockerRecoveryAccessVerified
+    )
+    $gateDirectory = Join-Path ([IO.Path]::GetFullPath($RunDirectory)) 'gate-a'
+    $challengePath = Join-Path $gateDirectory 'remote-challenge.json'
+    $proofPath = Join-Path $gateDirectory 'ssh-health-proof.json'
+    if (-not (Test-Path -LiteralPath $challengePath -PathType Leaf)) { throw 'Gate A challenge does not exist.' }
+    $state = Get-Content -LiteralPath $challengePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$state.runId -cne $RunId.ToString()) { throw 'Challenge Run ID mismatch.' }
+    if ($null -ne $state.consumedUtc) { throw 'Gate A challenge was already consumed.' }
+    if ([long]$state.expiresUnixSeconds -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { throw 'Gate A challenge expired.' }
+    if ((Get-SBMSGateAStringHash $Challenge) -cne [string]$state.challengeSha256) { throw 'Gate A challenge mismatch.' }
+    if (Test-Path -LiteralPath $proofPath) { throw 'SSH health proof already exists for this run.' }
+    $session = & $CaptureSession
+    foreach ($property in @('sshdAncestor','nonLoopbackClient','adminCapable','evidenceReadable','activePhysicalDisplay','computerName','lastBootUtc','clientAddress')) {
+        if ($null -eq $session.PSObject.Properties[$property]) { throw "SSH session evidence lacks '$property'." }
+    }
+    if (-not [bool]$session.sshdAncestor -or -not [bool]$session.nonLoopbackClient -or -not [bool]$session.adminCapable -or
+        -not [bool]$session.evidenceReadable -or -not [bool]$session.activePhysicalDisplay) { throw 'SSH recovery session did not satisfy every health condition.' }
+    $proof = [pscustomobject][ordered]@{
+        schemaVersion = 1; runId = $RunId.ToString(); stableDigest = [string]$state.stableDigest
+        challengeSha256 = [string]$state.challengeSha256; verifiedUtc = Get-SBMSGateAUtc
+        computerName = [string]$session.computerName; lastBootUtc = [string]$session.lastBootUtc; clientAddress = [string]$session.clientAddress
+        sshdAncestor = $true; nonLoopbackClient = $true; adminCapable = $true; evidenceReadable = $true
+        activePhysicalDisplay = $true; bitLockerRecoveryAccessVerified = [bool]$BitLockerRecoveryAccessVerified
+    }
+    Write-SBMSGateAAtomic $proofPath ($proof | ConvertTo-Json -Depth 12)
+    $state.consumedUtc = Get-SBMSGateAUtc
+    Write-SBMSGateAAtomic $challengePath ($state | ConvertTo-Json -Depth 10)
+    $proof
+}
+
 function Add-SBMSGateACheck {
     param([Collections.Generic.List[object]]$Checks, [string]$Id, [string]$Status, [string]$Reason)
     $Checks.Add([pscustomobject][ordered]@{ id = $Id; status = $Status; reason = $Reason })
@@ -127,8 +188,7 @@ function Invoke-SBMSGateA {
     param(
         [Parameter(Mandatory)][guid]$RunId,
         [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)][scriptblock]$CaptureEvidence,
-        [string]$RemoteProofPath
+        [Parameter(Mandatory)][scriptblock]$CaptureEvidence
     )
     $root = [IO.Path]::GetFullPath($RunDirectory)
     $gateDirectory = Join-Path $root 'gate-a'
@@ -141,7 +201,9 @@ function Invoke-SBMSGateA {
     if (-not (Test-Path -LiteralPath $stablePath)) {
         Write-SBMSGateAAtomic $stablePath $stableJson
         $baselineDigest = $currentDigest
+        $challenge = New-SBMSGateAChallenge -GateDirectory $gateDirectory -RunId $RunId.ToString() -StableDigest $baselineDigest
     } else {
+        $challenge = $null
         $baselineDigest = Get-SBMSGateAHash $stablePath
         $currentBytesHash = Get-SBMSGateAObjectHash $evidence
         if ($baselineDigest -cne $currentBytesHash) {
@@ -151,15 +213,16 @@ function Invoke-SBMSGateA {
         }
     }
     $proof = $null
-    if ($RemoteProofPath -and (Test-Path -LiteralPath $RemoteProofPath -PathType Leaf)) { $proof = Get-Content -LiteralPath $RemoteProofPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    $remoteProofPath = Join-Path $gateDirectory 'ssh-health-proof.json'
+    if (Test-Path -LiteralPath $remoteProofPath -PathType Leaf) { $proof = Get-Content -LiteralPath $remoteProofPath -Raw -Encoding UTF8 | ConvertFrom-Json }
     $result = Test-SBMSGateAEvidence -Evidence $evidence -RunId $RunId.ToString() -StableDigest $baselineDigest -RemoteProof $proof
     $manifest = [pscustomobject][ordered]@{
         schemaVersion = 3; contractVersion = 'gate-a/1'; runId = $RunId.ToString(); status = $result.status
         evaluatedUtc = $result.evaluatedUtc; stableStatePath = $stablePath; stableDigest = $baselineDigest
-        remoteProofPath = $RemoteProofPath; checks = $result.checks
+        remoteProofPath = $remoteProofPath; challenge = $challenge; checks = $result.checks
     }
     Write-SBMSGateAAtomic $manifestPath ($manifest | ConvertTo-Json -Depth 30)
     $manifest
 }
 
-Export-ModuleMember -Function Invoke-SBMSGateA, Test-SBMSGateAEvidence
+Export-ModuleMember -Function Invoke-SBMSGateA, Test-SBMSGateAEvidence, Confirm-SBMSGateARemoteHealth

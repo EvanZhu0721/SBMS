@@ -2,7 +2,7 @@
 
 This document defines the safety boundary for SBMS driver and hardware validation. It is a design and operating contract, not an instruction to change the current machine.
 
-Phase 1 delivers a boot-lab foundation, simulated tests, a fail-closed Gate A evidence evaluator, and a reviewable safety contract. The evaluator writes a schema-v3 stable baseline, rejects incomplete collectors, rejects drift, and requires a Run-bound SSH proof. The real collectors and controlled SSH proof writer are still pending, so it does **not** authorize Test Signing or driver mutation. Do not enable Test Signing, install or remove a display driver, change a boot entry, register a SYSTEM task, or reboot while reviewing Phase 1.
+Phase 1 delivers a boot-lab foundation, simulated tests, a fail-closed Gate A evidence evaluator, a controlled SSH proof writer, and a reviewable safety contract. The evaluator writes a schema-v3 stable baseline, rejects incomplete collectors, rejects drift, and requires a Run-bound SSH proof. The full real-machine collector set is still pending, so it does **not** authorize Test Signing or driver mutation. Do not enable Test Signing, install or remove a display driver, change a boot entry, register a SYSTEM task, or reboot while reviewing Phase 1.
 
 ## Why this exists
 
@@ -100,7 +100,7 @@ Gate A is read-only and must pass before any watchdog or system mutation:
 
 Unknown or stale display state is a failure, not a warning.
 
-`lab/SBMS.GateA.psm1` implements the versioned evidence envelope, baseline seal, drift check, and fail-closed policy evaluator. `lab/Invoke-SBMSGateA.ps1` currently accepts only an explicitly supplied structured-evidence fixture. This split permits cross-version tests without pretending that fixture data is real-machine proof. Until native collectors and `Confirm-SBMSLabRemoteHealth.ps1` are implemented and verified, the real adapter continues to hard-block TestSigning `Prepare` and `Arm` before filesystem or adapter mutation.
+`lab/SBMS.GateA.psm1` implements the versioned evidence envelope, baseline seal, drift check, fail-closed policy evaluator, one-time challenge, and replay-resistant proof write. `lab/Confirm-SBMSLabRemoteHealth.ps1` accepts the proof only from an administrator process descended from `sshd.exe`, with a non-loopback client, readable Run evidence, and a live physical path reported by Windows DisplayConfig. `lab/Invoke-SBMSGateA.ps1` still accepts only an explicitly supplied structured-evidence fixture. This split permits cross-version tests without pretending that fixture data is real-machine proof. Until the full native collector set is implemented and verified, the real adapter continues to hard-block TestSigning `Prepare` and `Arm` before filesystem or adapter mutation.
 
 ## Gate B — boot-policy change
 
