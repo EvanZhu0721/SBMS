@@ -26,10 +26,12 @@ $invokeParameters = @{
     RunRoot = $RunRoot
     Execute = $Execute
     Acknowledgement = $Acknowledgement
-    WatchdogTimeoutMinutes = $WatchdogTimeoutMinutes
     Confirm = $false
 }
 
+if ($PSBoundParameters.ContainsKey('WatchdogTimeoutMinutes')) {
+    $invokeParameters.WatchdogTimeoutMinutes = $WatchdogTimeoutMinutes
+}
 if ($WhatIfPreference) { $invokeParameters.WhatIf = $true }
 
 Invoke-SBMSHardwareLab @invokeParameters

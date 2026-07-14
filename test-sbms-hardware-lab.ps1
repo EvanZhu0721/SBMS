@@ -613,6 +613,36 @@ try {
         Assert-Equal $before $ctx.State.MutationCalls 'Profile drift reached mutation.'
     }
 
+    Invoke-TestCase 'Manifest watchdog timeout is immutable when explicitly rebound' {
+        $ctx = New-TestContext -Profile 'RecoveryDrill'
+        $audit = Invoke-SBMSHardwareLab -Phase Audit -Profile RecoveryDrill -RunId $ctx.RunId -RunRoot $ctx.RunRoot -Adapter $ctx.Adapter
+        Assert-Equal 'SnapshotComplete' $audit.state 'Default-timeout Audit did not create a snapshot.'
+        $before = $ctx.State.MutationCalls
+        $null = Assert-Throws -Action {
+            Invoke-SBMSHardwareLab -Phase Prepare -Profile RecoveryDrill -RunId $ctx.RunId -RunRoot $ctx.RunRoot -Adapter $ctx.Adapter -Execute -Acknowledgement "SBMS-HARDWARE-LAB/$($ctx.RunId)/RecoveryDrill/Prepare" -WatchdogTimeoutMinutes 3 -Confirm:$false
+        } -Pattern 'watchdog timeout mismatch' -Message 'Explicit watchdog timeout drift was accepted.'
+        Assert-Equal $before $ctx.State.MutationCalls 'Timeout drift reached mutation.'
+        Assert-Equal 0 $ctx.State.Clones.Count 'Timeout drift created a clone.'
+        Assert-Equal 0 $ctx.State.Tasks.Count 'Timeout drift installed a watchdog.'
+        $rejectedManifest = Get-TestManifest -Context $ctx
+        Assert-Equal 'SnapshotComplete' $rejectedManifest.state 'Timeout drift changed manifest state.'
+        Assert-Equal 8 $rejectedManifest.watchdogPlan.timeoutMinutes 'Timeout drift rewrote the manifest plan.'
+        Assert-True ([string]::IsNullOrEmpty([string]$rejectedManifest.lastError)) 'Pre-authorization timeout drift polluted lastError.'
+
+        $ctx = New-TestContext -Profile 'RecoveryDrill'
+        $audit = Invoke-SBMSHardwareLab -Phase Audit -Profile RecoveryDrill -RunId $ctx.RunId -RunRoot $ctx.RunRoot -Adapter $ctx.Adapter -WatchdogTimeoutMinutes 3
+        Assert-Equal 'SnapshotComplete' $audit.state 'Explicit-timeout Audit did not create a snapshot.'
+        $prepared = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        Assert-Equal 'Prepared' $prepared.state 'Omitted later timeout did not preserve the manifest plan.'
+        $manifest = Get-TestManifest -Context $ctx
+        Assert-Equal 3 $manifest.watchdogPlan.timeoutMinutes 'Manifest timeout changed after Prepare.'
+        $task = $ctx.State.Tasks[[string]$manifest.watchdogPlan.taskName]
+        Assert-Equal 'PT3M' $task.bootDelay 'Prepared watchdog did not use the immutable manifest timeout.'
+
+        $rollback = Invoke-SBMSHardwareLab -Phase Rollback -Profile RecoveryDrill -RunId $ctx.RunId -RunRoot $ctx.RunRoot -Adapter $ctx.Adapter -Execute -Acknowledgement "SBMS-HARDWARE-LAB/$($ctx.RunId)/RecoveryDrill/Rollback" -WatchdogTimeoutMinutes 8 -Confirm:$false
+        Assert-Equal 'Cleaned' $rollback.state 'Timeout drift blocked ownership-safe Rollback.'
+    }
+
     Invoke-TestCase 'Localized copy output yields exactly one clone GUID' {
         $ctx = New-TestContext -CopyFixture 'copy-output.zh-CN.txt'
         $result = Invoke-LabPhase -Context $ctx -Phase 'Prepare'

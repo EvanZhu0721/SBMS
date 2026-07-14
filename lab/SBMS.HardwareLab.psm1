@@ -1088,6 +1088,10 @@ function Invoke-SBMSHardwareLab {
             $manifest = Read-SBMSManifest -RunDirectory $runDirectory
             if ([string]$manifest.runId -ne $parsedRunId) { throw 'Manifest runId mismatch.' }
             if ([int]$manifest.schemaVersion -ne 2 -or [string]$manifest.profile -cne $Profile) { throw 'Manifest schema/profile mismatch; profile is immutable for a run.' }
+            if ($Phase -ne 'Rollback' -and $PSBoundParameters.ContainsKey('WatchdogTimeoutMinutes') -and
+                [int]$manifest.watchdogPlan.timeoutMinutes -ne $WatchdogTimeoutMinutes) {
+                throw 'Manifest watchdog timeout mismatch; timeout is immutable for a run.'
+            }
         } else {
             $snapshot = Get-SBMSHardwareLabSnapshot -Adapter $Adapter -RunDirectory $runDirectory
             $manifest = New-SBMSRunManifest -RunId $parsedRunId -RunDirectory $runDirectory -Baseline $snapshot.bcd -WatchdogTimeoutMinutes $WatchdogTimeoutMinutes -Profile $Profile
