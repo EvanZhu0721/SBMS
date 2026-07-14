@@ -845,7 +845,14 @@ function Invoke-SBMSArm {
 
 function Invoke-SBMSRollback {
     param($Manifest, [string]$RunDirectory, [hashtable]$Adapter)
-    if ($Manifest.state -eq 'Cleaned') { return $Manifest }
+    if ($Manifest.state -eq 'Cleaned') {
+        if (-not [string]::IsNullOrWhiteSpace([string]$Manifest.lastError)) {
+            $Manifest.lastError = $null
+            Save-SBMSManifest $Manifest $RunDirectory
+            Set-SBMSRunDirectorySecurity -RunDirectory $RunDirectory -Adapter $Adapter
+        }
+        return $Manifest
+    }
     $cloneGuid = [string]$Manifest.clone.guid
     if ([string]::IsNullOrWhiteSpace($cloneGuid)) {
         $ownedCandidates = @(Resolve-SBMSOwnedCloneGuid -Manifest $Manifest -Adapter $Adapter)
@@ -902,6 +909,7 @@ function Invoke-SBMSRollback {
     $after = Get-SBMSBcdState -Adapter $Adapter
     Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $after
     if ($after.bootSequence -contains $cloneGuid) { throw 'Cleanup invariant failed: clone remains in bootsequence.' }
+    $Manifest.lastError = $null
     $Manifest.state = 'Cleaned'; Save-SBMSManifest $Manifest $RunDirectory
     Add-SBMSJournalEntry $RunDirectory 'Cleaned' @{ cloneGuid = $cloneGuid }
     Set-SBMSRunDirectorySecurity -RunDirectory $RunDirectory -Adapter $Adapter
