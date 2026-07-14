@@ -129,6 +129,21 @@ function Test-SBMSAdministrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function New-SBMSWatchdogTaskXml {
+    param([string]$Command, [string]$Arguments, [string]$Delay)
+    $escape = { param([string]$Value) [Security.SecurityElement]::Escape($Value) }
+    return @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>SBMS one-shot hardware lab recovery watchdog</Description></RegistrationInfo>
+  <Triggers><BootTrigger><Enabled>true</Enabled><Delay>$Delay</Delay></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT5M</ExecutionTimeLimit><Priority>4</Priority></Settings>
+  <Actions Context="Author"><Exec><Command>$(& $escape $Command)</Command><Arguments>$(& $escape $Arguments)</Arguments></Exec></Actions>
+</Task>
+"@
+}
+
 function New-SBMSHardwareLabAdapter {
     [CmdletBinding()]
     param()
@@ -143,18 +158,8 @@ function New-SBMSHardwareLabAdapter {
             param($Specification)
             $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
             $arguments = Get-SBMSWatchdogExpectedArguments -Specification $Specification
-            $escape = { param([string]$Value) [Security.SecurityElement]::Escape($Value) }
             $delay = 'PT{0}M' -f [int]$Specification.timeoutMinutes
-            $xmlText = @"
-<?xml version="1.0" encoding="UTF-16"?>
-<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>SBMS one-shot hardware lab recovery watchdog</Description></RegistrationInfo>
-  <Triggers><BootTrigger><Enabled>true</Enabled><Delay>$delay</Delay></BootTrigger></Triggers>
-  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
-  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><RunOnlyIfIdle>false</RunOnlyIfIdle><WakeToRun>false</WakeToRun><ExecutionTimeLimit>PT5M</ExecutionTimeLimit><Priority>4</Priority></Settings>
-  <Actions Context="Author"><Exec><Command>$(& $escape $powerShell)</Command><Arguments>$(& $escape $arguments)</Arguments></Exec></Actions>
-</Task>
-"@
+            $xmlText = New-SBMSWatchdogTaskXml -Command $powerShell -Arguments $arguments -Delay $delay
             $xmlPath = Join-Path ([IO.Path]::GetTempPath()) ('SBMS-Watchdog-' + [guid]::NewGuid().ToString('N') + '.xml')
             try {
                 [IO.File]::WriteAllText($xmlPath, $xmlText, [Text.Encoding]::Unicode)

@@ -146,6 +146,12 @@ function Get-TestWatchdogExpectedArguments {
     return & $module { param($Spec) Get-SBMSWatchdogExpectedArguments -Specification $Spec } $Specification
 }
 
+function Get-TestWatchdogTaskXml {
+    param([string]$Command, [string]$Arguments, [string]$Delay)
+    $module = Get-Module -Name SBMS.HardwareLab -ErrorAction Stop
+    return & $module { param($C, $A, $D) New-SBMSWatchdogTaskXml -Command $C -Arguments $A -Delay $D } $Command $Arguments $Delay
+}
+
 function New-FakeAdapter {
     param($State)
 
@@ -492,6 +498,19 @@ try {
             Assert-True ($null -ne $object.PSObject.Properties['unexpectedRules']) 'Real ACL adapter omitted unexpected-rule evidence.'
         }
         Assert-NoRealCommands
+    }
+
+    Invoke-TestCase 'Watchdog XML uses the locally accepted SYSTEM principal shape' {
+        $command = 'C:\Windows\System32\cmd.exe'
+        $arguments = '/c exit 0'
+        [xml]$xml = Get-TestWatchdogTaskXml -Command $command -Arguments $arguments -Delay 'PT3M'
+        $principal = $xml.Task.Principals.Principal
+        Assert-Equal 'S-1-5-18' ([string]$principal.UserId) 'Watchdog XML did not target LocalSystem.'
+        Assert-True ($null -eq $principal.SelectSingleNode('*[local-name()="LogonType"]')) 'Watchdog XML emitted LogonType, which schtasks rejects for this SYSTEM principal schema.'
+        Assert-Equal 'HighestAvailable' ([string]$principal.RunLevel) 'Watchdog XML lost its elevated run level.'
+        Assert-Equal 'PT3M' ([string]$xml.Task.Triggers.BootTrigger.Delay) 'Watchdog XML lost its exact boot delay.'
+        Assert-Equal $command ([string]$xml.Task.Actions.Exec.Command) 'Watchdog XML changed the escaped command.'
+        Assert-Equal $arguments ([string]$xml.Task.Actions.Exec.Arguments) 'Watchdog XML changed the escaped arguments.'
     }
 
     Invoke-TestCase 'Default phase is Audit and performs zero mutation' {
