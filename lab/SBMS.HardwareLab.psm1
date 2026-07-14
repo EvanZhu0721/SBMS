@@ -368,18 +368,31 @@ function Test-SBMSCurrentTestSigning {
 }
 
 function Test-SBMSBaselineInvariant {
-    param($Baseline, $Current)
+    param($Baseline, $Current, [string]$AllowedDisplayOrderAddition, [string]$AllowedBootSequenceClone)
     if ($Baseline.currentGuid -ne $Current.currentGuid) { throw 'Current BCD entry changed unexpectedly.' }
     if ($Baseline.defaultGuid -ne $Current.defaultGuid) { throw 'bootmgr default changed unexpectedly.' }
-    if ((@($Baseline.displayOrder) -join '|') -ne (@($Current.displayOrder) -join '|')) { throw 'bootmgr displayorder changed unexpectedly.' }
+    $expectedDisplayOrder = @($Baseline.displayOrder)
+    if (-not [string]::IsNullOrWhiteSpace($AllowedDisplayOrderAddition)) {
+        if ($expectedDisplayOrder -contains $AllowedDisplayOrderAddition) { throw 'Owned clone GUID was already present in the baseline displayorder.' }
+        $expectedDisplayOrder += $AllowedDisplayOrderAddition
+    }
+    if (($expectedDisplayOrder -join '|') -ne (@($Current.displayOrder) -join '|')) { throw 'bootmgr displayorder changed unexpectedly.' }
+    $baselineBootSequence = @($Baseline.bootSequence)
+    $currentBootSequence = @($Current.bootSequence)
+    $bootSequenceAllowed = (($baselineBootSequence -join '|') -eq ($currentBootSequence -join '|'))
+    if (-not $bootSequenceAllowed -and -not [string]::IsNullOrWhiteSpace($AllowedBootSequenceClone)) {
+        $bootSequenceAllowed = ($currentBootSequence.Count -eq 1 -and $currentBootSequence[0] -eq $AllowedBootSequenceClone)
+    }
+    if (-not $bootSequenceAllowed) { throw 'bootmgr bootsequence changed unexpectedly.' }
 }
 
 function Assert-SBMSCloneDeletionSafe {
-    param($Manifest, [hashtable]$Adapter)
+    param($Manifest, [hashtable]$Adapter, [switch]$CloneOwnershipProven)
     $state = Get-SBMSBcdState -Adapter $Adapter
-    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $state
     $cloneGuid = [string]$Manifest.clone.guid
     if ([string]::IsNullOrWhiteSpace($cloneGuid)) { throw 'Clone deletion requires a non-empty manifest GUID.' }
+    if (-not $CloneOwnershipProven) { throw 'Clone deletion requires exact ownership proof before displayorder drift can be accepted.' }
+    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $state -AllowedDisplayOrderAddition $cloneGuid -AllowedBootSequenceClone $cloneGuid
     if ($state.currentGuid -eq $cloneGuid) { throw 'Refusing to delete the currently active loader.' }
     if ($state.defaultGuid -eq $cloneGuid -or $state.resolvedDefaultGuid -eq $cloneGuid) { throw 'Refusing to delete the default loader.' }
     return $state
@@ -387,17 +400,22 @@ function Assert-SBMSCloneDeletionSafe {
 
 function Resolve-SBMSCloneCleanupPresence {
     param($Manifest, [hashtable]$Adapter)
-    [void](Assert-SBMSCloneDeletionSafe -Manifest $Manifest -Adapter $Adapter)
     $cloneGuid = [string]$Manifest.clone.guid
+    if ([string]::IsNullOrWhiteSpace($cloneGuid)) { throw 'Clone cleanup reconciliation requires a non-empty manifest GUID.' }
     $probe = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $cloneGuid, '/v')
     if ($probe.ExitCode -eq 0) {
         if (-not (Test-SBMSCloneOwnershipReadback -Adapter $Adapter -CloneGuid $cloneGuid -Description $Manifest.clone.description)) {
             throw 'Clone identifier or exact description no longer matches the manifest.'
         }
+        [void](Assert-SBMSCloneDeletionSafe -Manifest $Manifest -Adapter $Adapter -CloneOwnershipProven)
         return $true
     }
     $candidates = @(Resolve-SBMSOwnedCloneGuid -Manifest $Manifest -Adapter $Adapter)
-    if ($candidates.Count -eq 0) { return $false }
+    if ($candidates.Count -eq 0) {
+        $state = Get-SBMSBcdState -Adapter $Adapter
+        Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $state
+        return $false
+    }
     throw "Clone-specific read-back failed while exact-description reconciliation still found $($candidates.Count) candidate(s); cleanup is blocked."
 }
 
@@ -694,7 +712,7 @@ function Invoke-SBMSPrepare {
         }
         if (-not (Test-SBMSCloneReadback -Adapter $Adapter -CloneGuid $Manifest.clone.guid -Description $Manifest.clone.description -Profile $Manifest.profile)) { throw "Clone $($Manifest.profile) read-back failed." }
         $after = Get-SBMSBcdState -Adapter $Adapter
-        Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $after
+        Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $after -AllowedDisplayOrderAddition $Manifest.clone.guid
         $Manifest.state = 'WatchdogInstallIntent'; Save-SBMSManifest $Manifest $RunDirectory
         Add-SBMSJournalEntry $RunDirectory 'WatchdogInstallIntent' @{ taskName = $Manifest.watchdogPlan.taskName }
         Install-SBMSWatchdog -Manifest $Manifest -RunDirectory $RunDirectory -Adapter $Adapter
@@ -751,6 +769,8 @@ function Invoke-SBMSPrepare {
                 if ($delete.ExitCode -ne 0) { $cleanupFailures.Add("Clone deletion failed: $($delete.StdErr)") }
                 $verifyDelete = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $Manifest.clone.guid, '/v')
                 if ($verifyDelete.ExitCode -eq 0) { $cleanupFailures.Add('Clone still exists after prepare rollback deletion.') }
+                $afterDelete = Get-SBMSBcdState -Adapter $Adapter
+                Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $afterDelete
                 }
             } catch {
                 $cleanupFailures.Add("Clone ownership changed after watchdog cleanup; deletion was refused: $($_.Exception.Message)")
@@ -785,15 +805,15 @@ function Invoke-SBMSArm {
         throw 'Arm requires an installed watchdog whose task action, SYSTEM identity, runId and script hash pass read-back.'
     }
     $before = Get-SBMSBcdState -Adapter $Adapter
-    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $before
     if (-not (Test-SBMSCloneReadback -Adapter $Adapter -CloneGuid $Manifest.clone.guid -Description $Manifest.clone.description -Profile $Manifest.profile)) { throw 'Clone read-back failed before Arm.' }
+    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $before -AllowedDisplayOrderAddition $Manifest.clone.guid
     $Manifest.watchdogPlan.status = 'OperatorConfirmed'
     $Manifest.state = 'BootSequenceArmIntent'; Save-SBMSManifest $Manifest $RunDirectory
     Add-SBMSJournalEntry $RunDirectory 'BootSequenceArmIntent' @{ cloneGuid = $Manifest.clone.guid }
     $arm = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/bootsequence', $Manifest.clone.guid)
     if ($arm.ExitCode -ne 0) { throw "Arming one-time bootsequence failed: $($arm.StdErr)" }
     $after = Get-SBMSBcdState -Adapter $Adapter
-    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $after
+    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $after -AllowedDisplayOrderAddition $Manifest.clone.guid -AllowedBootSequenceClone $Manifest.clone.guid
     if ((@($after.bootSequence).Count -ne 1) -or -not ($after.bootSequence -contains $Manifest.clone.guid)) { throw 'One-time bootsequence read-back failed.' }
     $Manifest.state = 'Armed'; Save-SBMSManifest $Manifest $RunDirectory
     Add-SBMSJournalEntry $RunDirectory 'Armed' @{ cloneGuid = $Manifest.clone.guid; automaticRestart = $false }

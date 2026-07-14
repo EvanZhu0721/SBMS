@@ -83,6 +83,8 @@ function New-FakeState {
         IdentifierLabel = $IdentifierLabel
         CopyCreatesClone = $true
         CopyCloneCount = 1
+        CopyAddsUnexpectedDisplayOrderGuid = $false
+        CopyAddsUnexpectedBootSequenceGuid = $false
         WatchdogInstallFails = $false
         WatchdogRemoveFails = $false
         CloneDeleteFails = $false
@@ -196,9 +198,17 @@ function New-FakeAdapter {
             } elseif ($verb -eq '/copy') {
                 if ($State.CopyCreatesClone) {
                     $State.Clones[$State.ExpectedCloneGuid] = @{ description = $argsCopy[3]; testsigning = $false }
+                    $State.DisplayOrder = @($State.DisplayOrder) + $State.ExpectedCloneGuid
                     if ($State.CopyCloneCount -gt 1) {
                         $State.Clones[$State.AdditionalCloneGuid] = @{ description = $argsCopy[3]; testsigning = $false }
+                        $State.DisplayOrder = @($State.DisplayOrder) + $State.AdditionalCloneGuid
                     }
+                }
+                if ($State.CopyAddsUnexpectedDisplayOrderGuid -and -not (@($State.DisplayOrder) -contains $State.AdditionalCloneGuid)) {
+                    $State.DisplayOrder = @($State.DisplayOrder) + $State.AdditionalCloneGuid
+                }
+                if ($State.CopyAddsUnexpectedBootSequenceGuid) {
+                    $State.BootSequence = @($State.AdditionalCloneGuid)
                 }
                 $stdout = & $getFixtureText -Name $State.CopyFixture
             } elseif ($verb -eq '/set') {
@@ -227,6 +237,7 @@ function New-FakeAdapter {
                     $stderr = 'Injected clone deletion failure.'
                 } else {
                     [void]$State.Clones.Remove($argsCopy[1])
+                    $State.DisplayOrder = @($State.DisplayOrder | Where-Object { $_ -ne $argsCopy[1] })
                 }
             } else {
                 $exitCode = 1
@@ -556,6 +567,36 @@ try {
         Assert-Equal 1 $ctx.State.Clones.Count 'Prepare did not create exactly one clone.'
         Assert-Equal 1 $ctx.State.Tasks.Count 'Prepare did not install exactly one verified watchdog.'
         Assert-ProductionLoadersUntouched -State $ctx.State
+    }
+
+    Invoke-TestCase 'Copy-added owned clone is the only accepted displayorder delta and deletion restores baseline' {
+        $ctx = New-TestContext
+        $baselineDisplayOrder = @($ctx.State.DisplayOrder)
+        $prepared = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        Assert-Equal (($baselineDisplayOrder + $script:CloneGuid) -join '|') (@($ctx.State.DisplayOrder) -join '|') 'Prepare did not preserve baseline displayorder plus exactly the owned clone.'
+        $cleaned = Invoke-LabPhase -Context $ctx -Phase 'Rollback'
+        Assert-Equal 'Cleaned' $cleaned.state 'Rollback did not clean the copy-added displayorder entry.'
+        Assert-Equal ($baselineDisplayOrder -join '|') (@($ctx.State.DisplayOrder) -join '|') 'Clone deletion did not restore baseline displayorder.'
+        Assert-Equal 0 $ctx.State.Clones.Count 'Rollback left the owned clone behind.'
+    }
+
+    Invoke-TestCase 'Unexpected displayorder GUID blocks clone cleanup without guessing' {
+        $ctx = New-TestContext
+        $ctx.State.CopyAddsUnexpectedDisplayOrderGuid = $true
+        $null = Assert-Throws -Action { Invoke-LabPhase -Context $ctx -Phase 'Prepare' } -Pattern 'displayorder changed unexpectedly' -Message 'Prepare accepted an unrelated displayorder addition.'
+        $deleteCalls = @($ctx.State.Calls | Where-Object { $_.kind -eq 'bcd' -and $_.arguments[0] -eq '/delete' })
+        Assert-Equal 0 $deleteCalls.Count 'Cleanup guessed and deleted a clone while displayorder contained an unrelated GUID.'
+        Assert-True ($ctx.State.Clones.ContainsKey($script:CloneGuid)) 'Fail-closed cleanup removed the owned clone despite unrelated displayorder drift.'
+        Assert-Equal 0 $ctx.State.Tasks.Count 'Prepare installed a watchdog after unrelated displayorder drift.'
+    }
+
+    Invoke-TestCase 'Unexpected bootsequence change blocks clone cleanup without guessing' {
+        $ctx = New-TestContext
+        $ctx.State.CopyAddsUnexpectedBootSequenceGuid = $true
+        $null = Assert-Throws -Action { Invoke-LabPhase -Context $ctx -Phase 'Prepare' } -Pattern 'bootsequence changed unexpectedly' -Message 'Prepare accepted an unrelated bootsequence change.'
+        $deleteCalls = @($ctx.State.Calls | Where-Object { $_.kind -eq 'bcd' -and $_.arguments[0] -eq '/delete' })
+        Assert-Equal 0 $deleteCalls.Count 'Cleanup guessed and deleted a clone while bootsequence contained an unrelated GUID.'
+        Assert-True ($ctx.State.Clones.ContainsKey($script:CloneGuid)) 'Fail-closed cleanup removed the owned clone despite unrelated bootsequence drift.'
     }
 
     Invoke-TestCase 'Audit parses zh-CN identifier labels for bootmgr current and default' {
