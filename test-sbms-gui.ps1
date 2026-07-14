@@ -4,6 +4,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+Add-Type -AssemblyName System.Drawing
+
 $Root = $PSScriptRoot
 $SourceDirectories = @(
     (Join-Path $Root "gui"),
@@ -97,7 +99,10 @@ try {
     )
 
     $configText = [IO.File]::ReadAllText((Join-Path $TestRoot "config-probe.png.txt"), [Text.Encoding]::UTF8)
-    if (-not $configText.Contains("映射组一 | +")) {
+    # Keep this source expression ASCII-only so Windows PowerShell 5.1 does not
+    # reinterpret a BOM-less UTF-8 test script through the active ANSI codepage.
+    $expectedConfigText = (-join [char[]]@(0x6620, 0x5c04, 0x7ec4, 0x4e00)) + " | +"
+    if (-not $configText.Contains($expectedConfigText)) {
         throw "Config probe semantic output changed: $configText"
     }
     $lockText = [IO.File]::ReadAllText((Join-Path $TestRoot "lock-probe.png.txt"), [Text.Encoding]::UTF8)
