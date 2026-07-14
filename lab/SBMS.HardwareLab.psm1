@@ -233,35 +233,39 @@ function New-SBMSHardwareLabAdapter {
             param([string]$RunDirectory)
             $allowed = @('S-1-5-18', 'S-1-5-32-544')
             $paths = @($RunDirectory) + @(Get-ChildItem -LiteralPath $RunDirectory -Recurse -Force -ErrorAction Stop | Select-Object -ExpandProperty FullName)
-            $objects = New-Object Collections.Generic.List[object]
+            # Windows PowerShell 5.1 throws "Argument types do not match" when a
+            # generic List[object] is expanded with @($list).  Keep the ACL
+            # evidence in native PowerShell collections so the adapter returns
+            # exactly one structured result on every supported host.
+            $objects = @()
             foreach ($path in $paths) {
                 $acl = Get-Acl -LiteralPath $path
                 $ownerSid = try { (New-Object Security.Principal.NTAccount($acl.Owner)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { [string]$acl.Owner }
-                $fullControlSids = New-Object Collections.Generic.HashSet[string]
-                $unexpectedRules = New-Object Collections.Generic.List[string]
+                $fullControlSids = @{}
+                $unexpectedRules = @()
                 foreach ($rule in $acl.Access) {
                     $sid = try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { [string]$rule.IdentityReference }
                     if ($allowed -notcontains $sid -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
-                        $unexpectedRules.Add("$sid|$($rule.AccessControlType)|$($rule.FileSystemRights)")
+                        $unexpectedRules += "$sid|$($rule.AccessControlType)|$($rule.FileSystemRights)"
                     }
                     if (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl) {
-                        [void]$fullControlSids.Add($sid)
+                        $fullControlSids[$sid] = $true
                     }
                 }
-                $objects.Add([pscustomobject]@{
+                $objects += [pscustomobject]@{
                     path = $path
                     ownerAllowed = ($allowed -contains $ownerSid)
                     inheritanceProtected = [bool]$acl.AreAccessRulesProtected
-                    systemFullControl = $fullControlSids.Contains('S-1-5-18')
-                    administratorsFullControl = $fullControlSids.Contains('S-1-5-32-544')
-                    unexpectedRules = @($unexpectedRules)
-                })
+                    systemFullControl = $fullControlSids.ContainsKey('S-1-5-18')
+                    administratorsFullControl = $fullControlSids.ContainsKey('S-1-5-32-544')
+                    unexpectedRules = $unexpectedRules
+                }
             }
             $success = @($objects | Where-Object {
                 -not $_.ownerAllowed -or -not $_.inheritanceProtected -or -not $_.systemFullControl -or
                 -not $_.administratorsFullControl -or @($_.unexpectedRules).Count -gt 0
             }).Count -eq 0
-            return [pscustomobject]@{ success = $success; objects = @($objects) }
+            return [pscustomobject]@{ success = $success; objects = $objects }
         }
     }
 }

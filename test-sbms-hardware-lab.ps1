@@ -456,6 +456,22 @@ try {
         Assert-NoRealCommands
     }
 
+    Invoke-TestCase 'Real ACL adapter returns structured evidence on Windows PowerShell 5.1' {
+        $probeRoot = Join-Path $script:TestRoot 'real-acl-adapter-probe'
+        New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $probeRoot 'probe.txt') -Value 'probe' -Encoding UTF8
+        $realAdapter = New-SBMSHardwareLabAdapter
+        $result = & $realAdapter.TestRunDirectorySecurity $probeRoot
+        Assert-True ($result -isnot [array]) 'Real ACL adapter emitted pipeline noise or an object array instead of one structured result.'
+        Assert-True ($null -ne $result.PSObject.Properties['success']) 'Real ACL adapter omitted success evidence.'
+        Assert-True ($null -ne $result.PSObject.Properties['objects']) 'Real ACL adapter omitted per-object evidence.'
+        Assert-Equal 2 @($result.objects).Count 'Real ACL adapter did not return evidence for both the directory and file.'
+        foreach ($object in @($result.objects)) {
+            Assert-True ($null -ne $object.PSObject.Properties['unexpectedRules']) 'Real ACL adapter omitted unexpected-rule evidence.'
+        }
+        Assert-NoRealCommands
+    }
+
     Invoke-TestCase 'Default phase is Audit and performs zero mutation' {
         $ctx = New-TestContext
         $result = Invoke-SBMSHardwareLab -RunId $ctx.RunId -RunRoot $ctx.RunRoot -Adapter $ctx.Adapter
