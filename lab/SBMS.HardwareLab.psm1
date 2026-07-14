@@ -144,6 +144,39 @@ function New-SBMSWatchdogTaskXml {
 "@
 }
 
+function ConvertFrom-SBMSOptionalTaskBoolean {
+    param($ParentNode, [string]$ElementName, [bool]$DefaultValue)
+    if ($null -eq $ParentNode) { return $DefaultValue }
+    $node = $ParentNode.SelectSingleNode(('./*[local-name()="{0}"]' -f $ElementName))
+    if ($null -eq $node) { return $DefaultValue }
+    $value = ([string]$node.InnerText).Trim()
+    if ($value -match '^(?i:true|1)$') { return $true }
+    if ($value -match '^(?i:false|0)$') { return $false }
+    throw "Task XML element $ElementName has an invalid Boolean value: $value"
+}
+
+function ConvertFrom-SBMSWatchdogTaskXml {
+    param([string]$Text)
+    [xml]$xml = $Text
+    $task = $xml.SelectSingleNode('/*[local-name()="Task"]')
+    if ($null -eq $task) { throw 'Watchdog task XML has no Task root element.' }
+    $bootTrigger = $task.SelectSingleNode('./*[local-name()="Triggers"]/*[local-name()="BootTrigger"]')
+    $settings = $task.SelectSingleNode('./*[local-name()="Settings"]')
+    $principal = $task.SelectSingleNode('./*[local-name()="Principals"]/*[local-name()="Principal"]')
+    $exec = $task.SelectSingleNode('./*[local-name()="Actions"]/*[local-name()="Exec"]')
+    return [pscustomobject]@{
+        exists = $true
+        command = if ($null -ne $exec) { [string]$exec.SelectSingleNode('./*[local-name()="Command"]').InnerText } else { '' }
+        arguments = if ($null -ne $exec) { [string]$exec.SelectSingleNode('./*[local-name()="Arguments"]').InnerText } else { '' }
+        userId = if ($null -ne $principal) { [string]$principal.SelectSingleNode('./*[local-name()="UserId"]').InnerText } else { '' }
+        hasBootTrigger = ($null -ne $bootTrigger)
+        bootDelay = if ($null -ne $bootTrigger) { [string]$bootTrigger.SelectSingleNode('./*[local-name()="Delay"]').InnerText } else { '' }
+        bootTriggerEnabled = if ($null -ne $bootTrigger) { ConvertFrom-SBMSOptionalTaskBoolean -ParentNode $bootTrigger -ElementName 'Enabled' -DefaultValue $true } else { $false }
+        enabled = ConvertFrom-SBMSOptionalTaskBoolean -ParentNode $settings -ElementName 'Enabled' -DefaultValue $true
+        rawXml = $Text
+    }
+}
+
 function New-SBMSHardwareLabAdapter {
     [CmdletBinding()]
     param()
@@ -177,20 +210,7 @@ function New-SBMSHardwareLabAdapter {
             $result = Invoke-SBMSNativeProcess -FilePath (Join-Path $env:SystemRoot 'System32\schtasks.exe') -ArgumentList @('/Query', '/TN', $TaskName, '/XML')
             if ($result.ExitCode -ne 0) { return [pscustomobject]@{ exists = $false; exitCode = $result.ExitCode } }
             try {
-                [xml]$xml = $result.StdOut
-                $exec = $xml.Task.Actions.Exec
-                $principal = $xml.Task.Principals.Principal
-                return [pscustomobject]@{
-                    exists = $true
-                    command = [string]$exec.Command
-                    arguments = [string]$exec.Arguments
-                    userId = [string]$principal.UserId
-                    hasBootTrigger = ($null -ne $xml.Task.Triggers.BootTrigger)
-                    bootDelay = [string]$xml.Task.Triggers.BootTrigger.Delay
-                    bootTriggerEnabled = ([string]$xml.Task.Triggers.BootTrigger.Enabled -match '^(?i:true|1)$')
-                    enabled = ([string]$xml.Task.Settings.Enabled -match '^(?i:true|1)$')
-                    rawXml = $result.StdOut
-                }
+                return ConvertFrom-SBMSWatchdogTaskXml -Text $result.StdOut
             } catch { throw "Watchdog task XML could not be parsed: $($_.Exception.Message)" }
         }
         RemoveWatchdog = {

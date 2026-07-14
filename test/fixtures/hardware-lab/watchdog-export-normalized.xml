@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>SBMS one-shot hardware lab recovery watchdog</Description></RegistrationInfo>
+  <Triggers><BootTrigger><Delay>PT3M</Delay></BootTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>S-1-5-18</UserId><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><ExecutionTimeLimit>PT5M</ExecutionTimeLimit></Settings>
+  <Actions Context="Author"><Exec><Command>C:\Windows\System32\cmd.exe</Command><Arguments>/c exit 0</Arguments></Exec></Actions>
+</Task>

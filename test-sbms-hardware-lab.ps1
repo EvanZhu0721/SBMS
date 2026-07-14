@@ -152,6 +152,12 @@ function Get-TestWatchdogTaskXml {
     return & $module { param($C, $A, $D) New-SBMSWatchdogTaskXml -Command $C -Arguments $A -Delay $D } $Command $Arguments $Delay
 }
 
+function Convert-TestWatchdogTaskXml {
+    param([string]$Text)
+    $module = Get-Module -Name SBMS.HardwareLab -ErrorAction Stop
+    return & $module { param($Value) ConvertFrom-SBMSWatchdogTaskXml -Text $Value } $Text
+}
+
 function New-FakeAdapter {
     param($State)
 
@@ -511,6 +517,24 @@ try {
         Assert-Equal 'PT3M' ([string]$xml.Task.Triggers.BootTrigger.Delay) 'Watchdog XML lost its exact boot delay.'
         Assert-Equal $command ([string]$xml.Task.Actions.Exec.Command) 'Watchdog XML changed the escaped command.'
         Assert-Equal $arguments ([string]$xml.Task.Actions.Exec.Arguments) 'Watchdog XML changed the escaped arguments.'
+    }
+
+    Invoke-TestCase 'Normalized watchdog XML applies schema-default Enabled=true when omitted' {
+        $fixture = Get-FixtureText -Name 'watchdog-export-normalized.xml'
+        $task = Convert-TestWatchdogTaskXml -Text $fixture
+        Assert-Equal $true $task.bootTriggerEnabled 'Omitted BootTrigger Enabled did not use the schema default true.'
+        Assert-Equal $true $task.enabled 'Omitted Settings Enabled did not use the schema default true.'
+        Assert-Equal $true $task.hasBootTrigger 'Normalized XML lost the BootTrigger.'
+        Assert-Equal 'PT3M' $task.bootDelay 'Normalized XML lost the exact BootTrigger delay.'
+        Assert-Equal 'S-1-5-18' $task.userId 'Normalized XML lost the SYSTEM principal.'
+        Assert-Equal 'C:\Windows\System32\cmd.exe' $task.command 'Normalized XML changed the command.'
+        Assert-Equal '/c exit 0' $task.arguments 'Normalized XML changed the arguments.'
+        $explicitFalse = $fixture.Replace('<Delay>PT3M</Delay>', '<Enabled>false</Enabled><Delay>PT3M</Delay>')
+        Assert-Equal $false (Convert-TestWatchdogTaskXml -Text $explicitFalse).bootTriggerEnabled 'Explicit BootTrigger Enabled=false was treated as the default true.'
+        $settingsFalse = $fixture.Replace('<ExecutionTimeLimit>PT5M</ExecutionTimeLimit>', '<Enabled>false</Enabled><ExecutionTimeLimit>PT5M</ExecutionTimeLimit>')
+        Assert-Equal $false (Convert-TestWatchdogTaskXml -Text $settingsFalse).enabled 'Explicit Settings Enabled=false was treated as the default true.'
+        $invalid = $fixture.Replace('<Delay>PT3M</Delay>', '<Enabled>invalid</Enabled><Delay>PT3M</Delay>')
+        $null = Assert-Throws -Action { Convert-TestWatchdogTaskXml -Text $invalid } -Pattern 'invalid Boolean value' -Message 'Invalid Enabled text did not fail closed.'
     }
 
     Invoke-TestCase 'Default phase is Audit and performs zero mutation' {
