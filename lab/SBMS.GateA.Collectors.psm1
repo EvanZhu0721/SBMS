@@ -215,7 +215,7 @@ function Get-SBMSGateARealEvidence {
             $taskIdentity = [string]$task.TaskPath + [string]$task.TaskName
             $identity = @($taskIdentity,$actionText) -join ' '
             $explicitlyAllowed = @($policy.allowedStartupIdentityPatterns | Where-Object { $taskIdentity -match [string]$_ }).Count -gt 0
-            $classification = if ($explicitlyAllowed) { 'allowed' } elseif ($identity -match [string]$policy.blockingNamePattern) { 'blocking' } elseif ([string]::IsNullOrWhiteSpace($actionText)) { 'unknown' } else { 'allowed' }
+            $classification = if ($explicitlyAllowed) { 'allowed' } elseif ($identity -match [string]$policy.blockingNamePattern) { 'blocking' } elseif ([string]$task.TaskPath -like '\Microsoft\*') { 'allowed' } elseif ([string]::IsNullOrWhiteSpace($actionText)) { 'unknown' } else { 'allowed' }
             $entries.Add([pscustomobject][ordered]@{ kind='ScheduledTask'; identity=$taskIdentity; actions=$actionText; classification=$classification })
         }
         foreach ($key in @('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce','Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Run','Registry::HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce')) {
