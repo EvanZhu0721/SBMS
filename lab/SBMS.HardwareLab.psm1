@@ -38,7 +38,9 @@ function Write-SBMSUtf8Atomic {
         $stream.Dispose()
     }
     if (Test-Path -LiteralPath $LiteralPath) {
-        Move-Item -LiteralPath $temporary -Destination $LiteralPath -Force
+        $backup = Join-Path $directory ('.' + [IO.Path]::GetFileName($LiteralPath) + '.' + [guid]::NewGuid().ToString('N') + '.bak')
+        [IO.File]::Replace($temporary, $LiteralPath, $backup)
+        if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
     } else {
         [IO.File]::Move($temporary, $LiteralPath)
     }
