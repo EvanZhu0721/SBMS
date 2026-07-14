@@ -2,7 +2,7 @@
 
 This document defines the safety boundary for SBMS driver and hardware validation. It is a design and operating contract, not an instruction to change the current machine.
 
-Phase 1 delivers a boot-lab foundation, simulated tests, and a reviewable safety contract only. It does **not** implement the full Gate A inventory, remote health acknowledgement, display/driver rollback, or immutable evidence store described as later-stage requirements below. Do not enable Test Signing, install or remove a display driver, change a boot entry, register a SYSTEM task, or reboot while reviewing Phase 1.
+Phase 1 delivers a boot-lab foundation, simulated tests, a fail-closed Gate A evidence evaluator, and a reviewable safety contract. The evaluator writes a schema-v3 stable baseline, rejects incomplete collectors, rejects drift, and requires a Run-bound SSH proof. The real collectors and controlled SSH proof writer are still pending, so it does **not** authorize Test Signing or driver mutation. Do not enable Test Signing, install or remove a display driver, change a boot entry, register a SYSTEM task, or reboot while reviewing Phase 1.
 
 ## Why this exists
 
@@ -86,7 +86,7 @@ Before Gate B:
 
 The automation must not print or copy the recovery key into repository logs. Evidence records only that an authorized operator verified access.
 
-## Gate A — baseline target (not implemented in Phase 1)
+## Gate A — baseline target
 
 Gate A is read-only and must pass before any watchdog or system mutation:
 
@@ -99,6 +99,8 @@ Gate A is read-only and must pass before any watchdog or system mutation:
 - the rollback plan is generated before any apply plan.
 
 Unknown or stale display state is a failure, not a warning.
+
+`lab/SBMS.GateA.psm1` implements the versioned evidence envelope, baseline seal, drift check, and fail-closed policy evaluator. `lab/Invoke-SBMSGateA.ps1` currently accepts only an explicitly supplied structured-evidence fixture. This split permits cross-version tests without pretending that fixture data is real-machine proof. Until native collectors and `Confirm-SBMSLabRemoteHealth.ps1` are implemented and verified, the real adapter continues to hard-block TestSigning `Prepare` and `Arm` before filesystem or adapter mutation.
 
 ## Gate B — boot-policy change
 

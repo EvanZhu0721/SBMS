@@ -697,9 +697,11 @@ try {
         }
         $failed = @($script:Checks | Where-Object { $_.status -eq 'FAIL' })
         $criticalEvidenceSkipped = @($script:Checks | Where-Object {
-            $Scenario -ne 'AuditOnly' -and
             $_.status -eq 'SKIP' -and
-            $_.name -in @('NativeListAudit', 'GuiLogs', 'LifecycleLog')
+            (
+                ($Scenario -eq 'AuditOnly' -and $_.name -in @('PnpAudit', 'DriverAudit', 'NativeListAudit')) -or
+                ($Scenario -ne 'AuditOnly' -and $_.name -in @('NativeListAudit', 'GuiLogs', 'LifecycleLog'))
+            )
         })
         if ($failed.Count -gt 0) {
             $exitCode = 1
