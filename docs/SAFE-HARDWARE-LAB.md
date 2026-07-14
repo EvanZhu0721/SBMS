@@ -159,3 +159,17 @@ The first real `RecoveryDrill` completed on the development host under Run ID `2
 This rehearsal exposed and fixed Windows PowerShell 5.1 collection binding, localized BCD parsing, `bcdedit /copy` display-order behavior, localized missing-entry exit semantics, Task Scheduler SYSTEM XML normalization, and omitted schema-default `Enabled` nodes. The reboot used the emergency inline fallback because SYSTEM's effective Windows PowerShell policy blocked the frozen `.ps1`; commit `d00bc34` now adds process-scoped `ExecutionPolicy Bypass` only after the outer encoded action proves both ACL-locked frozen files match their pinned SHA-256 values. That rich-path fix has 54/54 tests in both Windows PowerShell 5.1 and PowerShell 7, but still requires a separate real reboot qualification before it can replace the fallback evidence above.
 
 This result qualifies the one-time BCD return-reboot mechanism only. Gate B Test Signing and Gate C driver mutation remain hard-blocked.
+
+### Rich watchdog requalification
+
+A second real `RecoveryDrill` qualified the rich watchdog path under Run ID `7db7bb37-fba8-480c-aecf-7492f4f8fd51` at commit `10016fd`:
+
+- Audit and Prepare pinned a three-minute timeout, a SYSTEM BootTrigger task, both frozen-file SHA-256 values, and protected ACLs for nine Run-ID-owned objects. BitLocker was fully decrypted with protection off, a second-computer SSH session was established before Arm, and the RX 7900 XTX baseline was healthy at `5120x2880 @ 165 Hz`.
+- The clone boot started at 17:40:05 local time. The rich path wrote bare timestamp intent/requested markers at 09:43:16/09:43:17 UTC, with no `inline` or `fallback` suffix, and the return boot reached the unchanged default loader at 17:43:54 local time.
+- The journal contained the complete ordered rich sequence: `WatchdogRestartIntent`, `WatchdogRestartIntentPersisted`, `WatchdogSelfDisableResult`, and `WatchdogRestartRequested`. Script/module hash validation was true, self-disable succeeded with exit code 0, and the restart request exited 0.
+- Post-boot read-back proved the watchdog disabled itself, `current == default == baseline`, `bootsequence` returned empty, the physical GPU output remained healthy, and `displayorder` contained only the baseline plus the owned clone pending explicit cleanup.
+- Final Rollback removed the exact task and clone, restored the original single-entry `displayorder`, preserved an empty `bootsequence`, and left the manifest `Cleaned` with no error. No Test Signing or display-driver change occurred.
+
+A preflight attempt also exposed silent timeout drift when an Audit-created manifest stored 8 minutes and Prepare explicitly requested 3. Commit `10016fd` now treats an explicitly rebound timeout as immutable and fail-closed before mutation, while never blocking ownership-safe Rollback; the wrapper forwards the timeout only when the operator explicitly supplied it. Windows PowerShell 5.1 and PowerShell 7 both pass 55/55 adapter-isolated tests.
+
+The rich one-time return-reboot foundation is now qualified. This still does not authorize Gate B Test Signing or Gate C driver mutation, and it does not substitute for the remaining display/recovery/endurance matrix.
