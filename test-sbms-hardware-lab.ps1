@@ -88,7 +88,9 @@ function New-FakeState {
         WatchdogInstallFails = $false
         WatchdogRemoveFails = $false
         CloneDeleteFails = $false
+        CloneDeleteClaimsSuccessWithoutDeleting = $false
         CloneEnumFailuresRemaining = 0
+        MissingCloneEnumMode = 'ExitOne'
         WatchdogReadbackDrifts = $false
         WatchdogArgumentsDrift = $false
         WatchdogDelayDrift = $false
@@ -192,8 +194,15 @@ function New-FakeAdapter {
                     $clone = $State.Clones[$id]
                     $stdout = & $getFakeLoaderText -State $State -Guid $id -Description $clone.description -TestSigning ([bool]$clone.testsigning)
                 } else {
-                    $exitCode = 1
-                    $stderr = 'The specified entry does not exist.'
+                    if ($State.MissingCloneEnumMode -eq 'SuccessNoMatch') {
+                        $stdout = & $getFixtureText -Name 'enum-guid-not-found.zh-CN.txt'
+                    } elseif ($State.MissingCloneEnumMode -eq 'SuccessMultiple') {
+                        $stdout = (& $getFakeLoaderText -State $State -Guid $State.ExpectedCloneGuid -Description 'unexpected one' -TestSigning $false) + "`r`n" +
+                            (& $getFakeLoaderText -State $State -Guid $State.AdditionalCloneGuid -Description 'unexpected two' -TestSigning $false)
+                    } else {
+                        $exitCode = 1
+                        $stderr = 'The specified entry does not exist.'
+                    }
                 }
             } elseif ($verb -eq '/copy') {
                 if ($State.CopyCreatesClone) {
@@ -235,6 +244,8 @@ function New-FakeAdapter {
                 if ($State.CloneDeleteFails) {
                     $exitCode = 1
                     $stderr = 'Injected clone deletion failure.'
+                } elseif ($State.CloneDeleteClaimsSuccessWithoutDeleting) {
+                    $State.CloneEnumFailuresRemaining = 1
                 } else {
                     [void]$State.Clones.Remove($argsCopy[1])
                     $State.DisplayOrder = @($State.DisplayOrder | Where-Object { $_ -ne $argsCopy[1] })
@@ -969,6 +980,35 @@ try {
         Assert-Equal 0 $ctx.State.Tasks.Count 'Cleanup left a watchdog.'
         Assert-Equal 0 @($ctx.State.BootSequence).Count 'Cleanup left bootsequence armed.'
         Assert-ProductionLoadersUntouched -State $ctx.State
+    }
+
+    Invoke-TestCase 'zh-CN no-match output with exit zero is absent and Rollback reaches Cleaned' {
+        $ctx = New-TestContext
+        $ctx.State.MissingCloneEnumMode = 'SuccessNoMatch'
+        $null = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        $result = Invoke-LabPhase -Context $ctx -Phase 'Rollback'
+        Assert-Equal 'Cleaned' $result.state 'Rollback treated localized no-match output as a present clone.'
+        Assert-Equal 0 $ctx.State.Clones.Count 'Rollback left the clone after localized absence read-back.'
+        Assert-Equal (@($ctx.State.DisplayOrder | Where-Object { $_ -ne $script:CloneGuid }).Count) @($ctx.State.DisplayOrder).Count 'Rollback left the deleted clone in displayorder.'
+    }
+
+    Invoke-TestCase 'Multiple primary identifiers in a GUID probe fail closed' {
+        $ctx = New-TestContext
+        $ctx.State.MissingCloneEnumMode = 'SuccessMultiple'
+        $null = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        $null = Assert-Throws -Action { Invoke-LabPhase -Context $ctx -Phase 'Rollback' } -Pattern 'presence is ambiguous' -Message 'Rollback accepted multiple identifiers as absence.'
+        $manifest = Get-TestManifest -Context $ctx
+        Assert-Equal 'CloneDeleteIntent' $manifest.state 'Ambiguous post-delete read-back was incorrectly marked Cleaned.'
+    }
+
+    Invoke-TestCase 'Specific enum failure cannot hide a clone still found by enum all' {
+        $ctx = New-TestContext
+        $null = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        $ctx.State.CloneDeleteClaimsSuccessWithoutDeleting = $true
+        $null = Assert-Throws -Action { Invoke-LabPhase -Context $ctx -Phase 'Rollback' } -Pattern 'exact-description reconciliation still found 1 candidate' -Message 'Rollback marked a retained clone absent after specific enum failure.'
+        $manifest = Get-TestManifest -Context $ctx
+        Assert-Equal 'CloneDeleteIntent' $manifest.state 'Retained clone with a failed specific enum was incorrectly marked Cleaned.'
+        Assert-True ($ctx.State.Clones.ContainsKey($script:CloneGuid)) 'Failure injection did not retain the clone for enum-all reconciliation.'
     }
 
     Invoke-TestCase 'Rollback refuses clone deletion after external bootmgr default drift' {

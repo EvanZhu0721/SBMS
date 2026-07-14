@@ -336,6 +336,22 @@ function Get-SBMSBcdPrimaryIdentifierGuids {
     return @($identifiers)
 }
 
+function Get-SBMSBcdGuidProbe {
+    param([hashtable]$Adapter, [string]$Guid)
+    $result = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $Guid, '/v')
+    $identifiers = @(Get-SBMSBcdPrimaryIdentifierGuids -Text ([string]$result.StdOut))
+    if ($identifiers.Count -eq 0) {
+        return [pscustomobject]@{ present = $false; result = $result; identifiers = @() }
+    }
+    if ($identifiers.Count -ne 1) {
+        throw "BCD GUID read-back returned $($identifiers.Count) primary identifiers for $Guid; presence is ambiguous."
+    }
+    if ($identifiers[0] -ne $Guid) {
+        throw "BCD GUID read-back returned identifier $($identifiers[0]) while probing $Guid."
+    }
+    return [pscustomobject]@{ present = $true; result = $result; identifiers = @($identifiers) }
+}
+
 function Get-SBMSBcdState {
     param([Parameter(Mandatory = $true)][hashtable]$Adapter)
     $bootmgr = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', '{bootmgr}', '/v')
@@ -402,9 +418,9 @@ function Resolve-SBMSCloneCleanupPresence {
     param($Manifest, [hashtable]$Adapter)
     $cloneGuid = [string]$Manifest.clone.guid
     if ([string]::IsNullOrWhiteSpace($cloneGuid)) { throw 'Clone cleanup reconciliation requires a non-empty manifest GUID.' }
-    $probe = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $cloneGuid, '/v')
-    if ($probe.ExitCode -eq 0) {
-        if (-not (Test-SBMSCloneOwnershipReadback -Adapter $Adapter -CloneGuid $cloneGuid -Description $Manifest.clone.description)) {
+    $probe = Get-SBMSBcdGuidProbe -Adapter $Adapter -Guid $cloneGuid
+    if ($probe.present) {
+        if (-not (Test-SBMSCloneOwnershipProbe -Probe $probe -CloneGuid $cloneGuid -Description $Manifest.clone.description)) {
             throw 'Clone identifier or exact description no longer matches the manifest.'
         }
         [void](Assert-SBMSCloneDeletionSafe -Manifest $Manifest -Adapter $Adapter -CloneOwnershipProven)
@@ -454,21 +470,28 @@ function Get-SBMSWatchdogExpectedArguments {
     return "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded"
 }
 
-function Test-SBMSCloneOwnershipReadback {
-    param([hashtable]$Adapter, [string]$CloneGuid, [string]$Description)
-    $result = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $CloneGuid, '/v')
-    if ($result.ExitCode -ne 0) { return $false }
-    $ids = @(Get-SBMSBcdPrimaryIdentifierGuids -Text $result.StdOut)
+function Test-SBMSCloneOwnershipProbe {
+    param($Probe, [string]$CloneGuid, [string]$Description)
+    if ($null -eq $Probe -or -not [bool]$Probe.present) { return $false }
+    $result = $Probe.result
+    $ids = @($Probe.identifiers)
     $descriptions = @([regex]::Matches([string]$result.StdOut, '(?im)^\s*description\s+(.+?)\s*$') | ForEach-Object { $_.Groups[1].Value.Trim() })
     $hasId = ($ids.Count -eq 1 -and $ids[0] -eq $CloneGuid)
     $hasDescription = ($descriptions.Count -eq 1 -and $descriptions[0] -ceq $Description)
     return ($hasId -and $hasDescription)
 }
 
+function Test-SBMSCloneOwnershipReadback {
+    param([hashtable]$Adapter, [string]$CloneGuid, [string]$Description)
+    $probe = Get-SBMSBcdGuidProbe -Adapter $Adapter -Guid $CloneGuid
+    return (Test-SBMSCloneOwnershipProbe -Probe $probe -CloneGuid $CloneGuid -Description $Description)
+}
+
 function Test-SBMSCloneReadback {
     param([hashtable]$Adapter, [string]$CloneGuid, [string]$Description, [string]$Profile)
-    if (-not (Test-SBMSCloneOwnershipReadback -Adapter $Adapter -CloneGuid $CloneGuid -Description $Description)) { return $false }
-    $result = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $CloneGuid, '/v')
+    $probe = Get-SBMSBcdGuidProbe -Adapter $Adapter -Guid $CloneGuid
+    if (-not (Test-SBMSCloneOwnershipProbe -Probe $probe -CloneGuid $CloneGuid -Description $Description)) { return $false }
+    $result = $probe.result
     $hasTestSigning = [regex]::IsMatch([string]$result.StdOut, '(?im)^\s*testsigning\s+(yes|on|true|是|开)\s*$')
     $profileMatches = if ($Profile -eq 'TestSigning') { $hasTestSigning } else { -not $hasTestSigning }
     return $profileMatches
@@ -767,10 +790,9 @@ function Invoke-SBMSPrepare {
                 $delete = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/delete', $Manifest.clone.guid)
                 Add-SBMSJournalEntry $RunDirectory 'PrepareRollbackResult' @{ exitCode = $delete.ExitCode; cloneGuid = $Manifest.clone.guid }
                 if ($delete.ExitCode -ne 0) { $cleanupFailures.Add("Clone deletion failed: $($delete.StdErr)") }
-                $verifyDelete = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $Manifest.clone.guid, '/v')
-                if ($verifyDelete.ExitCode -eq 0) { $cleanupFailures.Add('Clone still exists after prepare rollback deletion.') }
-                $afterDelete = Get-SBMSBcdState -Adapter $Adapter
-                Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $afterDelete
+                if (Resolve-SBMSCloneCleanupPresence -Manifest $Manifest -Adapter $Adapter) {
+                    $cleanupFailures.Add('Clone still exists after prepare rollback deletion.')
+                }
                 }
             } catch {
                 $cleanupFailures.Add("Clone ownership changed after watchdog cleanup; deletion was refused: $($_.Exception.Message)")
@@ -875,8 +897,7 @@ function Invoke-SBMSRollback {
         $Manifest.state = 'CloneDeleteIntent'; Save-SBMSManifest $Manifest $RunDirectory
         $delete = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/delete', $cloneGuid)
         if ($delete.ExitCode -ne 0) { throw "Exact clone deletion failed: $($delete.StdErr)" }
-        $verify = Invoke-SBMSAdapterBcd -Adapter $Adapter -Arguments @('/enum', $cloneGuid, '/v')
-        if ($verify.ExitCode -eq 0) { throw 'Clone still exists after deletion.' }
+        if (Resolve-SBMSCloneCleanupPresence -Manifest $Manifest -Adapter $Adapter) { throw 'Clone still exists after deletion.' }
     }
     $after = Get-SBMSBcdState -Adapter $Adapter
     Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $after
