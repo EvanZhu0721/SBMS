@@ -15,6 +15,7 @@ $RunRoot = 'C:\ProgramData\SBMSLab\Runs'
 $ActiveRunPath = 'C:\ProgramData\SBMSLab\issue4-active.json'
 $RepositoryRoot = Split-Path $PSScriptRoot -Parent
 $RunIdWasBound = $PSBoundParameters.ContainsKey('RunId')
+$ErrorLogPath = Join-Path $env:TEMP 'SBMS-Issue4Lab.error.log'
 
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -46,6 +47,7 @@ function ConvertTo-WindowsArgument {
 
 function Restart-Elevated {
     $powerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    Remove-Item -LiteralPath $ErrorLogPath -Force -ErrorAction SilentlyContinue
     $arguments = New-Object Collections.Generic.List[string]
     foreach ($item in @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-Phase',$Phase)) {
         $arguments.Add((ConvertTo-WindowsArgument ([string]$item)))
@@ -57,6 +59,10 @@ function Restart-Elevated {
     if ($NoRestart) { $arguments.Add('-NoRestart') }
     if ($NoLaunchGui) { $arguments.Add('-NoLaunchGui') }
     $process = Start-Process -FilePath $powerShell -ArgumentList ($arguments -join ' ') -Verb RunAs -PassThru -Wait
+    if (Test-Path -LiteralPath $ErrorLogPath -PathType Leaf) {
+        $errorText = Get-Content -LiteralPath $ErrorLogPath -Raw -Encoding UTF8
+        if (-not [string]::IsNullOrWhiteSpace($errorText)) { Write-Error $errorText }
+    }
     exit $process.ExitCode
 }
 
@@ -85,6 +91,19 @@ function Resolve-RunId {
 }
 
 if (-not (Test-Administrator)) { Restart-Elevated }
+
+trap {
+    $diagnostic = [pscustomobject][ordered]@{
+        timestampUtc = [DateTime]::UtcNow.ToString('o')
+        phase = $Phase
+        runId = if ($RunIdWasBound) { $RunId.ToString() } else { $null }
+        message = $_.Exception.Message
+        position = $_.InvocationInfo.PositionMessage
+        scriptStackTrace = $_.ScriptStackTrace
+    }
+    [IO.File]::WriteAllText($ErrorLogPath, ($diagnostic | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+    exit 1
+}
 
 Import-Module (Join-Path $PSScriptRoot 'SBMS.HardwareLab.psm1') -Force
 if ($Phase -eq 'Start') {
