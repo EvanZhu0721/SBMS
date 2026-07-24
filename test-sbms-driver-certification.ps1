@@ -117,6 +117,17 @@ try {
     $fakeSignTool = Join-Path $testRoot 'signtool.exe'
     [System.IO.File]::WriteAllBytes($fakeSignTool, [byte[]](0))
     $policy = New-TestPolicy
+    $hlkPackage = Join-Path $testRoot 'submission.hlkx'
+    [System.IO.File]::WriteAllBytes($hlkPackage, [byte[]](7, 8, 9, 10))
+    $partnerCenterCommon = @{
+        PrivateProductId = '13635057453741329'
+        SharedProductId = '29963920'
+        SubmissionId = '1152921504621441930'
+        HlkPackagePath = $hlkPackage
+        ExpectedHlkPackageSha256 = (
+            Get-FileHash -LiteralPath $hlkPackage -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
     $dllSignature = [pscustomobject]@{
         Status = 'Valid'
         SignerCertificate = [pscustomobject]@{
@@ -230,6 +241,83 @@ try {
     [System.IO.File]::WriteAllBytes((Join-Path $returned 'sbmsindirectdisplay.cat'), [byte[]](9, 9, 9))
     $signature = New-TestCatalogSignature
 
+    Invoke-Test 'Import rejects malformed Partner Center provenance before output mutation' {
+        $output = Join-Path $testRoot 'bad-partner-center-output'
+        $badPartnerCenter = @{} + $partnerCenterCommon
+        $badPartnerCenter.PrivateProductId = 'not-a-product-id'
+        Assert-Throws {
+            Import-SBMSWhqlDriver `
+                -CandidateDirectory $candidateDir `
+                -ExpectedCandidateManifestSha256 $candidate.manifestSha256 `
+                -ReturnedDirectory $returned `
+                -OutputDirectory $output `
+                -SigningPolicy $policy `
+                -SignToolPath $fakeSignTool `
+                -ToolInvoker $toolInvoker `
+                -CatalogSignature $signature `
+                @badPartnerCenter
+        } 'PrivateProductId'
+        Assert-True (-not (Test-Path -LiteralPath $output)) 'Rejected Partner Center provenance mutated output.'
+    }
+
+    Invoke-Test 'Import rejects every malformed submission identifier before output mutation' {
+        $cases = @(
+            [pscustomobject]@{
+                Field = 'SharedProductId'
+                Value = '0'
+                Error = 'SharedProductId'
+            },
+            [pscustomobject]@{
+                Field = 'SubmissionId'
+                Value = '1152921504x21441930'
+                Error = 'SubmissionId'
+            },
+            [pscustomobject]@{
+                Field = 'ExpectedHlkPackageSha256'
+                Value = 'not-a-sha256'
+                Error = 'Expected HLK submission package SHA-256'
+            }
+        )
+
+        foreach ($case in $cases) {
+            $output = Join-Path $testRoot ('bad-' + $case.Field.ToLowerInvariant())
+            $invalid = @{} + $partnerCenterCommon
+            $invalid[$case.Field] = $case.Value
+            Assert-Throws {
+                Import-SBMSWhqlDriver `
+                    -CandidateDirectory $candidateDir `
+                    -ExpectedCandidateManifestSha256 $candidate.manifestSha256 `
+                    -ReturnedDirectory $returned `
+                    -OutputDirectory $output `
+                    -SigningPolicy $policy `
+                    -SignToolPath $fakeSignTool `
+                    -ToolInvoker $toolInvoker `
+                    -CatalogSignature $signature `
+                    @invalid
+            } $case.Error
+            Assert-True (-not (Test-Path -LiteralPath $output)) "Rejected $($case.Field) mutated output."
+        }
+    }
+
+    Invoke-Test 'Import rejects an HLK package that does not match the independent hash' {
+        $output = Join-Path $testRoot 'bad-hlk-hash-output'
+        $badHlkHash = @{} + $partnerCenterCommon
+        $badHlkHash.ExpectedHlkPackageSha256 = ('f' * 64)
+        Assert-Throws {
+            Import-SBMSWhqlDriver `
+                -CandidateDirectory $candidateDir `
+                -ExpectedCandidateManifestSha256 $candidate.manifestSha256 `
+                -ReturnedDirectory $returned `
+                -OutputDirectory $output `
+                -SigningPolicy $policy `
+                -SignToolPath $fakeSignTool `
+                -ToolInvoker $toolInvoker `
+                -CatalogSignature $signature `
+                @badHlkHash
+        } 'HLK submission package hash mismatch'
+        Assert-True (-not (Test-Path -LiteralPath $output)) 'Rejected HLK package hash mutated output.'
+    }
+
     Invoke-Test 'Import rejects an unpinned candidate manifest before output mutation' {
         $output = Join-Path $testRoot 'unpinned-output'
         Assert-Throws {
@@ -241,7 +329,8 @@ try {
                 -SigningPolicy $policy `
                 -SignToolPath $fakeSignTool `
                 -ToolInvoker $toolInvoker `
-                -CatalogSignature $signature
+                -CatalogSignature $signature `
+                @partnerCenterCommon
         } 'manifest hash mismatch'
         Assert-True (-not (Test-Path -LiteralPath $output)) 'Rejected import mutated output.'
     }
@@ -260,7 +349,8 @@ try {
                 -SigningPolicy $policy `
                 -SignToolPath $fakeSignTool `
                 -ToolInvoker $toolInvoker `
-                -CatalogSignature $signature
+                -CatalogSignature $signature `
+                @partnerCenterCommon
         } 'changed after candidate freeze'
         Assert-True (-not (Test-Path -LiteralPath $output)) 'Drift rejection mutated output.'
     }
@@ -281,7 +371,8 @@ try {
             -SigningPolicy $policy `
             -SignToolPath $fakeSignTool `
             -ToolInvoker $capturingInvoker `
-            -CatalogSignature $signature
+            -CatalogSignature $signature `
+            @partnerCenterCommon
 
         Assert-True ($script:ToolCalls.Count -eq 3) 'Expected one catalog and two catalog-membership verification calls.'
         Assert-True (@($script:ToolCalls | Where-Object { $_ -contains '/c' }).Count -eq 2) 'INF and DLL were not both verified against the catalog.'
@@ -291,10 +382,14 @@ try {
             Assert-True ($sourceHash -ceq $outputHash) "Imported bytes changed for '$name'."
         }
         Assert-True ($result.manifest.certification.method -ceq 'WHQL') 'Import provenance does not record WHQL.'
-        Assert-True ([int]$result.manifest.schemaVersion -eq 2) 'Import schema mismatch.'
+        Assert-True ([int]$result.manifest.schemaVersion -eq 3) 'Import schema mismatch.'
         Assert-True ([string]$result.manifest.identityFingerprint -ceq [string]$candidate.manifest.driver.identityFingerprint) 'Import identity fingerprint drifted.'
         Assert-True ($result.manifest.candidateManifestSha256 -ceq $candidate.manifestSha256) 'Candidate pin is absent from import provenance.'
         Assert-True ($result.manifest.driverVer -ceq '07/24/2026,0.3.0.0') 'DriverVer was lost during WHQL import.'
+        Assert-True ([string]$result.manifest.partnerCenter.privateProductId -ceq $partnerCenterCommon.PrivateProductId) 'Private Product ID was lost during WHQL import.'
+        Assert-True ([string]$result.manifest.partnerCenter.sharedProductId -ceq $partnerCenterCommon.SharedProductId) 'Shared Product ID was lost during WHQL import.'
+        Assert-True ([string]$result.manifest.partnerCenter.submissionId -ceq $partnerCenterCommon.SubmissionId) 'Submission ID was lost during WHQL import.'
+        Assert-True ([string]$result.manifest.partnerCenter.hlkPackageSha256 -ceq $partnerCenterCommon.ExpectedHlkPackageSha256) 'HLK package hash was lost during WHQL import.'
     }
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

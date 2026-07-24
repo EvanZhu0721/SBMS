@@ -14,6 +14,21 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $SigningPolicyPath,
 
+    [Parameter(Mandatory = $true)]
+    [string] $PrivateProductId,
+
+    [Parameter(Mandatory = $true)]
+    [string] $SharedProductId,
+
+    [Parameter(Mandatory = $true)]
+    [string] $SubmissionId,
+
+    [Parameter(Mandatory = $true)]
+    [string] $HlkPackagePath,
+
+    [Parameter(Mandatory = $true)]
+    [string] $ExpectedHlkPackageSha256,
+
     [string] $SignToolPath
 )
 
@@ -29,4 +44,9 @@ Import-SBMSWhqlDriver `
     -ReturnedDirectory $ReturnedDirectory `
     -OutputDirectory $OutputDirectory `
     -SigningPolicy $policy `
+    -PrivateProductId $PrivateProductId `
+    -SharedProductId $SharedProductId `
+    -SubmissionId $SubmissionId `
+    -HlkPackagePath $HlkPackagePath `
+    -ExpectedHlkPackageSha256 $ExpectedHlkPackageSha256 `
     -SignToolPath $SignToolPath

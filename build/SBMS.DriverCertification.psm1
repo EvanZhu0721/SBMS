@@ -263,12 +263,51 @@ function Import-SBMSWhqlDriver {
         [Parameter(Mandatory = $true)]
         [psobject] $SigningPolicy,
 
+        [Parameter(Mandatory = $true)]
+        [string] $PrivateProductId,
+
+        [Parameter(Mandatory = $true)]
+        [string] $SharedProductId,
+
+        [Parameter(Mandatory = $true)]
+        [string] $SubmissionId,
+
+        [Parameter(Mandatory = $true)]
+        [string] $HlkPackagePath,
+
+        [Parameter(Mandatory = $true)]
+        [string] $ExpectedHlkPackageSha256,
+
         [string] $SignToolPath,
 
         [scriptblock] $ToolInvoker,
 
         [psobject] $CatalogSignature
     )
+
+    foreach ($entry in @(
+        [pscustomobject]@{ Name = 'PrivateProductId'; Value = $PrivateProductId },
+        [pscustomobject]@{ Name = 'SharedProductId'; Value = $SharedProductId },
+        [pscustomobject]@{ Name = 'SubmissionId'; Value = $SubmissionId }
+    )) {
+        if ([string]$entry.Value -notmatch '^[1-9][0-9]*$') {
+            throw "$($entry.Name) must be a non-zero decimal identifier copied from Partner Center."
+        }
+    }
+    $normalizedExpectedHlkPackageSha256 = $ExpectedHlkPackageSha256.ToLowerInvariant()
+    if ($normalizedExpectedHlkPackageSha256 -notmatch '^[0-9a-f]{64}$') {
+        throw 'Expected HLK submission package SHA-256 must contain exactly 64 hexadecimal characters.'
+    }
+    $resolvedHlkPackagePath = [System.IO.Path]::GetFullPath($HlkPackagePath)
+    if (-not (Test-Path -LiteralPath $resolvedHlkPackagePath -PathType Leaf)) {
+        throw "Archived HLK submission package not found: $resolvedHlkPackagePath"
+    }
+    $actualHlkPackageSha256 = (
+        Get-FileHash -LiteralPath $resolvedHlkPackagePath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($actualHlkPackageSha256 -cne $normalizedExpectedHlkPackageSha256) {
+        throw "HLK submission package hash mismatch. Expected $normalizedExpectedHlkPackageSha256, actual $actualHlkPackageSha256."
+    }
 
     $candidate = [System.IO.Path]::GetFullPath($CandidateDirectory)
     $manifestPath = Join-Path $candidate 'SBMS.driver-candidate.json'
@@ -358,7 +397,7 @@ function Import-SBMSWhqlDriver {
         Get-SBMSFileRecord -LiteralPath (Join-Path $output $cat.Name) -RelativePath $cat.Name
     )
     $importManifest = [pscustomobject][ordered]@{
-        schemaVersion = 2
+        schemaVersion = 3
         kind = 'SBMS-WHQL-driver-import'
         importedUtc = [datetime]::UtcNow.ToString('o')
         candidateManifestSha256 = $actualManifestHash
@@ -373,6 +412,12 @@ function Import-SBMSWhqlDriver {
             signerSubject = [string]$verification.catalog.signerSubject
             signerThumbprint = [string]$verification.catalog.signerThumbprint
             timestampSubject = [string]$verification.catalog.timestampSubject
+        }
+        partnerCenter = [pscustomobject][ordered]@{
+            privateProductId = $PrivateProductId
+            sharedProductId = $SharedProductId
+            submissionId = $SubmissionId
+            hlkPackageSha256 = $actualHlkPackageSha256
         }
         artifacts = $records
     }

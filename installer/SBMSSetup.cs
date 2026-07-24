@@ -579,6 +579,7 @@ namespace SBMSSetup
             RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "sbmsindirectdisplay.cat"));
             RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "driver-identity.json"));
             RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "SBMS.driver-whql.json"));
+            RequireFile("Verify-SBMSWhqlProvenance.ps1");
         }
 
         private string PayloadRoot
