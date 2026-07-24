@@ -6,10 +6,18 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
+Import-Module (Join-Path $Root "build\SBMS.Version.psm1") -Force
+$BuildMetadata = Get-SBMSBuildMetadata -RepositoryRoot $Root
+Assert-SBMSVersionSourceContract -RepositoryRoot $Root
 $Solution = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\IddSampleDriver.sln"
 $DriverProjectDir = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\IddSampleDriver"
 $DriverOutputRoot = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\$Platform\$Configuration"
 $DriverPackageDir = Join-Path $DriverOutputRoot "IddSampleDriver"
+$GeneratedRoot = Join-Path $Root "obj\version\driver"
+$VersionResource = Join-Path $GeneratedRoot "IddSampleDriver.version.rc"
+Write-SBMSGeneratedFile -LiteralPath $VersionResource -Content (
+    New-SBMSWin32VersionResource -Metadata $BuildMetadata -InternalName "IddSampleDriver" -OriginalFilename "IddSampleDriver.dll" -FileDescription "SBMS indirect display driver" -FileType Dll
+) | Out-Null
 
 if (-not (Test-Path $Solution)) {
     throw "Solution not found: $Solution"
@@ -117,9 +125,15 @@ function New-DriverPackage {
     }
 
     $umdfVersion = if ($WdfVersion -match '^\d+\.\d+$') { "$WdfVersion.0" } else { $WdfVersion }
-    & $StampInf -f (Join-Path $DriverPackageDir "IddSampleDriver.inf") -a $infArch -d * -v * -u $umdfVersion
+    $packageInf = Join-Path $DriverPackageDir "IddSampleDriver.inf"
+    & $StampInf -f $packageInf -a $infArch -d $BuildMetadata.DriverDate -v $BuildMetadata.WindowsVersion -u $umdfVersion
     if ($LASTEXITCODE -ne 0) {
         throw "stampinf failed with exit code $LASTEXITCODE"
+    }
+    $driverVerLine = Select-String -LiteralPath $packageInf -Pattern '^\s*DriverVer\s*=\s*(.+)\s*$' |
+        Select-Object -First 1
+    if (-not $driverVerLine -or [string]$driverVerLine.Matches[0].Groups[1].Value.Trim() -ne [string]$BuildMetadata.DriverVer) {
+        throw "DriverVer metadata mismatch. Expected '$($BuildMetadata.DriverVer)'."
     }
 
     $osList = switch ($Platform.ToLowerInvariant()) {
@@ -285,17 +299,32 @@ $BuildArgs = @(
     "/p:WindowsTargetPlatformVersion=$SdkVersion",
     "/p:TargetPlatformVersion=$SdkVersion",
     "/p:WDKBuildFolder=$SdkVersion",
-    "/p:WDKContentRoot=$WdkRoot\",
-    "/p:WdkContentRoot=$WdkRoot\",
     "/p:SkipPackageVerification=true",
     "/p:ApiValidator_Enable=false",
     "/p:RunCodeAnalysis=false",
     "/p:EnablePREfast=false",
+    "/p:SBMSVersionResource=$VersionResource",
+    "/p:SBMSDriverDate=$($BuildMetadata.DriverDate)",
+    "/p:SBMSDriverVersion=$($BuildMetadata.WindowsVersion)",
+    "/p:Inf2CatUseLocalTime=true",
     "/nr:false"
 )
 
 $StagedVCTargetsPath = $null
+$PreviousVCTargetsPath = [System.Environment]::GetEnvironmentVariable(
+    'VCTargetsPath',
+    [System.EnvironmentVariableTarget]::Process
+)
+$PreviousWdkContentRoot = [System.Environment]::GetEnvironmentVariable(
+    'WDKContentRoot',
+    [System.EnvironmentVariableTarget]::Process
+)
 try {
+    [System.Environment]::SetEnvironmentVariable(
+        'WDKContentRoot',
+        ($WdkRoot.TrimEnd('\') + '\'),
+        [System.EnvironmentVariableTarget]::Process
+    )
     if ($canStageLocalWdkToolset -and -not $hasIntegratedWdkToolset) {
         # Issue #9: VCTargetsPath must remain a complete, version-matched Visual
         # C++ tree. Stage the installed tree and overlay only the two WDK
@@ -306,7 +335,15 @@ try {
         foreach ($toolsetPath in @($localUserModeToolset, $localAppDriverToolset)) {
             Copy-Item -LiteralPath $toolsetPath -Destination $stagedToolsetsPath -Recurse -Force
         }
-        $BuildArgs += "/p:VCTargetsPath=$StagedVCTargetsPath\"
+        # MSBuild requires VCTargetsPath to end in a separator, but Windows
+        # PowerShell 5.1 can escape the closing quote of a native argument that
+        # ends in a backslash. A process-scoped MSBuild property avoids that
+        # lossy native-command boundary.
+        [System.Environment]::SetEnvironmentVariable(
+            'VCTargetsPath',
+            ($StagedVCTargetsPath.TrimEnd('\') + '\'),
+            [System.EnvironmentVariableTarget]::Process
+        )
     }
 
     $buildStarted = Get-Date
@@ -316,7 +353,22 @@ try {
     }
 
     New-DriverPackage -WdfVersion $WdfVersion
+    $driverVersionInfo = (Get-Item -LiteralPath (Join-Path $DriverPackageDir "IddSampleDriver.dll")).VersionInfo
+    if ([string]$driverVersionInfo.FileVersion -ne [string]$BuildMetadata.WindowsVersion -or
+        [string]$driverVersionInfo.ProductVersion -ne [string]$BuildMetadata.SemVer) {
+        throw "Driver DLL version metadata mismatch. FileVersion=$($driverVersionInfo.FileVersion) ProductVersion=$($driverVersionInfo.ProductVersion)"
+    }
 } finally {
+    [System.Environment]::SetEnvironmentVariable(
+        'VCTargetsPath',
+        $PreviousVCTargetsPath,
+        [System.EnvironmentVariableTarget]::Process
+    )
+    [System.Environment]::SetEnvironmentVariable(
+        'WDKContentRoot',
+        $PreviousWdkContentRoot,
+        [System.EnvironmentVariableTarget]::Process
+    )
     if ($StagedVCTargetsPath -and (Test-Path $StagedVCTargetsPath)) {
         Remove-Item -LiteralPath $StagedVCTargetsPath -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path $StagedVCTargetsPath) {
@@ -328,3 +380,4 @@ try {
 Write-Host ""
 Write-Host "Build finished. Driver package found under:"
 Get-ChildItem -LiteralPath $DriverPackageDir -Force | Select-Object FullName,Length,LastWriteTime
+Write-Host "Version: $($BuildMetadata.SemVer) ($($BuildMetadata.DriverVer))"

@@ -1,5 +1,6 @@
 param(
-    [switch] $TryHost
+    [switch] $TryHost,
+    [switch] $VersionOnly
 )
 
 $ErrorActionPreference = "Continue"
@@ -133,6 +134,103 @@ function Get-InfDriverVersion {
     return ""
 }
 
+function Get-SBMSReleaseMetadata {
+    $manifestPath = Join-Path $PSScriptRoot "SBMS.release.json"
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if ([int]$manifest.schemaVersion -ne 2) {
+            throw "Unsupported SBMS release manifest schema '$($manifest.schemaVersion)'."
+        }
+        $productVersion = [string]$manifest.product.version
+        $installerVersion = [string]$manifest.components.installer.productVersion
+        $driverVersion = [string]$manifest.components.driver.driverVer
+        $commit = [string]$manifest.source.commit
+        $packageVersion = [string]$manifest.package.version
+        $packageName = [string]$manifest.package.fileName
+        $architecture = [string]$manifest.package.architecture
+        foreach ($required in @(
+            $productVersion,
+            $installerVersion,
+            $driverVersion,
+            $commit,
+            $packageVersion,
+            $packageName,
+            $architecture
+        )) {
+            if ([string]::IsNullOrWhiteSpace([string]$required)) {
+                throw "SBMS release manifest is missing required version provenance: $manifestPath"
+            }
+        }
+        if ($commit -notmatch '^[0-9a-f]{40,64}$') {
+            throw "SBMS release manifest contains an invalid source commit '$commit'."
+        }
+        if ($packageVersion -cne $productVersion) {
+            throw "SBMS release manifest package/product version mismatch: '$packageVersion' versus '$productVersion'."
+        }
+
+        $actualProductVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMS.exe")
+        $actualInstallerVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMSSetup.exe")
+        $packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter "IddSampleDriver.inf" -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        $actualDriverVersion = if ($packagedInf) {
+            Get-InfDriverVersion -InfPath $packagedInf.FullName
+        } else {
+            ""
+        }
+        if ($actualProductVersion -cne $productVersion) {
+            throw "SBMS.exe ProductVersion '$actualProductVersion' does not match release manifest '$productVersion'."
+        }
+        if ($actualInstallerVersion -cne $installerVersion) {
+            throw "SBMSSetup.exe ProductVersion '$actualInstallerVersion' does not match release manifest '$installerVersion'."
+        }
+        if ($actualDriverVersion -cne $driverVersion) {
+            throw "DriverVer '$actualDriverVersion' does not match release manifest '$driverVersion'."
+        }
+
+        return [pscustomobject]@{
+            productVersion = $productVersion
+            installerVersion = $installerVersion
+            driverVersion = $driverVersion
+            commit = $commit
+            packageVersion = $packageVersion
+            packageName = $packageName
+            architecture = $architecture
+            sourceDirty = [bool]$manifest.source.dirty
+        }
+    }
+
+    $versionPath = Join-Path $PSScriptRoot "VERSION"
+    $productVersion = if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
+        (Get-Content -LiteralPath $versionPath -Raw -Encoding UTF8).Trim()
+    } else {
+        ""
+    }
+    $commit = ""
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $commit = (& git -C $PSScriptRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0) { $commit = "" }
+    }
+    [pscustomobject]@{
+        productVersion = $productVersion
+        installerVersion = ""
+        driverVersion = ""
+        commit = [string]$commit
+        packageVersion = $productVersion
+        packageName = ""
+        architecture = "x64"
+        sourceDirty = $null
+    }
+}
+
+function Get-SBMSExecutableVersion {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+    $info = (Get-Item -LiteralPath $Path).VersionInfo
+    if (-not [string]::IsNullOrWhiteSpace([string]$info.ProductVersion)) { return [string]$info.ProductVersion }
+    return [string]$info.FileVersion
+}
+
 function Write-IddSampleDriverStorePackages {
     $root = Join-Path $env:WINDIR "System32\DriverStore\FileRepository"
     $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter "iddsampledriver.inf_*" -ErrorAction SilentlyContinue |
@@ -219,6 +317,34 @@ Write-Host "== SBMS diagnostic =="
 Write-Host "admin=$IsAdmin"
 Write-Host "cwd=$PSScriptRoot"
 
+$releaseMetadata = Get-SBMSReleaseMetadata
+$packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter "IddSampleDriver.inf" -File -Recurse -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+$installerVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMSSetup.exe")
+$driverVersion = if (-not [string]::IsNullOrWhiteSpace([string]$releaseMetadata.driverVersion)) {
+    [string]$releaseMetadata.driverVersion
+} elseif ($packagedInf) {
+    Get-InfDriverVersion -InfPath $packagedInf.FullName
+} else {
+    ""
+}
+if ([string]::IsNullOrWhiteSpace($installerVersion)) { $installerVersion = [string]$releaseMetadata.installerVersion }
+
+Write-Host ""
+Write-Host "== version provenance =="
+Write-Host "ProductVersion=$($releaseMetadata.productVersion)"
+Write-Host "InstallerVersion=$installerVersion"
+Write-Host "DriverVersion=$driverVersion"
+Write-Host "Commit=$($releaseMetadata.commit)"
+Write-Host "PackageVersion=$($releaseMetadata.packageVersion)"
+Write-Host "PackageName=$($releaseMetadata.packageName)"
+Write-Host "Architecture=$($releaseMetadata.architecture)"
+Write-Host "SourceDirty=$($releaseMetadata.sourceDirty)"
+
+if ($VersionOnly) {
+    return
+}
+
 Write-Host ""
 Write-Host "== processes =="
 Get-Process | Where-Object {
@@ -231,7 +357,9 @@ Get-Process | Where-Object {
 Write-Host ""
 Write-Host "== exe files =="
 Get-ChildItem -LiteralPath $PSScriptRoot -Filter *.exe |
-    Select-Object Name, Length, LastWriteTime |
+    Select-Object Name, Length, LastWriteTime,
+        @{ Name = "FileVersion"; Expression = { $_.VersionInfo.FileVersion } },
+        @{ Name = "ProductVersion"; Expression = { $_.VersionInfo.ProductVersion } } |
     Format-Table -AutoSize
 
 Write-Host ""

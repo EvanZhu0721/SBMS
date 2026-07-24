@@ -26,7 +26,13 @@
     <ClInclude Include="Trace.h" />
   </ItemGroup>
   <ItemGroup>
-    <Inf Include="IddSampleDriver.inf" />
+    <Inf Include="IddSampleDriver.inf">
+      <DateStamp>$(SBMSDriverDate)</DateStamp>
+      <TimeStamp>$(SBMSDriverVersion)</TimeStamp>
+    </Inf>
+  </ItemGroup>
+  <ItemGroup Condition="'$(SBMSVersionResource)' != ''">
+    <ResourceCompile Include="$(SBMSVersionResource)" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{2D54CB75-8B17-4F11-97DC-847B0244CD46}</ProjectGuid>

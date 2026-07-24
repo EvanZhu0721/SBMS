@@ -5,8 +5,20 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
+Import-Module (Join-Path $Root "build\SBMS.Version.psm1") -Force
+$BuildMetadata = Get-SBMSBuildMetadata -RepositoryRoot $Root
+Assert-SBMSVersionSourceContract -RepositoryRoot $Root
+$GeneratedRoot = Join-Path $Root "obj\version\setup"
+$VersionSource = Join-Path $GeneratedRoot "SBMS.Version.g.cs"
+$GeneratedManifest = Join-Path $GeneratedRoot "SBMSSetup.manifest"
+Write-SBMSGeneratedFile -LiteralPath $VersionSource -Content (
+    New-SBMSCSharpVersionSource -Metadata $BuildMetadata -AssemblyTitle "SBMS Setup" -FileDescription "SBMS installer"
+) | Out-Null
+Write-SBMSGeneratedFile -LiteralPath $GeneratedManifest -Content (
+    New-SBMSApplicationManifest -Metadata $BuildMetadata -AssemblyName "SBMS.Setup" -ExecutionLevel requireAdministrator
+) | Out-Null
 $Source = Join-Path $Root "installer\SBMSSetup.cs"
-$Manifest = Join-Path $Root "installer\SBMSSetup.manifest"
+$Manifest = $GeneratedManifest
 if ([System.IO.Path]::IsPathRooted($OutputName)) {
     $Out = $OutputName
 } else {
@@ -29,7 +41,7 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $Source
+& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $Source $VersionSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
@@ -58,3 +70,9 @@ if ($signTool -and $signingCert) {
 }
 
 Write-Host "Built: $Out"
+$versionInfo = (Get-Item -LiteralPath $Out).VersionInfo
+if ([string]$versionInfo.FileVersion -ne [string]$BuildMetadata.WindowsVersion -or
+    [string]$versionInfo.ProductVersion -ne [string]$BuildMetadata.SemVer) {
+    throw "Setup version metadata mismatch. FileVersion=$($versionInfo.FileVersion) ProductVersion=$($versionInfo.ProductVersion)"
+}
+Write-Host "Version: $($BuildMetadata.SemVer) ($($BuildMetadata.WindowsVersion))"

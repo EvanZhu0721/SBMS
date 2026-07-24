@@ -23,7 +23,7 @@ namespace SBMSGui
         private const int DMDO_270 = 3;
         private const string AppName = "SBMS";
         private const string AppLongName = "SBMS - bridges multiple screens";
-        private const string BuildLabel = "2026-06-29.069-beta";
+        private const string BuildLabel = SBMSBuild.ProductVersionInfo.SemVer;
         private const int WM_SETREDRAW = 0x000B;
         private const int MultiScreenBetaMaxTargets = 2;
         private const int DisplayTopologySettleTimeoutMs = 7000;
