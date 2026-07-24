@@ -29,7 +29,7 @@ $null = Resolve-SBMSSigningCertificate -Policy $policy
     -Production `
     -SigningPolicyPath $SigningPolicyPath `
     -SignToolPath $SignToolPath
-$driverDirectory = Join-Path $root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\IddSampleDriver'
+$driverDirectory = Join-Path $root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\SBMSIndirectDisplay'
 $msbuild = Get-Command msbuild.exe -ErrorAction SilentlyContinue
 $toolchain = [pscustomobject][ordered]@{
     powershell = $PSVersionTable.PSVersion.ToString()

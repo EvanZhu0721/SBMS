@@ -25,19 +25,21 @@ if ($Production) {
     $ProductionSigningPolicy = Read-SBMSSigningPolicy -LiteralPath $SigningPolicyPath
     $null = Resolve-SBMSSigningCertificate -Policy $ProductionSigningPolicy
 }
-$Solution = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\IddSampleDriver.sln"
+$Solution = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\SBMSIndirectDisplay.sln"
 $DriverProjectDir = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\IddSampleDriver"
 $DriverOutputRoot = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\$Platform\$Configuration"
-$DriverPackageDir = Join-Path $DriverOutputRoot "IddSampleDriver"
+$DriverPackageDir = Join-Path $DriverOutputRoot "SBMSIndirectDisplay"
 $GeneratedRoot = Join-Path $Root "obj\version\driver"
-$VersionResource = Join-Path $GeneratedRoot "IddSampleDriver.version.rc"
+$VersionResource = Join-Path $GeneratedRoot "SBMSIndirectDisplay.version.rc"
 Write-SBMSGeneratedFile -LiteralPath $VersionResource -Content (
-    New-SBMSWin32VersionResource -Metadata $BuildMetadata -InternalName "IddSampleDriver" -OriginalFilename "IddSampleDriver.dll" -FileDescription "SBMS indirect display driver" -FileType Dll
+    New-SBMSWin32VersionResource -Metadata $BuildMetadata -InternalName "SBMSIndirectDisplay" -OriginalFilename "SBMSIndirectDisplay.dll" -FileDescription "SBMS indirect display driver" -FileType Dll
 ) | Out-Null
 
 if (-not (Test-Path $Solution)) {
     throw "Solution not found: $Solution"
 }
+
+& (Join-Path $Root 'test-sbms-driver-contract.ps1') | Out-Host
 
 function Find-FirstExistingPath {
     param([string[]] $Paths)
@@ -99,8 +101,8 @@ function New-DriverPackage {
         [string] $WdfVersion
     )
 
-    $dll = Join-Path $DriverOutputRoot "IddSampleDriver.dll"
-    $infSource = Join-Path $DriverProjectDir "IddSampleDriver.inf"
+    $dll = Join-Path $DriverOutputRoot "SBMSIndirectDisplay.dll"
+    $infSource = Join-Path $DriverProjectDir "SBMSIndirectDisplay.inf"
     if (-not (Test-Path $dll)) {
         throw "Built driver DLL not found: $dll"
     }
@@ -108,10 +110,11 @@ function New-DriverPackage {
         throw "Driver INF not found: $infSource"
     }
 
-    Reset-ChildDirectory -Parent $DriverOutputRoot -Child "IddSampleDriver" | Out-Null
-    $packageDll = Join-Path $DriverPackageDir "IddSampleDriver.dll"
+    Reset-ChildDirectory -Parent $DriverOutputRoot -Child "SBMSIndirectDisplay" | Out-Null
+    $packageDll = Join-Path $DriverPackageDir "SBMSIndirectDisplay.dll"
     Copy-Item -LiteralPath $dll -Destination $packageDll -Force
-    Copy-Item -LiteralPath $infSource -Destination (Join-Path $DriverPackageDir "IddSampleDriver.inf") -Force
+    Copy-Item -LiteralPath $infSource -Destination (Join-Path $DriverPackageDir "SBMSIndirectDisplay.inf") -Force
+    Copy-Item -LiteralPath (Join-Path $Root 'driver-identity.json') -Destination $DriverPackageDir -Force
 
     $signingCert = $null
     if (-not [string]::IsNullOrWhiteSpace($TestCertificateThumbprint)) {
@@ -159,7 +162,7 @@ function New-DriverPackage {
     }
 
     $umdfVersion = if ($WdfVersion -match '^\d+\.\d+$') { "$WdfVersion.0" } else { $WdfVersion }
-    $packageInf = Join-Path $DriverPackageDir "IddSampleDriver.inf"
+    $packageInf = Join-Path $DriverPackageDir "SBMSIndirectDisplay.inf"
     & $StampInf -f $packageInf -a $infArch -d $BuildMetadata.DriverDate -v $BuildMetadata.WindowsVersion -u $umdfVersion
     if ($LASTEXITCODE -ne 0) {
         throw "stampinf failed with exit code $LASTEXITCODE"
@@ -199,7 +202,7 @@ function New-DriverPackage {
         if ($LASTEXITCODE -ne 0) {
             throw "signtool failed with exit code $LASTEXITCODE"
         }
-        Export-Certificate -Cert $signingCert -FilePath (Join-Path $DriverOutputRoot "IddSampleDriver.cer") -Force | Out-Null
+        Export-Certificate -Cert $signingCert -FilePath (Join-Path $DriverOutputRoot "SBMSIndirectDisplay.cer") -Force | Out-Null
 
         $signature = Get-AuthenticodeSignature $cat.FullName
         if ($signature.Status -ne "Valid") {
@@ -343,6 +346,7 @@ $BuildArgs = @(
     "/p:TargetPlatformVersion=$SdkVersion",
     "/p:WDKBuildFolder=$SdkVersion",
     "/p:SkipPackageVerification=true",
+    "/p:Inf2CatUseLocalTime=true",
     "/p:ApiValidator_Enable=false",
     "/p:RunCodeAnalysis=false",
     "/p:EnablePREfast=false",
@@ -396,7 +400,7 @@ try {
     }
 
     New-DriverPackage -WdfVersion $WdfVersion
-    $driverVersionInfo = (Get-Item -LiteralPath (Join-Path $DriverPackageDir "IddSampleDriver.dll")).VersionInfo
+    $driverVersionInfo = (Get-Item -LiteralPath (Join-Path $DriverPackageDir "SBMSIndirectDisplay.dll")).VersionInfo
     if ([string]$driverVersionInfo.FileVersion -ne [string]$BuildMetadata.WindowsVersion -or
         [string]$driverVersionInfo.ProductVersion -ne [string]$BuildMetadata.SemVer) {
         throw "Driver DLL version metadata mismatch. FileVersion=$($driverVersionInfo.FileVersion) ProductVersion=$($driverVersionInfo.ProductVersion)"

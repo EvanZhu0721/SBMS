@@ -15,6 +15,7 @@ Environment:
 
 --*/
 
+#include <initguid.h>
 #include "Driver.h"
 #include "Driver.tmh"
 
@@ -36,6 +37,7 @@ using namespace Microsoft::WRL;
  * virtual displays before the GUI has asked for them.
  */
 static constexpr DWORD IDD_SAMPLE_MONITOR_COUNT = 1;
+static constexpr DWORD SBMS_PREFERRED_MODE_INDEX = 7;
 
 /*
  * Issue #1: do not advertise oversized legacy modes that Windows may prefer
@@ -112,41 +114,71 @@ static const struct IndirectSampleMonitor::SampleMonitorMode s_SampleDefaultMode
 // FOR SAMPLE PURPOSES ONLY, Static info about monitors that will be reported to OS
 static const struct IndirectSampleMonitor s_SampleMonitors[] =
 {
-    // Modified EDID from Dell S2719DGF
+    // SBMS-owned EDID. The device-instance-specific serial and checksum are
+    // filled immediately before monitor arrival.
     {
         {
-            0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x10,0xAC,0xE6,0xD0,0x55,0x5A,0x4A,0x30,0x24,0x1D,0x01,
-            0x04,0xA5,0x3C,0x22,0x78,0xFB,0x6C,0xE5,0xA5,0x55,0x50,0xA0,0x23,0x0B,0x50,0x54,0x00,0x02,0x00,
-            0xD1,0xC0,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x58,0xE3,0x00,
-            0xA0,0xA0,0xA0,0x29,0x50,0x30,0x20,0x35,0x00,0x55,0x50,0x21,0x00,0x00,0x1A,0x00,0x00,0x00,0xFF,
-            0x00,0x37,0x4A,0x51,0x58,0x42,0x59,0x32,0x0A,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,0xFC,0x00,
-            0x53,0x32,0x37,0x31,0x39,0x44,0x47,0x46,0x0A,0x20,0x20,0x20,0x20,0x00,0x00,0x00,0xFD,0x00,0x28,
-            0x9B,0xFA,0xFA,0x40,0x01,0x0A,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x2C
+            0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x4C,0x4D,0x01,0x00,0x00,0x00,0x00,0x00,
+            0x01,0x24,0x01,0x04,0xA5,0x34,0x1D,0x78,0x0A,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
+            0x01,0x01,0x01,0x01,0x01,0x01,0x02,0x3A,0x80,0x18,0x71,0x38,0x2D,0x40,0x58,0x2C,
+            0x45,0x00,0xFD,0x1E,0x11,0x00,0x00,0x1A,0x00,0x00,0x00,0xFF,0x00,0x53,0x42,0x4D,
+            0x53,0x30,0x30,0x30,0x30,0x30,0x30,0x30,0x31,0x0A,0x00,0x00,0x00,0xFC,0x00,0x53,
+            0x42,0x4D,0x53,0x20,0x44,0x69,0x73,0x70,0x6C,0x61,0x79,0x0A,0x00,0x00,0x00,0xFE,
+            0x00,0x53,0x42,0x4D,0x53,0x20,0x49,0x44,0x44,0x0A,0x20,0x20,0x20,0x20,0x00,0x23
         },
         s_SampleDefaultModes,
         ARRAYSIZE(s_SampleDefaultModes),
-        0
-    },
-    // Modified EDID from Lenovo Y27fA
-    {
-        {
-            0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x30,0xAE,0xBF,0x65,0x01,0x01,0x01,0x01,0x20,0x1A,0x01,
-            0x04,0xA5,0x3C,0x22,0x78,0x3B,0xEE,0xD1,0xA5,0x55,0x48,0x9B,0x26,0x12,0x50,0x54,0x00,0x08,0x00,
-            0xA9,0xC0,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x68,0xD8,0x00,
-            0x18,0xF1,0x70,0x2D,0x80,0x58,0x2C,0x45,0x00,0x53,0x50,0x21,0x00,0x00,0x1E,0x00,0x00,0x00,0x10,
-            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFD,0x00,
-            0x30,0x92,0xB4,0xB4,0x22,0x01,0x0A,0x20,0x20,0x20,0x20,0x20,0x20,0x00,0x00,0x00,0xFC,0x00,0x4C,
-            0x45,0x4E,0x20,0x59,0x32,0x37,0x66,0x41,0x0A,0x20,0x20,0x20,0x00,0x11
-        },
-        s_SampleDefaultModes,
-        ARRAYSIZE(s_SampleDefaultModes),
-        0
+        SBMS_PREFERRED_MODE_INDEX
     }
 };
 
 #pragma endregion
 
 #pragma region helpers
+
+static ULONGLONG HashSbmsMonitorIdentity(PCWSTR InstanceId, ULONGLONG Seed, UINT ConnectorIndex)
+{
+    constexpr ULONGLONG FnvPrime = 1099511628211ULL;
+    ULONGLONG Hash = Seed;
+    for (auto Character = InstanceId; Character && *Character; ++Character)
+    {
+        WCHAR Value = *Character;
+        if (Value >= L'a' && Value <= L'z')
+        {
+            Value -= (L'a' - L'A');
+        }
+        Hash ^= static_cast<BYTE>(Value & 0xff);
+        Hash *= FnvPrime;
+        Hash ^= static_cast<BYTE>((Value >> 8) & 0xff);
+        Hash *= FnvPrime;
+    }
+    for (UINT Shift = 0; Shift < 32; Shift += 8)
+    {
+        Hash ^= static_cast<BYTE>((ConnectorIndex >> Shift) & 0xff);
+        Hash *= FnvPrime;
+    }
+    return Hash;
+}
+
+static bool IsSbmsEdid(const BYTE* Edid, size_t EdidSize)
+{
+    static const BYTE Header[] = { 0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00 };
+    if (!Edid || EdidSize != IndirectSampleMonitor::szEdidBlock ||
+        memcmp(Edid, Header, ARRAYSIZE(Header)) != 0 ||
+        Edid[8] != 0x4C || Edid[9] != 0x4D ||
+        Edid[10] != 0x01 || Edid[11] != 0x00)
+    {
+        return false;
+    }
+
+    BYTE Checksum = 0;
+    for (size_t Index = 0; Index < EdidSize; ++Index)
+    {
+        Checksum = static_cast<BYTE>(Checksum + Edid[Index]);
+    }
+    return Checksum == 0;
+}
 
 static inline void FillSignalInfo(DISPLAYCONFIG_VIDEO_SIGNAL_INFO& Mode, DWORD Width, DWORD Height, DWORD VSync, bool bMonitorMode)
 {
@@ -549,13 +581,118 @@ void SwapChainProcessor::RunCore()
 #pragma region IndirectDeviceContext
 
 IndirectDeviceContext::IndirectDeviceContext(_In_ WDFDEVICE WdfDevice) :
-    m_WdfDevice(WdfDevice)
+    m_WdfDevice(WdfDevice),
+    m_Adapter{},
+    m_MonitorEdid{},
+    m_MonitorContainerId{},
+    m_MonitorIdentityInitialized(false)
 {
-    m_Adapter = {};
 }
 
 IndirectDeviceContext::~IndirectDeviceContext()
 {
+}
+
+bool IndirectDeviceContext::InitializeMonitorIdentity(UINT ConnectorIndex)
+{
+    if (m_MonitorIdentityInitialized)
+    {
+        return true;
+    }
+
+    WDF_OBJECT_ATTRIBUTES Attributes;
+    WDF_OBJECT_ATTRIBUTES_INIT(&Attributes);
+    Attributes.ParentObject = m_WdfDevice;
+
+    WDF_DEVICE_PROPERTY_DATA PropertyData;
+    WDF_DEVICE_PROPERTY_DATA_INIT(&PropertyData, &DEVPKEY_Device_InstanceId);
+    WDFMEMORY InstanceIdMemory = nullptr;
+    DEVPROPTYPE PropertyType = 0;
+    NTSTATUS Status = WdfDeviceAllocAndQueryPropertyEx(
+        m_WdfDevice,
+        &PropertyData,
+        PagedPool,
+        &Attributes,
+        &InstanceIdMemory,
+        &PropertyType);
+    if (!NT_SUCCESS(Status))
+    {
+        return false;
+    }
+    if (PropertyType != DEVPROP_TYPE_STRING)
+    {
+        WdfObjectDelete(InstanceIdMemory);
+        return false;
+    }
+
+    size_t InstanceIdBytes = 0;
+    auto InstanceId = static_cast<PCWSTR>(WdfMemoryGetBuffer(InstanceIdMemory, &InstanceIdBytes));
+    if (!InstanceId || InstanceIdBytes < sizeof(WCHAR) || InstanceId[0] == L'\0')
+    {
+        WdfObjectDelete(InstanceIdMemory);
+        return false;
+    }
+
+    const ULONGLONG FirstHash = HashSbmsMonitorIdentity(
+        InstanceId,
+        14695981039346656037ULL,
+        ConnectorIndex);
+    const ULONGLONG SecondHash = HashSbmsMonitorIdentity(
+        InstanceId,
+        1099511628211ULL,
+        ConnectorIndex);
+    WdfObjectDelete(InstanceIdMemory);
+
+    m_MonitorContainerId.Data1 = static_cast<ULONG>(FirstHash);
+    m_MonitorContainerId.Data2 = static_cast<USHORT>(FirstHash >> 32);
+    m_MonitorContainerId.Data3 =
+        static_cast<USHORT>(((FirstHash >> 48) & 0x0fff) | 0x8000);
+    for (UINT Index = 0; Index < ARRAYSIZE(m_MonitorContainerId.Data4); ++Index)
+    {
+        m_MonitorContainerId.Data4[Index] = static_cast<BYTE>(SecondHash >> (Index * 8));
+    }
+    // UUIDv8 reserves the payload for application-defined deterministic data.
+    // Keep its version and RFC variant bits explicit so Windows receives a
+    // standards-shaped GUID without adding random identity churn.
+    m_MonitorContainerId.Data4[0] =
+        static_cast<BYTE>((m_MonitorContainerId.Data4[0] & 0x3f) | 0x80);
+
+    memcpy(
+        m_MonitorEdid.data(),
+        s_SampleMonitors[0].pEdidBlock,
+        IndirectSampleMonitor::szEdidBlock);
+
+    ULONG Serial = static_cast<ULONG>(FirstHash ^ (FirstHash >> 32) ^ SecondHash);
+    if (Serial == 0)
+    {
+        Serial = 1;
+    }
+    for (UINT Index = 0; Index < sizeof(Serial); ++Index)
+    {
+        m_MonitorEdid[12 + Index] = static_cast<BYTE>(Serial >> (Index * 8));
+    }
+
+    static const char HexDigits[] = "0123456789ABCDEF";
+    m_MonitorEdid[77] = 'S';
+    m_MonitorEdid[78] = 'B';
+    m_MonitorEdid[79] = 'M';
+    m_MonitorEdid[80] = 'S';
+    for (UINT Index = 0; Index < 8; ++Index)
+    {
+        const UINT Shift = (7 - Index) * 4;
+        m_MonitorEdid[81 + Index] = static_cast<BYTE>(HexDigits[(Serial >> Shift) & 0x0f]);
+    }
+    m_MonitorEdid[89] = 0x0a;
+
+    m_MonitorEdid[127] = 0;
+    BYTE Checksum = 0;
+    for (size_t Index = 0; Index < m_MonitorEdid.size() - 1; ++Index)
+    {
+        Checksum = static_cast<BYTE>(Checksum + m_MonitorEdid[Index]);
+    }
+    m_MonitorEdid[127] = static_cast<BYTE>(0 - Checksum);
+    m_MonitorIdentityInitialized = true;
+    return true;
 }
 
 void IndirectDeviceContext::InitAdapter()
@@ -577,9 +714,9 @@ void IndirectDeviceContext::InitAdapter()
     AdapterCaps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
 
     // Declare your device strings for telemetry (required)
-    AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName = L"IddSample Device";
-    AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName = L"Microsoft";
-    AdapterCaps.EndPointDiagnostics.pEndPointModelName = L"IddSample Model";
+    AdapterCaps.EndPointDiagnostics.pEndPointFriendlyName = L"SBMS Virtual Display";
+    AdapterCaps.EndPointDiagnostics.pEndPointManufacturerName = L"SBMS";
+    AdapterCaps.EndPointDiagnostics.pEndPointModelName = L"SBMS Indirect Display";
 
     // Declare your hardware and firmware versions (required)
     IDDCX_ENDPOINT_VERSION Version = {};
@@ -622,6 +759,12 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
     // number every single device to ensure the OS can tell the monitors apart.
     // ==============================
 
+    if (ConnectorIndex >= IDD_SAMPLE_MONITOR_COUNT ||
+        !InitializeMonitorIdentity(ConnectorIndex))
+    {
+        return;
+    }
+
     WDF_OBJECT_ATTRIBUTES Attr;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&Attr, IndirectMonitorContextWrapper);
     Attr.EvtCleanupCallback = [](WDFOBJECT Object)
@@ -644,13 +787,8 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
 
     MonitorInfo.MonitorDescription.Size = sizeof(MonitorInfo.MonitorDescription);
     MonitorInfo.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-    if (ConnectorIndex >= ARRAYSIZE(s_SampleMonitors))
-    {
-        return;
-    }
-    const auto& MonitorTemplate = s_SampleMonitors[ConnectorIndex];
     MonitorInfo.MonitorDescription.DataSize = IndirectSampleMonitor::szEdidBlock;
-    MonitorInfo.MonitorDescription.pData = const_cast<BYTE*>(MonitorTemplate.pEdidBlock);
+    MonitorInfo.MonitorDescription.pData = m_MonitorEdid.data();
 
     // ==============================
     // TODO: The monitor's container ID should be distinct from "this" device's container ID if the monitor is not
@@ -660,14 +798,7 @@ void IndirectDeviceContext::FinishInit(UINT ConnectorIndex)
     // unique monitor or to use "this" device's container ID for a permanent/integrated monitor.
     // ==============================
 
-    // Create a container ID. If GUID generation fails, do not publish a monitor
-    // with an all-zero container ID because Windows may merge it with another
-    // logical display during topology changes.
-    HRESULT Hr = CoCreateGuid(&MonitorInfo.MonitorContainerId);
-    if (FAILED(Hr))
-    {
-        return;
-    }
+    MonitorInfo.MonitorContainerId = m_MonitorContainerId;
 
     IDARG_IN_MONITORCREATE MonitorCreate = {};
     MonitorCreate.ObjectAttributes = &Attr;
@@ -776,22 +907,14 @@ NTSTATUS IddSampleParseMonitorDescription(const IDARG_IN_PARSEMONITORDESCRIPTION
     // this sample driver, we hard-code the EDID, so this function can generate known modes.
     // ==============================
 
-    DWORD SampleMonitorIdx = 0;
-    for(; SampleMonitorIdx < ARRAYSIZE(s_SampleMonitors); SampleMonitorIdx++)
-    {
-        if (pInArgs->MonitorDescription.DataSize == IndirectSampleMonitor::szEdidBlock &&
-            memcmp(pInArgs->MonitorDescription.pData, s_SampleMonitors[SampleMonitorIdx].pEdidBlock, IndirectSampleMonitor::szEdidBlock) == 0)
-        {
-            break;
-        }
-    }
-
-    if (SampleMonitorIdx == ARRAYSIZE(s_SampleMonitors))
+    if (!IsSbmsEdid(
+            static_cast<const BYTE*>(pInArgs->MonitorDescription.pData),
+            pInArgs->MonitorDescription.DataSize))
     {
         return STATUS_INVALID_PARAMETER;
     }
 
-    const auto& Monitor = s_SampleMonitors[SampleMonitorIdx];
+    const auto& Monitor = s_SampleMonitors[0];
 
     pOutArgs->MonitorModeBufferOutputCount = Monitor.ModeCount;
 

@@ -1,5 +1,13 @@
 # SBMS Release Notes
 
+## Unreleased - v0.3.0
+
+- Replaced the Microsoft indirect-display sample package, service, hardware ID, SWD instance, trace provider, endpoint, and monitor identities with a frozen SBMS-owned contract.
+- Made monitor container IDs and EDID serials deterministic per SBMS device instance and connector, with 1920x1080@60 as the preferred mode.
+- Bound build, WHQL candidate/import, production packaging, installer integrity, diagnostics, and hardware acceptance to the same `driver-identity.json` fingerprint.
+- Added a fail-closed legacy migration inventory and plan. Physical monitor IDs such as `DISPLAY\DELD0E6` are evidence only and can never be cleanup targets without a proven legacy SBMS parent.
+- Removed obsolete sample install resources and renamed the active solution, project, INF, DLL, catalog, package, service, and Driver Store identity to `SBMSIndirectDisplay`.
+
 ## 2026-06-29.069-beta
 
 - Removed the cumulative 5-recovery fuse from single native and multi-screen BETA topology/source recovery, so repeated Windows Settings layout or orientation edits no longer stop bridge recovery just because earlier recoveries succeeded in the same run.

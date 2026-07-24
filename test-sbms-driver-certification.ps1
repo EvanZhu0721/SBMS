@@ -41,13 +41,40 @@ function Invoke-Test {
 function New-TestDriver {
     param([string] $Directory)
     New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+    $inf = @'
+[Version]
+DriverVer=07/24/2026,0.3.0.0
+CatalogFile=sbmsindirectdisplay.cat
+
+[Manufacturer]
+%ManufacturerName%=SBMS,NTamd64
+
+[SBMS.NTamd64]
+%DeviceName%=SBMS_Install, SBMS\IndirectDisplay
+%DeviceName%=SBMS_Install, Root\SBMSIndirectDisplay
+
+[SBMS_Install.Wdf]
+UmdfService=SBMSIndirectDisplay,SBMSIndirectDisplay_Install
+UmdfServiceOrder=SBMSIndirectDisplay
+
+[SBMS_Install.HW]
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "SBMSIndirectDisplayGroup"
+
+[SBMSIndirectDisplay_Install]
+UmdfLibraryVersion=2.0.0
+ServiceBinary=%12%\UMDF\SBMSIndirectDisplay.dll
+
+[Strings]
+ManufacturerName="SBMS"
+DeviceName="SBMS Virtual Display Adapter"
+'@
     [System.IO.File]::WriteAllText(
-        (Join-Path $Directory 'IddSampleDriver.inf'),
-        "[Version]`r`nDriverVer=07/24/2026,0.3.0.0`r`n",
+        (Join-Path $Directory 'SBMSIndirectDisplay.inf'),
+        $inf,
         (New-Object System.Text.UTF8Encoding($false))
     )
     Copy-Item -LiteralPath $script:FixtureBinary `
-        -Destination (Join-Path $Directory 'IddSampleDriver.dll')
+        -Destination (Join-Path $Directory 'SBMSIndirectDisplay.dll')
 }
 
 function New-TestPolicy {
@@ -132,7 +159,7 @@ try {
     Invoke-Test 'Microsoft sample INF identity cannot become a WHQL candidate' {
         $sampleDriver = Join-Path $testRoot 'sample-driver'
         New-TestDriver -Directory $sampleDriver
-        Add-Content -LiteralPath (Join-Path $sampleDriver 'IddSampleDriver.inf') `
+        Add-Content -LiteralPath (Join-Path $sampleDriver 'SBMSIndirectDisplay.inf') `
             -Value 'Provider=<Your manufacturer name>; Root\IddSampleDriver ; TODO: edit hw-id' `
             -Encoding UTF8
         $output = Join-Path $testRoot 'sample-output'
@@ -142,7 +169,7 @@ try {
                 -OutputDirectory $output `
                 -SourceDirty $false `
                 @candidateCommon
-        } 'sample identity placeholders'
+        } 'legacy sample identity'
         Assert-True (-not (Test-Path -LiteralPath $output)) 'Rejected sample identity mutated output.'
     }
 
@@ -189,14 +216,18 @@ try {
         Assert-True ($candidate.manifest.kind -ceq 'SBMS-WHQL-driver-candidate') 'Candidate kind mismatch.'
         Assert-True ($candidate.manifest.source.commit -ceq $commit) 'Candidate commit mismatch.'
         Assert-True (-not $candidate.manifest.source.dirty) 'Candidate unexpectedly records dirty source.'
+        Assert-True ([int]$candidate.manifest.schemaVersion -eq 2) 'Candidate schema mismatch.'
+        Assert-True ([int]$candidate.manifest.driver.identitySchema -eq 1) 'Candidate identity schema mismatch.'
+        Assert-True ([string]$candidate.manifest.driver.identityFingerprint -match '^[0-9a-f]{64}$') 'Candidate identity fingerprint is invalid.'
+        Assert-True (Test-Path -LiteralPath (Join-Path $candidateDir 'driver-identity.json') -PathType Leaf) 'Candidate identity contract is missing.'
         Assert-True (@($candidate.manifest.artifacts).Count -eq 2) 'Candidate artifact allow-list mismatch.'
         Assert-True ($candidate.manifestSha256 -match '^[0-9a-f]{64}$') 'Candidate manifest hash is invalid.'
-        Assert-True (-not (Test-Path -LiteralPath (Join-Path $candidateDir 'driver\IddSampleDriver.cat'))) 'Candidate copied a pre-WHQL catalog.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $candidateDir 'driver\sbmsindirectdisplay.cat'))) 'Candidate copied a pre-WHQL catalog.'
     }
 
     $returned = Join-Path $testRoot 'returned'
     New-TestDriver -Directory $returned
-    [System.IO.File]::WriteAllBytes((Join-Path $returned 'iddsampledriver.cat'), [byte[]](9, 9, 9))
+    [System.IO.File]::WriteAllBytes((Join-Path $returned 'sbmsindirectdisplay.cat'), [byte[]](9, 9, 9))
     $signature = New-TestCatalogSignature
 
     Invoke-Test 'Import rejects an unpinned candidate manifest before output mutation' {
@@ -218,7 +249,7 @@ try {
     Invoke-Test 'Import rejects returned payload drift before signature verification' {
         $drifted = Join-Path $testRoot 'drifted'
         Copy-Item -LiteralPath $returned -Destination $drifted -Recurse
-        [System.IO.File]::WriteAllBytes((Join-Path $drifted 'IddSampleDriver.dll'), [byte[]](4, 2))
+        [System.IO.File]::WriteAllBytes((Join-Path $drifted 'SBMSIndirectDisplay.dll'), [byte[]](4, 2))
         $output = Join-Path $testRoot 'drifted-output'
         Assert-Throws {
             Import-SBMSWhqlDriver `
@@ -254,12 +285,14 @@ try {
 
         Assert-True ($script:ToolCalls.Count -eq 3) 'Expected one catalog and two catalog-membership verification calls.'
         Assert-True (@($script:ToolCalls | Where-Object { $_ -contains '/c' }).Count -eq 2) 'INF and DLL were not both verified against the catalog.'
-        foreach ($name in @('IddSampleDriver.inf', 'IddSampleDriver.dll', 'iddsampledriver.cat')) {
+        foreach ($name in @('SBMSIndirectDisplay.inf', 'SBMSIndirectDisplay.dll', 'sbmsindirectdisplay.cat')) {
             $sourceHash = (Get-FileHash -LiteralPath (Join-Path $returned $name) -Algorithm SHA256).Hash
             $outputHash = (Get-FileHash -LiteralPath (Join-Path $output $name) -Algorithm SHA256).Hash
             Assert-True ($sourceHash -ceq $outputHash) "Imported bytes changed for '$name'."
         }
         Assert-True ($result.manifest.certification.method -ceq 'WHQL') 'Import provenance does not record WHQL.'
+        Assert-True ([int]$result.manifest.schemaVersion -eq 2) 'Import schema mismatch.'
+        Assert-True ([string]$result.manifest.identityFingerprint -ceq [string]$candidate.manifest.driver.identityFingerprint) 'Import identity fingerprint drifted.'
         Assert-True ($result.manifest.candidateManifestSha256 -ceq $candidate.manifestSha256) 'Candidate pin is absent from import provenance.'
         Assert-True ($result.manifest.driverVer -ceq '07/24/2026,0.3.0.0') 'DriverVer was lost during WHQL import.'
     }

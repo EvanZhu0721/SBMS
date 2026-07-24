@@ -8,9 +8,9 @@
     { "role": "hardware-lab-module", "base": "repository", "path": "lab/SBMS.HardwareLab.psm1" },
     { "role": "displayconfig-source", "base": "repository", "path": "lab/SBMS.DisplayConfig.cs" },
     { "role": "audit-observer", "base": "repository", "path": "test-sbms-hardware.ps1" },
-    { "role": "driver-inf", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/IddSampleDriver/IddSampleDriver.inf" },
-    { "role": "driver-cat", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/IddSampleDriver/IddSampleDriver.cat" },
-    { "role": "driver-dll", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/IddSampleDriver/IddSampleDriver.dll" }
+    { "role": "driver-inf", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/SBMSIndirectDisplay/SBMSIndirectDisplay.inf" },
+    { "role": "driver-cat", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/SBMSIndirectDisplay/sbmsindirectdisplay.cat" },
+    { "role": "driver-dll", "base": "payload", "path": "Windows-driver-samples/video/IndirectDisplay/x64/Release/SBMSIndirectDisplay/SBMSIndirectDisplay.dll" }
   ],
   "blockingNamePattern": "(?i)SBMS|IddSample|Indirect Display|Virtual Display|DisplayBridge|Parsec|spacedesk|Duet Display|Miracast|Wireless Display|Remote Display",
   "allowedDisplayProviderPattern": "(?i)^(Advanced Micro Devices.*|AMD|Intel.*|NVIDIA.*|Microsoft)$",

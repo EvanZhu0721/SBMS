@@ -383,7 +383,7 @@ Invoke-TestCase 'Win32 resource contains numeric and display versions' {
     Assert-True $resource.Contains('VALUE "ProductVersion", "1.2.3-alpha.4\0"') 'RC SemVer missing.'
     Assert-True $resource.Contains('VALUE "OriginalFilename", "SBMSNative.exe\0"') 'RC filename missing.'
     Assert-True $resource.Contains('FILETYPE VFT_APP') 'RC application file type missing.'
-    $driverResource = New-SBMSWin32VersionResource -Metadata $metadata -InternalName 'IddSampleDriver' -OriginalFilename 'IddSampleDriver.dll' -FileType Dll
+    $driverResource = New-SBMSWin32VersionResource -Metadata $metadata -InternalName 'SBMSIndirectDisplay' -OriginalFilename 'SBMSIndirectDisplay.dll' -FileType Dll
     Assert-True $driverResource.Contains('FILETYPE VFT_DLL') 'RC driver DLL file type missing.'
 }
 
@@ -423,8 +423,8 @@ Invoke-TestCase 'Release manifest contains reproducible source and package data'
     Assert-Equal 'SBMSDeviceHost.exe' $data.components.deviceHost.artifactName 'DeviceHost artifact name mismatch.'
     Assert-Equal '4.5.6-dev.7' $data.components.deviceHost.productVersion 'DeviceHost product version mismatch.'
     Assert-Equal '4.5.6.7' $data.components.deviceHost.fileVersion 'DeviceHost file version mismatch.'
-    Assert-Equal 'IddSampleDriver.dll' $data.components.driver.artifactName 'Driver artifact name mismatch.'
-    Assert-Equal 'IddSampleDriver.inf' $data.components.driver.infName 'Driver INF name mismatch.'
+    Assert-Equal 'SBMSIndirectDisplay.dll' $data.components.driver.artifactName 'Driver artifact name mismatch.'
+    Assert-Equal 'SBMSIndirectDisplay.inf' $data.components.driver.infName 'Driver INF name mismatch.'
     Assert-Equal '4.5.6-dev.7' $data.components.driver.productVersion 'Driver product version mismatch.'
     Assert-Equal '4.5.6.7' $data.components.driver.fileVersion 'Driver file version mismatch.'
     Assert-Equal '07/25/2026' $data.components.driver.driverDate 'Driver date mismatch.'
@@ -460,7 +460,7 @@ Invoke-TestCase 'Source contract rejects a temporary hard-coded active GUI versi
         'installer\SBMSSetup.cs',
         'gui\SBMSGui.manifest',
         'installer\SBMSSetup.manifest',
-        'Windows-driver-samples\video\IndirectDisplay\IddSampleDriver\IddSampleDriver.inf',
+        'Windows-driver-samples\video\IndirectDisplay\IddSampleDriver\SBMSIndirectDisplay.inf',
         'build-sbms-driver.ps1'
     )
     try {

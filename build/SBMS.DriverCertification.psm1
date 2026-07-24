@@ -53,6 +53,63 @@ function Get-SBMSSingleDriverFile {
     $matches[0]
 }
 
+function Get-SBMSDriverIdentityContract {
+    $path = Join-Path (Split-Path $PSScriptRoot -Parent) 'driver-identity.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "SBMS driver identity contract not found: $path"
+    }
+    $contract = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$contract.schemaVersion -ne 1) {
+        throw "Unsupported SBMS driver identity schema: $($contract.schemaVersion)"
+    }
+    [pscustomobject][ordered]@{
+        path = $path
+        fingerprint = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        contract = $contract
+    }
+}
+
+function Assert-SBMSDriverInfIdentity {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $LiteralPath,
+
+        [Parameter(Mandatory = $true)]
+        [psobject] $Identity
+    )
+
+    $inf = Get-Content -LiteralPath $LiteralPath -Raw -Encoding UTF8
+    $contract = $Identity.contract
+    $required = @(
+        "CatalogFile=$($contract.package.catalogName)",
+        "%DeviceName%=SBMS_Install, $($contract.pnp.hardwareId)",
+        "%DeviceName%=SBMS_Install, $($contract.pnp.rootHardwareId)",
+        "HKR, `"WUDF`", `"DeviceGroupId`", %REG_SZ%, `"$($contract.pnp.deviceGroupId)`"",
+        "UmdfService=$($contract.pnp.serviceName),$($contract.pnp.serviceName)_Install",
+        "UmdfServiceOrder=$($contract.pnp.serviceName)",
+        "ServiceBinary=%12%\UMDF\$($contract.package.dllName)",
+        "ManufacturerName=`"$($contract.pnp.provider)`"",
+        "DeviceName=`"$($contract.pnp.deviceName)`""
+    )
+    foreach ($value in $required) {
+        if ($inf.IndexOf($value, [StringComparison]::Ordinal) -lt 0) {
+            throw "Driver INF does not match identity contract: missing '$value'."
+        }
+    }
+    foreach ($legacy in @(
+            '<Your manufacturer name>',
+            'TODO: Replace',
+            'TODO: edit',
+            'Root\IddSampleDriver',
+            'IddSampleDriverGroup',
+            'UmdfService=IddSampleDriver',
+            'ServiceBinary=%12%\UMDF\IddSampleDriver.dll')) {
+        if ($inf.IndexOf($legacy, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            throw "Driver INF contains legacy sample identity: '$legacy'."
+        }
+    }
+}
+
 function New-SBMSDriverCandidate {
     [CmdletBinding()]
     param(
@@ -106,10 +163,12 @@ function New-SBMSDriverCandidate {
     }
     $inf = Get-SBMSSingleDriverFile -Directory $source -Filter '*.inf'
     $dll = Get-SBMSSingleDriverFile -Directory $source -Filter '*.dll'
-    $infText = Get-Content -LiteralPath $inf.FullName -Raw -Encoding UTF8
-    if ($infText -match '(?i)<Your manufacturer name>|TODO:\s*(Replace|edit)|Root\\IddSampleDriver') {
-        throw 'WHQL driver candidate still contains Microsoft sample identity placeholders. Freeze the reviewed SBMS manufacturer, hardware ID, service and device identity first.'
+    $identity = Get-SBMSDriverIdentityContract
+    if ([string]$inf.Name -cne [string]$identity.contract.package.infName -or
+        [string]$dll.Name -cne [string]$identity.contract.package.dllName) {
+        throw 'Driver candidate artifact names do not match the identity contract.'
     }
+    Assert-SBMSDriverInfIdentity -LiteralPath $inf.FullName -Identity $identity
     $driverVerMatch = Select-String -LiteralPath $inf.FullName -Pattern '^\s*DriverVer\s*=\s*(.+?)\s*$' |
         Select-Object -First 1
     if (-not $driverVerMatch) {
@@ -143,13 +202,14 @@ function New-SBMSDriverCandidate {
     New-Item -ItemType Directory -Path $payload -Force | Out-Null
     Copy-Item -LiteralPath $inf.FullName -Destination (Join-Path $payload $inf.Name)
     Copy-Item -LiteralPath $dll.FullName -Destination (Join-Path $payload $dll.Name)
+    Copy-Item -LiteralPath $identity.path -Destination (Join-Path $output 'driver-identity.json')
 
     $artifacts = @(
         Get-SBMSFileRecord -LiteralPath (Join-Path $payload $inf.Name) -RelativePath "driver/$($inf.Name)"
         Get-SBMSFileRecord -LiteralPath (Join-Path $payload $dll.Name) -RelativePath "driver/$($dll.Name)"
     )
     $manifest = [pscustomobject][ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         kind = 'SBMS-WHQL-driver-candidate'
         createdUtc = [datetime]::UtcNow.ToString('o')
         source = [pscustomobject][ordered]@{
@@ -161,6 +221,8 @@ function New-SBMSDriverCandidate {
             driverVer = $actualDriverVer
             inf = $inf.Name
             dll = $dll.Name
+            identitySchema = [int]$identity.contract.schemaVersion
+            identityFingerprint = [string]$identity.fingerprint
             signature = [pscustomobject][ordered]@{
                 status = [string]$dllSignatureResult.status
                 signerSubject = [string]$dllSignatureResult.signerSubject
@@ -222,16 +284,36 @@ function Import-SBMSWhqlDriver {
         throw "Driver candidate manifest hash mismatch. Expected $expectedManifestHash, actual $actualManifestHash."
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([int]$manifest.schemaVersion -ne 1 -or
+    if ([int]$manifest.schemaVersion -ne 2 -or
         [string]$manifest.kind -cne 'SBMS-WHQL-driver-candidate' -or
         [bool]$manifest.source.dirty) {
         throw 'Driver candidate manifest is not an eligible clean WHQL candidate.'
+    }
+    $identityPath = Join-Path $candidate 'driver-identity.json'
+    if (-not (Test-Path -LiteralPath $identityPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $identityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            [string]$manifest.driver.identityFingerprint) {
+        throw 'Driver candidate identity contract is missing or drifted.'
+    }
+    $identity = [pscustomobject][ordered]@{
+        path = $identityPath
+        fingerprint = [string]$manifest.driver.identityFingerprint
+        contract = Get-Content -LiteralPath $identityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    }
+    if ([int]$identity.contract.schemaVersion -ne [int]$manifest.driver.identitySchema) {
+        throw 'Driver candidate identity schema does not match its manifest.'
     }
 
     $returned = [System.IO.Path]::GetFullPath($ReturnedDirectory)
     $inf = Get-SBMSSingleDriverFile -Directory $returned -Filter '*.inf'
     $dll = Get-SBMSSingleDriverFile -Directory $returned -Filter '*.dll'
     $cat = Get-SBMSSingleDriverFile -Directory $returned -Filter '*.cat'
+    if ([string]$inf.Name -cne [string]$identity.contract.package.infName -or
+        [string]$dll.Name -cne [string]$identity.contract.package.dllName -or
+        [string]$cat.Name -cne [string]$identity.contract.package.catalogName) {
+        throw 'Microsoft-returned package artifact names do not match the frozen identity contract.'
+    }
+    Assert-SBMSDriverInfIdentity -LiteralPath $inf.FullName -Identity $identity
     $returnedByName = @{
         ([string]$inf.Name).ToLowerInvariant() = $inf
         ([string]$dll.Name).ToLowerInvariant() = $dll
@@ -268,6 +350,7 @@ function Import-SBMSWhqlDriver {
     foreach ($file in @($inf, $dll, $cat)) {
         Copy-Item -LiteralPath $file.FullName -Destination (Join-Path $output $file.Name)
     }
+    Copy-Item -LiteralPath $identityPath -Destination (Join-Path $output 'driver-identity.json')
 
     $records = @(
         Get-SBMSFileRecord -LiteralPath (Join-Path $output $inf.Name) -RelativePath $inf.Name
@@ -275,12 +358,14 @@ function Import-SBMSWhqlDriver {
         Get-SBMSFileRecord -LiteralPath (Join-Path $output $cat.Name) -RelativePath $cat.Name
     )
     $importManifest = [pscustomobject][ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         kind = 'SBMS-WHQL-driver-import'
         importedUtc = [datetime]::UtcNow.ToString('o')
         candidateManifestSha256 = $actualManifestHash
         sourceCommit = [string]$manifest.source.commit
         driverVer = [string]$manifest.driver.driverVer
+        identitySchema = [int]$manifest.driver.identitySchema
+        identityFingerprint = [string]$manifest.driver.identityFingerprint
         driverSignature = $manifest.driver.signature
         certification = [pscustomobject][ordered]@{
             method = 'WHQL'

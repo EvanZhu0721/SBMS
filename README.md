@@ -8,19 +8,19 @@ Start with [CONTEXT.md](CONTEXT.md) for the project workflow constraints.
 
 SBMS means **SBMS bridges multiple screens**.
 
-SBMS is a Windows prototype that creates a controllable virtual desktop through the Indirect Display Driver model, then presents that desktop on a physical monitor with a native D3D11 output path. It is designed for mixed-size, mixed-DPI monitor setups where Windows' resolution-based desktop geometry feels physically wrong.
+SBMS is Windows display-control software that creates a controllable virtual desktop through the Indirect Display Driver model, then presents that desktop on a physical monitor with a native D3D11 output path. It is designed for mixed-size, mixed-DPI monitor setups where Windows' resolution-based desktop geometry feels physically wrong.
 
 The current target case is a 27-inch 5K display plus a high-refresh 24-inch 2K display. SBMS lets Windows see a virtual display whose logical size is chosen from real physical size instead of the 2K panel's native pixel count, then maps that virtual desktop back to the real 2K panel.
 
 ## Status
 
-This is a local engineering prototype, not a signed production driver.
+The repository has a production-owned driver identity and a fail-closed production packaging pipeline. Public release remains blocked until the package receives the required publisher signature and Microsoft WHQL return, then passes normal-boot hardware acceptance.
 
 - Windows 11
 - Visual Studio 2022 Build Tools
 - Windows Driver Kit
 - Administrator rights for the IDD software device host and Driver Store staging
-- Test signing or a valid driver-signing path
+- A valid production driver-signing path for release builds; explicit test certificates are for isolated development only
 
 ## Components
 
@@ -196,7 +196,7 @@ Filters:
 ## Safety Notes
 
 - SBMS refuses to use a physical display as the source unless `--allow-physical-source` is explicitly passed to the native executable.
-- SBMS still recognizes `IddSampleDriver` because the current prototype is based on Microsoft's sample driver identity.
+- Legacy `IddSampleDriver` identities are reported only for migration and residue diagnosis; they cannot satisfy the current SBMS device-success checks.
 - Stopping SBMS normally lets the native process restore cursor clipping, input capture, and migrated windows before the software display host exits.
 - Do not force-kill the native process unless the desktop is already recovered.
 
@@ -235,7 +235,7 @@ Diagnostics:
 .\diagnose-sbms.ps1 -TryHost
 ```
 
-The diagnostic script still mentions the underlying `IddSampleDriver` package because that is the driver package name used by the prototype.
+The diagnostic script reports current `SBMSIndirectDisplay` devices/packages separately from read-only legacy `IddSampleDriver` residue.
 
 ## Upstream
 

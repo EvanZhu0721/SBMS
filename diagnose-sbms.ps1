@@ -9,6 +9,25 @@ $Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $Principal = [Security.Principal.WindowsPrincipal]::new($Identity)
 $IsAdmin = $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
+function Get-SBMSDriverIdentity {
+    $paths = @(
+        (Join-Path $PSScriptRoot 'driver-identity.json')
+    )
+    $packaged = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'driver') -Filter 'driver-identity.json' -File -Recurse -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($packaged) {
+        $paths += $packaged.FullName
+    }
+    $path = $paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $path) {
+        throw 'SBMS driver identity contract is missing.'
+    }
+    Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+$DriverIdentity = Get-SBMSDriverIdentity
+$CurrentInstancePrefix = "SWD\$($DriverIdentity.pnp.enumerator)\$($DriverIdentity.pnp.instancePrefix)"
+
 function Get-DriverPackages {
     $packages = New-Object System.Collections.Generic.List[object]
     $current = [ordered]@{}
@@ -65,28 +84,55 @@ function Write-DisplayList {
     }
 }
 
-function Write-SBMSDevices {
-    if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
-        Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
-            $_.FriendlyName -like '*IddSample*' -or
-            $_.FriendlyName -like '*DisplayBridge*' -or
-            $_.FriendlyName -like '*SBMS*' -or
-            $_.InstanceId -like '*IddSampleDriver*'
-        } | Select-Object Status, Class, FriendlyName, InstanceId, Problem, ConfigManagerErrorCode |
-            Format-List
+function Get-SBMSDevices {
+    param(
+        [ValidateSet('Current', 'Legacy')]
+        [string] $IdentityKind
+    )
+
+    $matchesIdentity = {
+        param([string] $InstanceId)
+        if ($IdentityKind -eq 'Current') {
+            return -not [string]::IsNullOrWhiteSpace($InstanceId) -and
+                $InstanceId.StartsWith($CurrentInstancePrefix, [StringComparison]::OrdinalIgnoreCase)
+        }
+        foreach ($prefix in @($DriverIdentity.legacy.instanceIdPrefixes)) {
+            if (-not [string]::IsNullOrWhiteSpace($InstanceId) -and
+                $InstanceId.StartsWith([string]$prefix, [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+        }
+        return $false
     }
 
-    Get-CimInstance Win32_PnPEntity | Where-Object {
-        $_.Name -like '*IddSample*' -or
-        $_.Name -like '*DisplayBridge*' -or
-        $_.Name -like '*SBMS*' -or
-        $_.DeviceID -like '*IddSampleDriver*'
-    } | Select-Object Name, Status, PNPDeviceID, ConfigManagerErrorCode |
+    if (Get-Command Get-PnpDevice -ErrorAction SilentlyContinue) {
+        return @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object {
+            & $matchesIdentity ([string]$_.InstanceId)
+        })
+    }
+
+    @(Get-CimInstance Win32_PnPEntity | Where-Object {
+        & $matchesIdentity ([string]$_.PNPDeviceID)
+    })
+}
+
+function Write-SBMSDevices {
+    param(
+        [ValidateSet('Current', 'Legacy')]
+        [string] $IdentityKind
+    )
+
+    Get-SBMSDevices -IdentityKind $IdentityKind |
+        Select-Object Status, Class, FriendlyName, InstanceId, PNPDeviceID, Problem, ConfigManagerErrorCode |
         Format-List
 }
 
-function Write-IddSampleDeviceProperties {
-    $instanceId = "SWD\IDDSAMPLEDRIVER\IDDSAMPLEDRIVER"
+function Write-SBMSDeviceProperties {
+    param(
+        [ValidateSet('Current', 'Legacy')]
+        [string] $IdentityKind
+    )
+
     if (-not (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)) {
         return
     }
@@ -101,12 +147,17 @@ function Write-IddSampleDeviceProperties {
         "DEVPKEY_Device_Service"
     )
 
-    foreach ($key in $keys) {
-        try {
-            $property = Get-PnpDeviceProperty -InstanceId $instanceId -KeyName $key -ErrorAction Stop
-            Write-Host "$($property.KeyName)=$($property.Data)"
-        } catch {
+    foreach ($device in @(Get-SBMSDevices -IdentityKind $IdentityKind)) {
+        $instanceId = if ($device.InstanceId) { [string]$device.InstanceId } else { [string]$device.PNPDeviceID }
+        Write-Host "InstanceId=$instanceId"
+        foreach ($key in $keys) {
+            try {
+                $property = Get-PnpDeviceProperty -InstanceId $instanceId -KeyName $key -ErrorAction Stop
+                Write-Host "$($property.KeyName)=$($property.Data)"
+            } catch {
+            }
         }
+        Write-Host ''
     }
 }
 
@@ -116,7 +167,7 @@ function Test-VirtualDisplayVisible {
         return $false
     }
     $text = (& $Native --list 2>&1 | Out-String)
-    return ($text -match '(?i)IddSample|DisplayBridge|SBMS')
+    return ($text -match '(?i)SBMS Virtual Display|SBMS Display|SBMS Indirect Display')
 }
 
 function Get-InfDriverVersion {
@@ -139,7 +190,7 @@ function Get-SBMSReleaseMetadata {
     if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 -ErrorAction Stop |
             ConvertFrom-Json -ErrorAction Stop
-        if ([int]$manifest.schemaVersion -ne 2) {
+        if ([int]$manifest.schemaVersion -notin @(2, 3)) {
             throw "Unsupported SBMS release manifest schema '$($manifest.schemaVersion)'."
         }
         $productVersion = [string]$manifest.product.version
@@ -171,7 +222,7 @@ function Get-SBMSReleaseMetadata {
 
         $actualProductVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMS.exe")
         $actualInstallerVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMSSetup.exe")
-        $packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter "IddSampleDriver.inf" -File -Recurse -ErrorAction SilentlyContinue |
+        $packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter ([string]$DriverIdentity.package.infName) -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1
         $actualDriverVersion = if ($packagedInf) {
             Get-InfDriverVersion -InfPath $packagedInf.FullName
@@ -231,14 +282,22 @@ function Get-SBMSExecutableVersion {
     return [string]$info.FileVersion
 }
 
-function Write-IddSampleDriverStorePackages {
+function Write-SBMSDriverStorePackages {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $InfName,
+
+        [Parameter(Mandatory = $true)]
+        [string] $DllName
+    )
+
     $root = Join-Path $env:WINDIR "System32\DriverStore\FileRepository"
-    $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter "iddsampledriver.inf_*" -ErrorAction SilentlyContinue |
+    $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter "$($InfName.ToLowerInvariant())_*" -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending
 
     foreach ($dir in $dirs) {
-        $inf = Join-Path $dir.FullName "IddSampleDriver.inf"
-        $dll = Join-Path $dir.FullName "IddSampleDriver.dll"
+        $inf = Join-Path $dir.FullName $InfName
+        $dll = Join-Path $dir.FullName $DllName
         $cat = Get-ChildItem -LiteralPath $dir.FullName -Filter "*.cat" -File -ErrorAction SilentlyContinue |
             Select-Object -First 1
         $dllSig = if (Test-Path -LiteralPath $dll) { (Get-AuthenticodeSignature -LiteralPath $dll).Status } else { "Missing" }
@@ -260,11 +319,21 @@ function Write-IddSampleDriverStorePackages {
 }
 
 function Write-RecentKernelPnpEvents {
+    param(
+        [ValidateSet('Current', 'Legacy')]
+        [string] $IdentityKind
+    )
+
+    $pattern = if ($IdentityKind -eq 'Current') {
+        '(?i)SBMSIndirectDisplay|SWD\\SBMS\\VIRTUALDISPLAY-'
+    } else {
+        '(?i)IddSampleDriver|SWD\\IDDSAMPLEDRIVER\\'
+    }
     $events = Get-WinEvent -FilterHashtable @{
         ProviderName = "Microsoft-Windows-Kernel-PnP"
         StartTime = (Get-Date).AddHours(-6)
     } -ErrorAction SilentlyContinue | Where-Object {
-        $_.Message -match '(?i)IddSampleDriver'
+        $_.Message -match $pattern
     } | Select-Object -First 12
 
     foreach ($event in $events) {
@@ -272,7 +341,7 @@ function Write-RecentKernelPnpEvents {
         $summaryLines = New-Object System.Collections.Generic.List[string]
         $messageText = $event.Message.Replace("`r`n", "`n").Replace("`r", "`n")
         foreach ($line in $messageText.Split([char]10)) {
-            if ($line -match "(?i)IddSample|oem\d+\.inf|WUDFRd|IndirectKmd|0x[0-9A-F]+|Driver Name|Driver Version|Problem|Problem Status|Service|Configured|Started") {
+            if ($line -match "(?i)SBMSIndirectDisplay|SWD\\SBMS\\VIRTUALDISPLAY-|IddSample|oem\d+\.inf|WUDFRd|IndirectKmd|0x[0-9A-F]+|Driver Name|Driver Version|Problem|Problem Status|Service|Configured|Started") {
                 $summaryLines.Add($line.Trim())
             }
         }
@@ -318,7 +387,7 @@ Write-Host "admin=$IsAdmin"
 Write-Host "cwd=$PSScriptRoot"
 
 $releaseMetadata = Get-SBMSReleaseMetadata
-$packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter "IddSampleDriver.inf" -File -Recurse -ErrorAction SilentlyContinue |
+$packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter ([string]$DriverIdentity.package.infName) -File -Recurse -ErrorAction SilentlyContinue |
     Select-Object -First 1
 $installerVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMSSetup.exe")
 $driverVersion = if (-not [string]::IsNullOrWhiteSpace([string]$releaseMetadata.driverVersion)) {
@@ -367,11 +436,12 @@ Write-Host "== display list =="
 Write-DisplayList
 
 Write-Host ""
-Write-Host "== installed IddSampleDriver packages =="
-$foundDriver = $false
-foreach ($package in (Get-DriverPackages)) {
-    if ($package.OriginalName -ieq "iddsampledriver.inf") {
-        $foundDriver = $true
+Write-Host "== current SBMS driver packages =="
+$driverPackages = @(Get-DriverPackages)
+$foundCurrentDriver = $false
+foreach ($package in $driverPackages) {
+    if ($package.OriginalName -ieq [string]$DriverIdentity.package.infName) {
+        $foundCurrentDriver = $true
         Write-Host "PublishedName=$($package.PublishedName)"
         Write-Host "OriginalName=$($package.OriginalName)"
         Write-Host "ProviderName=$($package.ProviderName)"
@@ -381,25 +451,45 @@ foreach ($package in (Get-DriverPackages)) {
         Write-Host ""
     }
 }
-if (-not $foundDriver) {
-    Write-Host "No installed iddsampledriver.inf package found."
+if (-not $foundCurrentDriver) {
+    Write-Host "No installed $($DriverIdentity.package.infName) package found."
 }
 
 Write-Host ""
-Write-Host "== DriverStore IddSampleDriver payloads =="
-Write-IddSampleDriverStorePackages | Format-Table -AutoSize
+Write-Host "== current SBMS DriverStore payloads =="
+Write-SBMSDriverStorePackages -InfName ([string]$DriverIdentity.package.infName) -DllName ([string]$DriverIdentity.package.dllName) |
+    Format-Table -AutoSize
 
 Write-Host ""
-Write-Host "== active IddSample/SBMS PnP devices =="
-Write-SBMSDevices
+Write-Host "== current SBMS PnP devices =="
+Write-SBMSDevices -IdentityKind Current
 
 Write-Host ""
-Write-Host "== IddSample PnP properties =="
-Write-IddSampleDeviceProperties
+Write-Host "== current SBMS PnP properties =="
+Write-SBMSDeviceProperties -IdentityKind Current
 
 Write-Host ""
-Write-Host "== recent Kernel-PnP IddSample events =="
-Write-RecentKernelPnpEvents
+Write-Host "== recent current SBMS Kernel-PnP events =="
+Write-RecentKernelPnpEvents -IdentityKind Current
+
+Write-Host ""
+Write-Host "== legacy IddSample residue (report only) =="
+$foundLegacyDriver = $false
+foreach ($package in $driverPackages) {
+    if (@($DriverIdentity.legacy.packageOriginalNames) -icontains [string]$package.OriginalName) {
+        $foundLegacyDriver = $true
+        $package | Format-List
+    }
+}
+if (-not $foundLegacyDriver) {
+    Write-Host 'No installed legacy package found.'
+}
+Write-SBMSDriverStorePackages -InfName 'IddSampleDriver.inf' -DllName 'IddSampleDriver.dll' |
+    Format-Table -AutoSize
+Write-SBMSDevices -IdentityKind Legacy
+Write-SBMSDeviceProperties -IdentityKind Legacy
+Write-RecentKernelPnpEvents -IdentityKind Legacy
+Write-Host 'Legacy monitor hardware IDs are evidence only and are never cleanup targets without a proven legacy SBMS parent.'
 
 Write-Host ""
 Write-Host "== driver diagnostic log state =="
@@ -449,11 +539,11 @@ if ($TryHost) {
 
     Write-Host ""
     Write-Host "== PnP devices while host alive =="
-    Write-SBMSDevices
+    Write-SBMSDevices -IdentityKind Current
 
     Write-Host ""
-    Write-Host "== IddSample PnP properties while host alive =="
-    Write-IddSampleDeviceProperties
+    Write-Host "== current SBMS PnP properties while host alive =="
+    Write-SBMSDeviceProperties -IdentityKind Current
 
     if (-not $p.HasExited) {
         Write-Host "host still running; signaling stop"

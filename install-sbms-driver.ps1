@@ -29,7 +29,18 @@ function Assert-DriverPayload {
     )
 
     $Dir = $Inf.DirectoryName
-    $Dll = Join-Path $Dir "IddSampleDriver.dll"
+    $Dll = Join-Path $Dir "SBMSIndirectDisplay.dll"
+    $IdentityPath = Join-Path $Dir 'driver-identity.json'
+    if (-not (Test-Path -LiteralPath $IdentityPath -PathType Leaf)) {
+        throw "Driver identity contract is missing: $IdentityPath"
+    }
+    $Identity = Get-Content -LiteralPath $IdentityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$Identity.schemaVersion -ne 1 -or
+        [string]$Identity.package.infName -cne [string]$Inf.Name -or
+        [string]$Identity.package.dllName -cne 'SBMSIndirectDisplay.dll' -or
+        [string]$Identity.package.catalogName -cne 'sbmsindirectdisplay.cat') {
+        throw 'Driver payload does not match the SBMS identity contract.'
+    }
     $Cat = Get-ChildItem -LiteralPath $Dir -Filter "*.cat" -File -ErrorAction SilentlyContinue |
         Select-Object -First 1
 
@@ -117,11 +128,11 @@ $DriverSearchRoots = @(
 ) | Where-Object { Test-Path $_ }
 
 $Inf = $DriverSearchRoots |
-    ForEach-Object { Get-ChildItem $_ -Recurse -Filter "IddSampleDriver.inf" -ErrorAction SilentlyContinue } |
+    ForEach-Object { Get-ChildItem $_ -Recurse -Filter "SBMSIndirectDisplay.inf" -ErrorAction SilentlyContinue } |
     Where-Object {
         $Dir = $_.DirectoryName
-        (Test-Path (Join-Path $Dir "IddSampleDriver.dll")) -and
-        (Test-Path (Join-Path $Dir "IddSampleDriver.cat"))
+        (Test-Path (Join-Path $Dir "SBMSIndirectDisplay.dll")) -and
+        (Test-Path (Join-Path $Dir "sbmsindirectdisplay.cat"))
     } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
