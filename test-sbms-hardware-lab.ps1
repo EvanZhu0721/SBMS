@@ -1062,6 +1062,21 @@ try {
         Assert-ProductionLoadersUntouched -State $ctx.State
     }
 
+    Invoke-TestCase 'Rollback accepts an owned clone already removed from displayorder' {
+        $ctx = New-TestContext
+        $baselineDisplayOrder = @($ctx.State.DisplayOrder)
+        $null = Invoke-LabPhase -Context $ctx -Phase 'Prepare'
+        $null = Invoke-LabPhase -Context $ctx -Phase 'Arm'
+        $ctx.State.DisplayOrder = @($ctx.State.DisplayOrder | Where-Object { $_ -ne $script:CloneGuid })
+        $result = Invoke-LabPhase -Context $ctx -Phase 'Rollback'
+        Assert-Equal 'Cleaned' $result.state 'Rollback rejected the exact owned clone after displayorder returned to baseline.'
+        Assert-Equal 0 $ctx.State.Clones.Count 'Rollback left the exact owned clone after displayorder returned to baseline.'
+        Assert-Equal 0 $ctx.State.Tasks.Count 'Rollback left the watchdog after displayorder returned to baseline.'
+        Assert-Equal 0 @($ctx.State.BootSequence).Count 'Rollback left bootsequence armed after displayorder returned to baseline.'
+        Assert-Equal ($baselineDisplayOrder -join '|') (@($ctx.State.DisplayOrder) -join '|') 'Rollback changed the baseline displayorder.'
+        Assert-ProductionLoadersUntouched -State $ctx.State
+    }
+
     Invoke-TestCase 'zh-CN no-match output with exit zero is absent and Rollback reaches Cleaned' {
         $ctx = New-TestContext
         $ctx.State.MissingCloneEnumMode = 'SuccessNoMatch'

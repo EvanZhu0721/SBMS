@@ -702,5 +702,16 @@ Invoke-Test 'UAC poll forwarding and nonblocking per-Run mutex are statically pi
     Assert-True ($source -match 'force-killing powershell\.exe[\s\S]*boot watchdog') 'hard-kill watchdog recovery boundary is not documented'
 }
 
+Invoke-Test 'known failing TestSigning hardware Start is suspended before module import or mutation' {
+    $source = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lab\Invoke-SBMSIssue4Lab.ps1') -Raw -Encoding UTF8
+    $block = [regex]::Match(
+        $source,
+        "if \(\`$Phase -eq 'Start'\) \{\s*throw 'Issue #4 TestSigning hardware Start is suspended[\s\S]*?\}\s*Import-Module"
+    )
+    Assert-True $block.Success 'the known failing TestSigning Start path is not fail-closed before hardware module import'
+    Assert-True ($block.Value -match '7924eb2e-f15d-4c20-8a56-7ff9a59719dc') 'the suspension is not bound to the authoritative failed Gate B Run'
+    Assert-True ($block.Value -match 'Issue #18') 'the suspension does not identify the production-signing unlock condition'
+}
+
 Write-Host "Tests: $($script:Passed) passed, $($script:Failed) failed"
 if ($script:Failed -ne 0) { exit 1 }

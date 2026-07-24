@@ -449,7 +449,11 @@ function Assert-SBMSCloneDeletionSafe {
     $cloneGuid = [string]$Manifest.clone.guid
     if ([string]::IsNullOrWhiteSpace($cloneGuid)) { throw 'Clone deletion requires a non-empty manifest GUID.' }
     if (-not $CloneOwnershipProven) { throw 'Clone deletion requires exact ownership proof before displayorder drift can be accepted.' }
-    Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $state -AllowedDisplayOrderAddition $cloneGuid -AllowedBootSequenceClone $cloneGuid
+    if (@($state.displayOrder) -contains $cloneGuid) {
+        Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $state -AllowedDisplayOrderAddition $cloneGuid -AllowedBootSequenceClone $cloneGuid
+    } else {
+        Test-SBMSBaselineInvariant -Baseline $Manifest.baseline -Current $state -AllowedBootSequenceClone $cloneGuid
+    }
     if ($state.currentGuid -eq $cloneGuid) { throw 'Refusing to delete the currently active loader.' }
     if ($state.defaultGuid -eq $cloneGuid -or $state.resolvedDefaultGuid -eq $cloneGuid) { throw 'Refusing to delete the default loader.' }
     return $state

@@ -178,3 +178,20 @@ A second real `RecoveryDrill` qualified the rich watchdog path under Run ID `7db
 A preflight attempt also exposed silent timeout drift when an Audit-created manifest stored 8 minutes and Prepare explicitly requested 3. Commit `10016fd` now treats an explicitly rebound timeout as immutable and fail-closed before mutation, while never blocking ownership-safe Rollback; the wrapper forwards the timeout only when the operator explicitly supplied it. Windows PowerShell 5.1 and PowerShell 7 both pass 55/55 adapter-isolated tests.
 
 The rich one-time return-reboot foundation is now qualified. This still does not authorize Gate B Test Signing or Gate C driver mutation, and it does not substitute for the remaining display/recovery/endurance matrix.
+
+## 2026-07-25 Gate B failure and suspension
+
+Run `7924eb2e-f15d-4c20-8a56-7ff9a59719dc` reproduced loss of the RX 7900 XTX physical output while booted through the one-time Test Signing clone. This run is authoritative negative Gate B evidence:
+
+- the same-run Gate A baseline proved the physical G27K-180 path healthy at `5120x2880 @ 165 Hz`, both AMD adapters healthy, and no SBMS IDD package, reserved SWD, or product process present before reboot;
+- the hardware journal reached only `Armed`, and the Gate C journal contains only `Planned`;
+- no INF stage/install, SWD creation, indirect display arrival, device host, GUI, or supervised launch occurred;
+- the clone and default loader differed functionally only in `testsigning No` versus `testsigning Yes`;
+- the operator returned to the default loader after the physical output disappeared, and exact same-Run cleanup then removed the clone, watchdog, and active pointer without touching the default loader or display devices;
+- final read-back showed Test Signing disabled, no owned lab assets, and the RX 7900 XTX restored at `5120x2880 @ 165 Hz`.
+
+The earlier Run `87efa0e4-c2f3-430e-91a1-126eb77b9b26` reached Gate C and exposed duplicate legacy SWD/EDID and mode-selection defects, but those events cannot be the root cause of Run `7924eb2e` because Gate C never ran. The IDD arrival finding is therefore retained as a defect in the earlier run, not as a complete explanation of the physical-path failure class.
+
+The two successful `RecoveryDrill` runs qualified a normal clone and watchdog only; neither enabled Test Signing. Treating that result as evidence that a Test Signing clone was safe was an invalid extrapolation. Twelve non-present `DISPLAY\DELD0E6` child monitors remain a possible topology contaminant, but no failed-boot DxgKrnl/DisplayConfig evidence proves causality.
+
+`Invoke-SBMSIssue4Lab.ps1 -Phase Start` is now fail-closed. Do not perform another Test Signing plus IDD experiment on this workstation. Gate C hardware acceptance remains blocked until Issue #18 supplies a reviewed Microsoft-signed driver route that can run under the normal production boot policy.

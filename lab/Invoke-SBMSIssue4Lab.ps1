@@ -493,6 +493,10 @@ trap {
     exit 1
 }
 
+if ($Phase -eq 'Start') {
+    throw 'Issue #4 TestSigning hardware Start is suspended after Gate B failed before any Gate C install in Run 7924eb2e-f15d-4c20-8a56-7ff9a59719dc. Do not re-enable this path until Issue #18 provides a reviewed Microsoft-signed driver test route that does not require this workstation to boot with Test Signing.'
+}
+
 Import-Module (Join-Path $PSScriptRoot 'SBMS.HardwareLab.psm1') -Force
 if ($Phase -eq 'Start') {
     Import-Module (Join-Path $PSScriptRoot 'SBMS.GateC.psm1') -Force
