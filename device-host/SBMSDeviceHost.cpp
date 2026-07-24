@@ -11,6 +11,12 @@
 static const wchar_t* StopEventName = L"Local\\SBMSDeviceHostStop";
 static constexpr int MaxDeviceCount = 3;
 
+struct HostArgs
+{
+    int count = 1;
+    std::wstring startGate;
+};
+
 static void WINAPI CreationCallback(
     _In_ HSWDEVICE,
     _In_ HRESULT hrCreateResult,
@@ -24,27 +30,58 @@ static void WINAPI CreationCallback(
     SetEvent(eventHandle);
 }
 
-static int ParseDeviceCount(int argc, wchar_t** argv)
+static bool ParseArgs(int argc, wchar_t** argv, HostArgs& args)
 {
-    int count = 1;
     for (int i = 1; i < argc; ++i) {
         std::wstring arg = argv[i];
         if (arg == L"--count" && i + 1 < argc) {
-            count = _wtoi(argv[++i]);
+            args.count = _wtoi(argv[++i]);
+        } else if (arg == L"--start-gate" && i + 1 < argc) {
+            args.startGate = argv[++i];
         } else {
             std::printf("error=unknown_argument\n");
-            return -1;
+            return false;
         }
     }
-    return std::max(1, std::min(count, MaxDeviceCount));
+    args.count = std::max(1, std::min(args.count, MaxDeviceCount));
+    return true;
+}
+
+static bool WaitForStartGate(const std::wstring& name)
+{
+    if (name.empty()) {
+        return true;
+    }
+
+    HANDLE gate = OpenEventW(SYNCHRONIZE, FALSE, name.c_str());
+    if (!gate) {
+        std::printf("error=start_gate_open win32=%lu\n", GetLastError());
+        return false;
+    }
+
+    std::printf("start_gate=waiting\n");
+    std::fflush(stdout);
+    DWORD waitResult = WaitForSingleObject(gate, INFINITE);
+    CloseHandle(gate);
+    if (waitResult != WAIT_OBJECT_0) {
+        std::printf("error=start_gate_wait result=%lu\n", waitResult);
+        return false;
+    }
+    std::printf("start_gate=released\n");
+    std::fflush(stdout);
+    return true;
 }
 
 int wmain(int argc, wchar_t** argv)
 {
-    int requestedCount = ParseDeviceCount(argc, argv);
-    if (requestedCount < 0) {
+    HostArgs args;
+    if (!ParseArgs(argc, argv, args)) {
         return 2;
     }
+    if (!WaitForStartGate(args.startGate)) {
+        return 1;
+    }
+    int requestedCount = args.count;
 
     HANDLE createdEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!createdEvent) {

@@ -66,6 +66,12 @@ Invoke-Test 'Production preflight completes before user-mode builds' {
     Assert-True ($productionSource -match 'whqlManifest\.driverVer.+metadata\.DriverVer') 'WHQL DriverVer is not pinned to the release.'
 }
 
+Invoke-Test 'Production release builds, signs, and packages the recovery broker' {
+    Assert-True ($productionSource -match "build-sbms-recovery-broker\.ps1") 'Production release does not build the recovery broker.'
+    Assert-True ($productionSource -match '(?s)\$executables\s*=\s*@\(.+SBMSRecoveryBroker\.exe') 'Recovery broker is absent from the signing set.'
+    Assert-True ($productionSource -match '(?s)foreach \(\$name in @\(.+?''SBMSRecoveryBroker\.exe''') 'Recovery broker is absent from the production payload.'
+}
+
 Invoke-Test 'Production payload uses a signed CatalogVersion 2.0 boundary' {
     Assert-True ($productionSource -match 'New-FileCatalog.+CatalogVersion 2\.0') 'CatalogVersion 2.0 generation is missing.'
     $catalogStage = $productionSource.Substring(
@@ -204,3 +210,4 @@ Write-Host "Production release contract: $script:Passed passed, $script:Failed f
 if ($script:Failed -ne 0) {
     exit 1
 }
+$global:LASTEXITCODE = 0

@@ -9,7 +9,7 @@ SBMS production releases use two independently auditable signing stages.
 3. Import the Microsoft-returned driver package only if its INF and DLL still
    match the frozen candidate. The returned catalog must pass Windows
    kernel-policy verification.
-4. Build and sign the four user-mode executables with the explicit publisher
+4. Build and sign the five user-mode executables with the explicit publisher
    certificate, SHA-256 and an RFC3161 SHA-256 timestamp.
 5. Generate the SPDX SBOM and schema-v4 release manifest, then create a
    CatalogVersion 2.0 SHA-256 catalog over the complete release payload.

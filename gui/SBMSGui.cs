@@ -123,7 +123,14 @@ namespace SBMSGui
 
         private readonly NativeProcessSupervisor nativeSupervisor;
         private readonly DeviceHostSupervisor deviceHostSupervisor;
+        private readonly ChildProcessJob childProcessJob;
         private readonly BridgeLifecycle lifecycle = new BridgeLifecycle();
+        private readonly LifecycleRecoveryPolicy recoveryPolicy = new LifecycleRecoveryPolicy(
+            3,
+            TimeSpan.FromMilliseconds(250),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(30));
+        private System.Windows.Forms.Timer recoveryRetryTimer;
         private string lastNativeArgs = "";
         private string lastManagedVirtualResolution = "";
         private string lastManagedVirtualRefresh = "";
@@ -132,8 +139,13 @@ namespace SBMSGui
         private readonly string root;
         private readonly string nativeExe;
         private readonly string deviceHostExe;
+        private readonly string recoveryBrokerExe;
         private readonly string userDataDir;
         private readonly string configPath;
+        private readonly string recoveryRootDirectory;
+        private readonly string migrationSessionDirectory;
+        private System.Diagnostics.Process recoveryBrokerProcess;
+        private string startupRecoveryFailure = "";
         private readonly IConfigurationStore configurationStore = new XmlConfigurationStore();
         private readonly IDisplayModeService displayModeService = new DisplayModeService();
         private readonly ITopologyDiscoveryService topologyDiscoveryService = new TopologyDiscoveryService();
@@ -703,16 +715,26 @@ namespace SBMSGui
             root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory));
             nativeExe = Path.Combine(root, "SBMSNative.exe");
             deviceHostExe = Path.Combine(root, "SBMSDeviceHost.exe");
+            recoveryBrokerExe = Path.Combine(root, "SBMSRecoveryBroker.exe");
+            userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
+            recoveryRootDirectory = Path.Combine(userDataDir, "recovery");
+            migrationSessionDirectory = Path.Combine(
+                recoveryRootDirectory,
+                Guid.NewGuid().ToString("N"));
+            childProcessJob = new ChildProcessJob();
             nativeSupervisor = new NativeProcessSupervisor(
                 nativeExe,
                 root,
                 delegate(string line) { BeginInvoke((Action)delegate { AppendLog("[native] " + line); }); },
-                delegate(Action action) { BeginInvoke(action); });
+                delegate(Action action) { BeginInvoke(action); },
+                childProcessJob,
+                migrationSessionDirectory);
             deviceHostSupervisor = new DeviceHostSupervisor(
                 deviceHostExe,
                 root,
                 delegate(string line) { BeginInvoke((Action)delegate { AppendLog("[host] " + line); }); },
-                delegate(Action action) { BeginInvoke(action); });
+                delegate(Action action) { BeginInvoke(action); },
+                childProcessJob);
             recoveryProblemCheck = Environment.TickCount + 1500;
             topologyRecoveryService = new TopologyRecoveryService(
                 delegate { return CaptureNativeOutput("--list"); },
@@ -723,13 +745,17 @@ namespace SBMSGui
                     return topologyDiscoveryService.FindVirtualSourceMode(output, deviceName, resolution, GetCurrentDisplayModeOrNull);
                 },
                 (Func<string>)ProbeVirtualDisplayLoadFailure);
-            userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
             configPath = Path.Combine(userDataDir, "config.xml");
             logDirectory = Path.Combine(userDataDir, "logs");
             sessionLogPath = Path.Combine(logDirectory, "SBMS-" + DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture) + ".log");
             latestLogPath = Path.Combine(logDirectory, "latest.log");
             errorLogPath = Path.Combine(logDirectory, "error.log");
             InitializeDiagnostics();
+            startupRecoveryFailure = RecoverStaleWindowMigrations();
+            if (!string.IsNullOrWhiteSpace(startupRecoveryFailure))
+            {
+                AppendLog(startupRecoveryFailure);
+            }
 
             Text = AppName + " " + BuildLabel;
             StartPosition = FormStartPosition.CenterScreen;
@@ -837,7 +863,16 @@ namespace SBMSGui
             lightweightButton.Click += delegate { ToggleLightweightMode(); };
             listButton.Click += delegate { RunList(); };
             FormClosing += OnFormClosing;
-            FormClosed += delegate { trayIcon.Dispose(); };
+            FormClosed += delegate
+            {
+                trayIcon.Dispose();
+                childProcessJob.Dispose();
+                if (recoveryBrokerProcess != null)
+                {
+                    recoveryBrokerProcess.Dispose();
+                    recoveryBrokerProcess = null;
+                }
+            };
             ConfigureConfigurationPersistence();
             startupMenuItem.Checked = IsStartupEnabled();
             if (!configurationFileLoaded)
@@ -3547,7 +3582,9 @@ namespace SBMSGui
                     stateText = "停止中";
                     break;
                 case BridgeState.Error:
-                    stateText = running ? "异常（资源仍在运行）" : "异常";
+                    stateText = lifecycle.CleanupPending
+                        ? "异常（清理未完成）"
+                        : (running ? "异常（资源仍在运行）" : "异常");
                     break;
                 default:
                     stateText = running ? (multiBeta ? "多屏BETA运行中" : (streamOnly ? "串流中" : "运行中")) : "待机";
@@ -4777,12 +4814,19 @@ namespace SBMSGui
 
         private void StartBridge()
         {
+            if (lifecycle.CleanupPending)
+            {
+                AppendLog("上一次资源清理尚未完成，拒绝启动；请再次停止以重试清理。");
+                UpdateLifecycleUi();
+                return;
+            }
             if (IsBridgeSessionActive())
             {
                 return;
             }
             BridgeState previousState = lifecycle.State;
             long bridgeGeneration = lifecycle.BeginStart();
+            recoveryPolicy.Reset(bridgeGeneration);
             LogLifecycleTransition(previousState, "用户请求启动");
             startButton.Enabled = false;
             UpdateLifecycleUi();
@@ -4790,6 +4834,17 @@ namespace SBMSGui
             {
             SyncFirstBetaRowFromSingleControls();
             EnforceDefaultRuntimeOptions();
+            if (windowMoveCheck.Checked)
+            {
+                string brokerError;
+                if (!EnsureRecoveryBroker(bridgeGeneration, out brokerError))
+                {
+                    AbortBridgeStart(
+                        "窗口恢复 broker 启动失败: " + brokerError,
+                        bridgeGeneration);
+                    return;
+                }
+            }
             bool multiBeta = IsMultiMappingEnabled();
             bool streamOnly = streamModeCheck.Checked && !multiBeta;
             bool manageVirtualDisplay = deviceHostCheck.Checked || streamOnly;
@@ -5077,15 +5132,14 @@ namespace SBMSGui
                     BridgeState incompleteState = lifecycle.State;
                     if (IsBridgeRunning())
                     {
-                        lifecycle.MarkError(bridgeGeneration, "桥接启动未完成");
-                        LogLifecycleTransition(incompleteState, "桥接启动未完成");
+                        AbortBridgeStart("桥接启动未完成", bridgeGeneration);
                     }
                     else
                     {
                         long idleGeneration = lifecycle.BeginStop();
                         LogLifecycleTransition(incompleteState, "启动已取消");
                         incompleteState = lifecycle.State;
-                        lifecycle.MarkIdle(idleGeneration);
+                        lifecycle.CompleteStop(idleGeneration, "");
                         LogLifecycleTransition(incompleteState, "没有创建运行资源");
                     }
                     UpdateLifecycleUi();
@@ -5115,25 +5169,24 @@ namespace SBMSGui
                 }
                 if (IsRecoverableNativeDisplayExit(exitCode))
                 {
-                    AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出");
-                        BridgeState previousState = lifecycle.State;
-                        if (!lifecycle.BeginRecovery(processGeneration))
+                    string failure = GetRecoverableNativeExitMessage(exitCode) +
+                        " exit=" + exitCode.ToString(CultureInfo.InvariantCulture);
+                    Action restartAction = null;
+                    restartAction = delegate
+                    {
+                        if (!TryRestartNativeAfterTopologyChange(processGeneration))
                         {
-                            return;
+                            ScheduleRecoveryAttempt(
+                                processGeneration,
+                                "native restart failed after " + failure,
+                                restartAction);
                         }
-                        LogLifecycleTransition(previousState, GetRecoverableNativeExitMessage(exitCode));
-                    UpdateLifecycleUi();
-                    if (!TryRestartNativeAfterTopologyChange(processGeneration))
-                    {
-                        AbortBridgeStart("native 重启失败，已停止桥接", processGeneration);
-                    }
-                    else
-                    {
-                        previousState = lifecycle.State;
-                        lifecycle.MarkRunning(processGeneration);
-                        LogLifecycleTransition(previousState, "native 输出恢复完成");
-                        UpdateLifecycleUi();
-                    }
+                        else
+                        {
+                            CompleteBridgeRecovery(processGeneration, "native 输出恢复完成");
+                        }
+                    };
+                    ScheduleRecoveryAttempt(processGeneration, failure, restartAction);
                     return;
                 }
                 AbortBridgeStart("native 输出异常退出，已停止桥接", processGeneration);
@@ -5544,19 +5597,14 @@ namespace SBMSGui
 
         private void RestartBridgeAfterTopologyChange(string source, long generation)
         {
-            BridgeState previousState = lifecycle.State;
-            if (stoppingRequested || !lifecycle.BeginRecovery(generation))
+            ScheduleRecoveryAttempt(generation, source, delegate
             {
-                return;
-            }
-            LogLifecycleTransition(previousState, source);
-            UpdateLifecycleUi();
-            /*
-             * Issue #8: This path intentionally has no recovery-count fuse. Windows Settings
-             * may produce multiple short-lived topology/source snapshots while a user rotates
-             * or drags virtual monitors. Treat each recoverable exit as a fresh chance to
-             * settle, rebind, and rebuild native output while the device host stays alive.
-             */
+                PerformBridgeRecoveryAttempt(source, generation);
+            });
+        }
+
+        private void PerformBridgeRecoveryAttempt(string source, long generation)
+        {
             AppendLog("检测到显示拓扑/虚拟源变化，恢复 native 输出: " + source);
             try
             {
@@ -5573,35 +5621,44 @@ namespace SBMSGui
                  * user explicitly stops SBMS or exits the GUI.
                  */
                 stoppingRequested = true;
-                StopBetaProcesses();
-                nativeSupervisor.StopPrimary(AppendLog);
+                string stopFailure = StopBetaProcesses();
+                stopFailure = AppendStopFailure(
+                    stopFailure,
+                    nativeSupervisor.StopPrimary(AppendLog),
+                    "primary native");
+                if (!string.IsNullOrWhiteSpace(stopFailure))
+                {
+                    stoppingRequested = false;
+                    RetryBridgeRecovery(generation, source, stopFailure);
+                    return;
+                }
 
                 stoppingRequested = false;
 
                 string recoveryMessage;
                 if (!WaitForDisplayTopologyToSettle(DisplayTopologySettleTimeoutMs, generation, out recoveryMessage))
                 {
-                    FailBridgeRecovery(generation, recoveryMessage);
+                    RetryBridgeRecovery(generation, source, recoveryMessage);
                     return;
                 }
 
                 if (!RebindBetaTargetDisplays(out recoveryMessage))
                 {
-                    FailBridgeRecovery(generation, recoveryMessage);
+                    RetryBridgeRecovery(generation, source, recoveryMessage);
                     return;
                 }
 
                 List<BridgePairConfig> betaPairs;
                 if (!TryGetEnabledBridgePairs(false, out betaPairs, out recoveryMessage))
                 {
-                    FailBridgeRecovery(generation, recoveryMessage);
+                    RetryBridgeRecovery(generation, source, recoveryMessage);
                     return;
                 }
 
                 List<DisplayChoice> virtualSources;
                 if (!WaitForVirtualSources(betaPairs.Count, 15000, generation, out virtualSources, out recoveryMessage))
                 {
-                    FailBridgeRecovery(generation, (string.IsNullOrWhiteSpace(recoveryMessage)
+                    RetryBridgeRecovery(generation, source, (string.IsNullOrWhiteSpace(recoveryMessage)
                         ? "拓扑变化后等待虚拟显示器超时"
                         : recoveryMessage));
                     return;
@@ -5609,17 +5666,14 @@ namespace SBMSGui
 
                 if (!RestoreBetaVirtualModesAfterTopologyChange(virtualSources, betaPairs, followWindowsTopologyCheck.Checked, generation, out recoveryMessage))
                 {
-                    FailBridgeRecovery(generation, recoveryMessage);
+                    RetryBridgeRecovery(generation, source, recoveryMessage);
                     return;
                 }
 
                 int outputPairCount = CountOutputBridgePairs(betaPairs);
                 if (outputPairCount == 0)
                 {
-                    BridgeState recoveredState = lifecycle.State;
-                    lifecycle.MarkRunning(generation);
-                    LogLifecycleTransition(recoveredState, "仅虚拟桌面恢复完成");
-                    UpdateLifecycleUi();
+                    CompleteBridgeRecovery(generation, "仅虚拟桌面恢复完成");
                     AppendLog("拓扑变化后仍为仅虚拟桌面模式，未启动 native 输出");
                     AppendStreamOnlySunshineDisplayIds(virtualSources, betaPairs);
                     return;
@@ -5627,19 +5681,16 @@ namespace SBMSGui
 
                 if (!StartMultiScreenBeta(virtualSources, betaPairs))
                 {
-                    FailBridgeRecovery(generation, "拓扑变化后 native 输出恢复失败");
+                    RetryBridgeRecovery(generation, source, "拓扑变化后 native 输出恢复失败");
                     return;
                 }
 
-                BridgeState runningState = lifecycle.State;
-                lifecycle.MarkRunning(generation);
-                LogLifecycleTransition(runningState, "多屏 native 输出恢复完成");
-                UpdateLifecycleUi();
+                CompleteBridgeRecovery(generation, "多屏 native 输出恢复完成");
                 AppendLog("拓扑变化后 native 输出已恢复，虚拟显示器 host 未重启");
             }
             catch (Exception ex)
             {
-                FailBridgeRecovery(generation, "拓扑变化恢复异常: " + ex.Message);
+                RetryBridgeRecovery(generation, source, "拓扑变化恢复异常: " + ex.Message);
             }
             finally
             {
@@ -6100,9 +6151,20 @@ namespace SBMSGui
             AppendLog(CaptureNativeOutput("--list").TrimEnd());
         }
 
-        private void StopBetaProcesses()
+        private string StopBetaProcesses()
         {
-            nativeSupervisor.StopAllBeta(AppendLog);
+            bool allExited;
+            return StopBetaProcesses(out allExited);
+        }
+
+        private string StopBetaProcesses(out bool allExited)
+        {
+            ProcessStopResult result = nativeSupervisor.StopAllBeta(AppendLog);
+            allExited = result.Exited && !nativeSupervisor.HasCleanupPending;
+            return AppendStopFailure(
+                "",
+                result,
+                "beta native");
         }
 
         private void AbortBridgeStart(string message, long expectedGeneration)
@@ -6111,9 +6173,16 @@ namespace SBMSGui
             {
                 return;
             }
+            CancelPendingRecovery();
             BridgeState previousState = lifecycle.State;
-            long cleanupGeneration = lifecycle.BeginStop();
+            long cleanupGeneration = lifecycle.BeginStop(message);
             LogLifecycleTransition(previousState, "启动/运行失败，开始清理");
+            if (previousState == BridgeState.Stopping)
+            {
+                AppendLog("cleanup request coalesced generation=" +
+                    cleanupGeneration.ToString(CultureInfo.InvariantCulture));
+                return;
+            }
             UpdateLifecycleUi();
             if (!string.IsNullOrWhiteSpace(message))
             {
@@ -6121,13 +6190,41 @@ namespace SBMSGui
             }
 
             stoppingRequested = true;
-            StopBetaProcesses();
-            nativeSupervisor.StopPrimary(AppendLog);
+            bool betaExited;
+            string cleanupError = StopBetaProcesses(out betaExited);
+            ProcessStopResult primaryStop =
+                nativeSupervisor.StopPrimary(AppendLog);
+            cleanupError = AppendStopFailure(
+                cleanupError,
+                primaryStop,
+                "primary native");
 
-            StopDeviceHost();
-            if (!WaitForVirtualDisplaysToClear(5000))
+            bool nativeExited = betaExited &&
+                primaryStop.Exited &&
+                !nativeSupervisor.HasCleanupPending;
+            if (nativeExited)
+            {
+                cleanupError = AppendCleanupError(
+                    cleanupError,
+                    RecoverCurrentWindowMigrationsForCleanup());
+            }
+            else
+            {
+                cleanupError = AppendCleanupError(
+                    cleanupError,
+                    "native cleanup pending; window migration recovery deferred");
+            }
+
+            bool hostExited;
+            cleanupError = AppendCleanupError(
+                cleanupError,
+                StopDeviceHost(out hostExited));
+            if (hostExited && !WaitForVirtualDisplaysToClear(5000))
             {
                 AppendLog("虚拟显示器未在超时内全部移除，已刷新当前列表");
+                cleanupError = AppendCleanupError(
+                    cleanupError,
+                    "virtual display cleanup timeout after 5000ms");
             }
             else
             {
@@ -6136,7 +6233,11 @@ namespace SBMSGui
             lastNativeArgs = "";
             stoppingRequested = false;
             previousState = lifecycle.State;
-            lifecycle.MarkError(cleanupGeneration, message);
+            lifecycle.CompleteStop(
+                cleanupGeneration,
+                cleanupError,
+                nativeSupervisor.HasCleanupPending ||
+                deviceHostSupervisor.HasCleanupPending);
             LogLifecycleTransition(previousState, message);
             UpdateLifecycleUi();
         }
@@ -6157,19 +6258,56 @@ namespace SBMSGui
 
         private void StopBridge()
         {
+            CancelPendingRecovery();
             BridgeState previousState = lifecycle.State;
             long stopGeneration = lifecycle.BeginStop();
             LogLifecycleTransition(previousState, "用户请求停止");
+            if (previousState == lifecycle.State ||
+                lifecycle.State == BridgeState.Idle)
+            {
+                UpdateLifecycleUi();
+                return;
+            }
             stoppingRequested = true;
             UpdateLifecycleUi();
-            StopBetaProcesses();
-            nativeSupervisor.StopPrimary(AppendLog);
-            StopDeviceHost();
+            bool betaExited;
+            string cleanupError = StopBetaProcesses(out betaExited);
+            ProcessStopResult primaryStop =
+                nativeSupervisor.StopPrimary(AppendLog);
+            cleanupError = AppendStopFailure(
+                cleanupError,
+                primaryStop,
+                "primary native");
+            bool nativeExited = betaExited &&
+                primaryStop.Exited &&
+                !nativeSupervisor.HasCleanupPending;
+            if (nativeExited)
+            {
+                cleanupError = AppendCleanupError(
+                    cleanupError,
+                    RecoverCurrentWindowMigrationsForCleanup());
+            }
+            else
+            {
+                cleanupError = AppendCleanupError(
+                    cleanupError,
+                    "native cleanup pending; window migration recovery deferred");
+            }
+            bool hostExited;
+            cleanupError = AppendCleanupError(
+                cleanupError,
+                StopDeviceHost(out hostExited));
             lastNativeArgs = "";
             stoppingRequested = false;
             previousState = lifecycle.State;
-            lifecycle.MarkIdle(stopGeneration);
-            LogLifecycleTransition(previousState, "资源清理完成");
+            lifecycle.CompleteStop(
+                stopGeneration,
+                cleanupError,
+                nativeSupervisor.HasCleanupPending ||
+                deviceHostSupervisor.HasCleanupPending);
+            LogLifecycleTransition(
+                previousState,
+                string.IsNullOrWhiteSpace(cleanupError) ? "资源清理完成" : cleanupError);
             UpdateLifecycleUi();
         }
 
@@ -6182,11 +6320,8 @@ namespace SBMSGui
         private void FailBridgeRecovery(long generation, string message)
         {
             string detail = string.IsNullOrWhiteSpace(message) ? "拓扑变化恢复失败" : message;
-            AppendLog(detail + "，虚拟显示器保持运行，可手动停止后重试");
-            BridgeState previousState = lifecycle.State;
-            lifecycle.MarkError(generation, detail);
-            LogLifecycleTransition(previousState, detail);
-            UpdateLifecycleUi();
+            AppendLog(detail + "，恢复预算已耗尽，开始完整清理");
+            AbortBridgeStart(detail, generation);
         }
 
         private bool IsBridgeSessionActive()
@@ -6195,7 +6330,8 @@ namespace SBMSGui
                    lifecycle.State == BridgeState.Starting ||
                    lifecycle.State == BridgeState.Running ||
                    lifecycle.State == BridgeState.Recovering ||
-                   lifecycle.State == BridgeState.Stopping;
+                   lifecycle.State == BridgeState.Stopping ||
+                   lifecycle.CleanupPending;
         }
 
         private bool IsDeviceHostRunning()
@@ -6258,9 +6394,20 @@ namespace SBMSGui
             Close();
         }
 
-        private void StopDeviceHost()
+        private string StopDeviceHost()
         {
-            deviceHostSupervisor.Stop(AppendLog);
+            bool exited;
+            return StopDeviceHost(out exited);
+        }
+
+        private string StopDeviceHost(out bool exited)
+        {
+            ProcessStopResult result = deviceHostSupervisor.Stop(AppendLog);
+            exited = result.Exited && !deviceHostSupervisor.HasCleanupPending;
+            return AppendStopFailure(
+                "",
+                result,
+                "device host");
         }
 
         private static bool IsRunningAsAdministrator()
@@ -6389,9 +6536,381 @@ namespace SBMSGui
         private void CompleteBridgeStart(long generation)
         {
             BridgeState previousState = lifecycle.State;
-            lifecycle.MarkRunning(generation);
-            LogLifecycleTransition(previousState, "桥接资源已就绪");
-            UpdateLifecycleUi();
+            if (lifecycle.MarkRunning(generation))
+            {
+                LogLifecycleTransition(previousState, "桥接资源已就绪");
+                UpdateLifecycleUi();
+            }
+        }
+
+        private void ScheduleRecoveryAttempt(long generation, string failure, Action attempt)
+        {
+            if (stoppingRequested ||
+                !lifecycle.IsCurrent(generation) ||
+                (lifecycle.State != BridgeState.Running && lifecycle.State != BridgeState.Recovering))
+            {
+                return;
+            }
+
+            if (recoveryRetryTimer != null)
+            {
+                AppendLog("recovery trigger coalesced generation=" +
+                    generation.ToString(CultureInfo.InvariantCulture) +
+                    " failure=" + failure);
+                return;
+            }
+
+            LifecycleRecoveryDecision decision = recoveryPolicy.RegisterFailure(
+                generation,
+                DateTimeOffset.UtcNow,
+                failure);
+            AppendLog(decision.FormatLog());
+            if (!decision.ShouldRetry)
+            {
+                FailBridgeRecovery(generation, decision.TerminalFailure);
+                return;
+            }
+
+            if (lifecycle.State == BridgeState.Running)
+            {
+                BridgeState previousState = lifecycle.State;
+                if (!lifecycle.BeginRecovery(generation))
+                {
+                    return;
+                }
+                LogLifecycleTransition(previousState, failure);
+                UpdateLifecycleUi();
+            }
+
+            recoveryRetryTimer = new System.Windows.Forms.Timer();
+            recoveryRetryTimer.Interval = Math.Max(1, (int)decision.Delay.TotalMilliseconds);
+            recoveryRetryTimer.Tick += delegate
+            {
+                System.Windows.Forms.Timer timer = recoveryRetryTimer;
+                recoveryRetryTimer = null;
+                if (timer != null)
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                }
+                if (!stoppingRequested &&
+                    lifecycle.IsCurrent(generation) &&
+                    lifecycle.State == BridgeState.Recovering)
+                {
+                    attempt();
+                }
+            };
+            recoveryRetryTimer.Start();
+        }
+
+        private void RetryBridgeRecovery(long generation, string source, string failure)
+        {
+            string detail = string.IsNullOrWhiteSpace(failure)
+                ? "topology recovery failed"
+                : failure;
+            ScheduleRecoveryAttempt(generation, detail, delegate
+            {
+                PerformBridgeRecoveryAttempt(source, generation);
+            });
+        }
+
+        private void CompleteBridgeRecovery(long generation, string reason)
+        {
+            BridgeState previousState = lifecycle.State;
+            if (lifecycle.MarkRunning(generation))
+            {
+                recoveryPolicy.MarkRecoverySucceeded(generation, DateTimeOffset.UtcNow);
+                LogLifecycleTransition(previousState, reason);
+                UpdateLifecycleUi();
+            }
+        }
+
+        private void CancelPendingRecovery()
+        {
+            System.Windows.Forms.Timer timer = recoveryRetryTimer;
+            recoveryRetryTimer = null;
+            if (timer != null)
+            {
+                timer.Stop();
+                timer.Dispose();
+            }
+        }
+
+        private bool EnsureRecoveryBroker(long generation, out string error)
+        {
+            error = "";
+            if (!string.IsNullOrWhiteSpace(startupRecoveryFailure))
+            {
+                error = startupRecoveryFailure;
+                return false;
+            }
+            if (recoveryBrokerProcess != null)
+            {
+                try
+                {
+                    if (!recoveryBrokerProcess.HasExited)
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                }
+                recoveryBrokerProcess.Dispose();
+                recoveryBrokerProcess = null;
+            }
+            if (!File.Exists(recoveryBrokerExe))
+            {
+                error = "missing " + recoveryBrokerExe;
+                return false;
+            }
+
+            Directory.CreateDirectory(migrationSessionDirectory);
+            using (var ready = new ManualResetEvent(false))
+            {
+                var broker = new System.Diagnostics.Process();
+                var diagnostics = new StringBuilder();
+                System.Diagnostics.Process current = System.Diagnostics.Process.GetCurrentProcess();
+                broker.StartInfo.FileName = recoveryBrokerExe;
+                broker.StartInfo.Arguments =
+                    "watch --gui-pid " + current.Id.ToString(CultureInfo.InvariantCulture) +
+                    " --gui-start-time " + current.StartTime.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture) +
+                    " --session-dir \"" + migrationSessionDirectory + "\"";
+                broker.StartInfo.WorkingDirectory = root;
+                broker.StartInfo.UseShellExecute = false;
+                broker.StartInfo.CreateNoWindow = true;
+                broker.StartInfo.RedirectStandardOutput = true;
+                broker.StartInfo.RedirectStandardError = true;
+                broker.StartInfo.StandardOutputEncoding = Encoding.UTF8;
+                broker.StartInfo.StandardErrorEncoding = Encoding.UTF8;
+                broker.EnableRaisingEvents = true;
+                System.Diagnostics.DataReceivedEventHandler outputHandler = delegate(object sender, System.Diagnostics.DataReceivedEventArgs eventArgs)
+                {
+                    if (eventArgs.Data == null)
+                    {
+                        return;
+                    }
+                    lock (diagnostics)
+                    {
+                        diagnostics.AppendLine(eventArgs.Data);
+                    }
+                    if (eventArgs.Data.StartsWith("broker=ready", StringComparison.Ordinal))
+                    {
+                        ready.Set();
+                    }
+                };
+                broker.OutputDataReceived += outputHandler;
+                broker.ErrorDataReceived += outputHandler;
+                broker.Exited += delegate
+                {
+                    try
+                    {
+                        BeginInvoke((Action)delegate
+                        {
+                            if (lifecycle.IsCurrent(generation) && IsBridgeSessionActive())
+                            {
+                                AbortBridgeStart("窗口恢复 broker 异常退出", generation);
+                            }
+                        });
+                    }
+                    catch
+                    {
+                    }
+                };
+
+                try
+                {
+                    if (!broker.Start())
+                    {
+                        error = "Process.Start returned false";
+                        broker.Dispose();
+                        return false;
+                    }
+                    recoveryBrokerProcess = broker;
+                    broker.BeginOutputReadLine();
+                    broker.BeginErrorReadLine();
+                    if (!ready.WaitOne(5000))
+                    {
+                        lock (diagnostics)
+                        {
+                            error = "ready timeout after 5000ms " + diagnostics.ToString().Trim();
+                        }
+                        KillProcessQuietly(broker);
+                        broker.Dispose();
+                        recoveryBrokerProcess = null;
+                        return false;
+                    }
+                    AppendLog("recovery broker ready pid=" +
+                        broker.Id.ToString(CultureInfo.InvariantCulture));
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    error = ex.Message;
+                    KillProcessQuietly(broker);
+                    broker.Dispose();
+                    recoveryBrokerProcess = null;
+                    return false;
+                }
+            }
+        }
+
+        private string RecoverStaleWindowMigrations()
+        {
+            string[] sessionDirectories;
+            try
+            {
+                if (!Directory.Exists(recoveryRootDirectory))
+                {
+                    return "";
+                }
+                sessionDirectories = Directory.GetDirectories(
+                    recoveryRootDirectory,
+                    "*",
+                    SearchOption.TopDirectoryOnly);
+            }
+            catch (Exception ex)
+            {
+                if (!IsRecoveryFileSystemFailure(ex))
+                {
+                    throw;
+                }
+                return "stale window migration root enumeration failed: " + ex.Message;
+            }
+            var journal = new WindowMigrationJournal(new Win32WindowRecoveryApi());
+            int unresolved = 0;
+            foreach (string sessionDirectory in sessionDirectories)
+            {
+                WindowMigrationRecoveryLease lease;
+                try
+                {
+                    if (!WindowMigrationRecoveryLease.TryAcquire(
+                        sessionDirectory,
+                        6000,
+                        out lease))
+                    {
+                        WriteDiagnosticLine(
+                            "window recovery busy; broker owns session=" + sessionDirectory,
+                            false);
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (!IsRecoveryFileSystemFailure(ex))
+                    {
+                        throw;
+                    }
+                    ++unresolved;
+                    WriteDiagnosticLine(
+                        "window recovery lease failed session=" + sessionDirectory +
+                        " error=" + ex.Message,
+                        true);
+                    continue;
+                }
+                using (lease)
+                {
+                    WindowMigrationRecoveryResult result = journal.RecoverDirectory(sessionDirectory);
+                    unresolved += result.Unresolved;
+                }
+            }
+            return unresolved == 0
+                ? ""
+                : "stale window migration recovery unresolved=" +
+                   unresolved.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private static bool IsRecoveryFileSystemFailure(Exception error)
+        {
+            return error is IOException ||
+                   error is UnauthorizedAccessException ||
+                   error is System.Security.SecurityException ||
+                   error is ArgumentException ||
+                   error is NotSupportedException;
+        }
+
+        private string RecoverCurrentWindowMigrations()
+        {
+            WindowMigrationRecoveryLease lease;
+            if (!WindowMigrationRecoveryLease.TryAcquire(
+                migrationSessionDirectory,
+                5000,
+                out lease))
+            {
+                return "window migration recovery busy timeoutMs=5000";
+            }
+            WindowMigrationRecoveryResult result;
+            using (lease)
+            {
+                result = new WindowMigrationJournal(new Win32WindowRecoveryApi())
+                    .RecoverDirectory(migrationSessionDirectory);
+            }
+            if (result.Unresolved > 0)
+            {
+                return "window migration recovery unresolved=" +
+                    result.Unresolved.ToString(CultureInfo.InvariantCulture);
+            }
+            if (result.Restored > 0 || result.AlreadyOriginal > 0)
+            {
+                AppendLog(
+                    "window migration recovery prepared=" +
+                    result.Prepared.ToString(CultureInfo.InvariantCulture) +
+                    " restored=" + result.Restored.ToString(CultureInfo.InvariantCulture) +
+                    " alreadyOriginal=" + result.AlreadyOriginal.ToString(CultureInfo.InvariantCulture));
+            }
+            return "";
+        }
+
+        private string RecoverCurrentWindowMigrationsForCleanup()
+        {
+            try
+            {
+                return RecoverCurrentWindowMigrations();
+            }
+            catch (Exception ex)
+            {
+                return "window migration recovery exception=" + ex.Message;
+            }
+        }
+
+        private static string AppendCleanupError(string current, string next)
+        {
+            if (string.IsNullOrWhiteSpace(current))
+            {
+                return next ?? "";
+            }
+            if (string.IsNullOrWhiteSpace(next))
+            {
+                return current;
+            }
+            return current + "; " + next;
+        }
+
+        private static string AppendStopFailure(
+            string current,
+            ProcessStopResult result,
+            string component)
+        {
+            if (result == null || result.Succeeded)
+            {
+                return current ?? "";
+            }
+            return AppendCleanupError(current, result.Format(component));
+        }
+
+        private static void KillProcessQuietly(System.Diagnostics.Process process)
+        {
+            try
+            {
+                if (process != null && !process.HasExited)
+                {
+                    process.Kill();
+                    process.WaitForExit(1000);
+                }
+            }
+            catch
+            {
+            }
         }
 
         private void UpdateLifecycleUi()
@@ -6462,6 +6981,27 @@ namespace SBMSGui
                 }
                 MainForm.WriteFatalError("domain", exception);
             };
+            bool ownsInstance;
+            using (var instanceMutex = new Mutex(
+                true,
+                @"Local\SBMS.Gui.Singleton",
+                out ownsInstance))
+            {
+                if (!ownsInstance)
+                {
+                    if (args.Length > 0 &&
+                        args[0].EndsWith("-probe", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Environment.ExitCode = 3;
+                        return;
+                    }
+                    MessageBox.Show(
+                        "SBMS 已在当前 Windows 会话中运行。",
+                        "SBMS",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+                    return;
+                }
             if (args.Length >= 2 && string.Equals(args[0], "--config-probe", StringComparison.OrdinalIgnoreCase))
             {
                 using (var form = new MainForm())
@@ -6507,6 +7047,7 @@ namespace SBMSGui
                 return;
             }
             Application.Run(new MainForm());
+            }
         }
     }
 }

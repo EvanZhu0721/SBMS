@@ -573,6 +573,7 @@ namespace SBMSSetup
             RequireFile("SBMS.exe");
             RequireFile("SBMSNative.exe");
             RequireFile("SBMSDeviceHost.exe");
+            RequireFile("SBMSRecoveryBroker.exe");
             RequireFile("install-sbms-driver.ps1");
             RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "SBMSIndirectDisplay.inf"));
             RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "SBMSIndirectDisplay.dll"));
@@ -594,7 +595,7 @@ namespace SBMSSetup
 
         private void EnsureNotRunning()
         {
-            string[] names = { "SBMS", "SBMSNative", "SBMSDeviceHost" };
+            string[] names = { "SBMS", "SBMSNative", "SBMSDeviceHost", "SBMSRecoveryBroker" };
             foreach (string name in names)
             {
                 Process[] processes = Process.GetProcessesByName(name);

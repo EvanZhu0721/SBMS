@@ -74,7 +74,7 @@ foreach ($case in $mappingCases) {
         Assert-Equal $true $result.IsPrerelease 'Prerelease flag mismatch.'
         Assert-Equal "v$version" $result.TagName 'Tag mismatch.'
         Assert-Equal "SBMS-$version-windows-x64.zip" $result.PackageFileName 'Package mismatch.'
-    }.GetNewClosure()
+    }
 }
 
 Invoke-TestCase 'All numeric component boundaries are accepted' {
@@ -112,7 +112,7 @@ $invalidVersions = @(
 foreach ($invalid in $invalidVersions) {
     Invoke-TestCase "Reject invalid version [$($invalid.Replace("`n", '\n'))]" {
         Assert-Throws { ConvertFrom-SBMSVersion $invalid } 'Invalid version was accepted.'
-    }.GetNewClosure()
+    }
 }
 
 Invoke-TestCase 'VERSION reader allows one final line ending' {
@@ -423,6 +423,9 @@ Invoke-TestCase 'Release manifest contains reproducible source and package data'
     Assert-Equal 'SBMSDeviceHost.exe' $data.components.deviceHost.artifactName 'DeviceHost artifact name mismatch.'
     Assert-Equal '4.5.6-dev.7' $data.components.deviceHost.productVersion 'DeviceHost product version mismatch.'
     Assert-Equal '4.5.6.7' $data.components.deviceHost.fileVersion 'DeviceHost file version mismatch.'
+    Assert-Equal 'SBMSRecoveryBroker.exe' $data.components.recoveryBroker.artifactName 'RecoveryBroker artifact name mismatch.'
+    Assert-Equal '4.5.6-dev.7' $data.components.recoveryBroker.productVersion 'RecoveryBroker product version mismatch.'
+    Assert-Equal '4.5.6.7' $data.components.recoveryBroker.fileVersion 'RecoveryBroker file version mismatch.'
     Assert-Equal 'SBMSIndirectDisplay.dll' $data.components.driver.artifactName 'Driver artifact name mismatch.'
     Assert-Equal 'SBMSIndirectDisplay.inf' $data.components.driver.infName 'Driver INF name mismatch.'
     Assert-Equal '4.5.6-dev.7' $data.components.driver.productVersion 'Driver product version mismatch.'

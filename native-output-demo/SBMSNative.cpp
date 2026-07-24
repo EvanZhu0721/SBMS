@@ -46,7 +46,11 @@ struct DxOutputInfo {
 
 struct WindowMoveRecord {
     HWND hwnd = nullptr;
+    DWORD processId = 0;
+    unsigned long long processCreationTime = 0;
     RECT originalRect{};
+    RECT migratedRect{};
+    WINDOWPLACEMENT originalPlacement{};
 };
 
 struct WindowMigrationState {
@@ -60,6 +64,7 @@ struct WindowMigrationState {
 
 static bool g_running = true;
 static WindowMigrationState g_windowMigration;
+static std::wstring g_windowMigrationJournal;
 
 static void Check(HRESULT hr, const char* what) {
     if (FAILED(hr)) {
@@ -272,6 +277,31 @@ static RECT MapRectBetweenDisplays(const RECT& rect, const RECT& fromRect, const
     return mapped;
 }
 
+static RECT ClampRectToNearestMonitorWorkArea(const RECT& rect) {
+    RECT candidate = rect;
+    HMONITOR monitor = MonitorFromRect(&candidate, MONITOR_DEFAULTTONEAREST);
+    if (!monitor) {
+        return rect;
+    }
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+        return rect;
+    }
+
+    const LONG workWidth = std::max<LONG>(1, Width(info.rcWork));
+    const LONG workHeight = std::max<LONG>(1, Height(info.rcWork));
+    const LONG width = std::min(std::max<LONG>(1, Width(rect)), workWidth);
+    const LONG height = std::min(std::max<LONG>(1, Height(rect)), workHeight);
+    const LONG left = std::max(
+        info.rcWork.left,
+        std::min(rect.left, info.rcWork.right - width));
+    const LONG top = std::max(
+        info.rcWork.top,
+        std::min(rect.top, info.rcWork.bottom - height));
+    return RECT{left, top, left + width, top + height};
+}
+
 static bool IsShellOrSystemWindow(HWND hwnd) {
     wchar_t className[128]{};
     GetClassNameW(hwnd, className, ARRAYSIZE(className));
@@ -363,6 +393,92 @@ static WindowMoveRecord* FindWindowMoveRecord(HWND hwnd) {
     return it == g_windowMigration.moved.end() ? nullptr : &(*it);
 }
 
+static bool GetProcessCreationTime(DWORD processId, unsigned long long& creationTime) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) {
+        return false;
+    }
+    FILETIME created{}, exited{}, kernel{}, user{};
+    BOOL ok = GetProcessTimes(process, &created, &exited, &kernel, &user);
+    CloseHandle(process);
+    if (!ok) {
+        return false;
+    }
+    creationTime =
+        (static_cast<unsigned long long>(created.dwHighDateTime) << 32) |
+        static_cast<unsigned long long>(created.dwLowDateTime);
+    return true;
+}
+
+static std::string FormatJournalRect(const RECT& rect) {
+    std::ostringstream text;
+    text << rect.left << "," << rect.top << "," << rect.right << "," << rect.bottom;
+    return text.str();
+}
+
+static bool AppendJournalLine(const std::string& line) {
+    if (g_windowMigrationJournal.empty()) {
+        return false;
+    }
+
+    HANDLE file = CreateFileW(
+        g_windowMigrationJournal.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    std::string terminated = line + "\r\n";
+    DWORD written = 0;
+    BOOL writeOk = WriteFile(
+        file,
+        terminated.data(),
+        static_cast<DWORD>(terminated.size()),
+        &written,
+        nullptr);
+    BOOL flushOk = writeOk ? FlushFileBuffers(file) : FALSE;
+    CloseHandle(file);
+    return writeOk && written == terminated.size() && flushOk;
+}
+
+static bool AppendPreparedRecord(const WindowMoveRecord& record) {
+    std::ostringstream line;
+    const WINDOWPLACEMENT& placement = record.originalPlacement;
+    line << "SBMSWM2|P|"
+         << std::hex << std::uppercase
+         << reinterpret_cast<unsigned long long>(record.hwnd)
+         << "|" << std::dec << record.processId
+         << "|" << std::hex << std::uppercase << record.processCreationTime
+         << "|" << FormatJournalRect(record.originalRect)
+         << "|" << FormatJournalRect(record.migratedRect)
+         << "|" << FormatJournalRect(g_windowMigration.fromRect)
+         << "|" << FormatJournalRect(g_windowMigration.toRect)
+         << "|" << std::dec
+         << placement.flags << ","
+         << placement.showCmd << ","
+         << placement.ptMinPosition.x << ","
+         << placement.ptMinPosition.y << ","
+         << placement.ptMaxPosition.x << ","
+         << placement.ptMaxPosition.y << ","
+         << FormatJournalRect(placement.rcNormalPosition);
+    return AppendJournalLine(line.str());
+}
+
+static bool AppendResolvedRecord(const WindowMoveRecord& record) {
+    std::ostringstream line;
+    line << "SBMSWM2|R|"
+         << std::hex << std::uppercase
+         << reinterpret_cast<unsigned long long>(record.hwnd)
+         << "|" << std::dec << record.processId
+         << "|" << std::hex << std::uppercase << record.processCreationTime;
+    return AppendJournalLine(line.str());
+}
+
 static BOOL CALLBACK MoveWindowsToSourceProc(HWND hwnd, LPARAM) {
     if (!IsMovableTopLevelWindow(hwnd)) {
         return TRUE;
@@ -377,6 +493,25 @@ static BOOL CALLBACK MoveWindowsToSourceProc(HWND hwnd, LPARAM) {
     WindowMoveRecord* existingRecord = FindWindowMoveRecord(hwnd);
 
     RECT mapped = MapRectBetweenDisplays(rect, g_windowMigration.fromRect, g_windowMigration.toRect);
+    if (!existingRecord) {
+        DWORD processId = 0;
+        GetWindowThreadProcessId(hwnd, &processId);
+        WindowMoveRecord record{};
+        record.hwnd = hwnd;
+        record.processId = processId;
+        record.originalRect = rect;
+        record.migratedRect = mapped;
+        record.originalPlacement.length = sizeof(record.originalPlacement);
+        if (processId == 0 ||
+            !GetProcessCreationTime(processId, record.processCreationTime) ||
+            !GetWindowPlacement(hwnd, &record.originalPlacement) ||
+            !AppendPreparedRecord(record)) {
+            std::cerr << "window_migration=journal_prepare_failed\n";
+            return TRUE;
+        }
+        g_windowMigration.moved.push_back(record);
+        existingRecord = &g_windowMigration.moved.back();
+    }
     SetWindowPos(
         hwnd,
         nullptr,
@@ -385,9 +520,6 @@ static BOOL CALLBACK MoveWindowsToSourceProc(HWND hwnd, LPARAM) {
         Width(mapped),
         Height(mapped),
         SWP_NOZORDER | SWP_NOACTIVATE);
-    if (!existingRecord) {
-        g_windowMigration.moved.push_back({hwnd, rect});
-    }
     return TRUE;
 }
 
@@ -435,25 +567,37 @@ static void RestoreMigratedWindows() {
     size_t restored = 0;
     for (const auto& record : g_windowMigration.moved) {
         HWND hwnd = record.hwnd;
-        if (!IsWindow(hwnd) || !IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+        if (!IsWindow(hwnd)) {
+            AppendResolvedRecord(record);
+            continue;
+        }
+        DWORD currentProcessId = 0;
+        unsigned long long currentCreationTime = 0;
+        GetWindowThreadProcessId(hwnd, &currentProcessId);
+        if (currentProcessId != record.processId ||
+            !GetProcessCreationTime(currentProcessId, currentCreationTime) ||
+            currentCreationTime != record.processCreationTime) {
+            AppendResolvedRecord(record);
+            continue;
+        }
+        if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+            // Keep the durable PREPARE record. A hidden or minimized window can
+            // become visible again, and resolving it here would lose the only
+            // safe restore path after this process exits.
             continue;
         }
         RECT rect{};
         if (!GetWindowRect(hwnd, &rect) || IsEmptyRect(rect)) {
             continue;
         }
-        RECT mapped = PointInRect(g_windowMigration.toRect, RectCenter(rect))
-                          ? MapRectBetweenDisplays(rect, g_windowMigration.toRect, g_windowMigration.fromRect)
-                          : record.originalRect;
-        SetWindowPos(
-            hwnd,
-            nullptr,
-            mapped.left,
-            mapped.top,
-            Width(mapped),
-            Height(mapped),
-            SWP_NOZORDER | SWP_NOACTIVATE);
-        ++restored;
+        WINDOWPLACEMENT placement = record.originalPlacement;
+        placement.length = sizeof(placement);
+        placement.rcNormalPosition =
+            ClampRectToNearestMonitorWorkArea(placement.rcNormalPosition);
+        if (SetWindowPlacement(hwnd, &placement)) {
+            AppendResolvedRecord(record);
+            ++restored;
+        }
     }
     std::cout << "window_migration=restored count=" << restored << "\n";
     g_windowMigration.moved.clear();
@@ -1310,6 +1454,8 @@ struct Args {
     bool moveWindows = true;
     bool allowPhysicalSource = false;
     int seconds = 0;
+    std::wstring startGate;
+    std::wstring migrationJournal;
 };
 
 static constexpr int kTopologyChangedExitCode = 100;
@@ -1371,6 +1517,10 @@ static Args ParseArgs(int argc, wchar_t** argv) {
             if (args.seconds < 0) {
                 args.seconds = 0;
             }
+        } else if (arg == L"--start-gate" && i + 1 < argc) {
+            args.startGate = argv[++i];
+        } else if (arg == L"--migration-journal" && i + 1 < argc) {
+            args.migrationJournal = argv[++i];
         } else {
             std::wcerr << L"Unknown argument: " << arg << L"\n";
             std::exit(2);
@@ -1379,15 +1529,38 @@ static Args ParseArgs(int argc, wchar_t** argv) {
     return args;
 }
 
+static void WaitForStartGate(const std::wstring& name) {
+    if (name.empty()) {
+        return;
+    }
+
+    HANDLE gate = OpenEventW(SYNCHRONIZE, FALSE, name.c_str());
+    if (!gate) {
+        throw std::runtime_error("start gate could not be opened");
+    }
+
+    std::cout << "start_gate=waiting\n" << std::flush;
+    DWORD waitResult = WaitForSingleObject(gate, INFINITE);
+    CloseHandle(gate);
+    if (waitResult != WAIT_OBJECT_0) {
+        throw std::runtime_error("start gate wait failed");
+    }
+    std::cout << "start_gate=released\n" << std::flush;
+}
+
 int wmain(int argc, wchar_t** argv) {
     try {
-        EnableDpiAwareness();
-
         Args args = ParseArgs(argc, argv);
+        WaitForStartGate(args.startGate);
+        EnableDpiAwareness();
         if (args.list) {
             PrintList();
             return 0;
         }
+        if (args.moveWindows && args.migrationJournal.empty()) {
+            throw std::runtime_error("window migration requires --migration-journal");
+        }
+        g_windowMigrationJournal = args.migrationJournal;
 
         auto displays = EnumDisplays();
         DisplayInfo sourceDisplay = FindSourceDisplay(displays, args.source, args.allowPhysicalSource);

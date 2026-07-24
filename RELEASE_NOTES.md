@@ -1,6 +1,14 @@
 # SBMS Release Notes
 
-## Unreleased - v0.3.0
+## Unreleased
+
+### v0.2.0 reliability
+
+- Repeated Start and Stop requests now coalesce safely, and stale callbacks from an earlier session cannot mutate a newer run.
+- If SBMS closes unexpectedly, its native and host children are terminated automatically. When window migration is enabled, a separate recovery broker replays the durable journal to return pending windows to the physical desktop.
+- Topology and source recovery now use bounded backoff and a terminal cleanup path instead of retrying indefinitely. Logs retain transition, retry, timeout, exit-code, and terminal-failure details.
+
+### v0.3.0 production-driver work
 
 - Replaced the Microsoft indirect-display sample package, service, hardware ID, SWD instance, trace provider, endpoint, and monitor identities with a frozen SBMS-owned contract.
 - Made monitor container IDs and EDID serials deterministic per SBMS device instance and connector, with 1920x1080@60 as the preferred mode.

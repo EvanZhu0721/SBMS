@@ -83,6 +83,26 @@ function Invoke-Probe {
 
 try {
     New-Item -ItemType Directory -Path $TestRoot | Out-Null
+    Import-Module (Join-Path $Root "build\SBMS.Version.psm1") -Force
+    $versionSource = Join-Path $TestRoot "SBMS.Version.g.cs"
+    Write-SBMSGeneratedFile -LiteralPath $versionSource -Content (
+        New-SBMSCSharpVersionSource `
+            -Metadata (Get-SBMSBuildMetadata -RepositoryRoot $Root) `
+            -AssemblyTitle "SBMS GUI probe" `
+            -FileDescription "SBMS GUI regression probe"
+    ) | Out-Null
+    $Sources += $versionSource
+    $mainSource = [IO.File]::ReadAllText(
+        (Join-Path $Root "gui\SBMSGui.cs"),
+        [Text.Encoding]::UTF8)
+    if ($mainSource -notmatch 'Local\\SBMS\.Gui\.Singleton') {
+        throw "GUI session singleton guard is missing."
+    }
+    $singletonIndex = $mainSource.IndexOf('Local\SBMS.Gui.Singleton', [StringComparison]::Ordinal)
+    $probeIndex = $mainSource.IndexOf('--config-probe', [StringComparison]::Ordinal)
+    if ($singletonIndex -lt 0 -or $probeIndex -lt 0 -or $singletonIndex -gt $probeIndex) {
+        throw "GUI probe paths bypass the session singleton guard."
+    }
 
     # Issue #12: probes use a temporary asInvoker host so UI regression checks
     # can run without weakening the administrator manifest of the real product.
@@ -97,6 +117,39 @@ try {
         Invoke-Probe -Name "stream-config-probe" -Argument "--stream-config-probe"
         Invoke-Probe -Name "lock-probe" -Argument "--lock-probe"
     )
+
+    $createdNew = $false
+    $instanceMutex = [Threading.Mutex]::new(
+        $true,
+        "Local\SBMS.Gui.Singleton",
+        [ref]$createdNew)
+    try {
+        if (-not $createdNew) {
+            throw "GUI singleton test could not acquire a clean mutex."
+        }
+        $blockedProbePath = Join-Path $TestRoot "blocked-probe.png"
+        $blockedProbe = Start-Process `
+            -FilePath $ProbeExe `
+            -ArgumentList @("--lock-probe", $blockedProbePath) `
+            -PassThru
+        try {
+            if (-not $blockedProbe.WaitForExit(5000)) {
+                $blockedProbe.Kill()
+                throw "Second GUI probe did not fail fast behind the singleton."
+            }
+            if ($blockedProbe.ExitCode -ne 3) {
+                throw "Second GUI probe bypassed the singleton; exit=$($blockedProbe.ExitCode)."
+            }
+            if (Test-Path -LiteralPath $blockedProbePath) {
+                throw "Blocked GUI probe performed runtime work."
+            }
+        } finally {
+            $blockedProbe.Dispose()
+        }
+    } finally {
+        $instanceMutex.ReleaseMutex()
+        $instanceMutex.Dispose()
+    }
 
     $configText = [IO.File]::ReadAllText((Join-Path $TestRoot "config-probe.png.txt"), [Text.Encoding]::UTF8)
     # Keep this source expression ASCII-only so Windows PowerShell 5.1 does not

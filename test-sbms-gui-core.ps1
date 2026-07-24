@@ -14,6 +14,7 @@ $TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("SBMS-GuiCoreTests-" + [guid]:
 $TestExe = Join-Path $TestRoot "GuiCoreTests.exe"
 $Sources = @(
     (Join-Path $Root "gui\Core\BridgeLifecycle.cs"),
+    (Join-Path $Root "gui\Core\LifecycleRecoveryPolicy.cs"),
     (Join-Path $Root "gui\Core\ResolutionMath.cs"),
     (Join-Path $Root "gui\Models\GuiConfig.cs"),
     (Join-Path $Root "gui\Models\DisplayModels.cs"),
@@ -21,6 +22,7 @@ $Sources = @(
     (Join-Path $Root "gui\Services\TopologyDiscoveryService.cs"),
     (Join-Path $Root "gui\Services\TopologyRecoveryService.cs"),
     (Join-Path $Root "gui\Services\DisplayModeService.cs"),
+    (Join-Path $Root "gui\Services\WindowMigrationJournal.cs"),
     (Join-Path $Root "tests\GuiCoreTests.cs")
 )
 foreach ($source in $Sources) {

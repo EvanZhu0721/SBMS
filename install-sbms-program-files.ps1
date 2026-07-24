@@ -5,7 +5,7 @@ $ErrorActionPreference = "Stop"
 $Source = $PSScriptRoot
 $Destination = Join-Path $env:ProgramFiles "SBMS"
 
-$required = @("SBMS.exe", "SBMSNative.exe", "SBMSDeviceHost.exe", "driver")
+$required = @("SBMS.exe", "SBMSNative.exe", "SBMSDeviceHost.exe", "SBMSRecoveryBroker.exe", "driver")
 foreach ($item in $required) {
     $path = Join-Path $Source $item
     if (-not (Test-Path -LiteralPath $path)) {
