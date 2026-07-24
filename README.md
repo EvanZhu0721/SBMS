@@ -1,5 +1,9 @@
 # SBMS
 
+Production driver certification, signing, package integrity and installer
+verification are documented in
+[`docs/PRODUCTION-SIGNING.md`](docs/PRODUCTION-SIGNING.md).
+
 Start with [CONTEXT.md](CONTEXT.md) for the project workflow constraints.
 
 SBMS means **SBMS bridges multiple screens**.
@@ -15,7 +19,7 @@ This is a local engineering prototype, not a signed production driver.
 - Windows 11
 - Visual Studio 2022 Build Tools
 - Windows Driver Kit
-- Administrator rights for the IDD software device host and driver install
+- Administrator rights for the IDD software device host and Driver Store staging
 - Test signing or a valid driver-signing path
 
 ## Components
@@ -31,7 +35,7 @@ This is a local engineering prototype, not a signed production driver.
 
 ## Build
 
-Run from an elevated PowerShell when driver install or the device host is needed:
+Run from an elevated PowerShell when Driver Store staging or the device host is needed:
 
 ```powershell
 .\build-sbms-driver.ps1
@@ -68,11 +72,16 @@ Run the source-level GUI checks without changing the driver or display topology:
 
 Real virtual-display acceptance is documented in [docs/HARDWARE-VALIDATION.md](docs/HARDWARE-VALIDATION.md). Hardware scenarios are recorded separately and never pass when critical native-enumeration or GUI lifecycle evidence is missing.
 
-Install or refresh the test driver:
+For an isolated development environment, stage the explicitly test-signed
+driver package without activating or rebinding a display device:
 
 ```powershell
-.\install-sbms-driver.ps1 -Force
+.\install-sbms-driver.ps1 -Force -AllowTestSigned
 ```
+
+Production Setup passes independently verified WHQL provenance to the same
+staging script. Active-device transition is deliberately deferred to the
+transactional installer tracked by Issue #19.
 
 ## Run
 
@@ -206,7 +215,10 @@ The package script writes:
 - `%USERPROFILE%\Documents\SBMS-Release\SBMS-<version>-windows-x64.zip`
 - `C:\Program Files\SBMS` when the shell has permission
 
-The release directory also contains `SBMSSetup.exe`, an elevated installer that copies SBMS to Program Files, optionally installs the test driver, and can create a Start Menu shortcut and startup task.
+The release directory also contains `SBMSSetup.exe`, an elevated installer that
+copies SBMS to Program Files, can stage the verified driver package in Driver
+Store without activating it, and can create a Start Menu shortcut and startup
+task.
 
 If the current shell is not elevated, run this from the release directory in an administrator PowerShell:
 

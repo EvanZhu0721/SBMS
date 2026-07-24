@@ -128,7 +128,11 @@ Gate C authorizes only the exact hashed SBMS driver payload. It requires:
 - an install plan that names the expected published INF and device instance;
 - rollback ownership that distinguishes the package installed by this Run ID from pre-existing packages.
 
-The current `install-sbms-driver.ps1` is a low-level mutation script, not a safe lab orchestrator. It must not be invoked by the lab until its destructive package/process behavior is placed behind the reviewed plan and ownership checks.
+The current `install-sbms-driver.ps1` is a Driver Store staging primitive, not
+a safe activation orchestrator. The lab may use it only as an explicitly
+planned staging step; it must not infer that a device was rebound or a virtual
+display was created. Active transition stays blocked until Issue #19 supplies
+the reviewed ownership and rollback state machine.
 
 ## Automatic recovery boundary
 

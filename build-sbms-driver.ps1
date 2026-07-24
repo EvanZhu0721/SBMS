@@ -1,6 +1,10 @@
 param(
     [string] $Configuration = "Release",
-    [string] $Platform = "x64"
+    [string] $Platform = "x64",
+    [string] $TestCertificateThumbprint,
+    [switch] $Production,
+    [string] $SigningPolicyPath,
+    [string] $SignToolPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +13,18 @@ $Root = $PSScriptRoot
 Import-Module (Join-Path $Root "build\SBMS.Version.psm1") -Force
 $BuildMetadata = Get-SBMSBuildMetadata -RepositoryRoot $Root
 Assert-SBMSVersionSourceContract -RepositoryRoot $Root
+if ($Production -and -not [string]::IsNullOrWhiteSpace($TestCertificateThumbprint)) {
+    throw 'Production signing and test signing are mutually exclusive.'
+}
+$ProductionSigningPolicy = $null
+if ($Production) {
+    if ([string]::IsNullOrWhiteSpace($SigningPolicyPath)) {
+        throw 'Production driver build requires -SigningPolicyPath.'
+    }
+    Import-Module (Join-Path $Root 'build\SBMS.Signing.psm1') -Force
+    $ProductionSigningPolicy = Read-SBMSSigningPolicy -LiteralPath $SigningPolicyPath
+    $null = Resolve-SBMSSigningCertificate -Policy $ProductionSigningPolicy
+}
 $Solution = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\IddSampleDriver.sln"
 $DriverProjectDir = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\IddSampleDriver"
 $DriverOutputRoot = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\$Platform\$Configuration"
@@ -97,16 +113,34 @@ function New-DriverPackage {
     Copy-Item -LiteralPath $dll -Destination $packageDll -Force
     Copy-Item -LiteralPath $infSource -Destination (Join-Path $DriverPackageDir "IddSampleDriver.inf") -Force
 
-    $certs = @(Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue)
-    $signingCert = $certs |
-        Where-Object { $_.Subject -like "*WDKTestCert*" } |
-        Sort-Object NotAfter -Descending |
-        Select-Object -First 1
-    if (-not $signingCert) {
-        $signingCert = $certs | Sort-Object NotAfter -Descending | Select-Object -First 1
+    $signingCert = $null
+    if (-not [string]::IsNullOrWhiteSpace($TestCertificateThumbprint)) {
+        $normalizedThumbprint = ($TestCertificateThumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant()
+        if ($normalizedThumbprint.Length -ne 40) {
+            throw 'TestCertificateThumbprint must contain exactly 40 hexadecimal characters.'
+        }
+        $signingCert = @(
+            Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue |
+                Where-Object {
+                    ([string]$_.Thumbprint -replace '[^0-9A-Fa-f]', '').ToUpperInvariant() -ceq $normalizedThumbprint
+                }
+        )
+        if ($signingCert.Count -ne 1) {
+            throw "Expected exactly one explicit test-signing certificate '$normalizedThumbprint'; found $($signingCert.Count)."
+        }
+        $signingCert = $signingCert[0]
     }
 
-    if ($signingCert) {
+    if ($Production) {
+        $null = Invoke-SBMSSignAuthenticode `
+            -LiteralPath $packageDll `
+            -Policy $ProductionSigningPolicy `
+            -SignToolPath $SignToolPath
+        $null = Assert-SBMSAuthenticodeSignature `
+            -LiteralPath $packageDll `
+            -Policy $ProductionSigningPolicy `
+            -SignToolPath $SignToolPath
+    } elseif ($signingCert) {
         & $SignTool sign /v /fd SHA256 /sha1 $signingCert.Thumbprint $packageDll
         if ($LASTEXITCODE -ne 0) {
             throw "signtool failed for driver DLL with exit code $LASTEXITCODE"
@@ -151,7 +185,16 @@ function New-DriverPackage {
         throw "Catalog was not generated in $DriverPackageDir"
     }
 
-    if ($signingCert) {
+    if ($Production) {
+        $null = Invoke-SBMSSignAuthenticode `
+            -LiteralPath $cat.FullName `
+            -Policy $ProductionSigningPolicy `
+            -SignToolPath $SignToolPath
+        $null = Assert-SBMSAuthenticodeSignature `
+            -LiteralPath $cat.FullName `
+            -Policy $ProductionSigningPolicy `
+            -SignToolPath $SignToolPath
+    } elseif ($signingCert) {
         & $SignTool sign /v /fd SHA256 /sha1 $signingCert.Thumbprint $cat.FullName
         if ($LASTEXITCODE -ne 0) {
             throw "signtool failed with exit code $LASTEXITCODE"
@@ -163,7 +206,7 @@ function New-DriverPackage {
             throw "Driver catalog signature is not valid: $($signature.StatusMessage)"
         }
     } else {
-        Write-Warning "No code-signing certificate was found. The driver package was generated unsigned."
+        Write-Warning "Driver package was generated unsigned. Pass -TestCertificateThumbprint explicitly only for isolated development."
     }
 }
 

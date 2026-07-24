@@ -22,6 +22,9 @@ namespace SBMSSetup
         private readonly GlowButton openButton = new GlowButton();
         private readonly GlowButton languageButton = new GlowButton();
         private readonly string setupLogPath;
+        private string stagedReleaseRoot;
+        private string installBackupRoot;
+        private bool installedPayloadCommitted;
         private bool english = true;
         private const string SetupBuildLabel = SBMSBuild.ProductVersionInfo.SemVer;
 
@@ -380,7 +383,7 @@ namespace SBMSSetup
             Text = T("SBMS Setup");
             titleLabel.Text = "SBMS";
             languageButton.Text = english ? "语言" : "lang";
-            driverCheck.Text = T("Install/update virtual display driver");
+            driverCheck.Text = T("Stage verified virtual display driver package");
             shortcutCheck.Text = T("Start Menu shortcut");
             startupCheck.Text = T("Start with Windows");
             installButton.Text = T("Install");
@@ -399,8 +402,8 @@ namespace SBMSSetup
             {
                 case "SBMS Setup":
                     return "SBMS 安装器";
-                case "Install/update virtual display driver":
-                    return "安装/更新虚拟显示器驱动";
+                case "Stage verified virtual display driver package":
+                    return "暂存已验证的虚拟显示驱动包";
                 case "Start Menu shortcut":
                     return "开始菜单快捷方式";
                 case "Start with Windows":
@@ -421,8 +424,8 @@ namespace SBMSSetup
                     return "已在 Program Files 中";
                 case "copied files":
                     return "已复制文件";
-                case "driver applied":
-                    return "驱动已应用";
+                case "driver package staged":
+                    return "驱动包已暂存";
                 case "shortcut applied":
                     return "快捷方式已应用";
                 case "startup task applied":
@@ -461,19 +464,107 @@ namespace SBMSSetup
         private void Install()
         {
             EnsurePayload();
-            EnsureNotRunning();
-            CopyPayload();
-            if (driverCheck.Checked)
+            bool installSucceeded = false;
+            try
             {
-                InstallDriver();
+                InstallTransaction.Execute(
+                    VerifyRelease,
+                    StageAndReverify,
+                    EnsureNotRunning,
+                    CopyPayload,
+                    driverCheck.Checked ? (Action)InstallDriver : delegate { },
+                    shortcutCheck.Checked ? (Action)CreateShortcutBestEffort : delegate { },
+                    startupCheck.Checked ? (Action)CreateStartupTaskBestEffort : delegate { });
+                installSucceeded = true;
             }
-            if (shortcutCheck.Checked)
+            finally
             {
-                CreateShortcut();
+                CleanupStaging(installSucceeded);
             }
-            if (startupCheck.Checked)
+        }
+
+        private void StageAndReverify()
+        {
+            if (!SBMSBuild.ProductionSigningInfo.IntegrityRequired)
             {
-                CreateStartupTask();
+                return;
+            }
+
+            string stagingParent = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                "SBMS.Staging");
+            Directory.CreateDirectory(stagingParent);
+            stagedReleaseRoot = Path.Combine(stagingParent, Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(stagedReleaseRoot);
+            File.Copy(
+                Path.Combine(sourceRoot, "SBMS.release.cat"),
+                Path.Combine(stagedReleaseRoot, "SBMS.release.cat"),
+                false);
+            CopyDirectory(
+                Path.Combine(sourceRoot, "payload"),
+                Path.Combine(stagedReleaseRoot, "payload"));
+            ReleaseIntegrityVerifier.VerifyOrThrow(
+                stagedReleaseRoot,
+                Application.ExecutablePath,
+                SBMSBuild.ProductionSigningInfo.PublisherThumbprint,
+                SBMSBuild.ProductionSigningInfo.WhqlCatalogSubjects);
+            Log(T("staged release integrity verified"));
+        }
+
+        private void CleanupStaging(bool installSucceeded)
+        {
+            if (installedPayloadCommitted && !installSucceeded)
+            {
+                if (Directory.Exists(installRoot))
+                {
+                    Directory.Delete(installRoot, true);
+                }
+                if (!String.IsNullOrWhiteSpace(installBackupRoot) &&
+                    Directory.Exists(installBackupRoot))
+                {
+                    Directory.Move(installBackupRoot, installRoot);
+                }
+            }
+            else if (!String.IsNullOrWhiteSpace(installBackupRoot) &&
+                     Directory.Exists(installBackupRoot))
+            {
+                BestEffortDeleteDirectory(installBackupRoot, "install backup");
+            }
+            if (!String.IsNullOrWhiteSpace(stagedReleaseRoot) &&
+                Directory.Exists(stagedReleaseRoot))
+            {
+                BestEffortDeleteDirectory(stagedReleaseRoot, "verified staging");
+            }
+            stagedReleaseRoot = null;
+            installBackupRoot = null;
+            installedPayloadCommitted = false;
+        }
+
+        private void BestEffortDeleteDirectory(string path, string label)
+        {
+            try
+            {
+                Directory.Delete(path, true);
+            }
+            catch (Exception ex)
+            {
+                // A completed driver-store operation must never be reported as
+                // a failed install solely because nonfunctional residue could
+                // not be removed. A future maintenance run may remove it.
+                Log(label + " cleanup deferred: " + ex.Message);
+            }
+        }
+
+        private void VerifyRelease()
+        {
+            if (SBMSBuild.ProductionSigningInfo.IntegrityRequired)
+            {
+                ReleaseIntegrityVerifier.VerifyOrThrow(
+                    sourceRoot,
+                    Application.ExecutablePath,
+                    SBMSBuild.ProductionSigningInfo.PublisherThumbprint,
+                    SBMSBuild.ProductionSigningInfo.WhqlCatalogSubjects);
+                Log(T("release integrity verified"));
             }
         }
 
@@ -486,6 +577,16 @@ namespace SBMSSetup
             RequireFile(Path.Combine("driver", "IddSampleDriver", "IddSampleDriver.inf"));
             RequireFile(Path.Combine("driver", "IddSampleDriver", "IddSampleDriver.dll"));
             RequireFile(Path.Combine("driver", "IddSampleDriver", "iddsampledriver.cat"));
+        }
+
+        private string PayloadRoot
+        {
+            get
+            {
+                return SBMSBuild.ProductionSigningInfo.IntegrityRequired
+                    ? Path.Combine(stagedReleaseRoot ?? sourceRoot, "payload")
+                    : sourceRoot;
+            }
         }
 
         private void EnsureNotRunning()
@@ -503,27 +604,72 @@ namespace SBMSSetup
 
         private void CopyPayload()
         {
-            if (SamePath(sourceRoot, installRoot))
+            if (SamePath(PayloadRoot, installRoot))
             {
                 Log(T("already in Program Files"));
                 return;
             }
 
-            if (Directory.Exists(installRoot))
+            if (!SBMSBuild.ProductionSigningInfo.IntegrityRequired)
             {
-                Directory.Delete(installRoot, true);
+                if (Directory.Exists(installRoot))
+                {
+                    Directory.Delete(installRoot, true);
+                }
+                Directory.CreateDirectory(installRoot);
+                CopyDirectory(PayloadRoot, installRoot);
+                Log(T("copied files"));
+                return;
             }
-            Directory.CreateDirectory(installRoot);
-            CopyDirectory(sourceRoot, installRoot);
-            Log(T("copied files"));
+
+            string candidate = installRoot + ".new." + Guid.NewGuid().ToString("N");
+            installBackupRoot = installRoot + ".backup." + Guid.NewGuid().ToString("N");
+            try
+            {
+                CopyDirectory(PayloadRoot, candidate);
+                ReleaseIntegrityVerifier.VerifyPayloadOrThrow(
+                    candidate,
+                    Path.Combine(stagedReleaseRoot, "SBMS.release.cat"),
+                    Application.ExecutablePath,
+                    SBMSBuild.ProductionSigningInfo.PublisherThumbprint,
+                    SBMSBuild.ProductionSigningInfo.WhqlCatalogSubjects);
+                if (Directory.Exists(installRoot))
+                {
+                    Directory.Move(installRoot, installBackupRoot);
+                }
+                Directory.Move(candidate, installRoot);
+                installedPayloadCommitted = true;
+                Log(T("verified payload committed"));
+            }
+            catch
+            {
+                if (Directory.Exists(candidate))
+                {
+                    Directory.Delete(candidate, true);
+                }
+                if (!Directory.Exists(installRoot) &&
+                    Directory.Exists(installBackupRoot))
+                {
+                    Directory.Move(installBackupRoot, installRoot);
+                }
+                throw;
+            }
         }
 
         private void InstallDriver()
         {
             string script = Path.Combine(installRoot, "install-sbms-driver.ps1");
             string command = "-NoProfile -ExecutionPolicy Bypass -File " + Quote(script) + " -Force";
+            if (SBMSBuild.ProductionSigningInfo.IntegrityRequired)
+            {
+                command += " -VerifiedByInstaller -VerifiedReleaseRoot " + Quote(stagedReleaseRoot);
+            }
+            else
+            {
+                command += " -AllowTestSigned";
+            }
             RunProcess("powershell.exe", command, 180000);
-            Log(T("driver applied"));
+            Log(T("driver package staged"));
         }
 
         private void CreateShortcut()
@@ -542,12 +688,42 @@ namespace SBMSSetup
             Log(T("shortcut applied"));
         }
 
+        private void CreateShortcutBestEffort()
+        {
+            RunBestEffort("shortcut", CreateShortcut);
+        }
+
         private void CreateStartupTask()
         {
             string target = Path.Combine(installRoot, "SBMS.exe");
             string taskRun = "\"" + target + "\"";
             RunProcess("schtasks.exe", "/Create /TN SBMS /SC ONLOGON /TR " + Quote(taskRun) + " /RL HIGHEST /F", 30000);
             Log(T("startup task applied"));
+        }
+
+        private void CreateStartupTaskBestEffort()
+        {
+            RunBestEffort("startup task", CreateStartupTask);
+        }
+
+        private void RunBestEffort(string label, Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    Log(label + " integration deferred: " + ex.Message);
+                }
+                catch
+                {
+                    // Best-effort integration and its diagnostic path must not
+                    // reverse an already completed core installation.
+                }
+            }
         }
 
         private void UninstallFiles()
@@ -570,7 +746,7 @@ namespace SBMSSetup
 
         private void RequireFile(string relativePath)
         {
-            string path = Path.Combine(sourceRoot, relativePath);
+            string path = Path.Combine(PayloadRoot, relativePath);
             if (!File.Exists(path))
             {
                 throw new FileNotFoundException("missing " + relativePath);
@@ -762,7 +938,7 @@ namespace SBMSSetup
                 catch (Exception ex)
                 {
                     MessageBox.Show(
-                        "SBMS Setup needs administrator rights to install the virtual display driver.\r\n\r\n" + ex.Message,
+                        "SBMS Setup needs administrator rights to stage the virtual display driver package in Driver Store.\r\n\r\n" + ex.Message,
                         "SBMS Setup",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Error);

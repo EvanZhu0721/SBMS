@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "profile": "Production",
+  "publisher": {
+    "subject": "REPLACE_WITH_CERTIFICATE_SUBJECT",
+    "thumbprint": "0000000000000000000000000000000000000000",
+    "storeLocation": "CurrentUser",
+    "storeName": "My"
+  },
+  "timestamp": {
+    "required": true,
+    "protocol": "RFC3161",
+    "digest": "SHA256",
+    "url": "https://REPLACE_WITH_RFC3161_TSA"
+  },
+  "driverCertification": {
+    "method": "WHQL",
+    "allowedCatalogSubjects": [
+      "CN=Microsoft Windows Hardware Compatibility Publisher, O=Microsoft Corporation, L=Redmond, S=Washington, C=US"
+    ]
+  },
+  "integrity": {
+    "hashAlgorithm": "SHA256",
+    "catalogVersion": "2.0"
+  },
+  "sbom": {
+    "format": "SPDX",
+    "specVersion": "2.2"
+  }
+}
