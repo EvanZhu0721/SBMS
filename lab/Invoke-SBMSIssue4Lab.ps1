@@ -136,6 +136,9 @@ if ($Phase -eq 'Start') {
     if ([string]$secondGateA.status -cne 'PASS' -or [string]$secondGateA.stableDigest -cne [string]$firstGateA.stableDigest) {
         throw 'Gate A no-drift recapture did not PASS with the same stable digest.'
     }
+    # The invoked Gate A entry imports HardwareLab in its child script scope.
+    # Re-import it here so the parent transaction retains the exported commands.
+    Import-Module (Join-Path $PSScriptRoot 'SBMS.HardwareLab.psm1') -Force
 
     $gateC = Initialize-SBMSGateC `
         -RunId $selectedRunId `
