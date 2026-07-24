@@ -123,6 +123,40 @@ function Get-SBMSGateCInfVersion {
 }
 
 function New-SBMSGateCRealAdapter {
+    $displayConfigSource = Join-Path $PSScriptRoot 'SBMS.DisplayConfig.cs'
+    $getDeviceBindings = {
+        param([string[]]$InstanceIds)
+        $allDevices = @(Get-PnpDevice -ErrorAction Stop)
+        @(
+            foreach ($instanceId in $InstanceIds) {
+                $matches = @($allDevices | Where-Object { [string]$_.InstanceId -ieq $instanceId })
+                if ($matches.Count -eq 0) {
+                    [pscustomobject]@{ exists = $false; instanceId = $instanceId; driverInf = ''; hasProblem = $false; status = 'Absent' }
+                    continue
+                }
+                if ($matches.Count -ne 1) {
+                    throw "Gate C exact PnP query returned $($matches.Count) devices for $instanceId."
+                }
+                $device = $matches[0]
+                $properties = @(Get-PnpDeviceProperty -InstanceId ([string]$device.InstanceId) -ErrorAction Stop)
+                $infProperties = @($properties | Where-Object { [string]$_.KeyName -ceq 'DEVPKEY_Device_DriverInfPath' })
+                if ($infProperties.Count -gt 1) {
+                    throw "Gate C PnP property query returned duplicate DriverInfPath values for $instanceId."
+                }
+                [pscustomobject]@{
+                    exists = $true
+                    instanceId = [string]$device.InstanceId
+                    driverInf = if ($infProperties.Count -eq 1) { [string]$infProperties[0].Data } else { '' }
+                    hasProblem = ([string]$device.Problem -cne 'CM_PROB_NONE')
+                    status = [string]$device.Status
+                }
+            }
+        )
+    }.GetNewClosure()
+    $getDeviceBinding = {
+        param([string]$InstanceId)
+        @(& $getDeviceBindings @($InstanceId))[0]
+    }.GetNewClosure()
     @{
         IsReal = $true
         TestAdministrator = {
@@ -146,27 +180,13 @@ function New-SBMSGateCRealAdapter {
         }
         AddDriver = {
             param([string]$InfPath)
-            Invoke-SBMSGateCNative -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -ArgumentList @('/add-driver', $InfPath, '/install')
+            Invoke-SBMSGateCNative -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -ArgumentList @('/add-driver', $InfPath)
         }
         ScanDevices = {
             Invoke-SBMSGateCNative -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -ArgumentList @('/scan-devices')
         }
-        GetDeviceBinding = {
-            param([string]$InstanceId)
-            $device = Get-PnpDevice -InstanceId $InstanceId -ErrorAction SilentlyContinue
-            if ($null -eq $device) {
-                return [pscustomobject]@{ exists = $false; instanceId = $InstanceId; driverInf = ''; hasProblem = $false; status = 'Absent' }
-            }
-            $inf = Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName 'DEVPKEY_Device_DriverInfPath' -ErrorAction SilentlyContinue
-            $problem = Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName 'DEVPKEY_Device_HasProblem' -ErrorAction SilentlyContinue
-            [pscustomobject]@{
-                exists = $true
-                instanceId = [string]$device.InstanceId
-                driverInf = if ($null -ne $inf) { [string]$inf.Data } else { '' }
-                hasProblem = if ($null -ne $problem) { [bool]$problem.Data } else { $true }
-                status = [string]$device.Status
-            }
-        }
+        GetDeviceBindings = $getDeviceBindings
+        GetDeviceBinding = $getDeviceBinding
         GetBindingsByPublishedInf = {
             param([string]$PublishedName)
             @(
@@ -175,6 +195,24 @@ function New-SBMSGateCRealAdapter {
                     ForEach-Object { [string]$_.DeviceID }
             )
         }
+        GetActiveDisplayPaths = {
+            if (-not ('SBMSDisplayConfig' -as [type])) {
+                Add-Type -LiteralPath $displayConfigSource -ErrorAction Stop
+            }
+            @(
+                [SBMSDisplayConfig]::GetActivePaths() |
+                    ForEach-Object {
+                        [pscustomobject][ordered]@{
+                            adapterLuid = [string]$_.AdapterLuid
+                            targetId = [uint32]$_.TargetId
+                            monitorDevicePath = [string]$_.MonitorDevicePath
+                            active = [bool]$_.Active
+                            targetAvailable = [bool]$_.TargetAvailable
+                            classification = [string]$_.Classification
+                        }
+                    }
+            )
+        }.GetNewClosure()
         RemoveDevice = {
             param([string]$InstanceId)
             Invoke-SBMSGateCNative -FilePath (Join-Path $env:SystemRoot 'System32\pnputil.exe') -ArgumentList @('/remove-device', $InstanceId)
@@ -219,12 +257,69 @@ function Get-SBMSGateCExpectedDeviceIds {
     }
 }
 
+function ConvertTo-SBMSGateCCanonicalValue {
+    param($Value)
+    if ($null -eq $Value) { return 'null;' }
+    if ($Value -is [bool]) { return ('bool:' + $(if ($Value) { '1;' } else { '0;' })) }
+    if ($Value -is [string] -or $Value -is [char]) {
+        $text = [string]$Value
+        return ('string:' + $script:Utf8NoBom.GetByteCount($text).ToString([Globalization.CultureInfo]::InvariantCulture) + ':' + $text + ';')
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        [string[]]$keys = @($Value.Keys | ForEach-Object { [string]$_ })
+        [Array]::Sort($keys, [StringComparer]::Ordinal)
+        $parts = New-Object Collections.Generic.List[string]
+        foreach ($key in $keys) {
+            $parts.Add((ConvertTo-SBMSGateCCanonicalValue -Value $key))
+            $parts.Add((ConvertTo-SBMSGateCCanonicalValue -Value $Value[$key]))
+        }
+        return ('dictionary:' + $keys.Count.ToString([Globalization.CultureInfo]::InvariantCulture) + ':{' + ($parts -join '') + '}')
+    }
+    if ($Value -is [Collections.IEnumerable]) {
+        $items = @($Value)
+        $parts = New-Object Collections.Generic.List[string]
+        foreach ($item in $items) {
+            $parts.Add((ConvertTo-SBMSGateCCanonicalValue -Value $item))
+        }
+        return ('array:' + $items.Count.ToString([Globalization.CultureInfo]::InvariantCulture) + ':[' + ($parts -join '') + ']')
+    }
+    $type = $Value.GetType()
+    if ($type.IsEnum) {
+        return ('enum:' + $type.FullName + ':' + ([Convert]::ToInt64($Value, [Globalization.CultureInfo]::InvariantCulture)).ToString([Globalization.CultureInfo]::InvariantCulture) + ';')
+    }
+    $typeCode = [Type]::GetTypeCode($type)
+    if ($typeCode -in @(
+            [TypeCode]::SByte, [TypeCode]::Byte, [TypeCode]::Int16, [TypeCode]::UInt16,
+            [TypeCode]::Int32, [TypeCode]::UInt32, [TypeCode]::Int64, [TypeCode]::UInt64)) {
+        return ('number:integer:' + ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $Value)) + ';')
+    }
+    if ($typeCode -eq [TypeCode]::Decimal) {
+        return ('number:System.Decimal:' + ([decimal]$Value).ToString('G29', [Globalization.CultureInfo]::InvariantCulture) + ';')
+    }
+    if ($typeCode -eq [TypeCode]::Single) {
+        return ('number:System.Single:' + ([single]$Value).ToString('R', [Globalization.CultureInfo]::InvariantCulture) + ';')
+    }
+    if ($typeCode -eq [TypeCode]::Double) {
+        return ('number:System.Double:' + ([double]$Value).ToString('R', [Globalization.CultureInfo]::InvariantCulture) + ';')
+    }
+    $properties = @($Value.PSObject.Properties | Where-Object { $_.MemberType -in @('NoteProperty', 'Property') })
+    if ($properties.Count -eq 0) {
+        throw "Gate C canonical serialization does not support $($type.FullName)."
+    }
+    $propertyParts = New-Object Collections.Generic.List[string]
+    foreach ($property in $properties) {
+        $propertyParts.Add((ConvertTo-SBMSGateCCanonicalValue -Value ([string]$property.Name)))
+        $propertyParts.Add((ConvertTo-SBMSGateCCanonicalValue -Value $property.Value))
+    }
+    'object:' + $properties.Count.ToString([Globalization.CultureInfo]::InvariantCulture) + ':{' + ($propertyParts -join '') + '}'
+}
+
 function Get-SBMSGateCPlanDigest {
     param($Plan)
-    $json = $Plan | ConvertTo-Json -Depth 12 -Compress
+    $canonical = ConvertTo-SBMSGateCCanonicalValue -Value $Plan
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        (($sha.ComputeHash($script:Utf8NoBom.GetBytes($json)) | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
+        (($sha.ComputeHash($script:Utf8NoBom.GetBytes($canonical)) | ForEach-Object { $_.ToString('x2') }) -join '').ToUpperInvariant()
     } finally { $sha.Dispose() }
 }
 
@@ -237,6 +332,130 @@ function New-SBMSGateCOwnershipRecord {
         provider = [string]$Package.provider
         className = [string]$Package.className
     }
+}
+
+function Assert-SBMSGateCExpectedDevicesAbsent {
+    param([hashtable]$Adapter, [string[]]$ExpectedDeviceIds, [string]$Stage)
+    $bindings = if ($Adapter.ContainsKey('GetDeviceBindings')) {
+        @(& $Adapter.GetDeviceBindings $ExpectedDeviceIds)
+    } else {
+        @($ExpectedDeviceIds | ForEach-Object { & $Adapter.GetDeviceBinding $_ })
+    }
+    if ($bindings.Count -ne $ExpectedDeviceIds.Count) {
+        throw "Gate C $Stage exact device query returned an unexpected result count."
+    }
+    foreach ($instanceId in $ExpectedDeviceIds) {
+        $matches = @($bindings | Where-Object { [string]$_.instanceId -ieq $instanceId })
+        if ($matches.Count -ne 1) {
+            throw "Gate C $Stage could not uniquely read exact expected device state: $instanceId"
+        }
+        $binding = $matches[0]
+        if ($null -eq $binding) {
+            throw "Gate C $Stage could not read exact expected device state: $instanceId"
+        }
+        if ([bool]$binding.exists) {
+            throw "Gate C $Stage refuses stale expected device: $instanceId"
+        }
+    }
+}
+
+function Get-SBMSGateCPhysicalPathIdentity {
+    param($Path)
+    if ($null -eq $Path.PSObject.Properties['adapterLuid'] -or
+        $null -eq $Path.PSObject.Properties['targetId'] -or
+        $null -eq $Path.PSObject.Properties['monitorDevicePath'] -or
+        [string]::IsNullOrWhiteSpace([string]$Path.monitorDevicePath)) {
+        throw 'Gate C physical display path identity is incomplete.'
+    }
+    [pscustomobject][ordered]@{
+        adapterLuid = [string]$Path.adapterLuid
+        targetId = [uint32]$Path.targetId
+        monitorDevicePath = [string]$Path.monitorDevicePath
+    }
+}
+
+function Get-SBMSGateCUsablePhysicalPaths {
+    param($Paths)
+    @(
+        $Paths | Where-Object {
+            [bool]$_.active -and [bool]$_.targetAvailable -and [string]$_.classification -ceq 'physical'
+        }
+    )
+}
+
+function Test-SBMSGateCPhysicalIdentityPresent {
+    param($Identity, $Paths)
+    @(
+        $Paths | Where-Object {
+            [string]$_.adapterLuid -ceq [string]$Identity.adapterLuid -and
+            [uint32]$_.targetId -eq [uint32]$Identity.targetId -and
+            [string]$_.monitorDevicePath -ieq [string]$Identity.monitorDevicePath
+        }
+    ).Count -eq 1
+}
+
+function Get-SBMSGateCSessionPhysicalBaseline {
+    param($Manifest, [hashtable]$Adapter, [string]$GateDirectory)
+    $current = @(Get-SBMSGateCUsablePhysicalPaths -Paths @(& $Adapter.GetActiveDisplayPaths))
+    $currentIdentities = @($current | ForEach-Object { Get-SBMSGateCPhysicalPathIdentity -Path $_ })
+    $missing = @(
+        $Manifest.plan.baselinePhysicalMonitorPaths | Where-Object {
+            $monitorPath = [string]$_
+            @($current | Where-Object { [string]$_.monitorDevicePath -ieq $monitorPath }).Count -ne 1
+        }
+    )
+    $sessionBaseline = @(
+        foreach ($monitorPath in @($Manifest.plan.baselinePhysicalMonitorPaths)) {
+            $match = @($current | Where-Object { [string]$_.monitorDevicePath -ieq [string]$monitorPath })
+            if ($match.Count -eq 1) {
+                Get-SBMSGateCPhysicalPathIdentity -Path $match[0]
+            }
+        }
+    )
+    Add-SBMSGateCJournal $GateDirectory 'PhysicalPathsBeforeHost' @{
+        plannedMonitorCount = @($Manifest.plan.baselinePhysicalMonitorPaths).Count
+        activePhysicalCount = $currentIdentities.Count
+        activePhysicalDigest = Get-SBMSGateCPlanDigest -Plan $currentIdentities
+        sessionBaselineDigest = Get-SBMSGateCPlanDigest -Plan $sessionBaseline
+        missing = @($missing)
+    }
+    if ($missing.Count -gt 0) {
+        throw "Gate C current boot cannot uniquely resolve $($missing.Count) planned physical monitor path(s)."
+    }
+    $sessionBaseline
+}
+
+function Assert-SBMSGateCSessionPhysicalPathsPreserved {
+    param($SessionBaseline, [hashtable]$Adapter, [string]$GateDirectory, [string]$JournalEvent)
+    $current = @(Get-SBMSGateCUsablePhysicalPaths -Paths @(& $Adapter.GetActiveDisplayPaths))
+    $currentIdentities = @($current | ForEach-Object { Get-SBMSGateCPhysicalPathIdentity -Path $_ })
+    $missing = @(
+        $SessionBaseline | Where-Object {
+            -not (Test-SBMSGateCPhysicalIdentityPresent -Identity $_ -Paths $current)
+        }
+    )
+    Add-SBMSGateCJournal $GateDirectory $JournalEvent @{
+        sessionBaselineCount = @($SessionBaseline).Count
+        activePhysicalCount = $currentIdentities.Count
+        activePhysicalDigest = Get-SBMSGateCPlanDigest -Plan $currentIdentities
+        missing = @($missing)
+    }
+    if ($missing.Count -gt 0) {
+        throw "Gate C physical recovery path disappeared: $($missing.Count) current-boot baseline path(s) missing."
+    }
+}
+
+function Test-SBMSGateCBindingSetEqual {
+    param([string[]]$Expected, [string[]]$Actual)
+    if ($Expected.Count -ne $Actual.Count) { return $false }
+    $set = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($instanceId in $Expected) {
+        if (-not $set.Add([string]$instanceId)) { return $false }
+    }
+    foreach ($instanceId in $Actual) {
+        if (-not $set.Remove([string]$instanceId)) { return $false }
+    }
+    $set.Count -eq 0
 }
 
 function Assert-SBMSGateCManifest {
@@ -276,7 +495,7 @@ function Initialize-SBMSGateC {
         [Parameter(Mandatory = $true)][string]$RunDirectory,
         [Parameter(Mandatory = $true)][string]$DriverPackagePath,
         [Parameter(Mandatory = $true)][string]$ProductRoot,
-        [ValidateRange(2, 3)][int]$VerificationDeviceCount = 2,
+        [ValidateRange(1, 3)][int]$VerificationDeviceCount = 1,
         [hashtable]$Adapter = (New-SBMSGateCRealAdapter)
     )
     if (-not (& $Adapter.TestAdministrator)) { throw 'Gate C planning requires elevation.' }
@@ -288,6 +507,34 @@ function Initialize-SBMSGateC {
         [string]$gateA.runId -cne $RunId.ToString() -or [string]$gateA.status -cne 'PASS') {
         throw 'Gate C planning requires same-Run-ID Gate A PASS.'
     }
+    $gateACurrentEvidencePath = Join-Path (Join-Path $resolvedRunDirectory 'gate-a') 'current-evidence.json'
+    if (-not (Test-Path -LiteralPath $gateACurrentEvidencePath -PathType Leaf)) {
+        throw 'Gate C planning requires Gate A current display evidence.'
+    }
+    $gateACurrentEvidence = Get-Content -LiteralPath $gateACurrentEvidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($null -eq $gateACurrentEvidence.PSObject.Properties['displayConfig'] -or
+        [string]$gateACurrentEvidence.displayConfig.status -cne 'Captured') {
+        throw 'Gate C planning requires captured Gate A display configuration.'
+    }
+    $baselinePhysicalMonitorPaths = @(
+        Get-SBMSGateCUsablePhysicalPaths -Paths @($gateACurrentEvidence.displayConfig.data.activePaths) |
+            ForEach-Object {
+                $identity = Get-SBMSGateCPhysicalPathIdentity -Path $_
+                [string]$identity.monitorDevicePath
+            }
+    )
+    if ($baselinePhysicalMonitorPaths.Count -eq 0) {
+        throw 'Gate C planning requires at least one active and available physical recovery path.'
+    }
+    $uniqueMonitorPaths = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($monitorPath in $baselinePhysicalMonitorPaths) {
+        if (-not $uniqueMonitorPaths.Add([string]$monitorPath)) {
+            throw 'Gate C planning requires unique physical monitor device paths.'
+        }
+    }
+    $expectedDeviceIds = @(Get-SBMSGateCExpectedDeviceIds -Count $VerificationDeviceCount)
+    $reservedDeviceIds = @(Get-SBMSGateCExpectedDeviceIds -Count 3)
+    Assert-SBMSGateCExpectedDevicesAbsent -Adapter $Adapter -ExpectedDeviceIds $reservedDeviceIds -Stage 'Initialize'
 
     $gateDirectory = Join-Path $resolvedRunDirectory 'gate-c'
     $payloadDirectory = Join-Path $gateDirectory 'payload'
@@ -301,6 +548,7 @@ function Initialize-SBMSGateC {
         'SBMSNative.exe' = (Join-Path $ProductRoot 'SBMSNative.exe')
         'SBMSDeviceHost.exe' = (Join-Path $ProductRoot 'SBMSDeviceHost.exe')
         'SBMS.GateC.psm1' = (Join-Path $PSScriptRoot 'SBMS.GateC.psm1')
+        'SBMS.DisplayConfig.cs' = (Join-Path $PSScriptRoot 'SBMS.DisplayConfig.cs')
     }
     foreach ($name in $sourceFiles.Keys) {
         if (-not (Test-Path -LiteralPath $sourceFiles[$name] -PathType Leaf)) { throw "Gate C payload is missing: $name" }
@@ -328,7 +576,9 @@ function Initialize-SBMSGateC {
         originalInfName = 'IddSampleDriver.inf'
         driverVersion = Get-SBMSGateCInfVersion -InfPath (Join-Path $payloadDirectory 'IddSampleDriver.inf')
         verificationDeviceCount = $VerificationDeviceCount
-        expectedDeviceIds = @(Get-SBMSGateCExpectedDeviceIds -Count $VerificationDeviceCount)
+        expectedDeviceIds = $expectedDeviceIds
+        reservedDeviceIds = $reservedDeviceIds
+        baselinePhysicalMonitorPaths = $baselinePhysicalMonitorPaths
         stopEventName = "Global\SBMSDeviceHostStop-$($RunId.ToString())"
         baselinePublishedNames = @($baselinePackages | ForEach-Object { [string]$_.publishedName } | Sort-Object -Unique)
         files = $files
@@ -460,10 +710,14 @@ function Invoke-SBMSGateCInstall {
     $gateDirectory = Join-Path $RunDirectory 'gate-c'
     if ([string]$Manifest.state -eq 'InstalledAndVerified') { return $Manifest }
     if ([string]$Manifest.state -ne 'Planned') { throw "Gate C Install requires Planned state, found $($Manifest.state)." }
+    Assert-SBMSGateCExpectedDevicesAbsent -Adapter $Adapter -ExpectedDeviceIds @($Manifest.plan.reservedDeviceIds) -Stage 'Install'
     $packagesBefore = @(& $Adapter.GetDriverPackages)
     if (@($packagesBefore | Where-Object { [string]$_.originalName -ieq [string]$Manifest.plan.originalInfName }).Count -gt 0) {
         throw 'Gate C found an unowned matching package before installation.'
     }
+    $sessionPhysicalBaseline = @(
+        Get-SBMSGateCSessionPhysicalBaseline -Manifest $Manifest -Adapter $Adapter -GateDirectory $gateDirectory
+    )
     $Manifest.state = 'InstallIntent'
     Save-SBMSGateCManifest $Manifest $gateDirectory
     Add-SBMSGateCJournal $gateDirectory 'InstallIntent' @{}
@@ -487,6 +741,12 @@ function Invoke-SBMSGateCInstall {
     $Manifest.state = 'PackageOwned'
     Save-SBMSGateCManifest $Manifest $gateDirectory
     Add-SBMSGateCJournal $gateDirectory 'PackageOwned' @{ publishedName = $Manifest.ownedPublishedName }
+    $preExistingBindings = @(& $Adapter.GetBindingsByPublishedInf $Manifest.ownedPublishedName)
+    if ($preExistingBindings.Count -gt 0) {
+        throw "Gate C staged package already has device bindings: $($Manifest.ownedPublishedName)"
+    }
+    Assert-SBMSGateCSessionPhysicalPathsPreserved -SessionBaseline $sessionPhysicalBaseline `
+        -Adapter $Adapter -GateDirectory $gateDirectory -JournalEvent 'PhysicalPathsAfterStage'
 
     $hostResult = $null
     try {
@@ -495,13 +755,15 @@ function Invoke-SBMSGateCInstall {
         Save-SBMSGateCManifest $Manifest $gateDirectory
         Add-SBMSGateCJournal $gateDirectory 'HostStarted' @{ pid = $hostResult.process.Id; output = @($hostResult.output) }
         & $Adapter.ScanDevices | Out-Null
-        $verificationIds = if ($Adapter.IsReal) {
-            @($hostResult.deviceIds)
-        } elseif ($null -ne $hostResult.PSObject.Properties['deviceIds']) {
-            @($hostResult.deviceIds)
-        } else {
-            @($Manifest.plan.expectedDeviceIds)
-        }
+        $verificationIds = @(
+            if ($Adapter.IsReal) {
+                @($hostResult.deviceIds)
+            } elseif ($null -ne $hostResult.PSObject.Properties['deviceIds']) {
+                @($hostResult.deviceIds)
+            } else {
+                @($Manifest.plan.expectedDeviceIds)
+            }
+        )
         if ($verificationIds.Count -ne [int]$Manifest.plan.verificationDeviceCount) {
             throw 'Gate C verification host returned an unexpected device count.'
         }
@@ -512,6 +774,25 @@ function Invoke-SBMSGateCInstall {
             $ownedIds.Add([string]$binding.instanceId)
         }
         $Manifest.ownedDeviceIds = @($ownedIds | ForEach-Object { [string]$_ })
+        $allPublishedBindings = @(& $Adapter.GetBindingsByPublishedInf $Manifest.ownedPublishedName | ForEach-Object { [string]$_ })
+        if (-not (Test-SBMSGateCBindingSetEqual -Expected @($Manifest.ownedDeviceIds) -Actual $allPublishedBindings)) {
+            $reservedSet = New-Object 'Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($reservedId in @($Manifest.plan.reservedDeviceIds)) { [void]$reservedSet.Add([string]$reservedId) }
+            $safeCleanupIds = @(
+                @($Manifest.ownedDeviceIds) + @($allPublishedBindings) |
+                    Where-Object { $reservedSet.Contains([string]$_) } |
+                    Select-Object -Unique
+            )
+            $Manifest.ownedDeviceIds = @($safeCleanupIds)
+            Save-SBMSGateCManifest $Manifest $gateDirectory
+            throw 'Gate C published-name bindings do not exactly match this verification host.'
+        }
+        Add-SBMSGateCJournal $gateDirectory 'PackageBindingsVerified' @{
+            publishedName = $Manifest.ownedPublishedName
+            deviceIds = @($Manifest.ownedDeviceIds)
+        }
+        Assert-SBMSGateCSessionPhysicalPathsPreserved -SessionBaseline $sessionPhysicalBaseline `
+            -Adapter $Adapter -GateDirectory $gateDirectory -JournalEvent 'PhysicalPathsAfterHost'
     } finally {
         if ($null -ne $hostResult) { Stop-SBMSGateCVerificationHost -HostResult $hostResult -Adapter $Adapter }
     }
@@ -564,8 +845,8 @@ function Invoke-SBMSGateCRollback {
         if ($null -eq $Manifest.ownership -or
             (Get-SBMSGateCPlanDigest -Plan $Manifest.ownership) -cne [string]$Manifest.ownershipSha256 -or
             [string]$Manifest.ownership.publishedName -cne $publishedName -or
-            [string]$Manifest.ownership.originalName -cne [string]$Manifest.plan.originalInfName -or
-            [string]$Manifest.ownership.version -cne [string]$Manifest.plan.driverVersion -or
+            [string]$Manifest.ownership.originalName -ine [string]$Manifest.plan.originalInfName -or
+            [string]$Manifest.ownership.version -ine [string]$Manifest.plan.driverVersion -or
             [string]$Manifest.ownership.publishedName -in @($Manifest.plan.baselinePublishedNames)) {
             throw 'Gate C package ownership record is invalid.'
         }

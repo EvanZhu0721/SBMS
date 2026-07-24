@@ -1,11 +1,14 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('Start','Install','Rollback','Finalize','Status')]
+    [ValidateSet('Start','Install','SupervisedLaunch','Rollback','Finalize','Status')]
     [string]$Phase = 'Status',
 
     [guid]$RunId,
     [switch]$NoRestart,
-    [switch]$NoLaunchGui
+    [switch]$NoLaunchGui,
+
+    [ValidateRange(100, 60000)]
+    [int]$SupervisionPollMilliseconds = 1000
 )
 
 Set-StrictMode -Version 2.0
@@ -15,6 +18,7 @@ $RunRoot = 'C:\ProgramData\SBMSLab\Runs'
 $ActiveRunPath = 'C:\ProgramData\SBMSLab\issue4-active.json'
 $RepositoryRoot = Split-Path $PSScriptRoot -Parent
 $RunIdWasBound = $PSBoundParameters.ContainsKey('RunId')
+$SupervisionPollWasBound = $PSBoundParameters.ContainsKey('SupervisionPollMilliseconds')
 $ErrorLogPath = Join-Path $env:TEMP 'SBMS-Issue4Lab.error.log'
 
 function Test-Administrator {
@@ -58,6 +62,10 @@ function Restart-Elevated {
     }
     if ($NoRestart) { $arguments.Add('-NoRestart') }
     if ($NoLaunchGui) { $arguments.Add('-NoLaunchGui') }
+    if ($SupervisionPollWasBound) {
+        $arguments.Add((ConvertTo-WindowsArgument '-SupervisionPollMilliseconds'))
+        $arguments.Add((ConvertTo-WindowsArgument ([string]$SupervisionPollMilliseconds)))
+    }
     $process = Start-Process -FilePath $powerShell -ArgumentList ($arguments -join ' ') -Verb RunAs -PassThru -Wait
     if (Test-Path -LiteralPath $ErrorLogPath -PathType Leaf) {
         $errorText = Get-Content -LiteralPath $ErrorLogPath -Raw -Encoding UTF8
@@ -84,11 +92,289 @@ function Resolve-RunId {
     if ($RunIdWasBound -and $RunId -ne [guid]::Empty) { return $RunId }
     if (-not (Test-Path -LiteralPath $ActiveRunPath -PathType Leaf)) { throw 'No active Issue #4 lab Run ID was found.' }
     $active = Get-Content -LiteralPath $ActiveRunPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ([int]$active.schemaVersion -ne 1 -or [string]$active.contractVersion -cne 'issue4-lab/1') {
+    if ([int]$active.schemaVersion -ne 1 -or [string]$active.contractVersion -ine 'issue4-lab/1') {
         throw 'Active Issue #4 lab pointer is invalid.'
     }
     [guid]$active.runId
 }
+
+function Get-SBMSIssue4MissingPhysicalPaths {
+    param(
+        [string[]]$BaselineMonitorDevicePaths,
+        [object[]]$CurrentPaths
+    )
+
+    @(
+        foreach ($baselinePath in @($BaselineMonitorDevicePaths)) {
+            $matches = @(
+                $CurrentPaths | Where-Object {
+                    [string]$_.monitorDevicePath -ieq [string]$baselinePath -and
+                    [bool]$_.active -and
+                    [bool]$_.targetAvailable -and
+                    [string]$_.classification -ieq 'physical'
+                }
+            )
+            if ($matches.Count -ne 1) { [string]$baselinePath }
+        }
+    )
+}
+
+function Test-SBMSIssue4ProcessIdentityEqual {
+    param($Expected, $Current)
+
+    if ($null -eq $Expected -or $null -eq $Current) { return $false }
+    [int]$Expected.processId -eq [int]$Current.processId -and
+        [string]::Equals(
+            [IO.Path]::GetFullPath([string]$Expected.executablePath),
+            [IO.Path]::GetFullPath([string]$Current.executablePath),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and
+        [string]$Expected.creationDate -ceq [string]$Current.creationDate
+}
+
+function Get-SBMSIssue4SupervisorMutexName {
+    param([guid]$Id)
+    "Global\SBMSIssue4GuiSupervisor_$($Id.ToString('N').ToLowerInvariant())"
+}
+
+function Invoke-SBMSIssue4GuiSafetyRollback {
+    param(
+        [hashtable]$Adapter,
+        [string]$Reason
+    )
+
+    & $Adapter.ReportProgress "SAFETY TRIP: $Reason"
+    try {
+        $rolledBack = & $Adapter.Rollback
+    } catch {
+        throw "Supervised GUI safety check failed: $Reason Exact same-Run Gate C rollback also failed: $($_.Exception.Message)"
+    }
+    $state = if ($null -ne $rolledBack -and $null -ne $rolledBack.PSObject.Properties['state']) {
+        [string]$rolledBack.state
+    } else {
+        'unknown'
+    }
+    if ($state -notin @('RollbackVerified', 'RollbackPendingReboot')) {
+        throw "Supervised GUI safety check failed: $Reason Exact same-Run Gate C rollback returned unaccepted state '$state' and is treated as failed."
+    }
+    throw "Supervised GUI safety check failed: $Reason Exact same-Run Gate C rollback completed with state '$state'."
+}
+
+function Invoke-SBMSIssue4GuiSupervisor {
+    param(
+        [Parameter(Mandatory=$true)][string]$GuiPath,
+        [Parameter(Mandatory=$true)][string[]]$BaselineMonitorDevicePaths,
+        [Parameter(Mandatory=$true)][hashtable]$Adapter,
+        [ValidateRange(100, 60000)][int]$PollMilliseconds = 1000
+    )
+
+    if ($BaselineMonitorDevicePaths.Count -eq 0) {
+        throw 'Supervised GUI launch requires at least one frozen baseline physical monitor path.'
+    }
+
+    & $Adapter.ReportProgress 'Checking frozen physical display baseline before GUI launch...'
+    try {
+        $before = @(& $Adapter.GetActiveDisplayPaths)
+    } catch {
+        Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "physical display baseline could not be read before launch: $($_.Exception.Message)"
+    }
+    $missingBefore = @(Get-SBMSIssue4MissingPhysicalPaths -BaselineMonitorDevicePaths $BaselineMonitorDevicePaths -CurrentPaths $before)
+    if ($missingBefore.Count -gt 0) {
+        Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "baseline physical display path was unavailable before launch: $($missingBefore -join ', ')"
+    }
+
+    & $Adapter.ReportProgress 'Launching the frozen SBMS GUI under supervision...'
+    try {
+        $gui = & $Adapter.StartGui $GuiPath
+    } catch {
+        Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "the GUI process could not be started with an exact identity: $($_.Exception.Message)"
+    }
+    if ($null -eq $gui -or $null -eq $gui.PSObject.Properties['identity']) {
+        Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason 'the GUI process identity could not be captured'
+    }
+    & $Adapter.ReportProgress "GUI PID $([int]$gui.identity.processId) is supervised. Close the GUI normally to finish; physical display safety is checked every $PollMilliseconds ms."
+    & $Adapter.ReportProgress 'Keep this PowerShell window open while testing. If the supervisor is interrupted (for example Ctrl+C), the armed boot watchdog remains the fallback recovery path.'
+
+    while ($true) {
+        try {
+            $status = & $Adapter.GetGuiStatus $gui
+        } catch {
+            Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "GUI status could not be read: $($_.Exception.Message)"
+        }
+        if ($null -eq $status -or $null -eq $status.PSObject.Properties['state']) {
+            Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason 'GUI status adapter returned no state.'
+        }
+        if ([string]$status.state -ieq 'Exited') {
+            & $Adapter.ReportProgress 'GUI exited. Confirming the physical display baseline three consecutive times before accepting a normal exit...'
+            for ($confirmation = 1; $confirmation -le 3; $confirmation++) {
+                try {
+                    $finalPaths = @(& $Adapter.GetActiveDisplayPaths)
+                } catch {
+                    Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "final physical display confirmation $confirmation could not be read: $($_.Exception.Message)"
+                }
+                $finalMissing = @(
+                    Get-SBMSIssue4MissingPhysicalPaths `
+                        -BaselineMonitorDevicePaths $BaselineMonitorDevicePaths `
+                        -CurrentPaths $finalPaths
+                )
+                if ($finalMissing.Count -gt 0) {
+                    Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "final physical display confirmation $confirmation found an unavailable baseline path: $($finalMissing -join ', ')"
+                }
+                if ($confirmation -lt 3) {
+                    & $Adapter.Sleep ([Math]::Min($PollMilliseconds, 1000))
+                }
+            }
+            & $Adapter.ReportProgress 'GUI exited normally and the physical display baseline passed three final confirmations; no rollback was requested.'
+            return [pscustomobject][ordered]@{
+                outcome = 'ExitedNormally'
+                processId = [int]$gui.identity.processId
+                rollbackPerformed = $false
+            }
+        }
+        if ([string]$status.state -ine 'Running' -or
+            -not (Test-SBMSIssue4ProcessIdentityEqual -Expected $gui.identity -Current $status.identity)) {
+            Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "GUI process identity changed or became unverifiable (state '$([string]$status.state)')."
+        }
+
+        try {
+            $current = @(& $Adapter.GetActiveDisplayPaths)
+        } catch {
+            Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "physical display observer failed while the GUI was running: $($_.Exception.Message)"
+        }
+        $missing = @(Get-SBMSIssue4MissingPhysicalPaths -BaselineMonitorDevicePaths $BaselineMonitorDevicePaths -CurrentPaths $current)
+        if ($missing.Count -gt 0) {
+            Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason "baseline physical display path became unavailable: $($missing -join ', ')"
+        }
+        & $Adapter.Sleep $PollMilliseconds
+    }
+}
+
+function Invoke-SBMSIssue4AuditedGuiLaunch {
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$Audit,
+        [Parameter(Mandatory=$true)][scriptblock]$CreateSupervisorAdapter,
+        [ValidateRange(100, 60000)][int]$PollMilliseconds = 1000
+    )
+
+    # Nothing capable of launching the GUI is called until Gate C's signed/hash
+    # invariant audit has returned a complete InstalledAndVerified manifest.
+    $manifest = & $Audit
+    if ($null -eq $manifest -or [string]$manifest.state -ine 'InstalledAndVerified') {
+        $state = if ($null -eq $manifest) { 'null' } else { [string]$manifest.state }
+        throw "SupervisedLaunch requires an audited Gate C state 'InstalledAndVerified'; current state is '$state'."
+    }
+    $guiFile = @($manifest.plan.files | Where-Object { [string]$_.name -ieq 'SBMS.exe' })
+    $displayConfigFile = @($manifest.plan.files | Where-Object { [string]$_.name -ieq 'SBMS.DisplayConfig.cs' })
+    if ($guiFile.Count -ne 1 -or $displayConfigFile.Count -ne 1) {
+        throw 'The audited frozen Gate C manifest does not uniquely identify the GUI and display observer.'
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$manifest.planSha256)) {
+        throw 'The audited frozen Gate C manifest does not contain a plan digest.'
+    }
+    $baselinePaths = @($manifest.plan.baselinePhysicalMonitorPaths | ForEach-Object { [string]$_ })
+    $adapter = & $CreateSupervisorAdapter ([string]$displayConfigFile[0].path) ([string]$manifest.planSha256)
+    $supervised = Invoke-SBMSIssue4GuiSupervisor `
+        -GuiPath ([string]$guiFile[0].path) `
+        -BaselineMonitorDevicePaths $baselinePaths `
+        -Adapter $adapter `
+        -PollMilliseconds $PollMilliseconds
+    [pscustomobject][ordered]@{
+        outcome = $supervised.outcome
+        processId = $supervised.processId
+        rollbackPerformed = $supervised.rollbackPerformed
+    }
+}
+
+function New-SBMSIssue4GuiSupervisorRealAdapter {
+    param(
+        [string]$DisplayConfigSource,
+        [scriptblock]$Rollback
+    )
+
+    if (-not ('SBMSDisplayConfig' -as [type])) {
+        Add-Type -LiteralPath $DisplayConfigSource -ErrorAction Stop
+    }
+
+    @{
+        GetActiveDisplayPaths = {
+            @(
+                [SBMSDisplayConfig]::GetActivePaths() | ForEach-Object {
+                    [pscustomobject][ordered]@{
+                        monitorDevicePath = [string]$_.MonitorDevicePath
+                        active = [bool]$_.Active
+                        targetAvailable = [bool]$_.TargetAvailable
+                        classification = [string]$_.Classification
+                    }
+                }
+            )
+        }
+        StartGui = {
+            param([string]$Path)
+            $fullPath = [IO.Path]::GetFullPath($Path)
+            $info = New-Object Diagnostics.ProcessStartInfo
+            $info.FileName = $fullPath
+            $info.WorkingDirectory = Split-Path -Parent $fullPath
+            $info.UseShellExecute = $false
+            $process = New-Object Diagnostics.Process
+            $process.StartInfo = $info
+            if (-not $process.Start()) { throw 'The frozen SBMS GUI process did not start.' }
+
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            $cim = $null
+            while ($null -eq $cim -and [DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
+                $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)" -ErrorAction SilentlyContinue
+                if ($null -eq $cim) { Start-Sleep -Milliseconds 100 }
+            }
+            if ($null -eq $cim -or
+                -not [string]::Equals(
+                    [IO.Path]::GetFullPath([string]$cim.ExecutablePath),
+                    $fullPath,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                try { if (-not $process.HasExited) { $process.Kill() } } catch {}
+                throw 'The frozen SBMS GUI exact process identity could not be captured.'
+            }
+            [pscustomobject][ordered]@{
+                process = $process
+                identity = [pscustomobject][ordered]@{
+                    processId = [int]$cim.ProcessId
+                    executablePath = [string]$cim.ExecutablePath
+                    creationDate = [string]$cim.CreationDate
+                }
+            }
+        }
+        GetGuiStatus = {
+            param($Gui)
+            try {
+                $Gui.process.Refresh()
+                if ($Gui.process.HasExited) {
+                    return [pscustomobject]@{ state = 'Exited'; identity = $null }
+                }
+            } catch {
+                return [pscustomobject]@{ state = 'IdentityChanged'; identity = $null }
+            }
+            $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$Gui.identity.processId)" -ErrorAction SilentlyContinue
+            if ($null -eq $cim) {
+                return [pscustomobject]@{ state = 'IdentityChanged'; identity = $null }
+            }
+            [pscustomobject]@{
+                state = 'Running'
+                identity = [pscustomobject]@{
+                    processId = [int]$cim.ProcessId
+                    executablePath = [string]$cim.ExecutablePath
+                    creationDate = [string]$cim.CreationDate
+                }
+            }
+        }
+        Rollback = $Rollback
+        Sleep = { param([int]$Milliseconds) Start-Sleep -Milliseconds $Milliseconds }
+        ReportProgress = { param([string]$Message) Write-Host "[SBMS Issue #4] $Message" }
+    }
+}
+
+# Dot-sourcing exposes the pure supervisor functions to the local fake-adapter
+# tests without entering the elevated hardware transaction.
+if ([string]$MyInvocation.InvocationName -ceq '.') { return }
 
 if (-not (Test-Administrator)) { Restart-Elevated }
 
@@ -119,6 +405,7 @@ if ($Phase -eq 'Start') {
 }
 
 if ($Phase -eq 'Start') {
+    Write-Host '[SBMS Issue #4] Capturing and validating the authoritative Gate A baseline...'
     $selectedRunId = if ($PSBoundParameters.ContainsKey('RunId') -and $RunId -ne [guid]::Empty) { $RunId } else { [guid]::NewGuid() }
     $runDirectory = Join-Path $RunRoot $selectedRunId.ToString()
     if (Test-Path -LiteralPath $runDirectory) { throw "Run directory already exists: $runDirectory" }
@@ -145,7 +432,7 @@ if ($Phase -eq 'Start') {
         -RunDirectory $runDirectory `
         -DriverPackagePath $driverPackage `
         -ProductRoot $RepositoryRoot `
-        -VerificationDeviceCount 2
+        -VerificationDeviceCount 1
     $securityAdapter = New-SBMSHardwareLabAdapter
     $secured = & $securityAdapter.SecureRunDirectory $runDirectory
     $securityReadback = & $securityAdapter.TestRunDirectorySecurity $runDirectory
@@ -155,6 +442,7 @@ if ($Phase -eq 'Start') {
     }
 
     $prepareAck = "SBMS-HARDWARE-LAB/$($selectedRunId.ToString())/TestSigning/Prepare"
+    Write-Host '[SBMS Issue #4] Preparing the one-boot TestSigning clone and watchdog...'
     Invoke-SBMSHardwareLab `
         -Phase Prepare `
         -Profile TestSigning `
@@ -164,6 +452,7 @@ if ($Phase -eq 'Start') {
         -WatchdogTimeoutMinutes 30 `
         -Confirm:$false | Out-Null
     $armAck = "SBMS-HARDWARE-LAB/$($selectedRunId.ToString())/TestSigning/Arm"
+    Write-Host '[SBMS Issue #4] Arming the exact one-boot clone transaction...'
     $armed = Invoke-SBMSHardwareLab `
         -Phase Arm `
         -Profile TestSigning `
@@ -190,6 +479,7 @@ if ($Phase -eq 'Start') {
 }
 
 if ($Phase -eq 'Install') {
+    Write-Host '[SBMS Issue #4] Installing and verifying the frozen Gate C payload. Physical display paths are checked inside Gate C...'
     $manifest = Read-SBMSGateCManifest -RunDirectory $runDirectory
     $ack = "SBMS-GATE-C/$($selectedRunId.ToString())/Install/$($manifest.planSha256)"
     try {
@@ -213,14 +503,66 @@ if ($Phase -eq 'Install') {
         publishedName = $installed.ownedPublishedName
         guiPath = $guiPath
         rebootRequired = $installed.rebootRequired
+        guiLaunched = $false
+        nextPhase = 'SupervisedLaunch'
     }
-    if (-not $NoLaunchGui) {
-        Start-Process -FilePath $guiPath -WorkingDirectory (Split-Path -Parent $guiPath)
-    }
+    Write-Host "[SBMS Issue #4] Gate C Install completed with state '$($installed.state)'."
+    Write-Host '[SBMS Issue #4] The GUI was not launched. Run this script with -Phase SupervisedLaunch; it will remain attached until the GUI exits.'
     return
 }
 
+if ($Phase -eq 'SupervisedLaunch') {
+    $supervisorMutex = New-Object Threading.Mutex($false, (Get-SBMSIssue4SupervisorMutexName -Id $selectedRunId))
+    $hasSupervisorMutex = $false
+    try {
+        try {
+            $hasSupervisorMutex = $supervisorMutex.WaitOne([TimeSpan]::Zero)
+        } catch [Threading.AbandonedMutexException] {
+            $hasSupervisorMutex = $true
+        }
+        if (-not $hasSupervisorMutex) {
+            throw 'Another SupervisedLaunch is already active for this exact Run ID.'
+        }
+
+        Write-Host '[SBMS Issue #4] Auditing the frozen Gate C manifest and payload before loading any GUI code...'
+        $auditAction = {
+            Invoke-SBMSGateC -Phase Audit -RunId $selectedRunId
+        }.GetNewClosure()
+        $createAdapter = {
+            param([string]$DisplayConfigPath, [string]$AuditedPlanSha256)
+            # Freeze the authorization digest returned by the one successful
+            # pre-launch Audit. A later payload drift must not block emergency
+            # cleanup by forcing another full Audit before Rollback.
+            $rollbackAction = {
+                $rollbackAck = "SBMS-GATE-C/$($selectedRunId.ToString())/Rollback/$AuditedPlanSha256"
+                Invoke-SBMSGateC -Phase Rollback -RunId $selectedRunId -Execute -Acknowledgement $rollbackAck
+            }.GetNewClosure()
+            New-SBMSIssue4GuiSupervisorRealAdapter `
+                -DisplayConfigSource $DisplayConfigPath `
+                -Rollback $rollbackAction
+        }.GetNewClosure()
+        $supervised = Invoke-SBMSIssue4AuditedGuiLaunch `
+            -Audit $auditAction `
+            -CreateSupervisorAdapter $createAdapter `
+            -PollMilliseconds $SupervisionPollMilliseconds
+        [pscustomobject][ordered]@{
+            phase = 'SupervisedLaunch'
+            runId = $selectedRunId
+            outcome = $supervised.outcome
+            processId = $supervised.processId
+            rollbackPerformed = $supervised.rollbackPerformed
+            nextPhase = 'Finalize'
+        }
+        Write-Host '[SBMS Issue #4] Supervised GUI verification completed. Run this script with -Phase Finalize to remove the driver, devices, watchdog, and test boot clone.'
+        return
+    } finally {
+        if ($hasSupervisorMutex) { $supervisorMutex.ReleaseMutex() }
+        $supervisorMutex.Dispose()
+    }
+}
+
 if ($Phase -in @('Rollback','Finalize')) {
+    Write-Host "[SBMS Issue #4] Running exact same-Run $Phase cleanup..."
     $manifest = Read-SBMSGateCManifest -RunDirectory $runDirectory
     $gateCAck = "SBMS-GATE-C/$($selectedRunId.ToString())/Rollback/$($manifest.planSha256)"
     $gateC = Invoke-SBMSGateC -Phase Rollback -RunId $selectedRunId -Execute -Acknowledgement $gateCAck
