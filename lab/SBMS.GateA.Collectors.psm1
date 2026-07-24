@@ -110,7 +110,7 @@ function Get-SBMSGateARealEvidence {
         $summary = Get-Content -LiteralPath $summaryPath -Raw -Encoding UTF8 | ConvertFrom-Json
         [pscustomobject][ordered]@{
             result=[string]$summary.result; exitCode=$observerExitCode; observationOnly=[bool]$summary.observationOnly
-            driverInstallOrRemovalAttempted=[bool]$summary.driverInstallOrRemovalAttempted; summarySha256=Get-SBMSCollectorHash $summaryPath
+            driverInstallOrRemovalAttempted=[bool]$summary.driverInstallOrRemovalAttempted
             checks=@($summary.checks)
         }
     } $artifactDirectory
