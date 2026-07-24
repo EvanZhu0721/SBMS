@@ -209,7 +209,7 @@ function Get-VirtualDisplayCount {
         if ($line -match '^(\\\\\.\\DISPLAY\d+).*\sname=(.+)$') {
             $deviceName = $Matches[1].Trim()
             $name = $Matches[2].Trim()
-            if ($name -match '(?i)iddsample|displaybridge|sbms') {
+            if ($name -match '^(?i:SBMS Virtual Display|SBMS Display|SBMS Indirect Display)$') {
                 [void]$deviceNames.Add($deviceName)
             }
         }

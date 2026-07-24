@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include <bugcodes.h>
+#include <devpkey.h>
 #include <wudfwdm.h>
 #include <wdf.h>
 #include <iddcx.h>
@@ -12,6 +13,7 @@
 #include <avrt.h>
 #include <wrl.h>
 
+#include <array>
 #include <memory>
 
 #include "Trace.h"
@@ -102,8 +104,13 @@ namespace Microsoft
             void FinishInit(UINT ConnectorIndex);
 
         protected:
+            bool InitializeMonitorIdentity(UINT ConnectorIndex);
+
             WDFDEVICE m_WdfDevice;
             IDDCX_ADAPTER m_Adapter;
+            std::array<BYTE, IndirectSampleMonitor::szEdidBlock> m_MonitorEdid;
+            GUID m_MonitorContainerId;
+            bool m_MonitorIdentityInitialized;
         };
 
         class IndirectMonitorContext

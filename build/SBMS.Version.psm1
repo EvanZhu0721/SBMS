@@ -268,7 +268,7 @@ function Assert-SBMSVersionSourceContract {
             Message = 'Setup source manifest must retain the generated-version placeholder.'
         },
         @{
-            Path = 'Windows-driver-samples\video\IndirectDisplay\IddSampleDriver\IddSampleDriver.inf'
+            Path = 'Windows-driver-samples\video\IndirectDisplay\IddSampleDriver\SBMSIndirectDisplay.inf'
             Pattern = '(?m)^\s*DriverVer\s*=\s*07/01/2026,0\.0\.0\.0\s*$'
             Message = 'Driver source INF must retain the deterministic DriverVer placeholder.'
         }
@@ -519,8 +519,8 @@ function New-SBMSReleaseManifestData {
                 fileVersion = [string]$binaryVersion.fileVersion
             }
             driver = [pscustomobject][ordered]@{
-                artifactName = 'IddSampleDriver.dll'
-                infName = 'IddSampleDriver.inf'
+                artifactName = 'SBMSIndirectDisplay.dll'
+                infName = 'SBMSIndirectDisplay.inf'
                 productVersion = [string]$binaryVersion.productVersion
                 fileVersion = [string]$binaryVersion.fileVersion
                 driverDate = [string]$Metadata.DriverDate

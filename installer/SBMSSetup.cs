@@ -574,9 +574,11 @@ namespace SBMSSetup
             RequireFile("SBMSNative.exe");
             RequireFile("SBMSDeviceHost.exe");
             RequireFile("install-sbms-driver.ps1");
-            RequireFile(Path.Combine("driver", "IddSampleDriver", "IddSampleDriver.inf"));
-            RequireFile(Path.Combine("driver", "IddSampleDriver", "IddSampleDriver.dll"));
-            RequireFile(Path.Combine("driver", "IddSampleDriver", "iddsampledriver.cat"));
+            RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "SBMSIndirectDisplay.inf"));
+            RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "SBMSIndirectDisplay.dll"));
+            RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "sbmsindirectdisplay.cat"));
+            RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "driver-identity.json"));
+            RequireFile(Path.Combine("driver", "SBMSIndirectDisplay", "SBMS.driver-whql.json"));
         }
 
         private string PayloadRoot

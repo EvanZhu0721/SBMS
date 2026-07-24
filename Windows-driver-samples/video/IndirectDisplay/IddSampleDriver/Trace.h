@@ -18,12 +18,12 @@ Environment:
 //
 // Define the tracing flags.
 //
-// Tracing GUID - b254994f-46e6-4718-80a0-0a3aa50d6ce4
+// SBMS tracing GUID - 31ecf82b-1a56-4c85-98cc-866cc3b5b156
 //
 
 #define WPP_CONTROL_GUIDS                                              \
     WPP_DEFINE_CONTROL_GUID(                                           \
-        MyDriver1TraceGuid, (b254994f,46e6,4718,80a0,0a3aa50d6ce4),                  \
+        SbmsIndirectDisplayTraceGuid, (31ecf82b,1a56,4c85,98cc,866cc3b5b156),      \
                                                                        \
         WPP_DEFINE_BIT(MYDRIVER_ALL_INFO)                              \
         WPP_DEFINE_BIT(TRACE_DRIVER)                                   \
@@ -58,6 +58,4 @@ Environment:
 // Driver specific #defines
 //
 
-// TODO: Use a unique driver tracing ID here,
-// see https://docs.microsoft.com/en-us/windows-hardware/drivers/devtest/adding-wpp-software-tracing-to-a-windows-driver
-#define MYDRIVER_TRACING_ID L"Microsoft\\UMDF2.25\\IddSampleDriver v1.0"
+#define MYDRIVER_TRACING_ID L"SBMS\\UMDF2.25\\SBMSIndirectDisplay v1.0"

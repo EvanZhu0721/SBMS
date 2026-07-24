@@ -160,7 +160,7 @@ function Assert-SBMSBuiltArtifactVersions {
         @{ Path = (Join-Path $Root 'SBMSNative.exe'); Name = 'Native' },
         @{ Path = (Join-Path $Root 'SBMSDeviceHost.exe'); Name = 'DeviceHost' },
         @{
-            Path = (Join-Path $Root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\IddSampleDriver\IddSampleDriver.dll')
+            Path = (Join-Path $Root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\SBMSIndirectDisplay\SBMSIndirectDisplay.dll')
             Name = 'Driver'
         }
     )
@@ -175,7 +175,7 @@ function Assert-SBMSBuiltArtifactVersions {
         }
     }
 
-    $driverInf = Join-Path $Root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\IddSampleDriver\IddSampleDriver.inf'
+    $driverInf = Join-Path $Root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\SBMSIndirectDisplay\SBMSIndirectDisplay.inf'
     if (-not (Test-Path -LiteralPath $driverInf -PathType Leaf)) {
         throw "Missing built driver INF: $driverInf"
     }
@@ -280,7 +280,7 @@ foreach ($file in $releaseFiles) {
     Copy-RequiredFile -RelativePath $file -Destination $ReleaseDir
 }
 
-$driverPackage = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release\IddSampleDriver"
+$driverPackage = Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release\SBMSIndirectDisplay"
 $driverReleaseDir = New-Item -ItemType Directory -Path (Join-Path $ReleaseDir "driver") -Force
 if (Test-Path -LiteralPath $driverPackage) {
     Copy-Item -LiteralPath $driverPackage -Destination $driverReleaseDir.FullName -Recurse -Force
@@ -288,7 +288,7 @@ if (Test-Path -LiteralPath $driverPackage) {
     throw "Missing built driver package: $driverPackage"
 }
 
-$driverCer = Get-ChildItem -LiteralPath (Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release") -Filter "IddSampleDriver.cer" -File -ErrorAction SilentlyContinue |
+$driverCer = Get-ChildItem -LiteralPath (Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release") -Filter "SBMSIndirectDisplay.cer" -File -ErrorAction SilentlyContinue |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
 if ($driverCer) {

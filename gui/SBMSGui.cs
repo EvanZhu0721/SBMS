@@ -5729,20 +5729,35 @@ namespace SBMSGui
             }
 
             nextProblemCheck = Environment.TickCount + 3000;
-            return TryGetIddSampleDriverProblem(out message);
+            return TryGetSbmsIndirectDisplayProblem(out message);
         }
 
-        private static bool TryGetIddSampleDriverProblem(out string message)
+        private static bool TryGetSbmsIndirectDisplayProblem(out string message)
+        {
+            message = "";
+            for (int index = 1; index <= 3; ++index)
+            {
+                string instanceId = "SWD\\SBMS\\VIRTUALDISPLAY-" + index.ToString("00", CultureInfo.InvariantCulture);
+                if (TryGetSbmsIndirectDisplayProblem(instanceId, out message))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool TryGetSbmsIndirectDisplayProblem(string instanceId, out string message)
         {
             message = "";
             string output;
-            RunTool("pnputil.exe", "/enum-devices /instanceid \"SWD\\IDDSAMPLEDRIVER\\IDDSAMPLEDRIVER\" /drivers /properties", out output);
+            RunTool("pnputil.exe", "/enum-devices /instanceid \"" + instanceId + "\" /drivers /properties", out output);
             if (string.IsNullOrWhiteSpace(output))
             {
                 return false;
             }
 
             var details = new List<string>();
+            details.Add("InstanceId=" + instanceId);
             string statusLine = FindOutputLine(output, "Status:");
             string problemLine = FindOutputLine(output, "Problem Code:");
             string hasProblemValue = FindPropertyValue(output, "DEVPKEY_Device_HasProblem");
@@ -5855,7 +5870,7 @@ namespace SBMSGui
             doc.LoadXml(xml);
 
             string deviceId = FindEventDataValue(doc, "DeviceInstanceId");
-            if (deviceId.IndexOf("IddSampleDriver", StringComparison.OrdinalIgnoreCase) < 0)
+            if (!deviceId.StartsWith("SWD\\SBMS\\VIRTUALDISPLAY-", StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }

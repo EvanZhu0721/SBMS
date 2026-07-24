@@ -65,23 +65,23 @@ int wmain(int argc, wchar_t** argv)
     for (int i = 0; i < requestedCount; ++i) {
         ResetEvent(createdEvent);
 
-        std::wstring instanceId = (i == 0)
-            ? L"IddSampleDriver"
-            : (L"IddSampleDriver" + std::to_wstring(i + 1));
+        wchar_t instanceIdBuffer[32]{};
+        swprintf_s(instanceIdBuffer, L"VirtualDisplay-%02d", i + 1);
+        std::wstring instanceId = instanceIdBuffer;
 
         SW_DEVICE_CREATE_INFO createInfo{};
         createInfo.cbSize = sizeof(createInfo);
-        createInfo.pszzHardwareIds = L"IddSampleDriver\0\0";
-        createInfo.pszzCompatibleIds = L"IddSampleDriver\0\0";
+        createInfo.pszzHardwareIds = L"SBMS\\IndirectDisplay\0\0";
+        createInfo.pszzCompatibleIds = L"SBMS\\IndirectDisplay\0\0";
         createInfo.pszInstanceId = instanceId.c_str();
-        createInfo.pszDeviceDescription = L"SBMS Virtual Display";
+        createInfo.pszDeviceDescription = L"SBMS Virtual Display Adapter";
         createInfo.CapabilityFlags = SWDeviceCapabilitiesRemovable |
                                      SWDeviceCapabilitiesSilentInstall |
                                      SWDeviceCapabilitiesDriverRequired;
 
         HSWDEVICE device = nullptr;
         HRESULT hr = SwDeviceCreate(
-            L"IddSampleDriver",
+            L"SBMS",
             L"HTREE\\ROOT\\0",
             &createInfo,
             0,

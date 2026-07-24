@@ -115,10 +115,21 @@ if (-not (Test-Path -LiteralPath $whqlManifestPath -PathType Leaf)) {
     throw "WHQL import manifest not found: $whqlManifestPath"
 }
 $whqlManifest = Get-Content -LiteralPath $whqlManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([int]$whqlManifest.schemaVersion -ne 1 -or
+if ([int]$whqlManifest.schemaVersion -ne 2 -or
     [string]$whqlManifest.kind -cne 'SBMS-WHQL-driver-import' -or
     [string]$whqlManifest.certification.method -cne 'WHQL') {
     throw 'Driver directory is not a verified SBMS WHQL import.'
+}
+$whqlIdentityPath = Join-Path $whql 'driver-identity.json'
+if (-not (Test-Path -LiteralPath $whqlIdentityPath -PathType Leaf) -or
+    [string]$whqlManifest.identityFingerprint -notmatch '^[0-9a-f]{64}$' -or
+    (Get-FileHash -LiteralPath $whqlIdentityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        [string]$whqlManifest.identityFingerprint) {
+    throw 'WHQL driver identity contract is missing or drifted.'
+}
+$driverIdentity = Get-Content -LiteralPath $whqlIdentityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([int]$driverIdentity.schemaVersion -ne [int]$whqlManifest.identitySchema) {
+    throw 'WHQL driver identity schema does not match its import manifest.'
 }
 if ([string]$whqlManifest.sourceCommit -cne [string]$metadata.Commit) {
     throw "WHQL driver commit '$($whqlManifest.sourceCommit)' does not match release commit '$($metadata.Commit)'."
@@ -230,11 +241,12 @@ foreach ($name in @(
     )) {
     Copy-Item -LiteralPath (Join-Path $root $name) -Destination $payload.FullName
 }
-$driverOutput = New-Item -ItemType Directory -Path (Join-Path $payload.FullName 'driver\IddSampleDriver') -Force
+$driverOutput = New-Item -ItemType Directory -Path (Join-Path $payload.FullName 'driver\SBMSIndirectDisplay') -Force
 foreach ($file in @($driverInf, $driverDll, $driverCat)) {
     Copy-Item -LiteralPath $file.FullName -Destination $driverOutput.FullName
 }
 Copy-Item -LiteralPath $whqlManifestPath -Destination $driverOutput.FullName
+Copy-Item -LiteralPath $whqlIdentityPath -Destination $driverOutput.FullName
 
 $filesBeforeSbom = @(Get-ChildItem -LiteralPath $payload.FullName -Recurse -File | Sort-Object FullName)
 $spdxFiles = @()
@@ -347,6 +359,8 @@ $manifest = [pscustomobject][ordered]@{
         method = 'WHQL'
         sourceCommit = [string]$whqlManifest.sourceCommit
         candidateManifestSha256 = [string]$whqlManifest.candidateManifestSha256
+        identitySchema = [int]$whqlManifest.identitySchema
+        identityFingerprint = [string]$whqlManifest.identityFingerprint
         catalog = $driverCat.Name
         signerSubject = [string]$driverVerification.catalog.signerSubject
         signerThumbprint = [string]$driverVerification.catalog.signerThumbprint

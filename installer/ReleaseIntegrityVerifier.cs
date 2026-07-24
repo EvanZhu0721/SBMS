@@ -43,7 +43,8 @@ if ([string]$manifest.source.commit -notmatch '^[0-9a-f]{40,64}$' -or [bool]$man
     throw 'Release source provenance is invalid.'
 }
 if ([string]$manifest.driverCertification.sourceCommit -cne [string]$manifest.source.commit -or
-    [string]$manifest.driverCertification.candidateManifestSha256 -notmatch '^[0-9a-f]{64}$') {
+    [string]$manifest.driverCertification.candidateManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+    [string]$manifest.driverCertification.identityFingerprint -notmatch '^[0-9a-f]{64}$') {
     throw 'WHQL driver provenance is not pinned to the release source.'
 }
 if ([string]$manifest.signing.publisherThumbprint -cne $expected) {
@@ -109,12 +110,30 @@ foreach ($name in @('SBMS.exe', 'SBMSNative.exe', 'SBMSDeviceHost.exe')) {
     }
 }
 if ([string]$manifest.driverCertification.method -cne 'WHQL') { throw 'Driver certification method is not WHQL.' }
-$driverRoot = Join-Path $payload 'driver\IddSampleDriver'
+$driverRoot = Join-Path $payload 'driver\SBMSIndirectDisplay'
+$driverIdentityPath = Join-Path $driverRoot 'driver-identity.json'
+if (-not (Test-Path -LiteralPath $driverIdentityPath -PathType Leaf) -or
+    (Get-FileHash -LiteralPath $driverIdentityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+        [string]$manifest.driverCertification.identityFingerprint) {
+    throw 'Production driver identity contract is missing or drifted.'
+}
+$driverIdentity = Get-Content -LiteralPath $driverIdentityPath -Raw -Encoding UTF8 | ConvertFrom-Json
+if ([int]$driverIdentity.schemaVersion -ne [int]$manifest.driverCertification.identitySchema -or
+    [string]$driverIdentity.package.infName -cne 'SBMSIndirectDisplay.inf' -or
+    [string]$driverIdentity.package.dllName -cne 'SBMSIndirectDisplay.dll' -or
+    [string]$driverIdentity.package.catalogName -cne 'sbmsindirectdisplay.cat') {
+    throw 'Production driver identity contract is incompatible with this installer.'
+}
 $driverInf = @(Get-ChildItem -LiteralPath $driverRoot -Filter '*.inf' -File)
 $driverDll = @(Get-ChildItem -LiteralPath $driverRoot -Filter '*.dll' -File)
 $driverCat = @(Get-ChildItem -LiteralPath $driverRoot -Filter '*.cat' -File)
 if ($driverInf.Count -ne 1 -or $driverDll.Count -ne 1 -or $driverCat.Count -ne 1) {
     throw 'Production driver payload must contain exactly one INF, DLL and CAT.'
+}
+if ([string]$driverInf[0].Name -cne [string]$driverIdentity.package.infName -or
+    [string]$driverDll[0].Name -cne [string]$driverIdentity.package.dllName -or
+    [string]$driverCat[0].Name -cne [string]$driverIdentity.package.catalogName) {
+    throw 'Production driver artifacts do not match the frozen identity contract.'
 }
 $driverSignature = Get-AuthenticodeSignature -LiteralPath $driverCat[0].FullName
 $allowedWhqlSubjects = @($env:SBMS_VERIFY_WHQL_SUBJECTS -split '\r?\n')
@@ -229,7 +248,7 @@ if (-not $driverVerLine -or
             string driverRoot = Path.Combine(
                 Path.GetFullPath(payloadDirectory),
                 "driver",
-                "IddSampleDriver");
+                "SBMSIndirectDisplay");
             string[] catalogs = Directory.GetFiles(driverRoot, "*.cat");
             string[] infs = Directory.GetFiles(driverRoot, "*.inf");
             string[] dlls = Directory.GetFiles(driverRoot, "*.dll");
