@@ -200,6 +200,16 @@ function Test-SBMSGateASshdAncestor {
     $false
 }
 
+function Test-SBMSGateARecordedPhysicalDisplay {
+    param([Parameter(Mandatory)][string]$RunDirectory)
+    $evidencePath = Join-Path $RunDirectory 'gate-a\baseline-evidence.json'
+    $evidence = Get-Content -LiteralPath $evidencePath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+    if ([string]$evidence.displayConfig.status -cne 'Captured') { return $false }
+    @($evidence.displayConfig.data.activePaths | Where-Object {
+        $_.active -and $_.targetAvailable -and [string]$_.classification -ceq 'physical'
+    }).Count -gt 0
+}
+
 function Get-SBMSGateARemoteSessionEvidence {
     param([Parameter(Mandatory)][string]$RunDirectory)
     $parts = @(([string]$env:SSH_CONNECTION).Split(' ', [StringSplitOptions]::RemoveEmptyEntries))
@@ -211,7 +221,20 @@ function Get-SBMSGateARemoteSessionEvidence {
     $null = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 -ErrorAction Stop
     $displaySource = Join-Path $PSScriptRoot 'SBMS.DisplayConfig.cs'
     if ($null -eq ('SBMSDisplayConfig' -as [type])) { Add-Type -TypeDefinition (Get-Content -LiteralPath $displaySource -Raw -Encoding UTF8) -Language CSharp -ErrorAction Stop }
-    $paths = @([SBMSDisplayConfig]::GetActivePaths())
+    $displayEvidenceSource = 'live-display-config'
+    $displayProbeError = $null
+    try {
+        $paths = @([SBMSDisplayConfig]::GetActivePaths())
+        $activePhysicalDisplay = @($paths | Where-Object {
+            $_.Active -and $_.TargetAvailable -and $_.Classification -eq 'physical'
+        }).Count -gt 0
+    } catch {
+        $inner = $_.Exception.InnerException
+        if ($inner -isnot [ComponentModel.Win32Exception]) { throw }
+        $displayProbeError = $inner.Message
+        $displayEvidenceSource = 'protected-gate-a-baseline'
+        $activePhysicalDisplay = Test-SBMSGateARecordedPhysicalDisplay -RunDirectory $RunDirectory
+    }
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
     $lastBoot = ([DateTime]$os.LastBootUpTime).ToUniversalTime()
     [pscustomobject][ordered]@{
@@ -219,7 +242,9 @@ function Get-SBMSGateARemoteSessionEvidence {
         nonLoopbackClient = -not [Net.IPAddress]::IsLoopback($client)
         adminCapable = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         evidenceReadable = $true
-        activePhysicalDisplay = @($paths | Where-Object { $_.Active -and $_.TargetAvailable -and $_.Classification -eq 'physical' }).Count -gt 0
+        activePhysicalDisplay = $activePhysicalDisplay
+        displayEvidenceSource = $displayEvidenceSource
+        displayProbeError = $displayProbeError
         computerName = $env:COMPUTERNAME
         lastBootUtc = $lastBoot.ToString('o')
         lastBootUnixSeconds = ([DateTimeOffset]$lastBoot).ToUnixTimeSeconds()

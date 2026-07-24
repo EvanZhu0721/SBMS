@@ -59,6 +59,11 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'gate-a\stable-state.json')) 'Stable evidence was not written.'
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'gate-a\rollback-plan.json')) 'Rollback plan was not written before mutation.'
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'gate-a\evidence-index.json')) 'Evidence index was not written.'
+    $recordedPhysicalDisplay = & $script:GateModule {
+        param($InnerRunDirectory)
+        Test-SBMSGateARecordedPhysicalDisplay -RunDirectory $InnerRunDirectory
+    } $root
+    Assert-True $recordedPhysicalDisplay 'Protected Gate A evidence should provide the SSH-session display fallback.'
     Assert-Equal 3 ((Get-Content -LiteralPath (Join-Path $root 'gate-a\manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json).schemaVersion) 'Manifest schema mismatch.'
     Assert-True ($null -eq (Get-Content -LiteralPath (Join-Path $root 'gate-a\manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties['challenge']) 'Plaintext challenge must not be persisted in the manifest.'
 
