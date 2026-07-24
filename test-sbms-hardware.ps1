@@ -4,8 +4,9 @@ Collects SBMS hardware acceptance evidence without installing or removing driver
 
 .PARAMETER Scenario
 AuditOnly writes evidence and runs the read-only SBMSNative --list audit when available.
-There is intentionally no All scenario. Run SingleOutput, MultiGroup, StreamOnly, and
-TopologyRecovery as four independent invocations so each result has complete evidence.
+There is intentionally no All scenario. Run SingleOutput, MultiGroup, StreamOnly,
+TopologyRecovery, and BetaTopologyRecovery as five independent invocations so each
+result has complete evidence.
 #>
 [CmdletBinding()]
 param(
@@ -29,9 +30,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$validScenarios = @('AuditOnly', 'SingleOutput', 'MultiGroup', 'StreamOnly', 'TopologyRecovery')
+$validScenarios = @('AuditOnly', 'SingleOutput', 'MultiGroup', 'StreamOnly', 'TopologyRecovery', 'BetaTopologyRecovery')
 if ($Scenario -eq 'All') {
-    Write-Error "Scenario 'All' is intentionally unsupported. Run four independent calls: SingleOutput, MultiGroup, StreamOnly, and TopologyRecovery."
+    Write-Error "Scenario 'All' is intentionally unsupported. Run five independent calls: SingleOutput, MultiGroup, StreamOnly, TopologyRecovery, and BetaTopologyRecovery."
     exit 1
 }
 if ($Scenario -notin $validScenarios) {
@@ -48,14 +49,23 @@ if ($Scenario -ne 'AuditOnly' -and $StableSeconds -lt 1) {
     exit 1
 }
 
-if (-not $PSBoundParameters.ContainsKey('ExpectedVirtualCount') -and $Scenario -eq 'MultiGroup') {
+if (-not $PSBoundParameters.ContainsKey('ExpectedVirtualCount') -and $Scenario -in @('MultiGroup', 'BetaTopologyRecovery')) {
     $ExpectedVirtualCount = 2
 }
-if (-not $PSBoundParameters.ContainsKey('ExpectedNativeCount') -and $Scenario -eq 'MultiGroup') {
+if (-not $PSBoundParameters.ContainsKey('ExpectedNativeCount') -and $Scenario -in @('MultiGroup', 'BetaTopologyRecovery')) {
     $ExpectedNativeCount = 2
 }
 if (-not $PSBoundParameters.ContainsKey('ExpectedNativeCount') -and $Scenario -eq 'StreamOnly') {
     $ExpectedNativeCount = 0
+}
+if ($Scenario -in @('TopologyRecovery', 'BetaTopologyRecovery') -and $ExpectedNativeCount -lt 1) {
+    Write-Error "Scenario '$Scenario' requires at least one native output process."
+    exit 1
+}
+if ($Scenario -eq 'BetaTopologyRecovery' -and
+    ($ExpectedVirtualCount -lt 2 -or $ExpectedNativeCount -lt 2 -or $ExpectedNativeCount -ne $ExpectedVirtualCount)) {
+    Write-Error "Scenario 'BetaTopologyRecovery' requires at least two virtual displays and one native output per virtual display."
+    exit 1
 }
 
 if ([string]::IsNullOrWhiteSpace($EvidenceDirectory)) {
@@ -343,8 +353,8 @@ function Observe-TopologyRecovery {
         $script:ObservationSamples.Add($initial)
         $initialMatches = $initial.guiPids.Count -eq 1 -and
             $initial.hostPids.Count -eq 1 -and
-            $initial.nativePids.Count -eq 1 -and
-            $initial.virtualCount -eq 1
+            $initial.nativePids.Count -eq $ExpectedNativeCount -and
+            $initial.virtualCount -eq $ExpectedVirtualCount
         if ($initialMatches) {
             if ($null -eq $initialStableSince) { $initialStableSince = Get-Date }
             if (((Get-Date) - $initialStableSince).TotalSeconds -ge $StableSeconds) {
@@ -364,22 +374,22 @@ function Observe-TopologyRecovery {
             InitialStable = $false
             HostPidUnchanged = $false
             NativeZeroObserved = $false
-            NewNativePidObserved = $false
+            AllNativePidsReplaced = $false
             Stable = $false
             LogMarker = $null
         }
     }
 
     $script:RecoveryLogMarker = Get-CurrentSessionLogMarker
-    Write-Host '[INFO] Initial GUI=1, host=1, native=1, virtual=1 baseline is stable. Trigger topology recovery now.'
+    Write-Host ("[INFO] Initial GUI=1, host=1, native={0}, virtual={1} baseline is stable. Trigger topology recovery now." -f $ExpectedNativeCount, $ExpectedVirtualCount)
     if (-not [string]::IsNullOrWhiteSpace($script:RecoveryLogMarker.SourcePath)) {
         Write-Host ("[INFO] Recovery log marker: {0} after {1} line(s)" -f $script:RecoveryLogMarker.SourcePath, $script:RecoveryLogMarker.LineCount)
     }
     $initialHost = Get-PidSignature $initial.hostPids
-    $initialNative = Get-PidSignature $initial.nativePids
+    $initialNativePids = @($initial.nativePids)
     $hostUnchanged = $initial.hostPids.Count -eq 1
     $nativeZeroObserved = $false
-    $newNativePidObserved = $false
+    $allNativePidsReplaced = $false
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $last = $initial
 
@@ -390,18 +400,18 @@ function Observe-TopologyRecovery {
         if ((Get-PidSignature $last.hostPids) -ne $initialHost) {
             $hostUnchanged = $false
         }
-        $nativeSignature = Get-PidSignature $last.nativePids
         if (-not $nativeZeroObserved -and $last.nativePids.Count -eq 0) {
             $nativeZeroObserved = $true
         }
-        if ($last.nativePids.Count -gt 0 -and $nativeSignature -ne $initialNative) {
-            $newNativePidObserved = $true
+        $reusedInitialPids = @($last.nativePids | Where-Object { $_ -in $initialNativePids })
+        if ($last.nativePids.Count -eq $ExpectedNativeCount -and $reusedInitialPids.Count -eq 0) {
+            $allNativePidsReplaced = $true
             break
         }
     }
 
     $stableSince = $null
-    if ($newNativePidObserved) {
+    if ($allNativePidsReplaced) {
         $finalDeadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while ((Get-Date) -lt $finalDeadline) {
             $last = Get-RuntimeSnapshot
@@ -411,8 +421,9 @@ function Observe-TopologyRecovery {
             }
             $finalMatches = $last.guiPids.Count -eq 1 -and
                 $last.hostPids.Count -eq 1 -and
-                $last.nativePids.Count -eq 1 -and
-                $last.virtualCount -eq 1
+                $last.nativePids.Count -eq $ExpectedNativeCount -and
+                $last.virtualCount -eq $ExpectedVirtualCount -and
+                @($last.nativePids | Where-Object { $_ -in $initialNativePids }).Count -eq 0
             if ($hostUnchanged -and $finalMatches) {
                 if ($null -eq $stableSince) { $stableSince = Get-Date }
                 if (((Get-Date) - $stableSince).TotalSeconds -ge $StableSeconds) { break }
@@ -428,7 +439,7 @@ function Observe-TopologyRecovery {
         InitialStable = $initialStable
         HostPidUnchanged = $hostUnchanged
         NativeZeroObserved = $nativeZeroObserved
-        NewNativePidObserved = $newNativePidObserved
+        AllNativePidsReplaced = $allNativePidsReplaced
         Stable = ($null -ne $stableSince -and ((Get-Date) - $stableSince).TotalSeconds -ge $StableSeconds)
         LogMarker = $script:RecoveryLogMarker
     }
@@ -548,18 +559,58 @@ function Test-GuiLifecycleLog {
         }
     }
     $runningIndex = -1
+    $settledIndex = -1
+    $nativeStartedIndex = -1
+    $prematureNativeRestart = $false
+    $singleRestartObserved = $false
+    $betaRestartIndexes = New-Object 'System.Collections.Generic.HashSet[int]'
+    # Keep the non-ASCII product log token out of this BOM-less script so
+    # Windows PowerShell 5.1 parses it consistently under every ANSI codepage.
+    $topologySettledLog = -join [char[]]@(
+        0x663e, 0x793a, 0x62d3, 0x6251, 0x5df2, 0x7a33, 0x5b9a, 0xff0c,
+        0x51c6, 0x5907, 0x91cd, 0x542f, 0x0020, 0x006e, 0x0061, 0x0074,
+        0x0069, 0x0076, 0x0065, 0x0020, 0x8f93, 0x51fa)
+    $singleRestartLog = 'native ' + (-join [char[]]@(0x5df2, 0x91cd, 0x542f))
+    $betaRestartPattern = 'beta native\[(\d+)\] ' + (-join [char[]]@(0x5df2, 0x542f, 0x52a8))
     if ($recoveringIndex -ge 0) {
         for ($i = $recoveringIndex + 1; $i -lt $appended.Count; ++$i) {
+            if ($settledIndex -lt 0 -and $appended[$i].IndexOf($topologySettledLog, [System.StringComparison]::Ordinal) -ge 0) {
+                $settledIndex = $i
+            }
+            $isSingleRestart = $appended[$i].IndexOf($singleRestartLog, [System.StringComparison]::Ordinal) -ge 0
+            $isBetaRestart = $appended[$i] -match $betaRestartPattern
+            if ($isSingleRestart -or $isBetaRestart) {
+                if ($settledIndex -lt 0) {
+                    $prematureNativeRestart = $true
+                } else {
+                    if ($nativeStartedIndex -lt 0) {
+                        $nativeStartedIndex = $i
+                    }
+                    if ($isSingleRestart) {
+                        $singleRestartObserved = $true
+                    }
+                    if ($isBetaRestart) {
+                        [void]$betaRestartIndexes.Add([int]$Matches[1])
+                    }
+                }
+            }
             if ($appended[$i] -match ('Recovering -> Running generation=' + [regex]::Escape($recoveryGeneration) + '(?:\D|$)')) {
                 $runningIndex = $i
                 break
             }
         }
     }
-    if ($recoveringIndex -lt 0 -or $runningIndex -lt 0) {
-        Add-Check 'LifecycleLog' 'FAIL' 'Appended current-session log does not contain ordered Running -> Recovering and Recovering -> Running transitions with the same generation'
+    $nativeRestartEvidenceComplete = if ($Scenario -eq 'BetaTopologyRecovery') {
+        $betaRestartIndexes.Count -eq $ExpectedNativeCount
     } else {
-        Add-Check 'LifecycleLog' 'PASS' ("Appended current-session log contains ordered recovery transitions for generation {0}" -f $recoveryGeneration)
+        $singleRestartObserved
+    }
+    if ($recoveringIndex -lt 0 -or $settledIndex -lt 0 -or $nativeStartedIndex -lt 0 -or $runningIndex -lt 0 -or
+        $prematureNativeRestart -or -not $nativeRestartEvidenceComplete -or
+        -not ($recoveringIndex -lt $settledIndex -and $settledIndex -lt $nativeStartedIndex -and $nativeStartedIndex -lt $runningIndex)) {
+        Add-Check 'LifecycleLog' 'FAIL' 'Current-session log does not prove ordered Recovering -> topology stable -> native restart -> Running for one generation'
+    } else {
+        Add-Check 'LifecycleLog' 'PASS' ("Current-session log proves settle-before-restart recovery for generation {0}" -f $recoveryGeneration)
     }
 }
 
@@ -632,12 +683,12 @@ try {
 
     if ($Scenario -eq 'AuditOnly') {
         Add-Check 'AuditOnly' 'PASS' 'Wrote local evidence and executed the read-only SBMSNative --list audit when available; no SBMS product, driver, PnP, or display-topology state was changed'
-    } elseif ($Scenario -eq 'TopologyRecovery') {
+    } elseif ($Scenario -in @('TopologyRecovery', 'BetaTopologyRecovery')) {
         $recovery = Observe-TopologyRecovery
         if ($recovery.InitialStable) {
-            Add-Check 'TopologyRecoveryInitialStable' 'PASS' ("Initial runtime held GUI=1, host=1, native=1, virtual=1 for $StableSeconds second(s)")
+            Add-Check 'TopologyRecoveryInitialStable' 'PASS' ("Initial runtime held GUI=1, host=1, native=$ExpectedNativeCount, virtual=$ExpectedVirtualCount for $StableSeconds second(s)")
         } else {
-            Add-Check 'TopologyRecoveryInitialStable' 'FAIL' 'Initial GUI=1, host=1, native=1, virtual=1 baseline did not become stable'
+            Add-Check 'TopologyRecoveryInitialStable' 'FAIL' "Initial GUI=1, host=1, native=$ExpectedNativeCount, virtual=$ExpectedVirtualCount baseline did not become stable"
         }
         if ($recovery.HostPidUnchanged) {
             Add-Check 'TopologyRecoveryHostPid' 'PASS' ("Host PID remained {0}" -f (Get-PidSignature $recovery.Initial.hostPids))
@@ -649,15 +700,15 @@ try {
         } else {
             Add-Check 'TopologyRecoveryNativeStopped' 'SKIP' 'The 100ms sampler did not capture native=0; ordered same-generation lifecycle logs and a new same-parent native PID remain mandatory'
         }
-        if ($recovery.NewNativePidObserved) {
-            Add-Check 'TopologyRecoveryNativePid' 'PASS' 'Observed a new non-empty native PID owned by the same trusted GUI session'
+        if ($recovery.AllNativePidsReplaced) {
+            Add-Check 'TopologyRecoveryAllNativePidsReplaced' 'PASS' "All $ExpectedNativeCount initial native PID(s) were replaced under the same trusted GUI session"
         } else {
-            Add-Check 'TopologyRecoveryNativePid' 'FAIL' 'No new same-parent native PID was observed after the stable baseline'
+            Add-Check 'TopologyRecoveryAllNativePidsReplaced' 'FAIL' "Final native PID set did not contain exactly $ExpectedNativeCount new same-parent process(es)"
         }
         if ($recovery.Stable) {
-            Add-Check 'RuntimeStable' 'PASS' ("Final runtime held GUI=1, host=1, native=1, virtual=1 for $StableSeconds second(s)")
+            Add-Check 'RuntimeStable' 'PASS' ("Final runtime held GUI=1, host=1, native=$ExpectedNativeCount, virtual=$ExpectedVirtualCount for $StableSeconds second(s)")
         } else {
-            Add-Check 'RuntimeStable' 'FAIL' 'Final GUI=1, host=1, native=1, virtual=1 state did not become stable after the required recovery observations'
+            Add-Check 'RuntimeStable' 'FAIL' "Final GUI=1, host=1, native=$ExpectedNativeCount, virtual=$ExpectedVirtualCount state did not become stable after the required recovery observations"
         }
     } else {
         $finalSnapshot = Observe-StableRuntime
@@ -673,7 +724,7 @@ try {
 
     [void](Copy-GuiLogs)
     if ($Scenario -ne 'AuditOnly') {
-        Test-GuiLifecycleLog -RequireRecovery:($Scenario -eq 'TopologyRecovery')
+        Test-GuiLifecycleLog -RequireRecovery:($Scenario -in @('TopologyRecovery', 'BetaTopologyRecovery'))
     }
 } catch {
     Add-Check 'HarnessExecution' 'FAIL' $_.Exception.ToString()

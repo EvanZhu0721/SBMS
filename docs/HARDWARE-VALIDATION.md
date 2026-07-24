@@ -72,6 +72,19 @@ Topology recovery begins from a stable single-output session. After the script p
   -TimeoutSeconds 120
 ```
 
+Multi-screen BETA topology recovery is a separate acceptance run. Start at least two enabled, non-stream-only mapping groups in the elevated GUI; every virtual display in this scenario must have one native output. After the local prompt, rotate or move one virtual display in Windows Settings. Acceptance requires the same host PID throughout, every original native PID to be replaced, a stable final N/N runtime, and a same-generation log sequence proving topology settled before every native restart.
+
+```powershell
+.\test-sbms-hardware.ps1 `
+  -Scenario BetaTopologyRecovery `
+  -AcknowledgeSystemChanges `
+  -ExpectedVirtualCount 2 `
+  -ExpectedNativeCount 2 `
+  -TimeoutSeconds 120
+```
+
+Both recovery scenarios are local, interactive release-QA checks. They require only the SBMS GUI, Windows Settings, and an elevated PowerShell window on the test machine; SSH and a second computer are not part of the procedure.
+
 There is intentionally no `All` scenario. Combining independently configured sessions into one result makes failures and missing evidence ambiguous.
 
 ## Result contract

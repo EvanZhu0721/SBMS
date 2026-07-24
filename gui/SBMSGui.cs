@@ -137,6 +137,7 @@ namespace SBMSGui
         private readonly IConfigurationStore configurationStore = new XmlConfigurationStore();
         private readonly IDisplayModeService displayModeService = new DisplayModeService();
         private readonly ITopologyDiscoveryService topologyDiscoveryService = new TopologyDiscoveryService();
+        private readonly TopologyRecoveryWorkflow topologyRecoveryWorkflow = new TopologyRecoveryWorkflow();
         private readonly ITopologyRecoveryService topologyRecoveryService;
         private int recoveryProblemCheck;
         private readonly string logDirectory;
@@ -716,7 +717,7 @@ namespace SBMSGui
             recoveryProblemCheck = Environment.TickCount + 1500;
             topologyRecoveryService = new TopologyRecoveryService(
                 delegate { return CaptureNativeOutput("--list"); },
-                IsDeviceHostRunning,
+                delegate { return !deviceHostCheck.Checked || IsDeviceHostRunning(); },
                 ParseVirtualSources,
                 delegate(string deviceName, Resolution resolution, string output)
                 {
@@ -5115,25 +5116,9 @@ namespace SBMSGui
                 }
                 if (IsRecoverableNativeDisplayExit(exitCode))
                 {
-                    AppendLog(GetRecoverableNativeExitMessage(exitCode) + "，重启 native 输出");
-                        BridgeState previousState = lifecycle.State;
-                        if (!lifecycle.BeginRecovery(processGeneration))
-                        {
-                            return;
-                        }
-                        LogLifecycleTransition(previousState, GetRecoverableNativeExitMessage(exitCode));
-                    UpdateLifecycleUi();
-                    if (!TryRestartNativeAfterTopologyChange(processGeneration))
-                    {
-                        AbortBridgeStart("native 重启失败，已停止桥接", processGeneration);
-                    }
-                    else
-                    {
-                        previousState = lifecycle.State;
-                        lifecycle.MarkRunning(processGeneration);
-                        LogLifecycleTransition(previousState, "native 输出恢复完成");
-                        UpdateLifecycleUi();
-                    }
+                    RestartSingleBridgeAfterTopologyChange(
+                        GetRecoverableNativeExitMessage(exitCode),
+                        processGeneration);
                     return;
                 }
                 AbortBridgeStart("native 输出异常退出，已停止桥接", processGeneration);
@@ -5160,6 +5145,65 @@ namespace SBMSGui
                 : "检测到显示拓扑变化";
         }
 
+        private void RestartSingleBridgeAfterTopologyChange(string reason, long generation)
+        {
+            /*
+             * Issue #4: Windows may rebuild display enumeration several times after
+             * a Settings topology edit. Keep the long-lived virtual display host
+             * alive, wait for stable enumeration, then rebind and restart native.
+             * Recovery failure is non-destructive; only explicit Stop/Exit owns the
+             * normal running-session host shutdown path.
+             */
+            BridgeState previousState = lifecycle.State;
+            if (!lifecycle.BeginRecovery(generation))
+            {
+                return;
+            }
+            try
+            {
+                LogLifecycleTransition(previousState, reason);
+                UpdateLifecycleUi();
+                AppendLog(reason + "，等待显示拓扑稳定后恢复 native 输出");
+
+                string settleMessage = "";
+                TopologyRecoveryOutcome outcome = topologyRecoveryWorkflow.Recover(
+                    delegate
+                    {
+                        bool settled = WaitForDisplayTopologyToSettle(
+                            DisplayTopologySettleTimeoutMs,
+                            generation,
+                            out settleMessage);
+                        if (settled)
+                        {
+                            AppendLog("显示拓扑已稳定，准备重启 native 输出");
+                        }
+                        return settled;
+                    },
+                    delegate { return TryRestartNativeAfterTopologyChange(generation); });
+
+                if (outcome != TopologyRecoveryOutcome.Recovered)
+                {
+                    string failure = outcome == TopologyRecoveryOutcome.TopologyDidNotSettle
+                        ? settleMessage
+                        : "拓扑稳定后 native 输出重启失败";
+                    FailBridgeRecovery(generation, failure);
+                    return;
+                }
+
+                previousState = lifecycle.State;
+                lifecycle.MarkRunning(generation);
+                LogLifecycleTransition(previousState, "native 输出恢复完成");
+                UpdateLifecycleUi();
+            }
+            catch (Exception ex)
+            {
+                if (lifecycle.IsCurrent(generation))
+                {
+                    FailBridgeRecovery(generation, "拓扑变化恢复异常: " + ex.Message);
+                }
+            }
+        }
+
         private bool TryRestartNativeAfterTopologyChange(long generation)
         {
             if (!deviceHostCheck.Checked)
@@ -5168,7 +5212,7 @@ namespace SBMSGui
             }
 
             /*
-             * Issue #1: a topology change must restart native output without
+             * Issue #4: a topology change must restart native output without
              * stopping the managed virtual display host.
              *
              * DXGI desktop duplication intentionally returns DXGI_ERROR_ACCESS_LOST when the
@@ -5366,7 +5410,11 @@ namespace SBMSGui
             }
             message = !string.IsNullOrWhiteSpace(topologyRecoveryService.LastFailure)
                 ? topologyRecoveryService.LastFailure
-                : (!lifecycle.IsCurrent(generation) ? "显示拓扑等待已取消" : (!IsDeviceHostRunning() ? "拓扑变化恢复时虚拟显示器 host 已退出" : "等待显示拓扑稳定超时"));
+                : (!lifecycle.IsCurrent(generation)
+                    ? "显示拓扑等待已取消"
+                    : (deviceHostCheck.Checked && !IsDeviceHostRunning()
+                        ? "拓扑变化恢复时虚拟显示器 host 已退出"
+                        : "等待显示拓扑稳定超时"));
             return false;
         }
 
@@ -5584,6 +5632,7 @@ namespace SBMSGui
                     FailBridgeRecovery(generation, recoveryMessage);
                     return;
                 }
+                AppendLog("显示拓扑已稳定，准备重启 native 输出");
 
                 if (!RebindBetaTargetDisplays(out recoveryMessage))
                 {

@@ -20,6 +20,7 @@ $Sources = @(
     (Join-Path $Root "gui\Services\XmlConfigurationStore.cs"),
     (Join-Path $Root "gui\Services\TopologyDiscoveryService.cs"),
     (Join-Path $Root "gui\Services\TopologyRecoveryService.cs"),
+    (Join-Path $Root "gui\Services\TopologyRecoveryWorkflow.cs"),
     (Join-Path $Root "gui\Services\DisplayModeService.cs"),
     (Join-Path $Root "tests\GuiCoreTests.cs")
 )

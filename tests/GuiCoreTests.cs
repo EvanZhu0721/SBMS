@@ -114,6 +114,33 @@ internal static class GuiCoreTests
         Assert(!failingRecovery.WaitForAny(5000, delegate(int delay) { return true; }, out cancelledSource) && failingRecovery.LastFailure == "driver problem",
             "recovery failure probe should stop polling and preserve diagnostics");
 
+        var workflow = new TopologyRecoveryWorkflow();
+        var workflowCalls = new List<string>();
+        TopologyRecoveryOutcome workflowOutcome = workflow.Recover(
+            delegate { workflowCalls.Add("settle"); return true; },
+            delegate { workflowCalls.Add("restart"); return true; });
+        Assert(workflowOutcome == TopologyRecoveryOutcome.Recovered,
+            "topology workflow should report recovery");
+        Assert(workflowCalls.Count == 2 && workflowCalls[0] == "settle" && workflowCalls[1] == "restart",
+            "topology workflow must wait for stable enumeration before native restart");
+
+        workflowCalls.Clear();
+        workflowOutcome = workflow.Recover(
+            delegate { workflowCalls.Add("settle"); return false; },
+            delegate { workflowCalls.Add("restart"); return true; });
+        Assert(workflowOutcome == TopologyRecoveryOutcome.TopologyDidNotSettle && workflowCalls.Count == 1,
+            "failed topology settle must prevent native restart");
+
+        workflowCalls.Clear();
+        workflowOutcome = workflow.Recover(
+            delegate { workflowCalls.Add("settle"); return true; },
+            delegate { workflowCalls.Add("restart"); return false; });
+        Assert(workflowOutcome == TopologyRecoveryOutcome.NativeRestartFailed &&
+               workflowCalls.Count == 2 &&
+               workflowCalls[0] == "settle" &&
+               workflowCalls[1] == "restart",
+            "native restart failure should remain a distinct non-cleanup outcome");
+
         var displayModes = new DisplayModeService();
         Assert(displayModes.NormalizeOrientation(-1) == 0, "negative orientation should normalize to default");
         Assert(displayModes.NormalizeOrientation(3) == 3, "valid orientation should be preserved");
