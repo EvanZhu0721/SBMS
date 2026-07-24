@@ -37,7 +37,7 @@ if ([string]$catalogResult.Status -cne 'Valid') {
 $manifestPath = Join-Path $payload 'SBMS.release.json'
 if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'Release manifest is missing.' }
 $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([int]$manifest.schemaVersion -ne 3) { throw 'Production release manifest schema must be 3.' }
+if ([int]$manifest.schemaVersion -ne 4) { throw 'Production release manifest schema must be 4.' }
 if ([string]$manifest.profile -cne 'Production') { throw 'Release manifest is not a Production profile.' }
 if ([string]$manifest.source.commit -notmatch '^[0-9a-f]{40,64}$' -or [bool]$manifest.source.dirty) {
     throw 'Release source provenance is invalid.'
@@ -46,6 +46,14 @@ if ([string]$manifest.driverCertification.sourceCommit -cne [string]$manifest.so
     [string]$manifest.driverCertification.candidateManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
     [string]$manifest.driverCertification.identityFingerprint -notmatch '^[0-9a-f]{64}$') {
     throw 'WHQL driver provenance is not pinned to the release source.'
+}
+foreach ($field in @('privateProductId', 'sharedProductId', 'submissionId')) {
+    if ([string]$manifest.driverCertification.partnerCenter.$field -notmatch '^[1-9][0-9]*$') {
+        throw ('WHQL Partner Center provenance is invalid: ' + $field)
+    }
+}
+if ([string]$manifest.driverCertification.partnerCenter.hlkPackageSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw 'WHQL HLK submission package provenance is invalid.'
 }
 if ([string]$manifest.signing.publisherThumbprint -cne $expected) {
     throw 'Release manifest publisher does not match the installer identity.'
@@ -110,8 +118,21 @@ foreach ($name in @('SBMS.exe', 'SBMSNative.exe', 'SBMSDeviceHost.exe')) {
     }
 }
 if ([string]$manifest.driverCertification.method -cne 'WHQL') { throw 'Driver certification method is not WHQL.' }
-$driverRoot = Join-Path $payload 'driver\SBMSIndirectDisplay'
-$driverIdentityPath = Join-Path $driverRoot 'driver-identity.json'
+$provenanceVerifierPath = Join-Path $payload 'Verify-SBMSWhqlProvenance.ps1'
+if (-not (Test-Path -LiteralPath $provenanceVerifierPath -PathType Leaf)) {
+    throw 'WHQL provenance verifier is missing.'
+}
+. $provenanceVerifierPath
+$driverArtifacts = Assert-SBMSWhqlDriverArtifacts `
+    -ReleaseManifest $manifest `
+    -PayloadRoot $payload
+$driverRoot = [string]$driverArtifacts.driverRoot
+$whqlImportPath = [string]$driverArtifacts.whqlImportPath
+$whqlImport = Get-Content -LiteralPath $whqlImportPath -Raw -Encoding UTF8 | ConvertFrom-Json
+$null = Assert-SBMSWhqlReleaseProvenance `
+    -ReleaseManifest $manifest `
+    -WhqlImportManifest $whqlImport
+$driverIdentityPath = [string]$driverArtifacts.identityPath
 if (-not (Test-Path -LiteralPath $driverIdentityPath -PathType Leaf) -or
     (Get-FileHash -LiteralPath $driverIdentityPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne
         [string]$manifest.driverCertification.identityFingerprint) {
@@ -124,9 +145,9 @@ if ([int]$driverIdentity.schemaVersion -ne [int]$manifest.driverCertification.id
     [string]$driverIdentity.package.catalogName -cne 'sbmsindirectdisplay.cat') {
     throw 'Production driver identity contract is incompatible with this installer.'
 }
-$driverInf = @(Get-ChildItem -LiteralPath $driverRoot -Filter '*.inf' -File)
-$driverDll = @(Get-ChildItem -LiteralPath $driverRoot -Filter '*.dll' -File)
-$driverCat = @(Get-ChildItem -LiteralPath $driverRoot -Filter '*.cat' -File)
+$driverInf = @(Get-Item -LiteralPath ([string]$driverArtifacts.infPath))
+$driverDll = @(Get-Item -LiteralPath ([string]$driverArtifacts.dllPath))
+$driverCat = @(Get-Item -LiteralPath ([string]$driverArtifacts.catPath))
 if ($driverInf.Count -ne 1 -or $driverDll.Count -ne 1 -or $driverCat.Count -ne 1) {
     throw 'Production driver payload must contain exactly one INF, DLL and CAT.'
 }

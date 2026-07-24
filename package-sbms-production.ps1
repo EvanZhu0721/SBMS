@@ -115,10 +115,18 @@ if (-not (Test-Path -LiteralPath $whqlManifestPath -PathType Leaf)) {
     throw "WHQL import manifest not found: $whqlManifestPath"
 }
 $whqlManifest = Get-Content -LiteralPath $whqlManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ([int]$whqlManifest.schemaVersion -ne 2 -or
+if ([int]$whqlManifest.schemaVersion -ne 3 -or
     [string]$whqlManifest.kind -cne 'SBMS-WHQL-driver-import' -or
     [string]$whqlManifest.certification.method -cne 'WHQL') {
     throw 'Driver directory is not a verified SBMS WHQL import.'
+}
+foreach ($field in @('privateProductId', 'sharedProductId', 'submissionId')) {
+    if ([string]$whqlManifest.partnerCenter.$field -notmatch '^[1-9][0-9]*$') {
+        throw "WHQL import Partner Center field '$field' is invalid."
+    }
+}
+if ([string]$whqlManifest.partnerCenter.hlkPackageSha256 -notmatch '^[0-9a-f]{64}$') {
+    throw 'WHQL import HLK submission package SHA-256 is invalid.'
 }
 $whqlIdentityPath = Join-Path $whql 'driver-identity.json'
 if (-not (Test-Path -LiteralPath $whqlIdentityPath -PathType Leaf) -or
@@ -236,6 +244,7 @@ foreach ($name in @(
         'RELEASE_NOTES.md',
         'install-sbms-driver.ps1',
         'install-sbms-program-files.ps1',
+        'Verify-SBMSWhqlProvenance.ps1',
         'run-sbms-native.ps1',
         'diagnose-sbms.ps1'
     )) {
@@ -326,7 +335,7 @@ $artifactRecords = @(
         }
 )
 $manifest = [pscustomobject][ordered]@{
-    schemaVersion = 3
+    schemaVersion = 4
     profile = 'Production'
     product = [pscustomobject][ordered]@{
         name = 'SBMS'
@@ -364,6 +373,12 @@ $manifest = [pscustomobject][ordered]@{
         catalog = $driverCat.Name
         signerSubject = [string]$driverVerification.catalog.signerSubject
         signerThumbprint = [string]$driverVerification.catalog.signerThumbprint
+        partnerCenter = [pscustomobject][ordered]@{
+            privateProductId = [string]$whqlManifest.partnerCenter.privateProductId
+            sharedProductId = [string]$whqlManifest.partnerCenter.sharedProductId
+            submissionId = [string]$whqlManifest.partnerCenter.submissionId
+            hlkPackageSha256 = [string]$whqlManifest.partnerCenter.hlkPackageSha256
+        }
         embeddedSignature = [pscustomobject][ordered]@{
             status = [string]$driverEmbeddedSignature.status
             signerSubject = [string]$driverEmbeddedSignature.signerSubject

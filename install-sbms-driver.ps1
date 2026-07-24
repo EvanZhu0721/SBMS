@@ -23,6 +23,55 @@ if (-not $Force) {
     exit 10
 }
 
+$VerifiedProductionRoot = $null
+$VerifiedProductionPayload = $null
+if (-not $AllowTestSigned) {
+    if (-not $VerifiedByInstaller -or [string]::IsNullOrWhiteSpace($VerifiedReleaseRoot)) {
+        throw 'Production driver installation is restricted to the publisher-verified SBMS installer.'
+    }
+    $VerifiedProductionRoot = [System.IO.Path]::GetFullPath($VerifiedReleaseRoot)
+    $VerifiedProductionPayload = Join-Path $VerifiedProductionRoot 'payload'
+    if (-not (Test-Path -LiteralPath $VerifiedProductionPayload -PathType Container)) {
+        throw "Publisher-verified release payload is missing: $VerifiedProductionPayload"
+    }
+}
+
+function Assert-SBMSPayloadPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Path,
+
+        [Parameter(Mandatory = $true)]
+        [string] $PayloadRoot
+    )
+
+    $root = [System.IO.Path]::GetFullPath($PayloadRoot).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $candidate = [System.IO.Path]::GetFullPath($Path)
+    $prefix = $root + [System.IO.Path]::DirectorySeparatorChar
+    if (-not $candidate.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Driver payload escapes the publisher-verified release payload: $candidate"
+    }
+
+    $relative = $candidate.Substring($prefix.Length)
+    $cursor = $root
+    foreach ($segment in $relative.Split(
+        @(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar
+        ),
+        [System.StringSplitOptions]::RemoveEmptyEntries
+    )) {
+        $cursor = Join-Path $cursor $segment
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction Stop
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Publisher-verified driver payload contains a reparse point: $cursor"
+        }
+    }
+}
+
 function Assert-DriverPayload {
     param(
         [System.IO.FileInfo] $Inf
@@ -56,12 +105,9 @@ function Assert-DriverPayload {
         throw "Refusing to install invalid driver catalog: $($Cat.FullName) signature=$($catSignature.Status) $($catSignature.StatusMessage)"
     }
     if (-not $AllowTestSigned) {
-        if (-not $VerifiedByInstaller -or [string]::IsNullOrWhiteSpace($VerifiedReleaseRoot)) {
-            throw 'Production driver installation is restricted to the publisher-verified SBMS installer.'
-        }
-        $verifiedRoot = [System.IO.Path]::GetFullPath($VerifiedReleaseRoot)
-        $releaseCatalog = Join-Path $verifiedRoot 'SBMS.release.cat'
-        $releasePayload = Join-Path $verifiedRoot 'payload'
+        Assert-SBMSPayloadPath -Path $Inf.FullName -PayloadRoot $VerifiedProductionPayload
+        $releaseCatalog = Join-Path $VerifiedProductionRoot 'SBMS.release.cat'
+        $releasePayload = $VerifiedProductionPayload
         $releaseManifestPath = Join-Path $releasePayload 'SBMS.release.json'
         $releaseSignature = Get-AuthenticodeSignature -LiteralPath $releaseCatalog
         if ([string]$releaseSignature.Status -cne 'Valid' -or
@@ -81,12 +127,32 @@ function Assert-DriverPayload {
         $releaseThumbprint = (
             [string]$releaseSignature.SignerCertificate.Thumbprint -replace '[^0-9A-Fa-f]', ''
         ).ToUpperInvariant()
-        if ([int]$releaseManifest.schemaVersion -ne 3 -or
+        if ([int]$releaseManifest.schemaVersion -ne 4 -or
             [string]$releaseManifest.profile -cne 'Production' -or
             [string]$releaseManifest.driverCertification.method -cne 'WHQL' -or
             [string]$releaseManifest.signing.publisherThumbprint -cne $releaseThumbprint) {
             throw 'Publisher release manifest does not authorize this production WHQL install.'
         }
+        $provenanceVerifierPath = Join-Path $releasePayload 'Verify-SBMSWhqlProvenance.ps1'
+        if (-not (Test-Path -LiteralPath $provenanceVerifierPath -PathType Leaf)) {
+            throw 'Publisher-verified WHQL provenance verifier is missing.'
+        }
+        . $provenanceVerifierPath
+        $driverArtifacts = Assert-SBMSWhqlDriverArtifacts `
+            -ReleaseManifest $releaseManifest `
+            -PayloadRoot $releasePayload
+        if ([System.IO.Path]::GetFullPath($Inf.FullName) -ine
+            [System.IO.Path]::GetFullPath([string]$driverArtifacts.infPath)) {
+            throw 'Selected driver INF is not the artifact bound to the publisher-verified release.'
+        }
+        $whqlImport = Get-Content `
+            -LiteralPath ([string]$driverArtifacts.whqlImportPath) `
+            -Raw `
+            -Encoding UTF8 |
+            ConvertFrom-Json
+        $null = Assert-SBMSWhqlReleaseProvenance `
+            -ReleaseManifest $releaseManifest `
+            -WhqlImportManifest $whqlImport
         if (-not $catSignature.SignerCertificate -or
             [string]$catSignature.SignerCertificate.Subject -cne
                 [string]$releaseManifest.driverCertification.signerSubject) {
@@ -121,11 +187,16 @@ function Assert-DriverPayload {
     Write-Host "Driver payload CAT signature=$($catSignature.Status)"
 }
 
-$DriverSearchRoots = @(
-    (Join-Path $PSScriptRoot "driver"),
-    (Join-Path $PSScriptRoot "Windows-driver-samples\video\IndirectDisplay"),
-    $PSScriptRoot
-) | Where-Object { Test-Path $_ }
+$DriverSearchRoots = if ($AllowTestSigned) {
+    @(
+        (Join-Path $PSScriptRoot "driver"),
+        (Join-Path $PSScriptRoot "Windows-driver-samples\video\IndirectDisplay"),
+        $PSScriptRoot
+    ) | Where-Object { Test-Path $_ }
+} else {
+    @(Join-Path $VerifiedProductionPayload 'driver') |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Container }
+}
 
 $Inf = $DriverSearchRoots |
     ForEach-Object { Get-ChildItem $_ -Recurse -Filter "SBMSIndirectDisplay.inf" -ErrorAction SilentlyContinue } |

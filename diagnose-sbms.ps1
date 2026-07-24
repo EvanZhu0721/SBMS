@@ -190,16 +190,39 @@ function Get-SBMSReleaseMetadata {
     if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 -ErrorAction Stop |
             ConvertFrom-Json -ErrorAction Stop
-        if ([int]$manifest.schemaVersion -notin @(2, 3)) {
+        if ([int]$manifest.schemaVersion -notin @(2, 3, 4)) {
             throw "Unsupported SBMS release manifest schema '$($manifest.schemaVersion)'."
         }
         $productVersion = [string]$manifest.product.version
-        $installerVersion = [string]$manifest.components.installer.productVersion
-        $driverVersion = [string]$manifest.components.driver.driverVer
         $commit = [string]$manifest.source.commit
-        $packageVersion = [string]$manifest.package.version
-        $packageName = [string]$manifest.package.fileName
-        $architecture = [string]$manifest.package.architecture
+        $isProduction = (
+            [int]$manifest.schemaVersion -in @(3, 4) -and
+            [string]$manifest.profile -ceq 'Production'
+        )
+        if ($isProduction) {
+            $releaseRoot = Split-Path -Parent $PSScriptRoot
+            $installerVersion = [string]$manifest.installer.productVersion
+            $driverVersion = [string]$manifest.product.driverVer
+            $packageVersion = $productVersion
+            $packageName = Split-Path -Leaf $releaseRoot
+            $architecture = [string]$manifest.product.architecture
+            if ([int]$manifest.schemaVersion -eq 4) {
+                foreach ($field in @('privateProductId', 'sharedProductId', 'submissionId')) {
+                    if ([string]$manifest.driverCertification.partnerCenter.$field -notmatch '^[1-9][0-9]*$') {
+                        throw "SBMS production manifest contains invalid Partner Center provenance: $field"
+                    }
+                }
+                if ([string]$manifest.driverCertification.partnerCenter.hlkPackageSha256 -notmatch '^[0-9a-f]{64}$') {
+                    throw 'SBMS production manifest contains an invalid HLK submission package hash.'
+                }
+            }
+        } else {
+            $installerVersion = [string]$manifest.components.installer.productVersion
+            $driverVersion = [string]$manifest.components.driver.driverVer
+            $packageVersion = [string]$manifest.package.version
+            $packageName = [string]$manifest.package.fileName
+            $architecture = [string]$manifest.package.architecture
+        }
         foreach ($required in @(
             $productVersion,
             $installerVersion,
@@ -221,7 +244,12 @@ function Get-SBMSReleaseMetadata {
         }
 
         $actualProductVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMS.exe")
-        $actualInstallerVersion = Get-SBMSExecutableVersion -Path (Join-Path $PSScriptRoot "SBMSSetup.exe")
+        $installerPath = if ($isProduction) {
+            Join-Path $releaseRoot 'SBMSSetup.exe'
+        } else {
+            Join-Path $PSScriptRoot 'SBMSSetup.exe'
+        }
+        $actualInstallerVersion = Get-SBMSExecutableVersion -Path $installerPath
         $packagedInf = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot "driver") -Filter ([string]$DriverIdentity.package.infName) -File -Recurse -ErrorAction SilentlyContinue |
             Select-Object -First 1
         $actualDriverVersion = if ($packagedInf) {

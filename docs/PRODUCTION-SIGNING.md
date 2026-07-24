@@ -11,7 +11,7 @@ SBMS production releases use two independently auditable signing stages.
    kernel-policy verification.
 4. Build and sign the four user-mode executables with the explicit publisher
    certificate, SHA-256 and an RFC3161 SHA-256 timestamp.
-5. Generate the SPDX SBOM and schema-v3 release manifest, then create a
+5. Generate the SPDX SBOM and schema-v4 release manifest, then create a
    CatalogVersion 2.0 SHA-256 catalog over the complete release payload.
 6. Sign and timestamp the release catalog. The installer verifies the catalog,
    manifest, exact payload allow-list, hashes, component signatures and WHQL
@@ -76,13 +76,27 @@ package, import it with the independently recorded hash:
   -CandidateManifestSha256 <64-hex-sha256> `
   -ReturnedDirectory C:\SBMS-WHQL\microsoft-returned `
   -OutputDirectory C:\SBMS-WHQL\verified `
-  -SigningPolicyPath C:\SBMS-Secrets\signing-policy.json
+  -SigningPolicyPath C:\SBMS-Secrets\signing-policy.json `
+  -PrivateProductId <partner-center-private-product-id> `
+  -SharedProductId <partner-center-shared-product-id> `
+  -SubmissionId <partner-center-submission-id> `
+  -HlkPackagePath C:\SBMS-WHQL\archive\submission.hlkx `
+  -ExpectedHlkPackageSha256 <independently-recorded-sha256>
 ```
 
 The import checks that the returned INF and DLL are byte-for-byte identical to
 the frozen candidate, verifies the Microsoft kernel-policy catalog and verifies
 that both files are members of that catalog. It never modifies the returned
-files.
+files. It also hashes the archived HLK upload and rejects it unless that value
+matches the independently recorded SHA-256. The three operator-supplied Partner
+Center identifiers are stored as decimal strings, not floating-point numbers.
+The script records but does not query or authenticate Partner Center; retain the
+portal/API export beside the package as the authority for those IDs. Microsoft
+assigns private, shared, and submission IDs to each hardware submission; the
+Hardware API addresses a submission by product ID and submission ID:
+
+- https://learn.microsoft.com/windows-hardware/drivers/dashboard/hardware-submission-ids
+- https://learn.microsoft.com/windows-hardware/drivers/dashboard/manage-product-submissions
 
 Create the retail package only from the verified import:
 
@@ -94,9 +108,12 @@ Create the retail package only from the verified import:
 
 The production packager refuses dirty source, never calls
 `build-sbms-driver.ps1`, signs and timestamps every user-mode executable,
-generates an SPDX 2.2 SBOM and schema-v3 manifest, then covers the complete
+generates an SPDX 2.2 SBOM and schema-v4 manifest, then covers the complete
 `payload` directory with a signed CatalogVersion 2.0 catalog. Partial output is
-removed if any gate fails.
+removed if any gate fails. Both the embedded verifier and standalone staging
+path resolve the driver only from that verified payload and re-check the fixed
+INF, DLL, CAT, identity, and WHQL-import paths against the manifest length and
+SHA-256 records before any Driver Store mutation.
 
 The production installer first verifies its own Authenticode publisher and
 timestamp against the identity embedded at build time, then verifies the
@@ -128,9 +145,11 @@ Repository tests cannot manufacture production evidence. A release remains
 blocked until the release owner supplies:
 
 - the reviewed legal publisher certificate and RFC3161 service;
-- the reviewed permanent INF manufacturer, hardware ID, service and device
-  identity replacing every Microsoft sample placeholder;
+- legal publisher display name and PNP manufacturer code confirmation for the
+  permanent SBMS identity already frozen in source;
 - a clean candidate manifest hash recorded independently of the candidate;
 - passing HLK results and the Microsoft-returned WHQL package;
 - a normal-boot install on supported Windows with TestSigning disabled;
-- archived Partner Center submission identifiers and release provenance.
+- archived Partner Center private/shared/submission IDs and the exact uploaded
+  HLK package SHA-256. Schema-v3 WHQL imports and schema-v4 production releases
+  carry these values end to end.
