@@ -30,6 +30,8 @@ The repository has a production-owned driver identity and a fail-closed producti
   - Native D3D11 Desktop Duplication output path. Captures the virtual source display and presents it on the physical target display.
 - `SBMSDeviceHost.exe`
   - Creates and owns the software display device with `SwDeviceCreate`.
+- `SBMSRecoveryBroker.exe`
+  - Runs outside the GUI child-process Job and restores journaled window moves after abrupt GUI termination.
 - `Windows-driver-samples/video/IndirectDisplay`
   - Patched Microsoft IndirectDisplay sample. Each software device instance exposes one virtual monitor, and the host creates only the number of instances requested by the current mapping configuration. The driver advertises common SBMS virtual modes including 1080p, 2K, 4K, 5K, 8K, 2880p-style modes, 16:9, 16:10, 4:3, landscape, and portrait sizes.
 
@@ -41,6 +43,7 @@ Run from an elevated PowerShell when Driver Store staging or the device host is 
 .\build-sbms-driver.ps1
 .\build-sbms-device-host.ps1
 .\build-sbms-native.ps1
+.\build-sbms-recovery-broker.ps1
 .\build-sbms-gui.ps1
 ```
 
@@ -58,6 +61,7 @@ SBMS.exe
 SBMSSetup.exe
 SBMSNative.exe
 SBMSDeviceHost.exe
+SBMSRecoveryBroker.exe
 ```
 
 ## Validation
@@ -66,6 +70,10 @@ Run the source-level GUI checks without changing the driver or display topology:
 
 ```powershell
 .\test-sbms-gui-core.ps1
+.\test-sbms-process-job.ps1
+.\test-sbms-start-gate.ps1
+.\test-sbms-supervisors.ps1
+.\test-sbms-recovery-broker.ps1
 .\test-sbms-gui.ps1
 .\test-sbms-hardware.ps1 -Scenario AuditOnly
 ```
@@ -197,8 +205,11 @@ Filters:
 
 - SBMS refuses to use a physical display as the source unless `--allow-physical-source` is explicitly passed to the native executable.
 - Legacy `IddSampleDriver` identities are reported only for migration and residue diagnosis; they cannot satisfy the current SBMS device-success checks.
-- Stopping SBMS normally lets the native process restore cursor clipping, input capture, and migrated windows before the software display host exits.
-- Do not force-kill the native process unless the desktop is already recovered.
+- `SBMSDeviceHost.exe` and every `SBMSNative.exe` wait on a launch gate until the GUI assigns them to its kill-on-close Windows Job.
+- Only one SBMS GUI instance may own a Windows user session, preventing one instance from sweeping another instance's journals or signalling its host stop event.
+- Before moving a window, native output flushes its durable rectangle and `WINDOWPLACEMENT`. Normal Stop and the out-of-job recovery broker serialize replay through a per-session lease, preserve minimized/maximized state, and clamp restored placement to a current physical work area.
+- Recovery is bounded. Repeated failures enter terminal cleanup instead of restarting indefinitely, while the first and last failures remain visible in the session log.
+- These safeguards recover SBMS-owned processes and journaled window moves; they do not claim to repair arbitrary Windows DisplayConfig, GPU-driver, or boot failures.
 
 ## Packaging
 

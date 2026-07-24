@@ -229,6 +229,16 @@ Invoke-Test 'Production verifier rejects missing or mismatched WHQL submission p
     }
 }
 
+Invoke-Test 'Installer requires, verifies, and blocks a running recovery broker' {
+    $setupSource = [System.IO.File]::ReadAllText(
+        (Join-Path $root 'installer\SBMSSetup.cs'),
+        [System.Text.Encoding]::UTF8
+    )
+    Assert-True ($verifierSource -match "SBMSRecoveryBroker\.exe") 'Production integrity verifier does not verify the recovery broker.'
+    Assert-True ($setupSource -match 'RequireFile\("SBMSRecoveryBroker\.exe"\)') 'Installer does not require the recovery broker payload.'
+    Assert-True ($setupSource -match '"SBMSRecoveryBroker"') 'Installer does not block a running recovery broker.'
+}
+
 Invoke-Test 'WHQL provenance contract accepts exact values and rejects drift' {
     $commit = '0123456789abcdef0123456789abcdef01234567'
     $candidateHash = ('a' * 64)
@@ -423,3 +433,4 @@ Write-Host "Installer integrity contract: $script:Passed passed, $script:Failed 
 if ($script:Failed -ne 0) {
     exit 1
 }
+$global:LASTEXITCODE = 0

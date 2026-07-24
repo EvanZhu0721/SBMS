@@ -103,7 +103,7 @@ foreach ($file in @(Get-ChildItem -LiteralPath $payload -Recurse -File -Force)) 
 }
 $version = (Get-Content -LiteralPath (Join-Path $payload 'VERSION') -Raw -Encoding UTF8).Trim()
 if ($version -cne [string]$manifest.product.version) { throw 'VERSION does not match the release manifest.' }
-foreach ($name in @('SBMS.exe', 'SBMSNative.exe', 'SBMSDeviceHost.exe')) {
+foreach ($name in @('SBMS.exe', 'SBMSNative.exe', 'SBMSDeviceHost.exe', 'SBMSRecoveryBroker.exe')) {
     $path = Join-Path $payload $name
     $componentSignature = Get-AuthenticodeSignature -LiteralPath $path
     if ([string]$componentSignature.Status -cne 'Valid' -or -not $componentSignature.SignerCertificate) {

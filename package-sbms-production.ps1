@@ -171,6 +171,7 @@ $driverEmbeddedSignature = Assert-SBMSAuthenticodeSignature `
 
 & (Join-Path $root 'build-sbms-device-host.ps1')
 & (Join-Path $root 'build-sbms-native.ps1')
+& (Join-Path $root 'build-sbms-recovery-broker.ps1')
 & (Join-Path $root 'build-sbms-gui.ps1')
 & (Join-Path $root 'build-sbms-setup.ps1') `
     -Production `
@@ -180,7 +181,8 @@ $driverEmbeddedSignature = Assert-SBMSAuthenticodeSignature `
 $executables = @(
     (Join-Path $root 'SBMS.exe'),
     (Join-Path $root 'SBMSNative.exe'),
-    (Join-Path $root 'SBMSDeviceHost.exe')
+    (Join-Path $root 'SBMSDeviceHost.exe'),
+    (Join-Path $root 'SBMSRecoveryBroker.exe')
 )
 foreach ($executable in $executables) {
     $null = Invoke-SBMSSignAuthenticode `
@@ -239,6 +241,7 @@ foreach ($name in @(
         'SBMS.exe',
         'SBMSNative.exe',
         'SBMSDeviceHost.exe',
+        'SBMSRecoveryBroker.exe',
         'README.md',
         'NOTICE.md',
         'RELEASE_NOTES.md',

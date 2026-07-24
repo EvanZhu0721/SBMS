@@ -518,6 +518,11 @@ function New-SBMSReleaseManifestData {
                 productVersion = [string]$binaryVersion.productVersion
                 fileVersion = [string]$binaryVersion.fileVersion
             }
+            recoveryBroker = [pscustomobject][ordered]@{
+                artifactName = 'SBMSRecoveryBroker.exe'
+                productVersion = [string]$binaryVersion.productVersion
+                fileVersion = [string]$binaryVersion.fileVersion
+            }
             driver = [pscustomobject][ordered]@{
                 artifactName = 'SBMSIndirectDisplay.dll'
                 infName = 'SBMSIndirectDisplay.inf'

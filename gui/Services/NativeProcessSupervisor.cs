@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 namespace SBMSGui
 {
@@ -10,6 +12,7 @@ namespace SBMSGui
     {
         private const int WM_CLOSE = 0x0010;
         private const int StopTimeoutMs = 3000;
+        private const int LaunchGateAckTimeoutMs = 5000;
 
         private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
 
@@ -26,6 +29,9 @@ namespace SBMSGui
         private readonly string workingDirectory;
         private readonly Action<string> output;
         private readonly Action<Action> dispatch;
+        private readonly ChildProcessJob childProcessJob;
+        private readonly string migrationJournalDirectory;
+        private readonly Func<Process, bool> terminateFailedStart;
         private readonly List<Process> betaProcesses = new List<Process>();
         private Process primaryProcess;
 
@@ -33,7 +39,10 @@ namespace SBMSGui
             string executablePath,
             string workingDirectory,
             Action<string> output,
-            Action<Action> dispatch)
+            Action<Action> dispatch,
+            ChildProcessJob childProcessJob,
+            string migrationJournalDirectory,
+            Func<Process, bool> terminateFailedStart = null)
         {
             if (string.IsNullOrWhiteSpace(executablePath))
             {
@@ -48,6 +57,18 @@ namespace SBMSGui
             this.workingDirectory = workingDirectory;
             this.output = output;
             this.dispatch = dispatch;
+            if (childProcessJob == null)
+            {
+                throw new ArgumentNullException("childProcessJob");
+            }
+            this.childProcessJob = childProcessJob;
+            if (string.IsNullOrWhiteSpace(migrationJournalDirectory))
+            {
+                throw new ArgumentException("Migration journal directory is required.", "migrationJournalDirectory");
+            }
+            this.migrationJournalDirectory = migrationJournalDirectory;
+            this.terminateFailedStart = terminateFailedStart ?? KillProcessQuietly;
+            Directory.CreateDirectory(this.migrationJournalDirectory);
         }
 
         public bool IsPrimaryRunning
@@ -75,10 +96,35 @@ namespace SBMSGui
             get { return IsPrimaryRunning || HasRunningBetaProcess; }
         }
 
+        public bool HasCleanupPending
+        {
+            get { return primaryProcess != null || betaProcesses.Count > 0; }
+        }
+
         public bool StartPrimary(string arguments, Action<int> exited, out string error)
         {
             error = "";
-            Process startedProcess = CreateProcess(arguments);
+            if (IsProcessRunning(primaryProcess))
+            {
+                error = "A primary native process is already running.";
+                return false;
+            }
+            DisposeQuietly(primaryProcess);
+            primaryProcess = null;
+
+            ChildLaunchGate launchGate = new ChildLaunchGate();
+            var gateWaiting = new ManualResetEvent(false);
+            Process startedProcess = CreateProcess(AppendStartGate(
+                AppendMigrationJournal(arguments),
+                launchGate.Name));
+            DataReceivedEventHandler gateHandler = delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (string.Equals(e.Data, "start_gate=waiting", StringComparison.Ordinal))
+                {
+                    gateWaiting.Set();
+                }
+            };
+            startedProcess.OutputDataReceived += gateHandler;
             startedProcess.EnableRaisingEvents = true;
             AttachOutput(startedProcess);
             startedProcess.Exited += delegate
@@ -106,29 +152,73 @@ namespace SBMSGui
             };
 
             primaryProcess = startedProcess;
+            bool committed = false;
+            bool processStarted = false;
             try
             {
                 startedProcess.Start();
+                processStarted = true;
+                string assignmentError;
+                if (!childProcessJob.TryAssign(startedProcess, out assignmentError))
+                {
+                    throw new InvalidOperationException(
+                        "Failed to contain native process before launch: " + assignmentError);
+                }
                 startedProcess.BeginOutputReadLine();
                 startedProcess.BeginErrorReadLine();
+                if (!WaitForLaunchGateAck(startedProcess, gateWaiting, LaunchGateAckTimeoutMs))
+                {
+                    throw new TimeoutException(
+                        "Native process did not acknowledge its launch gate within " +
+                        LaunchGateAckTimeoutMs + "ms.");
+                }
+                launchGate.Release();
+                committed = true;
                 return true;
             }
             catch (Exception ex)
             {
-                if (primaryProcess == startedProcess)
+                bool exitedAfterFailure = !processStarted;
+                if (!committed && processStarted)
+                {
+                    exitedAfterFailure = terminateFailedStart(startedProcess);
+                }
+                if (exitedAfterFailure && primaryProcess == startedProcess)
                 {
                     primaryProcess = null;
                 }
-                error = ex.Message;
-                DisposeQuietly(startedProcess);
+                error = ex.Message +
+                    (exitedAfterFailure ? "" : " Cleanup pending: native process did not exit.");
+                if (exitedAfterFailure)
+                {
+                    DisposeQuietly(startedProcess);
+                }
                 return false;
+            }
+            finally
+            {
+                startedProcess.OutputDataReceived -= gateHandler;
+                gateWaiting.Dispose();
+                launchGate.Dispose();
             }
         }
 
         public bool StartBeta(string arguments, int index, Action<int, int> exited, out string error)
         {
             error = "";
-            Process startedProcess = CreateProcess(arguments);
+            ChildLaunchGate launchGate = new ChildLaunchGate();
+            var gateWaiting = new ManualResetEvent(false);
+            Process startedProcess = CreateProcess(AppendStartGate(
+                AppendMigrationJournal(arguments),
+                launchGate.Name));
+            DataReceivedEventHandler gateHandler = delegate(object sender, DataReceivedEventArgs e)
+            {
+                if (string.Equals(e.Data, "start_gate=waiting", StringComparison.Ordinal))
+                {
+                    gateWaiting.Set();
+                }
+            };
+            startedProcess.OutputDataReceived += gateHandler;
             betaProcesses.Add(startedProcess);
             startedProcess.EnableRaisingEvents = true;
             AttachOutput(startedProcess);
@@ -147,20 +237,51 @@ namespace SBMSGui
                 });
             };
 
+            bool committed = false;
+            bool processStarted = false;
             try
             {
                 startedProcess.Start();
+                processStarted = true;
+                string assignmentError;
+                if (!childProcessJob.TryAssign(startedProcess, out assignmentError))
+                {
+                    throw new InvalidOperationException(
+                        "Failed to contain beta native process before launch: " + assignmentError);
+                }
                 startedProcess.BeginOutputReadLine();
                 startedProcess.BeginErrorReadLine();
+                if (!WaitForLaunchGateAck(startedProcess, gateWaiting, LaunchGateAckTimeoutMs))
+                {
+                    throw new TimeoutException(
+                        "Beta native process did not acknowledge its launch gate within " +
+                        LaunchGateAckTimeoutMs + "ms.");
+                }
+                launchGate.Release();
+                committed = true;
                 return true;
             }
             catch (Exception ex)
             {
-                betaProcesses.Remove(startedProcess);
-                error = ex.Message;
-                KillProcessQuietly(startedProcess);
-                DisposeQuietly(startedProcess);
+                bool exitedAfterFailure = !processStarted;
+                if (!committed && processStarted)
+                {
+                    exitedAfterFailure = terminateFailedStart(startedProcess);
+                }
+                if (exitedAfterFailure)
+                {
+                    betaProcesses.Remove(startedProcess);
+                    DisposeQuietly(startedProcess);
+                }
+                error = ex.Message +
+                    (exitedAfterFailure ? "" : " Cleanup pending: beta native process did not exit.");
                 return false;
+            }
+            finally
+            {
+                startedProcess.OutputDataReceived -= gateHandler;
+                gateWaiting.Dispose();
+                launchGate.Dispose();
             }
         }
 
@@ -172,16 +293,28 @@ namespace SBMSGui
             }
         }
 
-        public void StopPrimary(Action<string> log)
+        public ProcessStopResult StopPrimary(Action<string> log)
         {
             Process process = primaryProcess;
-            primaryProcess = null;
-            StopProcess(process, "正常关闭超时，强制结束", log);
-            DisposeQuietly(process);
+            ProcessStopResult result = StopProcess(process, "正常关闭超时，强制结束", log);
+            if (result.Exited)
+            {
+                if (ReferenceEquals(primaryProcess, process))
+                {
+                    primaryProcess = null;
+                }
+                DisposeQuietly(process);
+            }
+            return result;
         }
 
-        public void StopAllBeta(Action<string> log)
+        public ProcessStopResult StopAllBeta(Action<string> log)
         {
+            var combined = new ProcessStopResult
+            {
+                TimeoutMilliseconds = StopTimeoutMs,
+                Exited = true
+            };
             for (int i = betaProcesses.Count - 1; i >= 0; --i)
             {
                 RequestClose(betaProcesses[i]);
@@ -190,10 +323,41 @@ namespace SBMSGui
             for (int i = betaProcesses.Count - 1; i >= 0; --i)
             {
                 Process process = betaProcesses[i];
-                WaitAndKillIfNeeded(process, "beta native 正常关闭超时，强制结束", log);
-                DisposeQuietly(process);
+                ProcessStopResult current = WaitAndKillIfNeeded(
+                    process,
+                    "beta native 正常关闭超时，强制结束",
+                    log);
+                combined.HadProcess = combined.HadProcess || current.HadProcess;
+                combined.Forced = combined.Forced || current.Forced;
+                combined.Exited = combined.Exited && current.Exited;
+                if (!string.IsNullOrWhiteSpace(current.Error))
+                {
+                    combined.Error = string.IsNullOrWhiteSpace(combined.Error)
+                        ? current.Error
+                        : combined.Error + "; " + current.Error;
+                }
+                if (current.Exited)
+                {
+                    if (i < betaProcesses.Count &&
+                        ReferenceEquals(betaProcesses[i], process))
+                    {
+                        betaProcesses.RemoveAt(i);
+                    }
+                    else
+                    {
+                        betaProcesses.Remove(process);
+                    }
+                    DisposeQuietly(process);
+                }
             }
-            betaProcesses.Clear();
+            if (!combined.HadProcess)
+            {
+                combined.Exited = true;
+            }
+            combined.Graceful = combined.Exited &&
+                !combined.Forced &&
+                string.IsNullOrWhiteSpace(combined.Error);
+            return combined;
         }
 
         public void RemoveExitedBetaProcesses()
@@ -268,7 +432,7 @@ namespace SBMSGui
             }
         }
 
-        private static bool CaptureProcessOutput(Process process, int timeoutMs, out string capturedOutput)
+        private bool CaptureProcessOutput(Process process, int timeoutMs, out string capturedOutput)
         {
             var buffer = new StringBuilder();
             DataReceivedEventHandler appendLine = delegate(object sender, DataReceivedEventArgs e)
@@ -288,6 +452,13 @@ namespace SBMSGui
                 process.OutputDataReceived += appendLine;
                 process.ErrorDataReceived += appendLine;
                 process.Start();
+                string assignmentError;
+                if (!childProcessJob.TryAssign(process, out assignmentError))
+                {
+                    KillProcessQuietly(process);
+                    capturedOutput = "Failed to contain capture process: " + assignmentError;
+                    return false;
+                }
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
                 if (!process.WaitForExit(timeoutMs))
@@ -313,10 +484,10 @@ namespace SBMSGui
             }
         }
 
-        private static void StopProcess(Process process, string timeoutMessage, Action<string> log)
+        private static ProcessStopResult StopProcess(Process process, string timeoutMessage, Action<string> log)
         {
             RequestClose(process);
-            WaitAndKillIfNeeded(process, timeoutMessage, log);
+            return WaitAndKillIfNeeded(process, timeoutMessage, log);
         }
 
         private static void RequestClose(Process process)
@@ -334,22 +505,46 @@ namespace SBMSGui
             }
         }
 
-        private static void WaitAndKillIfNeeded(Process process, string timeoutMessage, Action<string> log)
+        private static ProcessStopResult WaitAndKillIfNeeded(Process process, string timeoutMessage, Action<string> log)
         {
+            var result = new ProcessStopResult
+            {
+                HadProcess = process != null,
+                TimeoutMilliseconds = StopTimeoutMs
+            };
+            if (process == null)
+            {
+                result.Exited = true;
+                result.Graceful = true;
+                return result;
+            }
             try
             {
-                if (process != null && !process.HasExited && !process.WaitForExit(StopTimeoutMs))
+                if (!process.HasExited && !process.WaitForExit(StopTimeoutMs))
                 {
                     if (log != null)
                     {
                         log(timeoutMessage);
                     }
                     process.Kill();
+                    result.Forced = true;
+                    if (!process.WaitForExit(1000))
+                    {
+                        result.Error = "process did not exit after force kill";
+                    }
                 }
+                result.Exited = process.HasExited;
+                result.Graceful = result.Exited && !result.Forced;
+                result.ExitCode = result.Exited ? GetExitCode(process) : -1;
             }
-            catch
+            catch (Exception ex)
             {
+                result.Error = ex.Message;
+                bool exited;
+                result.Exited = TryGetExited(process, out exited) && exited;
+                result.ExitCode = result.Exited ? GetExitCode(process) : -1;
             }
+            return result;
         }
 
         private static bool IsProcessRunning(Process process)
@@ -357,6 +552,25 @@ namespace SBMSGui
             try
             {
                 return process != null && !process.HasExited;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryGetExited(Process process, out bool exited)
+        {
+            exited = false;
+            if (process == null)
+            {
+                exited = true;
+                return true;
+            }
+            try
+            {
+                exited = process.HasExited;
+                return true;
             }
             catch
             {
@@ -376,19 +590,31 @@ namespace SBMSGui
             }
         }
 
-        private static void KillProcessQuietly(Process process)
+        private static bool KillProcessQuietly(Process process)
         {
             try
             {
-                if (process != null && !process.HasExited)
+                if (process == null || process.HasExited)
                 {
-                    process.Kill();
-                    process.WaitForExit(1000);
+                    return true;
+                }
+                process.Kill();
+                process.WaitForExit(1000);
+                bool exited;
+                if (TryGetExited(process, out exited))
+                {
+                    return exited;
                 }
             }
             catch
             {
+                bool exited;
+                if (TryGetExited(process, out exited))
+                {
+                    return exited;
+                }
             }
+            return false;
         }
 
         private static void DisposeQuietly(Process process)
@@ -417,6 +643,42 @@ namespace SBMSGui
                 }
                 return true;
             }, IntPtr.Zero);
+        }
+
+        private static bool WaitForLaunchGateAck(
+            Process process,
+            WaitHandle gateWaiting,
+            int timeoutMilliseconds)
+        {
+            Stopwatch timer = Stopwatch.StartNew();
+            while (timer.ElapsedMilliseconds < timeoutMilliseconds)
+            {
+                int remaining = timeoutMilliseconds - (int)timer.ElapsedMilliseconds;
+                if (gateWaiting.WaitOne(Math.Max(1, Math.Min(50, remaining))))
+                {
+                    return true;
+                }
+                if (!IsProcessRunning(process))
+                {
+                    return false;
+                }
+            }
+            return gateWaiting.WaitOne(0);
+        }
+
+        private static string AppendStartGate(string arguments, string gateName)
+        {
+            string prefix = string.IsNullOrWhiteSpace(arguments) ? "" : arguments.Trim() + " ";
+            return prefix + "--start-gate " + gateName;
+        }
+
+        private string AppendMigrationJournal(string arguments)
+        {
+            string path = Path.Combine(
+                migrationJournalDirectory,
+                "migration-" + Guid.NewGuid().ToString("N") + ".journal");
+            string prefix = string.IsNullOrWhiteSpace(arguments) ? "" : arguments.Trim() + " ";
+            return prefix + "--migration-journal \"" + path + "\"";
         }
     }
 }
