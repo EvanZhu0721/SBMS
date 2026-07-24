@@ -15,6 +15,8 @@ if (-not (Test-Path $Solution)) {
     throw "Solution not found: $Solution"
 }
 
+& (Join-Path $Root 'test-sbms-driver-contract.ps1') | Out-Host
+
 function Find-FirstExistingPath {
     param([string[]] $Paths)
     $Paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
@@ -288,6 +290,7 @@ $BuildArgs = @(
     "/p:WDKContentRoot=$WdkRoot\",
     "/p:WdkContentRoot=$WdkRoot\",
     "/p:SkipPackageVerification=true",
+    "/p:Inf2CatUseLocalTime=true",
     "/p:ApiValidator_Enable=false",
     "/p:RunCodeAnalysis=false",
     "/p:EnablePREfast=false",
