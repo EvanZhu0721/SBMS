@@ -20,12 +20,6 @@ function Assert-Throws([scriptblock]$Action, [string]$Pattern, [string]$Message)
     }
 }
 function Envelope($Data) { [pscustomobject][ordered]@{ status = 'Captured'; capturedUtc = '2026-07-14T00:00:00Z'; data = $Data } }
-function Confirm-FixtureRemoteHealth([guid]$RunId, [string]$RunDirectory, [string]$Challenge, [scriptblock]$CaptureSession) {
-    & $script:GateModule {
-        param($InnerRunId,$InnerRunDirectory,$InnerChallenge,$InnerCaptureSession)
-        Confirm-SBMSGateARemoteHealthCore -RunId $InnerRunId -RunDirectory $InnerRunDirectory -Challenge $InnerChallenge -CaptureSession $InnerCaptureSession
-    } $RunId $RunDirectory $Challenge $CaptureSession
-}
 function New-PassEvidence {
     [pscustomobject][ordered]@{
         machine = Envelope ([pscustomobject]@{ computerName='TESTHOST'; lastBootUtc='2026-07-14T00:00:00Z'; lastBootUnixSeconds=1783987200 })
@@ -46,18 +40,11 @@ function New-PassEvidence {
     }
 }
 
-$productionRemoteHealth = Get-Command Confirm-SBMSGateARemoteHealth -CommandType Function -ErrorAction Stop
-Assert-True ($productionRemoteHealth.Definition -match '\$sessionEvidence\s*=\s*Get-SBMSGateARemoteSessionEvidence') 'Production SSH proof must capture private session evidence before creating its closure.'
 $gateHashDefinition = & $script:GateModule { (Get-Command Get-SBMSGateAHash -CommandType Function).Definition }
 Assert-True ($gateHashDefinition -notmatch 'Get-FileHash') 'Gate A hashing must not depend on PowerShell module auto-loading.'
-$productionProofEntry = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lab\Confirm-SBMSLabRemoteHealth.ps1') -Raw -Encoding UTF8
-Assert-True ($productionProofEntry -notmatch '\.SecureRunDirectory\b') 'SSH proof entry must not redundantly rewrite the protected Run ACL after committing proof.'
-$hostExecutable = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
-$proofEntryPath = (Join-Path $PSScriptRoot 'lab\Confirm-SBMSLabRemoteHealth.ps1').Replace("'", "''")
-$bootstrapRunId = [guid]::NewGuid()
-$bootstrapCommand = "`$PSModuleAutoLoadingPreference='None'; try { & '$proofEntryPath' -RunId '$bootstrapRunId' -Challenge 'bootstrap-smoke' } catch { if (`$_.Exception.Message -match 'not recognized|CouldNotAutoloadMatchingModule|ErrorsUpdatingTypes') { exit 2 }; exit 0 }; exit 3"
-$null = & $hostExecutable -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $bootstrapCommand
-Assert-Equal 0 $LASTEXITCODE 'Production SSH proof entry did not bootstrap with module auto-loading disabled.'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lab\Confirm-SBMSLabRemoteHealth.ps1'))) 'Deprecated SSH proof entry must not ship.'
+$gateModuleSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lab\SBMS.GateA.psm1') -Raw -Encoding UTF8
+Assert-True ($gateModuleSource -notmatch 'Confirm-SBMSGateARemoteHealth|remote-challenge\.json|ssh-health-proof\.json|remoteHealth\.proof') 'Deprecated SSH proof implementation must not remain in Gate A.'
 
 $runId = [guid]::NewGuid()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('sbms-gate-a-test-' + [guid]::NewGuid().ToString('N'))
@@ -65,77 +52,38 @@ try {
     $evidence = New-PassEvidence
     $capture = { $evidence }.GetNewClosure()
     $first = Invoke-SBMSGateA -RunId $runId -RunDirectory $root -CaptureEvidence $capture
-    Assert-Equal 'INCONCLUSIVE' $first.status 'Missing SSH proof must not pass.'
+    Assert-Equal 'PASS' $first.status 'Complete local Gate A evidence should pass without an external SSH proof.'
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'gate-a\stable-state.json')) 'Stable evidence was not written.'
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'gate-a\rollback-plan.json')) 'Rollback plan was not written before mutation.'
     Assert-True (Test-Path -LiteralPath (Join-Path $root 'gate-a\evidence-index.json')) 'Evidence index was not written.'
-    $recordedPhysicalDisplay = & $script:GateModule {
-        param($InnerRunDirectory)
-        Test-SBMSGateARecordedPhysicalDisplay -RunDirectory $InnerRunDirectory
-    } $root
-    Assert-True $recordedPhysicalDisplay 'Protected Gate A evidence should provide the SSH-session display fallback.'
-    Assert-Equal 3 ((Get-Content -LiteralPath (Join-Path $root 'gate-a\manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json).schemaVersion) 'Manifest schema mismatch.'
-    Assert-True ($null -eq (Get-Content -LiteralPath (Join-Path $root 'gate-a\manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json).PSObject.Properties['challenge']) 'Plaintext challenge must not be persisted in the manifest.'
-
-    $session = [pscustomobject][ordered]@{
-        sshdAncestor=$true; nonLoopbackClient=$true; adminCapable=$true; evidenceReadable=$true; activePhysicalDisplay=$true
-        computerName='TESTHOST'; lastBootUtc='2026-07-14T00:00:00Z'; lastBootUnixSeconds=1783987200; clientAddress='192.0.2.20'
-    }
-    $sessionCapture = { $session }.GetNewClosure()
-    $proof = Confirm-FixtureRemoteHealth -RunId $runId -RunDirectory $root -Challenge $first.challenge -CaptureSession $sessionCapture
-    Assert-Throws { Confirm-FixtureRemoteHealth -RunId $runId -RunDirectory $root -Challenge $first.challenge -CaptureSession $sessionCapture } 'already consumed' 'SSH proof replay must be rejected.'
-    $second = Invoke-SBMSGateA -RunId $runId -RunDirectory $root -CaptureEvidence $capture
-    Assert-Equal 'PASS' $second.status 'Complete evidence and bound SSH proof should pass.'
-
-    $recoveryRunId = [guid]::NewGuid()
-    $recoveryRoot = Join-Path ([IO.Path]::GetTempPath()) ('sbms-gate-a-recovery-' + [guid]::NewGuid().ToString('N'))
-    $recoveryFirst = Invoke-SBMSGateA -RunId $recoveryRunId -RunDirectory $recoveryRoot -CaptureEvidence $capture
-    $recoveryGate = Join-Path $recoveryRoot 'gate-a'
-    $recoveryChallengePath = Join-Path $recoveryGate 'remote-challenge.json'
-    $recoveryProofPath = Join-Path $recoveryGate 'ssh-health-proof.json'
-    $recoveryState = Get-Content -LiteralPath $recoveryChallengePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $recoveryState | Add-Member -NotePropertyName consumeStartedUtc -NotePropertyValue '2026-07-24T00:00:00Z' -Force
-    $recoveryState | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $recoveryChallengePath -Encoding UTF8
-    [pscustomobject][ordered]@{
-        schemaVersion=1; runId=$recoveryRunId.ToString(); stableDigest=[string]$recoveryState.stableDigest
-        challengeSha256=[string]$recoveryState.challengeSha256; verifiedUtc='2026-07-24T00:00:00Z'
-        computerName='TESTHOST'; lastBootUtc='2026-07-14T00:00:00Z'; lastBootUnixSeconds=1783987200
-        clientAddress='192.0.2.20'; sshdAncestor=$true; nonLoopbackClient=$true; adminCapable=$true
-        evidenceReadable=$true; activePhysicalDisplay=$true; bitLockerRecoveryAccessVerified=$false
-    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $recoveryProofPath -Encoding UTF8
-    $recoveredProof = Confirm-FixtureRemoteHealth -RunId $recoveryRunId -RunDirectory $recoveryRoot -Challenge $recoveryFirst.challenge -CaptureSession { throw 'Capture must not run during proof recovery.' }
-    Assert-Equal $recoveryRunId.ToString() ([string]$recoveredProof.runId) 'Interrupted proof commit should resume safely.'
-    Remove-Item -LiteralPath $recoveryRoot -Recurse -Force
-
-    $badProof = $proof.PSObject.Copy(); $badProof.runId = [guid]::NewGuid().ToString()
-    $bad = Test-SBMSGateAEvidence -Evidence $evidence -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $badProof -ChallengeSha256 $first.challengeSha256
-    Assert-Equal 'FAIL' $bad.status 'Cross-run SSH proof must fail.'
-    $challengeState = Get-Content -LiteralPath (Join-Path $root 'gate-a\remote-challenge.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    Assert-True (-not [string]::IsNullOrWhiteSpace([string]$challengeState.consumedProofSha256)) 'Consumed challenge must bind the proof file hash.'
+    $manifest = Get-Content -LiteralPath (Join-Path $root 'gate-a\manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    Assert-Equal 4 $manifest.schemaVersion 'Manifest schema mismatch.'
+    Assert-Equal 'gate-a/2' $manifest.contractVersion 'Gate A contract version mismatch.'
+    Assert-True ($null -eq $manifest.PSObject.Properties['remoteProofPath']) 'Gate A manifest must not expose an SSH proof contract.'
 
     $missingBitLockerState = New-PassEvidence
     $missingBitLockerState.bitLocker.data.PSObject.Properties.Remove('protectionOn')
-    $bad = Test-SBMSGateAEvidence -Evidence $missingBitLockerState -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $proof -ChallengeSha256 $first.challengeSha256
+    $bad = Test-SBMSGateAEvidence -Evidence $missingBitLockerState -RunId $runId.ToString() -StableDigest $first.stableDigest
     Assert-Equal 'INCONCLUSIVE' $bad.status 'Missing BitLocker protection state must be inconclusive.'
 
     $unknownDriver = New-PassEvidence
     $unknownDriver.driverStore.data.packages[0].classification = 'unknown'
-    $bad = Test-SBMSGateAEvidence -Evidence $unknownDriver -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $proof -ChallengeSha256 $first.challengeSha256
+    $bad = Test-SBMSGateAEvidence -Evidence $unknownDriver -RunId $runId.ToString() -StableDigest $first.stableDigest
     Assert-Equal 'FAIL' $bad.status 'Unknown display package must fail closed.'
 
     $skip = New-PassEvidence
     $skip.auditOnly.data.checks += [pscustomobject]@{name='NativeListAudit';status='SKIP'}
-    $bad = Test-SBMSGateAEvidence -Evidence $skip -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $proof -ChallengeSha256 $first.challengeSha256
+    $bad = Test-SBMSGateAEvidence -Evidence $skip -RunId $runId.ToString() -StableDigest $first.stableDigest
     Assert-Equal 'FAIL' $bad.status 'Critical AuditOnly SKIP must fail closed.'
 
     $missing = New-PassEvidence
     $missing.PSObject.Properties.Remove('pnp')
-    $bad = Test-SBMSGateAEvidence -Evidence $missing -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $proof -ChallengeSha256 $first.challengeSha256
+    $bad = Test-SBMSGateAEvidence -Evidence $missing -RunId $runId.ToString() -StableDigest $first.stableDigest
     Assert-Equal 'INCONCLUSIVE' $bad.status 'Missing required collector must be inconclusive.'
 
     $blockedPnp = New-PassEvidence
     $blockedPnp.pnp.data.devices[0].classification = 'blocking'
-    $bad = Test-SBMSGateAEvidence -Evidence $blockedPnp -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $proof -ChallengeSha256 $first.challengeSha256
+    $bad = Test-SBMSGateAEvidence -Evidence $blockedPnp -RunId $runId.ToString() -StableDigest $first.stableDigest
     Assert-Equal 'FAIL' $bad.status 'Present blocking virtual-display PnP device must fail.'
 
     $drift = New-PassEvidence
@@ -143,9 +91,6 @@ try {
     $driftCapture = { $drift }.GetNewClosure()
     $bad = Invoke-SBMSGateA -RunId $runId -RunDirectory $root -CaptureEvidence $driftCapture
     Assert-Equal 'FAIL' $bad.status 'Stable evidence drift must fail.'
-
-    Add-Content -LiteralPath (Join-Path $root 'gate-a\ssh-health-proof.json') -Value ' ' -Encoding UTF8
-    Assert-Throws { Invoke-SBMSGateA -RunId $runId -RunDirectory $root -CaptureEvidence $capture } 'proof hash' 'Tampered SSH proof must be rejected.'
 
     $allText = (Get-ChildItem -LiteralPath $root -Recurse -File | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8 }) -join "`n"
     Assert-True ($allText -notmatch '(?i)recoverypassword') 'Evidence must not persist a BitLocker recovery secret field.'

@@ -1092,7 +1092,7 @@ function Invoke-SBMSHardwareLab {
             throw "Real mutation is restricted to the protected run root: $requiredRoot"
         }
         if ($Profile -eq 'TestSigning' -and $Phase -in @('Prepare', 'Arm')) {
-            throw 'Real TestSigning Prepare/Arm is blocked until Gate A, SSH recovery, and BitLocker recovery-key proofs are implemented and verified.'
+            throw 'Real TestSigning Prepare/Arm is blocked until an authoritative Gate A pass and separately reviewed Gate B recovery and Gate C mutation contracts are implemented.'
         }
     }
     if (-not (Test-Path -LiteralPath $runDirectory)) { New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null }
