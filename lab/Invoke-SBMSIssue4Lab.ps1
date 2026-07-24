@@ -146,6 +146,13 @@ if ($Phase -eq 'Start') {
         -DriverPackagePath $driverPackage `
         -ProductRoot $RepositoryRoot `
         -VerificationDeviceCount 2
+    $securityAdapter = New-SBMSHardwareLabAdapter
+    $secured = & $securityAdapter.SecureRunDirectory $runDirectory
+    $securityReadback = & $securityAdapter.TestRunDirectorySecurity $runDirectory
+    if ($null -eq $secured -or -not [bool]$secured.success -or
+        $null -eq $securityReadback -or -not [bool]$securityReadback.success) {
+        throw 'Gate C payload freeze did not preserve the protected run-directory ACL.'
+    }
 
     $prepareAck = "SBMS-HARDWARE-LAB/$($selectedRunId.ToString())/TestSigning/Prepare"
     Invoke-SBMSHardwareLab `
