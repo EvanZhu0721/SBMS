@@ -2,7 +2,7 @@
 
 This document defines the safety boundary for SBMS driver and hardware validation. It is a design and operating contract, not an instruction to change the current machine.
 
-Phase 1 delivers a boot-lab foundation, simulated tests, and a reviewable safety contract only. It does **not** implement the full Gate A inventory, remote health acknowledgement, display/driver rollback, or immutable evidence store described as later-stage requirements below. Do not enable Test Signing, install or remove a display driver, change a boot entry, register a SYSTEM task, or reboot while reviewing Phase 1.
+Phase 1 delivers a boot-lab foundation, simulated tests, a fail-closed Gate A evidence evaluator, structured real-machine collectors, and a reviewable safety contract. The evaluator writes a schema-v4 `gate-a/2` local stable baseline and rejects incomplete collectors or drift. Gate A has no SSH challenge and performs no BCD, reboot, driver, task, or topology mutation. Collector availability alone does **not** authorize Test Signing or driver mutation: the real adapter remains hard-locked until one authoritative Gate A run passes and the later gate contracts are implemented and reviewed.
 
 ## Why this exists
 
@@ -54,15 +54,17 @@ The complete lab design must eventually create a one-run watchdog under `SYSTEM`
 - write an append-only journal for arm, boot, acknowledgement, rollback attempt, command exit code, and verification;
 - expire and remove itself after a verified healthy acknowledgement or verified rollback.
 
-The health acknowledgement must require both an active physical display path and a successful remote check. A GUI process starting is not proof of display health.
+For later Gate B/C mutation tests, health acknowledgement must require an active physical display path and an independently reviewed recovery signal. A GUI process starting is not proof of display health. This is not a Gate A PASS condition.
 
 Phase 1 is intentionally narrower: its watchdog is a fixed-deadline, one-shot return-reboot guard for the cloned loader. It has no health acknowledgement/disarm path and does not restore display, PnP, or driver state. Its minimum recovery action must remain self-contained so a missing module or manifest cannot turn the deadline into a fail-open path. This foundation is not authorization for a Test Signing or driver test.
 
-The Phase 1 command surface exposes a `TestSigning` profile only for adapter-based state-machine tests. The real Windows adapter hard-blocks `TestSigning` `Prepare` and `Arm` until Gate A, second-computer SSH proof, and BitLocker recovery proof are implemented and verified. The only profile eligible for the first reviewed recovery exercise is the default `RecoveryDrill` profile.
+The Phase 1 command surface exposes a `TestSigning` profile only for adapter-based state-machine tests. The real Windows adapter hard-blocks `TestSigning` `Prepare` and `Arm` until an authoritative Gate A pass plus separately reviewed Gate B recovery and Gate C mutation contracts are implemented and verified. The only profile eligible for the first reviewed recovery exercise is the default `RecoveryDrill` profile.
 
 The watchdog must never delete every matching display package, rewrite arbitrary Enum registry keys, restore an unverified display topology, or stop unrelated processes.
 
 ## SSH and recovery proof
+
+This section belongs to Gate B and later mutation testing. SSH is optional development-lab infrastructure, is not shipped as a product workflow, and is not a Gate A PASS dependency.
 
 An SSH configuration is not proof of recovery. Before Gate B, test it from the second computer after a no-change reboot:
 
@@ -86,19 +88,22 @@ Before Gate B:
 
 The automation must not print or copy the recovery key into repository logs. Evidence records only that an authorized operator verified access.
 
-## Gate A — baseline target (not implemented in Phase 1)
+## Gate A — baseline target
 
 Gate A is read-only and must pass before any watchdog or system mutation:
 
 - repository commit, clean worktree, script hashes, and driver payload hashes are recorded;
 - `AuditOnly` evidence is complete;
 - BCD, Code Integrity, Secure Boot, BitLocker, pending-reboot, PnP, Driver Store, display adapters, monitor endpoints, active DisplayConfig paths, processes, services, and startup tasks are captured;
+- Windows servicing and SBMS/display-lab-owned pending reboot signals block Gate A; unrelated package file-renames are retained as evidence but do not block this read-only gate;
 - all high-privilege `ONLOGON` and `ONSTART` entries that can launch SBMS or a virtual-display tool are identified;
 - every display-class package and present virtual display is classified as allowed or blocking;
-- at least one healthy physical output and the independent recovery route are proven;
+- at least one healthy physical output is recorded locally;
 - the rollback plan is generated before any apply plan.
 
 Unknown or stale display state is a failure, not a warning.
+
+`lab/SBMS.GateA.psm1` implements the versioned local evidence envelope, baseline seal, drift check, fail-closed policy evaluator, rollback plan, and evidence index. `lab/SBMS.GateA.Collectors.psm1` captures the real machine through structured collectors, while `lab/Invoke-SBMSGateARealAudit.ps1` is the authoritative elevated read-only entry point. Its `-DiagnosticOnly` switch is deliberately non-authoritative and forces the evidence-security check to fail. `lab/Invoke-SBMSGateA.ps1` remains the fixture entry point used by cross-version tests. The real adapter continues to hard-block TestSigning `Prepare` and `Arm` until an authoritative Gate A run passes and the subsequent Gate B/C contracts are reviewed.
 
 ## Gate B — boot-policy change
 

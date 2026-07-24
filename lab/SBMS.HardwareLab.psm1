@@ -240,7 +240,12 @@ function New-SBMSHardwareLabAdapter {
                         [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
                     $security.AddAccessRule($rule) | Out-Null
                 }
-                Set-Acl -LiteralPath $directory -AclObject $security
+                $directoryInfo = New-Object IO.DirectoryInfo($directory)
+                if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) {
+                    [IO.FileSystemAclExtensions]::SetAccessControl($directoryInfo, $security)
+                } else {
+                    $directoryInfo.SetAccessControl($security)
+                }
             }
             foreach ($file in @(Get-ChildItem -LiteralPath $RunDirectory -File -Recurse -Force -ErrorAction Stop)) {
                 $security = New-Object Security.AccessControl.FileSecurity
@@ -250,7 +255,12 @@ function New-SBMSHardwareLabAdapter {
                     $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, [Security.AccessControl.FileSystemRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
                     $security.AddAccessRule($rule) | Out-Null
                 }
-                Set-Acl -LiteralPath $file.FullName -AclObject $security
+                $fileInfo = New-Object IO.FileInfo($file.FullName)
+                if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) {
+                    [IO.FileSystemAclExtensions]::SetAccessControl($fileInfo, $security)
+                } else {
+                    $fileInfo.SetAccessControl($security)
+                }
             }
             [pscustomobject]@{ success = $true }
         }
@@ -264,12 +274,18 @@ function New-SBMSHardwareLabAdapter {
             # exactly one structured result on every supported host.
             $objects = @()
             foreach ($path in $paths) {
-                $acl = Get-Acl -LiteralPath $path
-                $ownerSid = try { (New-Object Security.Principal.NTAccount($acl.Owner)).Translate([Security.Principal.SecurityIdentifier]).Value } catch { [string]$acl.Owner }
+                $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                if ($null -ne ('System.IO.FileSystemAclExtensions' -as [type])) {
+                    $acl = [IO.FileSystemAclExtensions]::GetAccessControl($item)
+                } else {
+                    $acl = $item.GetAccessControl()
+                }
+                $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
                 $fullControlSids = @{}
                 $unexpectedRules = @()
-                foreach ($rule in $acl.Access) {
-                    $sid = try { $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } catch { [string]$rule.IdentityReference }
+                $accessRules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
+                foreach ($rule in $accessRules) {
+                    $sid = [string]$rule.IdentityReference.Value
                     if ($allowed -notcontains $sid -or $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
                         $unexpectedRules += "$sid|$($rule.AccessControlType)|$($rule.FileSystemRights)"
                     }
@@ -1076,7 +1092,7 @@ function Invoke-SBMSHardwareLab {
             throw "Real mutation is restricted to the protected run root: $requiredRoot"
         }
         if ($Profile -eq 'TestSigning' -and $Phase -in @('Prepare', 'Arm')) {
-            throw 'Real TestSigning Prepare/Arm is blocked until Gate A, SSH recovery, and BitLocker recovery-key proofs are implemented and verified.'
+            throw 'Real TestSigning Prepare/Arm is blocked until an authoritative Gate A pass and separately reviewed Gate B recovery and Gate C mutation contracts are implemented.'
         }
     }
     if (-not (Test-Path -LiteralPath $runDirectory)) { New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null }

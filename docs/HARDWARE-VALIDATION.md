@@ -25,7 +25,7 @@ Run the observer before changing the driver or display session:
 .\test-sbms-hardware.ps1 -Scenario AuditOnly
 ```
 
-The audit captures the OS/session, privilege state, display and SBMS-related PnP records, signed display drivers, related processes, native display enumeration, and available GUI logs.
+The audit captures the OS/session, privilege state, display and SBMS-related PnP records, signed display drivers, related processes, native display enumeration, and available GUI logs. `AuditOnly` is `INCONCLUSIVE` when PnP, signed-driver, or native-list evidence is skipped; an incomplete observer run can no longer report PASS.
 
 ## Scenario matrix
 

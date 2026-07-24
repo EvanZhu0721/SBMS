@@ -490,7 +490,7 @@ try {
         Assert-NoRealCommands
     }
 
-    Invoke-TestCase 'Real ACL adapter returns structured evidence on Windows PowerShell 5.1' {
+    Invoke-TestCase 'Real ACL adapter returns structured evidence without Security module cmdlets' {
         $probeRoot = Join-Path $script:TestRoot 'real-acl-adapter-probe'
         New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
         Set-Content -LiteralPath (Join-Path $probeRoot 'probe.txt') -Value 'probe' -Encoding UTF8
@@ -503,6 +503,8 @@ try {
         foreach ($object in @($result.objects)) {
             Assert-True ($null -ne $object.PSObject.Properties['unexpectedRules']) 'Real ACL adapter omitted unexpected-rule evidence.'
         }
+        $moduleSource = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lab\SBMS.HardwareLab.psm1') -Raw -Encoding UTF8
+        Assert-True (-not ($moduleSource -match '(?im)^\s*(Set-Acl|Get-Acl)\b')) 'Real ACL adapter still relies on Microsoft.PowerShell.Security module autoload.'
         Assert-NoRealCommands
     }
 
