@@ -95,6 +95,7 @@ Gate A is read-only and must pass before any watchdog or system mutation:
 - repository commit, clean worktree, script hashes, and driver payload hashes are recorded;
 - `AuditOnly` evidence is complete;
 - BCD, Code Integrity, Secure Boot, BitLocker, pending-reboot, PnP, Driver Store, display adapters, monitor endpoints, active DisplayConfig paths, processes, services, and startup tasks are captured;
+- Windows servicing and SBMS/display-lab-owned pending reboot signals block Gate A; unrelated package file-renames are retained as evidence but do not block this read-only gate;
 - all high-privilege `ONLOGON` and `ONSTART` entries that can launch SBMS or a virtual-display tool are identified;
 - every display-class package and present virtual display is classified as allowed or blocking;
 - at least one healthy physical output is recorded locally;

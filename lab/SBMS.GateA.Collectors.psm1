@@ -152,7 +152,22 @@ function Get-SBMSGateARealEvidence {
         $cbs = Test-Path -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending'
         $wu = Test-Path -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'
         $rename = @((Get-ItemProperty -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations)
-        [pscustomobject][ordered]@{ cbs=$cbs; windowsUpdate=$wu; pendingFileRenameCount=$rename.Count; sccm=$false; any=($cbs -or $wu -or $rename.Count -gt 0) }
+        $renameOperations = @()
+        for ($index = 0; $index -lt $rename.Count; $index += 2) {
+            $source = [string]$rename[$index]
+            $destination = if ($index + 1 -lt $rename.Count) { [string]$rename[$index + 1] } else { '' }
+            $classification = if (($source + ' ' + $destination) -match [string]$policy.blockingNamePattern) { 'blocking' } else { 'external' }
+            $renameOperations += [pscustomobject][ordered]@{ source=$source; destination=$destination; classification=$classification }
+        }
+        $blockingRenameCount = @($renameOperations | Where-Object classification -eq 'blocking').Count
+        [pscustomobject][ordered]@{
+            cbs=$cbs; windowsUpdate=$wu; sccm=$false
+            pendingFileRenameCount=$renameOperations.Count
+            blockingPendingFileRenameCount=$blockingRenameCount
+            externalPendingFileRenameCount=($renameOperations.Count - $blockingRenameCount)
+            pendingFileRenames=$renameOperations
+            any=($cbs -or $wu -or $blockingRenameCount -gt 0)
+        }
     } $artifactDirectory
 
     $pnp = Invoke-SBMSCollector 'pnp' {

@@ -217,8 +217,8 @@ function Test-SBMSGateAEvidence {
         else { Add-SBMSGateACheck $checks 'integrity.compatible' 'PASS' 'Integrity state is known and compatible.' }
     }
     if ($collectorMap.ContainsKey('pendingReboot') -and $collectorMap.pendingReboot.status -eq 'Captured' -and $schemaComplete['pendingReboot']) {
-        if ([bool]$collectorMap.pendingReboot.data.any) { Add-SBMSGateACheck $checks 'pendingReboot.none' 'FAIL' 'A pending reboot signal is present.' }
-        else { Add-SBMSGateACheck $checks 'pendingReboot.none' 'PASS' 'No pending reboot signal is present.' }
+        if ([bool]$collectorMap.pendingReboot.data.any) { Add-SBMSGateACheck $checks 'pendingReboot.none' 'FAIL' 'A servicing or SBMS/display-lab-owned pending reboot signal is present.' }
+        else { Add-SBMSGateACheck $checks 'pendingReboot.none' 'PASS' 'No servicing or SBMS/display-lab-owned pending reboot signal is present; unrelated file maintenance is recorded but does not block read-only Gate A.' }
     }
     if ($collectorMap.ContainsKey('driverStore') -and $collectorMap.driverStore.status -eq 'Captured' -and $schemaComplete['driverStore']) {
         $bad = @($collectorMap.driverStore.data.packages | Where-Object { $_.classification -in @('blocking','unknown') })

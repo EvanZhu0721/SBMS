@@ -61,6 +61,19 @@ try {
     Assert-Equal 'gate-a/2' $manifest.contractVersion 'Gate A contract version mismatch.'
     Assert-True ($null -eq $manifest.PSObject.Properties['remoteProofPath']) 'Gate A manifest must not expose an SSH proof contract.'
 
+    $externalPending = New-PassEvidence
+    $externalPending.pendingReboot.data | Add-Member -NotePropertyName pendingFileRenameCount -NotePropertyValue 1
+    $externalPending.pendingReboot.data | Add-Member -NotePropertyName externalPendingFileRenameCount -NotePropertyValue 1
+    $externalPending.pendingReboot.data | Add-Member -NotePropertyName blockingPendingFileRenameCount -NotePropertyValue 0
+    $externalPending.pendingReboot.data | Add-Member -NotePropertyName pendingFileRenames -NotePropertyValue @([pscustomobject]@{source='gamingservicesproxy_11.dll.0';destination='';classification='external'})
+    $externalResult = Test-SBMSGateAEvidence -Evidence $externalPending -RunId $runId.ToString() -StableDigest $first.stableDigest
+    Assert-Equal 'PASS' $externalResult.status 'Unrelated package-maintenance rename must not block read-only Gate A.'
+
+    $ownedPending = New-PassEvidence
+    $ownedPending.pendingReboot.data.any = $true
+    $ownedResult = Test-SBMSGateAEvidence -Evidence $ownedPending -RunId $runId.ToString() -StableDigest $first.stableDigest
+    Assert-Equal 'FAIL' $ownedResult.status 'SBMS/display-lab-owned pending reboot must fail Gate A.'
+
     $missingBitLockerState = New-PassEvidence
     $missingBitLockerState.bitLocker.data.PSObject.Properties.Remove('protectionOn')
     $bad = Test-SBMSGateAEvidence -Evidence $missingBitLockerState -RunId $runId.ToString() -StableDigest $first.stableDigest
