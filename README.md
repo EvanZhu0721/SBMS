@@ -70,6 +70,7 @@ Run the source-level GUI checks without changing the driver or display topology:
 
 ```powershell
 .\test-sbms-gui-core.ps1
+.\test-sbms-configuration.ps1
 .\test-sbms-process-job.ps1
 .\test-sbms-start-gate.ps1
 .\test-sbms-supervisors.ps1
@@ -114,11 +115,24 @@ Default workflow:
 
 When `迁移窗口` is enabled, SBMS continuously moves movable top-level windows from the real target desktop to the virtual source desktop while the bridge is running. This keeps topmost windows such as Task Manager from blocking interaction on the physical output panel.
 
-SBMS can enumerate and select any active physical target display by its Windows device id such as `\\.\DISPLAY2`, so duplicate resolutions and 3+ monitor layouts do not have to rely on ambiguous resolution matching. The stable bridge path still runs one virtual source to one physical output per native process; the BETA multi-mapping tab starts multiple bridge groups on top of that model.
+SBMS can enumerate and select any active physical target display without relying
+on ambiguous resolution matching. The current `\\.\DISPLAY2` name is retained
+for diagnostics, while persisted bindings use the monitor-derived Sunshine UUID
+so a Windows display-number reorder cannot silently redirect output to another
+physical panel.
+
+GUI settings are stored as schema-v2 XML under `%LOCALAPPDATA%\SBMS`. Existing
+schema-v1 files migrate automatically. Saves use a durable same-directory
+temporary file and atomic replacement while retaining a validated
+last-known-good copy. Malformed or semantically invalid files are preserved
+with a unique `.invalid` name before recovery. A missing saved display is not
+treated as corruption: its saved device label and persistent identity remain visible and SBMS
+blocks Start until the user explicitly selects a replacement, rather than
+silently mapping to another monitor.
 
 ## Multi-Screen BETA
 
-The BETA build can create up to three virtual source displays by starting multiple one-monitor software device instances. In `设置 > 配置`, use `+ 新增组 BETA` to enter multi-mapping. SBMS shows a full-window warning overlay saying `多组映射支持为BETA功能, 不保证稳定性`; only after explicit confirmation does the multi-mapping tab appear.
+The BETA build can create up to two virtual source displays by starting multiple one-monitor software device instances. In `设置 > 配置`, use `+ 新增组 BETA` to enter multi-mapping. SBMS shows a full-window warning overlay saying `多组映射支持为BETA功能, 不保证稳定性`; only after explicit confirmation does the multi-mapping tab appear.
 
 Each group is edited in its own tab. It has its own enable state, output mode, target display, horizontal pixels, aspect ratio, orientation, physical size, sizing strategy, and calculated virtual source resolution. In normal output mode, choose a physical target display for that group, then let SBMS calculate the matching virtual display resolution.
 
@@ -128,7 +142,7 @@ In normal multi-screen mode, SBMS assigns one virtual source to each enabled row
 
 Notes:
 
-- BETA currently supports up to three mapping groups.
+- BETA currently supports up to two mapping groups.
 - Multi-mapping groups can mix normal physical-output groups and virtual-only streaming groups.
 - Pointer mapping and window migration still run per native process. This is usable for testing, but multi-display pointer capture may need a later unified input scheduler.
 - If the BETA topology behaves badly, stop SBMS first; the GUI will close all native output processes and then close the virtual display host.

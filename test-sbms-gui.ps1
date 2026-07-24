@@ -33,8 +33,13 @@ if (-not $Csc) {
     throw "Missing .NET Framework csc.exe"
 }
 
-$TestRoot = Join-Path ([IO.Path]::GetTempPath()) ("SBMS-GuiTests-" + [guid]::NewGuid().ToString("N"))
+$TestRoot = Join-Path ([IO.Path]::GetTempPath()) (
+    "SBMS GUI Tests With Spaces\" + [guid]::NewGuid().ToString("N"))
 $ProbeExe = Join-Path $TestRoot "SBMS-ProbeHost.exe"
+$previousProbeMutex = $env:SBMS_GUI_PROBE_MUTEX
+$probeMutexId = [guid]::NewGuid()
+$env:SBMS_GUI_PROBE_MUTEX = $probeMutexId.ToString()
+$testSucceeded = $false
 
 function Invoke-Probe {
     param(
@@ -43,7 +48,8 @@ function Invoke-Probe {
     )
 
     $png = Join-Path $TestRoot "$Name.png"
-    $process = Start-Process -FilePath $ProbeExe -ArgumentList @($Argument, $png) -PassThru
+    $quotedPng = '"' + $png.Replace('"', '\"') + '"'
+    $process = Start-Process -FilePath $ProbeExe -ArgumentList "$Argument $quotedPng" -PassThru
     try {
         if (-not $process.WaitForExit($ProbeTimeoutSeconds * 1000)) {
             $process.Kill()
@@ -116,12 +122,13 @@ try {
         Invoke-Probe -Name "risk-probe" -Argument "--risk-probe"
         Invoke-Probe -Name "stream-config-probe" -Argument "--stream-config-probe"
         Invoke-Probe -Name "lock-probe" -Argument "--lock-probe"
+        Invoke-Probe -Name "config-binding-probe" -Argument "--config-binding-probe"
     )
 
     $createdNew = $false
     $instanceMutex = [Threading.Mutex]::new(
         $true,
-        "Local\SBMS.Gui.Singleton",
+        ("Local\SBMS.Gui.Probe.Singleton." + $probeMutexId.ToString("N")),
         [ref]$createdNew)
     try {
         if (-not $createdNew) {
@@ -130,7 +137,7 @@ try {
         $blockedProbePath = Join-Path $TestRoot "blocked-probe.png"
         $blockedProbe = Start-Process `
             -FilePath $ProbeExe `
-            -ArgumentList @("--lock-probe", $blockedProbePath) `
+            -ArgumentList ('--lock-probe "' + $blockedProbePath.Replace('"', '\"') + '"') `
             -PassThru
         try {
             if (-not $blockedProbe.WaitForExit(5000)) {
@@ -163,10 +170,47 @@ try {
         throw "Lock probe semantic output changed: $lockText"
     }
 
+    foreach ($invalidArguments in @(
+        "--unknown-probe",
+        "--config-probe"
+    )) {
+        $invalidProbe = Start-Process `
+            -FilePath $ProbeExe `
+            -ArgumentList $invalidArguments `
+            -PassThru
+        try {
+            if (-not $invalidProbe.WaitForExit(5000)) {
+                $invalidProbe.Kill()
+                throw "Malformed probe invocation opened the full GUI: $invalidArguments"
+            }
+            if ($invalidProbe.ExitCode -ne 4) {
+                throw "Malformed probe invocation did not fail closed: $invalidArguments exit=$($invalidProbe.ExitCode)"
+            }
+        } finally {
+            $invalidProbe.Dispose()
+        }
+    }
+    $bindingText = [IO.File]::ReadAllText((Join-Path $TestRoot "config-binding-probe.png.txt"), [Text.Encoding]::UTF8)
+    if (-not $bindingText.Contains("labelPreserved=True") -or
+        -not $bindingText.Contains("tagNull=True") -or
+        -not $bindingText.Contains("devicePreserved=True") -or
+        -not $bindingText.Contains("persistentIdPreserved=True") -or
+        -not $bindingText.Contains("startBlocked=True") -or
+        -not $bindingText.Contains("lifecycleIdle=True") -or
+        -not $bindingText.Contains("feedbackVisible=True") -or
+        -not $bindingText.Contains("backupUnchanged=True") -or
+        -not $bindingText.Contains("primaryUnchanged=True")) {
+        throw "Configuration binding probe silently retargeted a stale display: $bindingText"
+    }
+
     $results | Format-Table -AutoSize
     Write-Host "GUI probes passed."
+    $testSucceeded = $true
 } finally {
-    if (Test-Path -LiteralPath $TestRoot) {
+    $env:SBMS_GUI_PROBE_MUTEX = $previousProbeMutex
+    if ($testSucceeded -and (Test-Path -LiteralPath $TestRoot)) {
         Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
+    } elseif (-not $testSucceeded) {
+        Write-Warning "GUI probe artifacts retained for diagnosis: $TestRoot"
     }
 }

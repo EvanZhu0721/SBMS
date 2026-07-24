@@ -27,4 +27,35 @@ namespace SBMSGui
         public string Refresh;
         public int Orientation;
     }
+
+    internal static class DisplayBindingResolver
+    {
+        public static DisplayChoice ResolveUniquePhysicalByPersistentId(
+            System.Collections.Generic.IEnumerable<DisplayChoice> displays,
+            string persistentId)
+        {
+            if (displays == null || string.IsNullOrWhiteSpace(persistentId))
+            {
+                return null;
+            }
+            DisplayChoice match = null;
+            foreach (DisplayChoice display in displays)
+            {
+                if (display == null || display.Virtual ||
+                    !string.Equals(
+                        display.SunshineId,
+                        persistentId,
+                        System.StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                if (match != null)
+                {
+                    return null;
+                }
+                match = display;
+            }
+            return match;
+        }
+    }
 }

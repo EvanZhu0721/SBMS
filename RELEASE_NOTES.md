@@ -7,6 +7,8 @@
 - Repeated Start and Stop requests now coalesce safely, and stale callbacks from an earlier session cannot mutate a newer run.
 - If SBMS closes unexpectedly, its native and host children are terminated automatically. When window migration is enabled, a separate recovery broker replays the durable journal to return pending windows to the physical desktop.
 - Topology and source recovery now use bounded backoff and a terminal cleanup path instead of retrying indefinitely. Logs retain transition, retry, timeout, exit-code, and terminal-failure details.
+- Existing settings migrate to schema v2 without losing valid mappings. Configuration writes are durable and atomic, retain a validated last-known-good copy, and recover from malformed files or interrupted writes with explicit diagnostics.
+- Saved physical targets use a monitor-derived persistent UUID rather than the transient `\\.\DISPLAYn` number. A disconnected, renamed, or renumbered target remains unresolved; SBMS preserves it and requires an explicit replacement before Start.
 
 ### v0.3.0 production-driver work
 
