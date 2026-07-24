@@ -46,6 +46,9 @@ function New-PassEvidence {
     }
 }
 
+$productionRemoteHealth = Get-Command Confirm-SBMSGateARemoteHealth -CommandType Function -ErrorAction Stop
+Assert-True ($productionRemoteHealth.Definition -match '\$sessionEvidence\s*=\s*Get-SBMSGateARemoteSessionEvidence') 'Production SSH proof must capture private session evidence before creating its closure.'
+
 $runId = [guid]::NewGuid()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('sbms-gate-a-test-' + [guid]::NewGuid().ToString('N'))
 try {

@@ -240,7 +240,8 @@ function Confirm-SBMSGateARemoteHealth {
     if ($actual -cne $expected) { throw 'Production SSH proof is restricted to the fixed ProgramData Run-ID directory.' }
     $item = Get-Item -LiteralPath $actual -Force -ErrorAction Stop
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Run directory must not be a reparse point.' }
-    $capture = { Get-SBMSGateARemoteSessionEvidence -RunDirectory $actual }.GetNewClosure()
+    $sessionEvidence = Get-SBMSGateARemoteSessionEvidence -RunDirectory $actual
+    $capture = { $sessionEvidence }.GetNewClosure()
     Confirm-SBMSGateARemoteHealthCore -RunId $RunId -RunDirectory $actual -Challenge $Challenge -CaptureSession $capture -BitLockerRecoveryAccessVerified:$BitLockerRecoveryAccessVerified
 }
 
