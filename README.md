@@ -202,8 +202,8 @@ Create the local release folders and zip:
 The package script writes:
 
 - `%USERPROFILE%\Documents\SBMS-Core-Source`
-- `%USERPROFILE%\Documents\SBMS-Release\SBMS`
-- `%USERPROFILE%\Documents\SBMS-Release\SBMS.zip`
+- `%USERPROFILE%\Documents\SBMS-Release\SBMS-<version>-windows-x64`
+- `%USERPROFILE%\Documents\SBMS-Release\SBMS-<version>-windows-x64.zip`
 - `C:\Program Files\SBMS` when the shell has permission
 
 The release directory also contains `SBMSSetup.exe`, an elevated installer that copies SBMS to Program Files, optionally installs the test driver, and can create a Start Menu shortcut and startup task.

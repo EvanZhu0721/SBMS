@@ -5,6 +5,18 @@ param(
 $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
+Import-Module (Join-Path $Root "build\SBMS.Version.psm1") -Force
+$BuildMetadata = Get-SBMSBuildMetadata -RepositoryRoot $Root
+Assert-SBMSVersionSourceContract -RepositoryRoot $Root
+$GeneratedRoot = Join-Path $Root "obj\version\gui"
+$VersionSource = Join-Path $GeneratedRoot "SBMS.Version.g.cs"
+$GeneratedManifest = Join-Path $GeneratedRoot "SBMSGui.manifest"
+Write-SBMSGeneratedFile -LiteralPath $VersionSource -Content (
+    New-SBMSCSharpVersionSource -Metadata $BuildMetadata -AssemblyTitle "SBMS" -FileDescription "SBMS display control"
+) | Out-Null
+Write-SBMSGeneratedFile -LiteralPath $GeneratedManifest -Content (
+    New-SBMSApplicationManifest -Metadata $BuildMetadata -AssemblyName "SBMS.Gui" -ExecutionLevel requireAdministrator
+) | Out-Null
 $SourceDirectories = @(
     (Join-Path $Root "gui"),
     (Join-Path $Root "gui\Core"),
@@ -17,8 +29,8 @@ $Sources = @(
         ForEach-Object { Get-ChildItem -LiteralPath $_ -File -Filter "*.cs" } |
         Sort-Object FullName |
         Select-Object -ExpandProperty FullName
-)
-$Manifest = Join-Path $Root "gui\SBMSGui.manifest"
+) + @($VersionSource)
+$Manifest = $GeneratedManifest
 if ([System.IO.Path]::IsPathRooted($OutputName)) {
     $Out = $OutputName
 } else {
@@ -49,3 +61,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Built: $Out"
+$versionInfo = (Get-Item -LiteralPath $Out).VersionInfo
+if ([string]$versionInfo.FileVersion -ne [string]$BuildMetadata.WindowsVersion -or
+    [string]$versionInfo.ProductVersion -ne [string]$BuildMetadata.SemVer) {
+    throw "GUI version metadata mismatch. FileVersion=$($versionInfo.FileVersion) ProductVersion=$($versionInfo.ProductVersion)"
+}
+Write-Host "Version: $($BuildMetadata.SemVer) ($($BuildMetadata.WindowsVersion))"

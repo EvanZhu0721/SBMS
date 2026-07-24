@@ -9,7 +9,8 @@ ClassGUID = {4D36E968-E325-11CE-BFC1-08002BE10318}
 Class = Display
 ClassVer = 2.0
 Provider=%ManufacturerName%
-DriverVer=06/30/2026,1.0.0.0
+; build-sbms-driver.ps1 replaces this deterministic placeholder from root VERSION.
+DriverVer=07/01/2026,0.0.0.0
 CatalogFile=IddSampleDriver.cat
 
 [Manufacturer]

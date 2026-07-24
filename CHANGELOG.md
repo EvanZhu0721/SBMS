@@ -9,6 +9,8 @@ and bug fixes.
 ### Added
 
 - Issue #11: local Obsidian development record and semantic-version workflow.
+- Issue #15: `VERSION`-derived GUI, installer, native, device-host, driver,
+  manifest, diagnostic, release-note, and package metadata.
 
 ### Fixed
 
