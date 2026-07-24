@@ -4,14 +4,22 @@
 
 Boot-policy and display-driver changes are governed by [Safe hardware lab](SAFE-HARDWARE-LAB.md). Its Gate A/B/C sequence, independent recovery requirements, and one-change-per-boot rule are mandatory. The first implementation phase creates and tests the lab scripts only; it does not execute them or change this machine.
 
-Driver installation is a separate, explicitly authorized operation. The current low-level installation primitive is:
+Driver Store staging is a separate, explicitly authorized operation. For an
+isolated development package the current primitive is:
 
 ```powershell
 .\build-sbms-driver.ps1
-.\install-sbms-driver.ps1 -Force
+.\install-sbms-driver.ps1 -Force -AllowTestSigned
 ```
 
-Do not run that primitive directly on a primary workstation. It is not a transactional lab orchestrator and currently stops processes, removes existing device/package state, and installs a test package. It may be used only after Safe Hardware Lab Gate C owns the exact payload and rollback plan.
+The script verifies the payload and stages it with `pnputil /add-driver`. It
+does not pass `/install`, stop SBMS processes, remove a device, delete an old
+package, scan devices or request an active binding. Staging is not hardware
+acceptance and must never be described as successful activation.
+
+Active-device transition remains forbidden on a primary workstation until the
+Issue #19 transaction owns the exact target and previous package identities,
+can verify the new binding by hash/provenance, and can restore the old binding.
 
 Do not use `tools/install-idd-driver.ps1` or `README-install.md` as an acceptance procedure. They are legacy prototype material; the latter is retained only as a deprecation pointer.
 

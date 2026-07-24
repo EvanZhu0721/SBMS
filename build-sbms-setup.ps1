@@ -1,5 +1,8 @@
 param(
-    [string] $OutputName = "SBMSSetup.exe"
+    [string] $OutputName = "SBMSSetup.exe",
+    [switch] $Production,
+    [string] $SigningPolicyPath,
+    [string] $SignToolPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +13,7 @@ $BuildMetadata = Get-SBMSBuildMetadata -RepositoryRoot $Root
 Assert-SBMSVersionSourceContract -RepositoryRoot $Root
 $GeneratedRoot = Join-Path $Root "obj\version\setup"
 $VersionSource = Join-Path $GeneratedRoot "SBMS.Version.g.cs"
+$SigningSource = Join-Path $GeneratedRoot "SBMS.Signing.g.cs"
 $GeneratedManifest = Join-Path $GeneratedRoot "SBMSSetup.manifest"
 Write-SBMSGeneratedFile -LiteralPath $VersionSource -Content (
     New-SBMSCSharpVersionSource -Metadata $BuildMetadata -AssemblyTitle "SBMS Setup" -FileDescription "SBMS installer"
@@ -17,7 +21,37 @@ Write-SBMSGeneratedFile -LiteralPath $VersionSource -Content (
 Write-SBMSGeneratedFile -LiteralPath $GeneratedManifest -Content (
     New-SBMSApplicationManifest -Metadata $BuildMetadata -AssemblyName "SBMS.Setup" -ExecutionLevel requireAdministrator
 ) | Out-Null
+$publisherThumbprint = ''
+$whqlCatalogSubjects = ''
+if ($Production) {
+    if ([string]::IsNullOrWhiteSpace($SigningPolicyPath)) {
+        throw 'Production setup build requires -SigningPolicyPath.'
+    }
+    Import-Module (Join-Path $Root 'build\SBMS.Signing.psm1') -Force
+    $SigningPolicy = Read-SBMSSigningPolicy -LiteralPath $SigningPolicyPath
+    $null = Resolve-SBMSSigningCertificate -Policy $SigningPolicy
+    $publisherThumbprint = [string]$SigningPolicy.publisher.thumbprint
+    $whqlCatalogSubjects = (@(
+        $SigningPolicy.driverCertification.allowedCatalogSubjects |
+            ForEach-Object { [string]$_ }
+    ) -join "`n").Replace('\', '\\').Replace('"', '\"').Replace("`r", '').Replace("`n", '\n')
+}
+$signingSourceText = @"
+namespace SBMSBuild
+{
+    internal static class ProductionSigningInfo
+    {
+        internal const bool IntegrityRequired = $($Production.IsPresent.ToString().ToLowerInvariant());
+        internal const string PublisherThumbprint = "$publisherThumbprint";
+        internal const string WhqlCatalogSubjects = "$whqlCatalogSubjects";
+    }
+}
+"@
+Write-SBMSGeneratedFile -LiteralPath $SigningSource -Content $signingSourceText | Out-Null
 $Source = Join-Path $Root "installer\SBMSSetup.cs"
+$TransactionSource = Join-Path $Root 'installer\InstallTransaction.cs'
+$VerifierSource = Join-Path $Root 'installer\ReleaseIntegrityVerifier.cs'
+$DriverVerifierSource = Join-Path $Root 'installer\DriverCatalogVerifier.cs'
 $Manifest = $GeneratedManifest
 if ([System.IO.Path]::IsPathRooted($OutputName)) {
     $Out = $OutputName
@@ -41,32 +75,20 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $Source $VersionSource
+& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll $Source $TransactionSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$WdkRoot = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10"
-$signTool = Get-ChildItem (Join-Path $WdkRoot "bin") -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match '\\(x64|x86)\\signtool\.exe$' } |
-    Sort-Object FullName -Descending |
-    Select-Object -First 1
-$certs = @(Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My -CodeSigningCert -ErrorAction SilentlyContinue)
-$signingCert = $certs |
-    Where-Object { $_.Subject -like "*WDKTestCert*" } |
-    Sort-Object NotAfter -Descending |
-    Select-Object -First 1
-if (-not $signingCert) {
-    $signingCert = $certs | Sort-Object NotAfter -Descending | Select-Object -First 1
-}
-
-if ($signTool -and $signingCert) {
-    & $signTool.FullName sign /v /fd SHA256 /sha1 $signingCert.Thumbprint $Out
-    if ($LASTEXITCODE -ne 0) {
-        exit $LASTEXITCODE
-    }
-} else {
-    Write-Warning "Setup executable was built unsigned because signtool or a code-signing certificate was not found."
+if ($Production) {
+    $null = Invoke-SBMSSignAuthenticode `
+        -LiteralPath $Out `
+        -Policy $SigningPolicy `
+        -SignToolPath $SignToolPath
+    $null = Assert-SBMSAuthenticodeSignature `
+        -LiteralPath $Out `
+        -Policy $SigningPolicy `
+        -SignToolPath $SignToolPath
 }
 
 Write-Host "Built: $Out"

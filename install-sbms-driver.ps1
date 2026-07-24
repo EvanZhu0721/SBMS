@@ -1,6 +1,9 @@
 param(
     [switch] $Force,
-    [switch] $KeepOld
+    [switch] $KeepOld,
+    [switch] $AllowTestSigned,
+    [string] $VerifiedReleaseRoot,
+    [switch] $VerifiedByInstaller
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,60 +17,10 @@ if (-not $IsAdmin) {
 }
 
 if (-not $Force) {
-    Write-Host "This installs a test display driver package."
-    Write-Host "Re-run with -Force after you have enabled test signing or prepared a valid signature."
+    Write-Host "This stages the SBMS display driver package in Driver Store."
+    Write-Host "Re-run with -Force for a Microsoft WHQL package."
+    Write-Host "Use -AllowTestSigned only for an isolated development package."
     exit 10
-}
-
-function Get-DriverPackages {
-    $packages = New-Object System.Collections.Generic.List[object]
-    $current = [ordered]@{}
-
-    function Flush-DriverPackage {
-        if ($current.Count -eq 0) {
-            return
-        }
-        if ($current.Contains("PublishedName") -or $current.Contains("OriginalName")) {
-            $snapshot = [ordered]@{}
-            foreach ($key in $current.Keys) {
-                $snapshot[$key] = $current[$key]
-            }
-            $packages.Add([pscustomobject]$snapshot)
-        }
-        $current.Clear()
-    }
-
-    foreach ($line in (pnputil /enum-drivers)) {
-        if ([string]::IsNullOrWhiteSpace($line)) {
-            Flush-DriverPackage
-            continue
-        }
-
-        if ($line -match '^\s*(.+?)\s*[:\uFF1A]\s*(.*?)\s*$') {
-            $field = $Matches[1]
-            $value = $Matches[2].Trim()
-            if ($field -match '(?i)^Published Name$' -or $value -match '(?i)^oem\d+\.inf$') {
-                $current["PublishedName"] = $value
-            } elseif ($field -match '(?i)^Original Name$' -or ($value -match '(?i)\.inf$' -and $value -notmatch '(?i)^oem\d+\.inf$' -and -not $current.Contains("OriginalName"))) {
-                $current["OriginalName"] = $value
-            } elseif ($field -match '(?i)^Provider Name$') {
-                $current["ProviderName"] = $value
-            } elseif ($field -match '(?i)^Class Name$') {
-                $current["ClassName"] = $value
-            } elseif ($field -match '(?i)^Driver Version$') {
-                $current["DriverVersion"] = $value
-            }
-        }
-    }
-
-    Flush-DriverPackage
-    $packages
-}
-
-function Get-IddSamplePublishedNames {
-    Get-DriverPackages |
-        Where-Object { $_.OriginalName -ieq "iddsampledriver.inf" } |
-        Select-Object -ExpandProperty PublishedName -Unique
 }
 
 function Assert-DriverPayload {
@@ -91,10 +44,60 @@ function Assert-DriverPayload {
     if ($catSignature.Status -ne "Valid") {
         throw "Refusing to install invalid driver catalog: $($Cat.FullName) signature=$($catSignature.Status) $($catSignature.StatusMessage)"
     }
+    if (-not $AllowTestSigned) {
+        if (-not $VerifiedByInstaller -or [string]::IsNullOrWhiteSpace($VerifiedReleaseRoot)) {
+            throw 'Production driver installation is restricted to the publisher-verified SBMS installer.'
+        }
+        $verifiedRoot = [System.IO.Path]::GetFullPath($VerifiedReleaseRoot)
+        $releaseCatalog = Join-Path $verifiedRoot 'SBMS.release.cat'
+        $releasePayload = Join-Path $verifiedRoot 'payload'
+        $releaseManifestPath = Join-Path $releasePayload 'SBMS.release.json'
+        $releaseSignature = Get-AuthenticodeSignature -LiteralPath $releaseCatalog
+        if ([string]$releaseSignature.Status -cne 'Valid' -or
+            -not $releaseSignature.SignerCertificate -or
+            -not $releaseSignature.TimeStamperCertificate) {
+            throw 'Publisher release catalog is not valid and timestamped.'
+        }
+        $releaseResult = Test-FileCatalog `
+            -Path $releasePayload `
+            -CatalogFilePath $releaseCatalog `
+            -Detailed
+        if ([string]$releaseResult.Status -cne 'Valid') {
+            throw "Publisher release payload is no longer catalog-valid: $($releaseResult.Status)"
+        }
+        $releaseManifest = Get-Content -LiteralPath $releaseManifestPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+        $releaseThumbprint = (
+            [string]$releaseSignature.SignerCertificate.Thumbprint -replace '[^0-9A-Fa-f]', ''
+        ).ToUpperInvariant()
+        if ([int]$releaseManifest.schemaVersion -ne 3 -or
+            [string]$releaseManifest.profile -cne 'Production' -or
+            [string]$releaseManifest.driverCertification.method -cne 'WHQL' -or
+            [string]$releaseManifest.signing.publisherThumbprint -cne $releaseThumbprint) {
+            throw 'Publisher release manifest does not authorize this production WHQL install.'
+        }
+        if (-not $catSignature.SignerCertificate -or
+            [string]$catSignature.SignerCertificate.Subject -cne
+                [string]$releaseManifest.driverCertification.signerSubject) {
+            throw 'Driver catalog signer does not match publisher-verified WHQL provenance.'
+        }
+        $dllSignature = Get-AuthenticodeSignature -LiteralPath $Dll
+        $dllThumbprint = (
+            [string]$dllSignature.SignerCertificate.Thumbprint -replace '[^0-9A-Fa-f]', ''
+        ).ToUpperInvariant()
+        if ([string]$dllSignature.Status -cne 'Valid' -or
+            $dllThumbprint -cne $releaseThumbprint -or
+            -not $dllSignature.TimeStamperCertificate) {
+            throw 'Driver DLL does not carry the publisher signature and timestamp authorized by the release.'
+        }
+        if (-not $catSignature.TimeStamperCertificate) {
+            throw 'Refusing a WHQL catalog without a trusted timestamp.'
+        }
+    }
 
     $dllSignature = Get-AuthenticodeSignature -LiteralPath $Dll
     if ($dllSignature.Status -ne "Valid") {
-        Write-Warning "Driver DLL embedded signature is $($dllSignature.Status); continuing because the driver package catalog is valid."
+        Write-Warning "Driver DLL embedded signature is $($dllSignature.Status); its bytes are covered by the verified catalog."
     }
 
     $DllHash = (Get-FileHash -LiteralPath $Dll -Algorithm SHA256).Hash
@@ -105,165 +108,6 @@ function Assert-DriverPayload {
     Write-Host "Driver payload CAT: $($Cat.FullName)"
     Write-Host "Driver payload CAT SHA256=$CatHash"
     Write-Host "Driver payload CAT signature=$($catSignature.Status)"
-}
-
-function Get-InfDriverVersionValue {
-    param(
-        [string] $InfPath
-    )
-
-    $line = Select-String -LiteralPath $InfPath -Pattern '^\s*DriverVer\s*=' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($line -and $line.Line -match '^\s*DriverVer\s*=\s*[^,]+,\s*(.+)\s*$') {
-        return $Matches[1].Trim()
-    }
-    return ""
-}
-
-function Convert-DriverPackageVersionValue {
-    param(
-        [string] $DriverVersion
-    )
-
-    if ($DriverVersion -match '^\s*\S+\s+(.+?)\s*$') {
-        return $Matches[1].Trim()
-    }
-    return $DriverVersion
-}
-
-function Get-DriverPackageVersionByPublishedName {
-    param(
-        [string] $PublishedName
-    )
-
-    if ([string]::IsNullOrWhiteSpace($PublishedName)) {
-        return ""
-    }
-
-    $package = Get-DriverPackages |
-        Where-Object { $_.PublishedName -ieq $PublishedName -and $_.OriginalName -ieq "iddsampledriver.inf" } |
-        Select-Object -First 1
-
-    if (-not $package) {
-        return ""
-    }
-
-    return Convert-DriverPackageVersionValue -DriverVersion $package.DriverVersion
-}
-
-function Get-InstalledInfVersionByPublishedName {
-    param(
-        [string] $PublishedName
-    )
-
-    if ([string]::IsNullOrWhiteSpace($PublishedName)) {
-        return ""
-    }
-
-    $infPath = Join-Path (Join-Path $env:WINDIR "INF") $PublishedName
-    if (-not (Test-Path -LiteralPath $infPath)) {
-        return ""
-    }
-
-    return Get-InfDriverVersionValue -InfPath $infPath
-}
-
-function Get-IddSampleDeviceProperty {
-    param(
-        [string] $KeyName
-    )
-
-    if (-not (Get-Command Get-PnpDeviceProperty -ErrorAction SilentlyContinue)) {
-        return $null
-    }
-
-    try {
-        $property = Get-PnpDeviceProperty -InstanceId "SWD\IDDSAMPLEDRIVER\IDDSAMPLEDRIVER" -KeyName $KeyName -ErrorAction Stop
-        return $property.Data
-    } catch {
-        return $null
-    }
-}
-
-function Assert-ActiveDriverBinding {
-    param(
-        [System.IO.FileInfo] $Inf
-    )
-
-    $expectedVersion = Get-InfDriverVersionValue -InfPath $Inf.FullName
-    $activeInf = Get-IddSampleDeviceProperty -KeyName "DEVPKEY_Device_DriverInfPath"
-    $activeVersion = Get-IddSampleDeviceProperty -KeyName "DEVPKEY_Device_DriverVersion"
-    $activeConfig = Get-IddSampleDeviceProperty -KeyName "DEVPKEY_Device_ConfigurationId"
-    $hasProblem = Get-IddSampleDeviceProperty -KeyName "DEVPKEY_Device_HasProblem"
-    $activePackageVersion = Get-DriverPackageVersionByPublishedName -PublishedName $activeInf
-    $activeInstalledInfVersion = Get-InstalledInfVersionByPublishedName -PublishedName $activeInf
-
-    Write-Host "Active binding DriverInf=$activeInf"
-    Write-Host "Active binding DriverVersion=$activeVersion"
-    Write-Host "Active binding PackageDriverVersion=$activePackageVersion"
-    Write-Host "Active binding InstalledInfVersion=$activeInstalledInfVersion"
-    Write-Host "Active binding Configuration=$activeConfig"
-    Write-Host "Active binding HasProblem=$hasProblem"
-
-    if ([string]::IsNullOrWhiteSpace($expectedVersion)) {
-        Write-Warning "Could not parse DriverVer from payload INF: $($Inf.FullName)"
-        return
-    }
-
-    Write-Host "Expected payload DriverVersion=$expectedVersion"
-    if (-not [string]::IsNullOrWhiteSpace($activePackageVersion) -and
-        [System.String]::Equals($activePackageVersion, $expectedVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
-        if (-not [string]::IsNullOrWhiteSpace($activeVersion) -and
-            -not [System.String]::Equals($activeVersion, $expectedVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Write-Warning "Active PnP DriverVersion is stale ($activeVersion), but $activeInf resolves to installed package version $activePackageVersion."
-        }
-        return
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($activeInstalledInfVersion) -and
-        [System.String]::Equals($activeInstalledInfVersion, $expectedVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
-        if (-not [string]::IsNullOrWhiteSpace($activeVersion) -and
-            -not [System.String]::Equals($activeVersion, $expectedVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Write-Warning "Active PnP DriverVersion is stale ($activeVersion), but $activeInf on disk has installed INF version $activeInstalledInfVersion."
-        }
-        return
-    }
-
-    if (-not [string]::IsNullOrWhiteSpace($activeVersion) -and
-        -not [System.String]::Equals($activeVersion, $expectedVersion, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Installed payload version is $expectedVersion, but active device remains bound to $activeInf version $activeVersion. Remove stale iddsampledriver.inf packages and rerun this installer."
-    }
-}
-
-if (-not $KeepOld) {
-    Write-Host "Stopping any SBMS software device host..."
-    try {
-        $event = [System.Threading.EventWaitHandle]::OpenExisting("Local\SBMSDeviceHostStop")
-        try {
-            [void] $event.Set()
-        } finally {
-            $event.Dispose()
-        }
-    } catch {
-    }
-
-    Start-Sleep -Milliseconds 500
-    Get-Process -Name SBMS, SBMSDeviceHost, SBMSNative, DisplayBridgeGui, DisplayBridgeDeviceHost, native-output-demo-input -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-
-    pnputil /remove-device "SWD\IddSampleDriver\IddSampleDriver" | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Could not remove existing IddSampleDriver device instance; continuing with driver package refresh."
-    }
-
-    $oldPackages = @(Get-IddSamplePublishedNames)
-    foreach ($publishedName in $oldPackages) {
-        Write-Host "Removing old IddSampleDriver package: $publishedName"
-        pnputil /delete-driver $publishedName /uninstall /force
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to remove old driver package: $publishedName"
-        }
-    }
 }
 
 $DriverSearchRoots = @(
@@ -283,18 +127,26 @@ $Inf = $DriverSearchRoots |
     Select-Object -First 1
 
 if (-not $Inf) {
-    throw "Built driver package not found. Run .\build-sbms-driver.ps1 first."
+    throw "Certified driver package not found beside the installer."
 }
 
+# Trust and payload checks must complete before making any machine mutation.
 Assert-DriverPayload -Inf $Inf
 
-Write-Host "Installing: $($Inf.FullName)"
-pnputil /add-driver $Inf.FullName /install
-
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+# Issue #18 deliberately stages the verified package without requesting an
+# active-device update. Rebinding and stale-package cleanup require the fully
+# transactional PnP rollback owned by Issue #19.
+$pnputil = Join-Path $env:SystemRoot 'System32\pnputil.exe'
+$nativeArgs = @('/add-driver', $Inf.FullName)
+Write-Host "Staging verified driver package without activating it: $($Inf.FullName)"
+& $pnputil @nativeArgs | Out-Host
+$addDriverExitCode = $LASTEXITCODE
+if ($addDriverExitCode -ne 0) {
+    throw "PnPUtil failed to stage the verified driver package (exit $addDriverExitCode). Active devices and existing packages were not intentionally changed."
 }
 
-pnputil /scan-devices | Out-Host
-Assert-ActiveDriverBinding -Inf $Inf
-Write-Host "Driver package installed."
+if ($KeepOld) {
+    Write-Verbose '-KeepOld is retained for command-line compatibility; staging now always preserves existing packages.'
+}
+
+Write-Host 'Driver package staged. Active-device transition is deferred to the transactional activation path.'
