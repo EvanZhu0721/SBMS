@@ -88,6 +88,20 @@ function New-TestSupervisorAdapter {
     [pscustomobject]@{ adapter = $adapter; state = $state; identity = $identity }
 }
 
+function New-TestAuditedManifest {
+    [pscustomobject]@{
+        state = 'InstalledAndVerified'
+        planSha256 = 'AUDITED-DIGEST'
+        plan = [pscustomobject]@{
+            files = @(
+                [pscustomobject]@{ name = 'SBMS.exe'; path = 'C:\Frozen\SBMS.exe' },
+                [pscustomobject]@{ name = 'SBMS.DisplayConfig.cs'; path = 'C:\Frozen\SBMS.DisplayConfig.cs' }
+            )
+            baselinePhysicalMonitorPaths = @('DISPLAY-A')
+        }
+    }
+}
+
 . (Join-Path $PSScriptRoot 'lab\Invoke-SBMSIssue4Lab.ps1')
 
 Invoke-Test 'physical baseline matching is case-insensitive' {
@@ -415,6 +429,259 @@ Invoke-Test 'post-audit payload drift cannot block an exact safety rollback' {
     Remove-Variable -Name SBMSIssue4DriftTestState -Scope Global -ErrorAction SilentlyContinue
 }
 
+Invoke-Test 'real pipeline Stop triggers exact rollback once with the audited digest' {
+    $shared = [hashtable]::Synchronized(@{
+        auditCalls = 0
+        rollbacks = 0
+        capturedDigest = $null
+        rollbackReason = $null
+        mutexReleased = $false
+        armedSignal = New-Object Threading.ManualResetEventSlim($false)
+    })
+    $nested = [PowerShell]::Create()
+    $async = $null
+    try {
+        $nested.Runspace.SessionStateProxy.SetVariable('WrapperPath', (Join-Path $PSScriptRoot 'lab\Invoke-SBMSIssue4Lab.ps1'))
+        $nested.Runspace.SessionStateProxy.SetVariable('SharedEvidence', $shared)
+        [void]$nested.AddScript({
+            . $WrapperPath
+            $audit = {
+                $SharedEvidence.auditCalls++
+                [pscustomobject]@{
+                    state = 'InstalledAndVerified'
+                    planSha256 = 'AUDITED-DIGEST'
+                    plan = [pscustomobject]@{
+                        files = @(
+                            [pscustomobject]@{ name = 'SBMS.exe'; path = 'C:\Frozen\SBMS.exe' },
+                            [pscustomobject]@{ name = 'SBMS.DisplayConfig.cs'; path = 'C:\Frozen\SBMS.DisplayConfig.cs' }
+                        )
+                        baselinePhysicalMonitorPaths = @('DISPLAY-A')
+                    }
+                }
+            }
+            $factory = {
+                param([string]$DisplayConfigPath, [string]$AuditedPlanSha256)
+                $SharedEvidence.capturedDigest = $AuditedPlanSha256
+                $identity = [pscustomobject]@{
+                    processId = 4242
+                    executablePath = 'C:\Frozen\SBMS.exe'
+                    creationDate = 'A'
+                }
+                @{
+                    GetActiveDisplayPaths = {
+                        [pscustomobject]@{
+                            monitorDevicePath = 'DISPLAY-A'
+                            active = $true
+                            targetAvailable = $true
+                            classification = 'physical'
+                        }
+                    }
+                    StartGui = {
+                        param([string]$Path)
+                        [pscustomobject]@{ identity = $identity }
+                    }.GetNewClosure()
+                    GetGuiStatus = {
+                        param($Gui)
+                        [pscustomobject]@{ state = 'Running'; identity = $identity }
+                    }.GetNewClosure()
+                    Rollback = {
+                        $SharedEvidence.rollbacks++
+                        [pscustomobject]@{ state = 'RollbackVerified' }
+                    }
+                    Sleep = {
+                        param([int]$Milliseconds)
+                        $SharedEvidence.armedSignal.Set()
+                        Start-Sleep -Seconds 30
+                    }
+                    ReportProgress = { param([string]$Message) }
+                }
+            }
+            $lifecycle = New-SBMSIssue4SupervisionLifecycle
+            $mutex = New-Object Threading.Mutex($false)
+            $mutexHeld = $mutex.WaitOne([TimeSpan]::Zero)
+            try {
+                Invoke-SBMSIssue4InterruptSafeAuditedGuiLaunch `
+                    -Audit $audit `
+                    -CreateSupervisorAdapter $factory `
+                    -Lifecycle $lifecycle `
+                    -PollMilliseconds 100 | Out-Null
+            } finally {
+                $SharedEvidence.rollbackReason = [string]$lifecycle.rollbackReason
+                if ($mutexHeld) {
+                    $mutex.ReleaseMutex()
+                    $SharedEvidence.mutexReleased = $true
+                }
+                $mutex.Dispose()
+            }
+        })
+        $async = $nested.BeginInvoke()
+        if (-not $shared.armedSignal.Wait([TimeSpan]::FromSeconds(5))) {
+            $nested.Stop()
+            throw 'nested supervisor did not reach the armed polling state'
+        }
+        $nested.Stop()
+        try {
+            $nested.EndInvoke($async) | Out-Null
+        } catch {
+            # Stop() can surface PipelineStoppedException from EndInvoke().
+        }
+        $nestedState = [string]$nested.InvocationStateInfo.State
+    } finally {
+        if ([string]$nested.InvocationStateInfo.State -in @('Running','Stopping')) {
+            $nested.Stop()
+        }
+        $nested.Dispose()
+        $shared.armedSignal.Dispose()
+    }
+
+    Assert-True ($nestedState -ceq 'Stopped') "real pipeline Stop ended in unexpected state '$nestedState'"
+    Assert-True ($shared.auditCalls -eq 1) 'pipeline-stop cleanup performed a second full Audit'
+    Assert-True ($shared.rollbacks -eq 1) 'pipeline-stop cleanup did not perform exactly one rollback'
+    Assert-True ([string]$shared.capturedDigest -ceq 'AUDITED-DIGEST') 'pipeline-stop rollback did not use the first audited digest'
+    Assert-True ([string]$shared.rollbackReason -like '*pipeline stopped*') 'pipeline-stop rollback reason was not retained'
+    Assert-True ([bool]$shared.mutexReleased) 'pipeline stop did not unwind through the enclosing mutex finally'
+}
+
+Invoke-Test 'existing safety trip is not rolled back twice by interruption finally' {
+    $state = [pscustomobject]@{ rollbacks = 0 }
+    $audit = { New-TestAuditedManifest }
+    $factory = {
+        param([string]$DisplayConfigPath, [string]$AuditedPlanSha256)
+        $rollbackState = $state
+        $fake = New-TestSupervisorAdapter `
+            -Statuses @([pscustomobject]@{ state = 'Running' }) `
+            -DisplaySnapshots @(
+                @((New-PhysicalPath 'DISPLAY-A')),
+                @((New-PhysicalPath 'DISPLAY-A' -Available $false))
+            )
+        $fake.adapter.Rollback = {
+            $rollbackState.rollbacks++
+            [pscustomobject]@{ state = 'RollbackVerified' }
+        }.GetNewClosure()
+        $fake.adapter
+    }.GetNewClosure()
+    $lifecycle = New-SBMSIssue4SupervisionLifecycle
+    $caught = $null
+    try {
+        Invoke-SBMSIssue4InterruptSafeAuditedGuiLaunch `
+            -Audit $audit `
+            -CreateSupervisorAdapter $factory `
+            -Lifecycle $lifecycle `
+            -PollMilliseconds 100 | Out-Null
+    } catch { $caught = $_ }
+
+    Assert-True ($null -ne $caught) 'safety trip did not terminate supervision'
+    Assert-True ($state.rollbacks -eq 1) "outer interruption finally duplicated an existing safety rollback (actual $($state.rollbacks))"
+    Assert-True ([bool]$lifecycle.rollbackAttempted) 'safety-trip lifecycle was not marked rollback-attempted'
+}
+
+Invoke-Test 'normal supervised exit completes lifecycle without rollback' {
+    $state = [pscustomobject]@{ rollbacks = 0 }
+    $audit = { New-TestAuditedManifest }
+    $factory = {
+        param([string]$DisplayConfigPath, [string]$AuditedPlanSha256)
+        $fake = New-TestSupervisorAdapter `
+            -Statuses @([pscustomobject]@{ state = 'Exited' }) `
+            -DisplaySnapshots @(
+                @((New-PhysicalPath 'DISPLAY-A')),
+                @((New-PhysicalPath 'DISPLAY-A')),
+                @((New-PhysicalPath 'DISPLAY-A')),
+                @((New-PhysicalPath 'DISPLAY-A'))
+            )
+        $fake.adapter.Rollback = {
+            $state.rollbacks++
+            [pscustomobject]@{ state = 'RollbackVerified' }
+        }.GetNewClosure()
+        $fake.adapter
+    }.GetNewClosure()
+    $lifecycle = New-SBMSIssue4SupervisionLifecycle
+    $result = Invoke-SBMSIssue4InterruptSafeAuditedGuiLaunch `
+        -Audit $audit `
+        -CreateSupervisorAdapter $factory `
+        -Lifecycle $lifecycle `
+        -PollMilliseconds 100
+
+    Assert-True ([string]$result.outcome -ceq 'ExitedNormally') 'normal exit outcome changed'
+    Assert-True ([bool]$lifecycle.completedNormally) 'normal exit did not complete the lifecycle'
+    Assert-True (-not [bool]$lifecycle.rollbackAttempted) 'normal exit attempted rollback'
+    Assert-True ($state.rollbacks -eq 0) 'normal exit invoked rollback'
+}
+
+Invoke-Test 'graceful host-exit cleanup target is rollback-once' {
+    $state = [pscustomobject]@{ rollbacks = 0 }
+    $lifecycle = New-SBMSIssue4SupervisionLifecycle
+    $rollback = {
+        $state.rollbacks++
+        [pscustomobject]@{ state = 'RollbackVerified' }
+    }.GetNewClosure()
+    $lifecycle.rollbackAction = $rollback
+    $lifecycle.armed = $true
+
+    Invoke-SBMSIssue4InterruptedSupervisionCleanup -Lifecycle $lifecycle -Reason 'the PowerShell host began a graceful shutdown'
+    Invoke-SBMSIssue4InterruptedSupervisionCleanup -Lifecycle $lifecycle -Reason 'duplicate host shutdown notification'
+
+    Assert-True ($state.rollbacks -eq 1) 'graceful host-exit target did not enforce exactly-once rollback'
+    Assert-True ([string]$lifecycle.rollbackReason -like '*graceful shutdown*') 'graceful host-exit reason was not retained'
+}
+
+Invoke-Test 'graceful host exit runs the armed rollback handler' {
+    $evidencePath = Join-Path ([IO.Path]::GetTempPath()) ("sbms-issue4-exit-$([guid]::NewGuid().ToString('N')).txt")
+    $wrapperPath = Join-Path $PSScriptRoot 'lab\Invoke-SBMSIssue4Lab.ps1'
+    $childExe = if ($PSVersionTable.PSEdition -eq 'Core') {
+        Join-Path $PSHOME 'pwsh.exe'
+    } else {
+        Join-Path $PSHOME 'powershell.exe'
+    }
+    $childScript = @"
+`$ErrorActionPreference = 'Stop'
+. '$($wrapperPath.Replace("'", "''"))'
+`$global:SBMSIssue4HostExitEvidencePath = '$($evidencePath.Replace("'", "''"))'
+`$global:SBMSIssue4HostExitIdentity = [pscustomobject]@{ processId = 7; executablePath = 'C:\Frozen\SBMS.exe'; creationDate = 'A' }
+`$audit = {
+    [pscustomobject]@{
+        state = 'InstalledAndVerified'
+        planSha256 = 'AUDITED-DIGEST'
+        plan = [pscustomobject]@{
+            files = @(
+                [pscustomobject]@{ name = 'SBMS.exe'; path = 'C:\Frozen\SBMS.exe' },
+                [pscustomobject]@{ name = 'SBMS.DisplayConfig.cs'; path = 'C:\Frozen\SBMS.DisplayConfig.cs' }
+            )
+            baselinePhysicalMonitorPaths = @('DISPLAY-A')
+        }
+    }
+}
+`$factory = {
+    param([string]`$DisplayConfigPath, [string]`$AuditedPlanSha256)
+    @{
+        GetActiveDisplayPaths = {
+            [pscustomobject]@{ monitorDevicePath = 'DISPLAY-A'; active = `$true; targetAvailable = `$true; classification = 'physical' }
+        }
+        StartGui = { param([string]`$Path) [pscustomobject]@{ identity = `$global:SBMSIssue4HostExitIdentity } }
+        GetGuiStatus = { param(`$Gui) [pscustomobject]@{ state = 'Running'; identity = `$global:SBMSIssue4HostExitIdentity } }
+        Rollback = {
+            [IO.File]::WriteAllText(`$global:SBMSIssue4HostExitEvidencePath, 'RollbackVerified', (New-Object Text.UTF8Encoding(`$false)))
+            [pscustomobject]@{ state = 'RollbackVerified' }
+        }
+        Sleep = { param([int]`$Milliseconds) exit 0 }
+        ReportProgress = { param([string]`$Message) }
+    }
+}
+`$lifecycle = New-SBMSIssue4SupervisionLifecycle
+Invoke-SBMSIssue4InterruptSafeAuditedGuiLaunch -Audit `$audit -CreateSupervisorAdapter `$factory -Lifecycle `$lifecycle -PollMilliseconds 100 | Out-Null
+"@
+    try {
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
+        & $childExe -NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded 2>$null | Out-Null
+        $childExit = $LASTEXITCODE
+        Assert-True ($childExit -eq 0) "graceful-exit child failed with exit code $childExit"
+        Assert-True (Test-Path -LiteralPath $evidencePath -PathType Leaf) 'graceful host exit did not unwind through the armed rollback finally'
+        $evidence = [IO.File]::ReadAllText($evidencePath, [Text.Encoding]::UTF8)
+        Assert-True ([string]$evidence -ceq 'RollbackVerified') 'graceful host-exit rollback evidence was wrong'
+    } finally {
+        Remove-Item -LiteralPath $evidencePath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Invoke-Test 'supervisor mutex name is exact per Run and stable' {
     $id = [guid]'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
     $name = Get-SBMSIssue4SupervisorMutexName -Id $id
@@ -430,7 +697,9 @@ Invoke-Test 'UAC poll forwarding and nonblocking per-Run mutex are statically pi
     Assert-True ($source -match 'Invoke-SBMSGateC\s+-Phase\s+Audit\s+-RunId\s+\$selectedRunId') 'SupervisedLaunch does not use Gate C Audit'
     Assert-True ($source -notmatch '\$auditedForRollback') 'safety rollback still performs a second full Audit'
     Assert-True ($source -match 'Rollback/\$AuditedPlanSha256') 'safety rollback acknowledgement does not use the frozen audited digest'
-    Assert-True ($source -match 'Keep this PowerShell window open[\s\S]*Ctrl\+C[\s\S]*watchdog') 'Ctrl+C watchdog fallback guidance is missing'
+    Assert-True ($source -match 'finally\s*\{[\s\S]*Invoke-SBMSIssue4InterruptedSupervisionCleanup') 'pipeline-stopping cleanup is not protected by finally'
+    Assert-True ($source -match 'graceful host `exit`[\s\S]*finally') 'graceful PowerShell host-exit unwind contract is not documented'
+    Assert-True ($source -match 'force-killing powershell\.exe[\s\S]*boot watchdog') 'hard-kill watchdog recovery boundary is not documented'
 }
 
 Write-Host "Tests: $($script:Passed) passed, $($script:Failed) failed"

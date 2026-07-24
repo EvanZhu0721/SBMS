@@ -137,6 +137,65 @@ function Get-SBMSIssue4SupervisorMutexName {
     "Global\SBMSIssue4GuiSupervisor_$($Id.ToString('N').ToLowerInvariant())"
 }
 
+function New-SBMSIssue4SupervisionLifecycle {
+    [pscustomobject]@{
+        armed = $false
+        completedNormally = $false
+        rollbackAttempted = $false
+        rollbackAction = $null
+        rollbackReason = $null
+        rollbackResult = $null
+        rollbackError = $null
+    }
+}
+
+function Invoke-SBMSIssue4SupervisionRollbackOnce {
+    param(
+        [Parameter(Mandatory=$true)]$Lifecycle,
+        [Parameter(Mandatory=$true)][string]$Reason
+    )
+
+    if (-not [bool]$Lifecycle.armed -or [bool]$Lifecycle.completedNormally) {
+        return $null
+    }
+    if ([bool]$Lifecycle.rollbackAttempted) {
+        if ($null -ne $Lifecycle.rollbackError) {
+            throw "The exact supervised rollback was already attempted and failed: $([string]$Lifecycle.rollbackError)"
+        }
+        return $Lifecycle.rollbackResult
+    }
+    $Lifecycle.rollbackAttempted = $true
+    $Lifecycle.rollbackReason = $Reason
+
+    try {
+        $result = & $Lifecycle.rollbackAction
+        $Lifecycle.rollbackResult = $result
+        return $result
+    } catch {
+        $Lifecycle.rollbackError = $_.Exception.Message
+        throw
+    }
+}
+
+function Invoke-SBMSIssue4InterruptedSupervisionCleanup {
+    param(
+        [Parameter(Mandatory=$true)]$Lifecycle,
+        [Parameter(Mandatory=$true)][string]$Reason,
+        [scriptblock]$ReportFailure = { param([string]$Message) Write-Warning $Message }
+    )
+
+    if (-not [bool]$Lifecycle.armed -or
+        [bool]$Lifecycle.completedNormally -or
+        [bool]$Lifecycle.rollbackAttempted) {
+        return
+    }
+    try {
+        Invoke-SBMSIssue4SupervisionRollbackOnce -Lifecycle $Lifecycle -Reason $Reason | Out-Null
+    } catch {
+        & $ReportFailure "Exact same-Run Gate C rollback failed during interrupted supervision: $($_.Exception.Message) The armed boot watchdog remains the recovery path."
+    }
+}
+
 function Invoke-SBMSIssue4GuiSafetyRollback {
     param(
         [hashtable]$Adapter,
@@ -193,7 +252,7 @@ function Invoke-SBMSIssue4GuiSupervisor {
         Invoke-SBMSIssue4GuiSafetyRollback -Adapter $Adapter -Reason 'the GUI process identity could not be captured'
     }
     & $Adapter.ReportProgress "GUI PID $([int]$gui.identity.processId) is supervised. Close the GUI normally to finish; physical display safety is checked every $PollMilliseconds ms."
-    & $Adapter.ReportProgress 'Keep this PowerShell window open while testing. If the supervisor is interrupted (for example Ctrl+C), the armed boot watchdog remains the fallback recovery path.'
+    & $Adapter.ReportProgress 'Keep this PowerShell window open while testing. Ctrl+C or a graceful PowerShell exit requests exact same-Run rollback; a force-killed process falls back to the armed boot watchdog.'
 
     while ($true) {
         try {
@@ -253,6 +312,7 @@ function Invoke-SBMSIssue4AuditedGuiLaunch {
     param(
         [Parameter(Mandatory=$true)][scriptblock]$Audit,
         [Parameter(Mandatory=$true)][scriptblock]$CreateSupervisorAdapter,
+        $Lifecycle,
         [ValidateRange(100, 60000)][int]$PollMilliseconds = 1000
     )
 
@@ -273,15 +333,57 @@ function Invoke-SBMSIssue4AuditedGuiLaunch {
     }
     $baselinePaths = @($manifest.plan.baselinePhysicalMonitorPaths | ForEach-Object { [string]$_ })
     $adapter = & $CreateSupervisorAdapter ([string]$displayConfigFile[0].path) ([string]$manifest.planSha256)
+    if ($null -ne $Lifecycle) {
+        $Lifecycle.rollbackAction = $adapter.Rollback
+        $Lifecycle.armed = $true
+        $onceRollback = {
+            Invoke-SBMSIssue4SupervisionRollbackOnce `
+                -Lifecycle $Lifecycle `
+                -Reason 'the physical display supervisor requested a safety rollback'
+        }.GetNewClosure()
+        $adapter.Rollback = $onceRollback
+    }
     $supervised = Invoke-SBMSIssue4GuiSupervisor `
         -GuiPath ([string]$guiFile[0].path) `
         -BaselineMonitorDevicePaths $baselinePaths `
         -Adapter $adapter `
         -PollMilliseconds $PollMilliseconds
+    if ($null -ne $Lifecycle -and [string]$supervised.outcome -ieq 'ExitedNormally') {
+        if ([bool]$Lifecycle.rollbackAttempted) {
+            throw 'The supervised launch cannot be accepted as normal after safety rollback began.'
+        }
+        $Lifecycle.completedNormally = $true
+    }
     [pscustomobject][ordered]@{
         outcome = $supervised.outcome
         processId = $supervised.processId
         rollbackPerformed = $supervised.rollbackPerformed
+    }
+}
+
+function Invoke-SBMSIssue4InterruptSafeAuditedGuiLaunch {
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$Audit,
+        [Parameter(Mandatory=$true)][scriptblock]$CreateSupervisorAdapter,
+        [Parameter(Mandatory=$true)]$Lifecycle,
+        [ValidateRange(100, 60000)][int]$PollMilliseconds = 1000,
+        [scriptblock]$ReportCleanupFailure = { param([string]$Message) Write-Warning $Message }
+    )
+
+    try {
+        Invoke-SBMSIssue4AuditedGuiLaunch `
+            -Audit $Audit `
+            -CreateSupervisorAdapter $CreateSupervisorAdapter `
+            -Lifecycle $Lifecycle `
+            -PollMilliseconds $PollMilliseconds
+    } finally {
+        # This same runspace executes finally during a managed pipeline unwind,
+        # including Ctrl+C/Stop(). A hard process kill cannot execute managed
+        # cleanup; the already-armed boot watchdog remains the recovery boundary.
+        Invoke-SBMSIssue4InterruptedSupervisionCleanup `
+            -Lifecycle $Lifecycle `
+            -Reason 'the PowerShell supervision pipeline stopped before normal GUI completion' `
+            -ReportFailure $ReportCleanupFailure
     }
 }
 
@@ -514,6 +616,7 @@ if ($Phase -eq 'Install') {
 if ($Phase -eq 'SupervisedLaunch') {
     $supervisorMutex = New-Object Threading.Mutex($false, (Get-SBMSIssue4SupervisorMutexName -Id $selectedRunId))
     $hasSupervisorMutex = $false
+    $supervisionLifecycle = New-SBMSIssue4SupervisionLifecycle
     try {
         try {
             $hasSupervisorMutex = $supervisorMutex.WaitOne([TimeSpan]::Zero)
@@ -541,9 +644,14 @@ if ($Phase -eq 'SupervisedLaunch') {
                 -DisplayConfigSource $DisplayConfigPath `
                 -Rollback $rollbackAction
         }.GetNewClosure()
-        $supervised = Invoke-SBMSIssue4AuditedGuiLaunch `
+        # Ctrl+C, PipelineStoppedException, and a graceful host `exit` unwind
+        # through the interrupt-safe function's finally block. Closing or
+        # force-killing powershell.exe cannot be guaranteed to run managed
+        # cleanup; the already-armed boot watchdog covers that boundary.
+        $supervised = Invoke-SBMSIssue4InterruptSafeAuditedGuiLaunch `
             -Audit $auditAction `
             -CreateSupervisorAdapter $createAdapter `
+            -Lifecycle $supervisionLifecycle `
             -PollMilliseconds $SupervisionPollMilliseconds
         [pscustomobject][ordered]@{
             phase = 'SupervisedLaunch'
