@@ -22,7 +22,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
 function Request-SBMSFallbackRestartOnce {
-    param([string]$Reason)
+    param([string]$Reason, [switch]$KeepTaskEnabled)
 
     if (-not $Execute) { throw $Reason }
     $expected = "SBMS-HARDWARE-LAB-WATCHDOG/$RunId/$Profile"
@@ -55,13 +55,50 @@ function Request-SBMSFallbackRestartOnce {
             } finally { $terminal.Dispose() }
         } catch [IO.IOException] {}
     }
-    if (Test-Path -LiteralPath $terminalPath -PathType Leaf) {
+    if ((Test-Path -LiteralPath $terminalPath -PathType Leaf) -and -not $KeepTaskEnabled) {
         $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
         & $schtasks /Change /TN $TaskName /Disable *> $null
     }
 }
 
 try {
+    $gateCModule = Join-Path $RunDirectory 'gate-c\payload\SBMS.GateC.psm1'
+    $gateCManifestPath = Join-Path $RunDirectory 'gate-c\manifest.json'
+    if ((Test-Path -LiteralPath $gateCModule -PathType Leaf) -and
+        (Test-Path -LiteralPath $gateCManifestPath -PathType Leaf)) {
+        $gateCManifest = Get-Content -LiteralPath $gateCManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $plannedGateCModule = @($gateCManifest.plan.files | Where-Object { [string]$_.name -eq 'SBMS.GateC.psm1' })
+        if ([string]$gateCManifest.runId -cne $RunId.ToString() -or
+            $plannedGateCModule.Count -ne 1 -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$plannedGateCModule[0].path),
+                [IO.Path]::GetFullPath($gateCModule),
+                [StringComparison]::OrdinalIgnoreCase) -or
+            (Get-FileHash -LiteralPath $gateCModule -Algorithm SHA256).Hash -cne [string]$plannedGateCModule[0].sha256) {
+            throw 'Frozen Gate C watchdog module identity or hash is invalid.'
+        }
+        Import-Module -Name $gateCModule -Force -ErrorAction Stop
+        if ([string]$gateCManifest.state -in @(
+                'InstallIntent',
+                'PackageOwned',
+                'HostStarted',
+                'InstalledAndVerified',
+                'RollbackRequired',
+                'RollbackIntent',
+                'RollbackPendingReboot')) {
+            $gateCAcknowledgement = "SBMS-GATE-C/$RunId/Rollback/$($gateCManifest.planSha256)"
+            $gateCResult = Invoke-SBMSGateC `
+                -Phase Rollback `
+                -RunId $RunId `
+                -Execute `
+                -Acknowledgement $gateCAcknowledgement
+            if ([string]$gateCResult.state -eq 'RollbackPendingReboot') {
+                Request-SBMSFallbackRestartOnce -Reason 'Gate C rollback requires one reboot before final read-back.' -KeepTaskEnabled
+                return
+            }
+        }
+    }
+
     $modulePath = Join-Path $PSScriptRoot 'SBMS.HardwareLab.psm1'
     Import-Module -Name $modulePath -Force -ErrorAction Stop
     Invoke-SBMSHardwareLabWatchdog `

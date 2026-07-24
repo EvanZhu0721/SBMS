@@ -582,7 +582,7 @@ try {
         Assert-ProductionLoadersUntouched -State $ctx.State
     }
 
-    Invoke-TestCase 'Real TestSigning Prepare and Arm are hard-blocked before adapter or filesystem mutation' {
+    Invoke-TestCase 'Real TestSigning Prepare and Arm require authoritative same-run Gate A evidence before mutation' {
         foreach ($phase in @('Prepare', 'Arm')) {
             $ctx = New-TestContext -Profile 'TestSigning'
             $ctx.Adapter.IsReal = $true
@@ -591,9 +591,9 @@ try {
             Assert-True (-not (Test-Path -LiteralPath $runDirectory)) 'The unique hard-lock test run directory unexpectedly existed before the test.'
             $null = Assert-Throws -Action {
                 Invoke-SBMSHardwareLab -Phase $phase -Profile TestSigning -RunId $ctx.RunId -RunRoot $runRoot -Adapter $ctx.Adapter -Execute -Acknowledgement "SBMS-HARDWARE-LAB/$($ctx.RunId)/TestSigning/$phase" -Confirm:$false
-            } -Pattern 'Real TestSigning Prepare/Arm is blocked' -Message "Real TestSigning $phase escaped the hard lock."
+            } -Pattern 'same-Run-ID authoritative Gate A manifest' -Message "Real TestSigning $phase escaped the Gate A authorization boundary."
             Assert-Equal 0 $ctx.State.Calls.Count "Real TestSigning $phase reached an adapter seam."
-            Assert-True (-not (Test-Path -LiteralPath $runDirectory)) "Real TestSigning $phase created a run directory before the hard lock."
+            Assert-True (-not (Test-Path -LiteralPath $runDirectory)) "Real TestSigning $phase created a run directory before Gate A authorization."
         }
     }
 

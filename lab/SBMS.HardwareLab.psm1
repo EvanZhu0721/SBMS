@@ -746,6 +746,105 @@ function Assert-SBMSMutationAuthorized {
     if (-not $Adapter.ContainsKey('TestAdministrator') -or -not (& $Adapter.TestAdministrator)) { throw 'An elevated administrator session is required.' }
 }
 
+function Test-SBMSHardwareLabWatchdogContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$RunDirectory,
+        [Parameter(Mandatory = $true)][guid]$RunId,
+        [hashtable]$Adapter = (New-SBMSHardwareLabAdapter)
+    )
+    $manifest = Read-SBMSManifest -RunDirectory $RunDirectory
+    if ([string]$manifest.runId -cne $RunId.ToString() -or
+        [string]$manifest.profile -cne 'TestSigning' -or
+        [string]$manifest.state -notin @('Armed','WatchdogRestartIntentPersisted') -or
+        [string]$manifest.watchdogPlan.status -notin @('InstalledAndVerified','OperatorConfirmed')) {
+        return $false
+    }
+    Test-SBMSWatchdogReadback -Adapter $Adapter -Specification $manifest.watchdogPlan
+}
+
+function Assert-SBMSGateAAuthorizesTestSigning {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunDirectory,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][hashtable]$Adapter
+    )
+    $gateDirectory = [IO.Path]::GetFullPath((Join-Path $RunDirectory 'gate-a'))
+    $manifestPath = Join-Path $gateDirectory 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw 'Real TestSigning requires a same-Run-ID authoritative Gate A manifest.'
+    }
+    $gate = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$gate.schemaVersion -ne 4 -or
+        [string]$gate.contractVersion -cne 'gate-a/2' -or
+        [string]$gate.runId -cne $RunId -or
+        [string]$gate.status -cne 'PASS') {
+        throw 'Gate A schema, contract, Run ID, or PASS status does not authorize TestSigning.'
+    }
+
+    $expectedPaths = [ordered]@{
+        stableStatePath = (Join-Path $gateDirectory 'stable-state.json')
+        baselineEvidencePath = (Join-Path $gateDirectory 'baseline-evidence.json')
+        currentEvidencePath = (Join-Path $gateDirectory 'current-evidence.json')
+        rollbackPlanPath = (Join-Path $gateDirectory 'rollback-plan.json')
+        evidenceIndexPath = (Join-Path $gateDirectory 'evidence-index.json')
+    }
+    foreach ($property in $expectedPaths.Keys) {
+        $actual = [IO.Path]::GetFullPath([string]$gate.$property)
+        if (-not $actual.Equals([IO.Path]::GetFullPath($expectedPaths[$property]), [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $actual -PathType Leaf)) {
+            throw "Gate A artifact binding failed for $property."
+        }
+    }
+    if ((Get-SBMSFileSha256 -LiteralPath $expectedPaths.stableStatePath) -cne [string]$gate.stableDigest) {
+        throw 'Gate A stable-state digest read-back failed.'
+    }
+    if ((Get-SBMSFileSha256 -LiteralPath $expectedPaths.rollbackPlanPath) -cne [string]$gate.rollbackPlanSha256 -or
+        (Get-SBMSFileSha256 -LiteralPath $expectedPaths.evidenceIndexPath) -cne [string]$gate.evidenceIndexSha256) {
+        throw 'Gate A rollback-plan or evidence-index hash read-back failed.'
+    }
+    $rollback = Get-Content -LiteralPath $expectedPaths.rollbackPlanPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$rollback.runId -cne $RunId -or
+        [string]$rollback.baselineEvidenceRootSha256 -cne [string]$gate.stableDigest -or
+        [string]$rollback.expectedOwnedTaskName -cne "SBMS-HardwareLab-Watchdog-$RunId" -or
+        [string]$rollback.expectedCloneDescription -cne "SBMS LAB TestSigning ONE-TIME $RunId") {
+        throw 'Gate A rollback ownership binding failed.'
+    }
+    $currentEvidence = Get-Content -LiteralPath $expectedPaths.currentEvidencePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([string]$currentEvidence.machine.status -cne 'Captured' -or
+        -not [string]::Equals(
+            [string]$currentEvidence.machine.data.computerName,
+            [string]$env:COMPUTERNAME,
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Gate A machine binding failed.'
+    }
+    if ([string]$currentEvidence.evidenceSecurity.status -cne 'Captured' -or
+        -not [bool]$currentEvidence.evidenceSecurity.data.protected) {
+        throw 'Gate A evidence-security binding failed.'
+    }
+    if ([string]$currentEvidence.bitLocker.status -cne 'Captured' -or
+        [bool]$currentEvidence.bitLocker.data.protectionOn) {
+        throw 'Gate B requires BitLocker protection to be off for this local recovery run.'
+    }
+    if (@($gate.checks | Where-Object { [string]$_.status -cne 'PASS' }).Count -gt 0) {
+        throw 'Gate A contains a non-PASS check.'
+    }
+    $evaluated = [DateTime]::Parse([string]$gate.evaluatedUtc).ToUniversalTime()
+    if (([DateTime]::UtcNow - $evaluated).TotalMinutes -gt 30 -or $evaluated -gt [DateTime]::UtcNow.AddMinutes(1)) {
+        throw 'Gate A authorization is stale; recapture the local baseline.'
+    }
+    if (-not $Adapter.ContainsKey('TestRunDirectorySecurity') -or
+        -not (Test-SBMSRunDirectorySecurityResult -Result (& $Adapter.TestRunDirectorySecurity $RunDirectory))) {
+        throw 'Gate A Run directory ACL read-back failed.'
+    }
+    return [pscustomobject]@{
+        runId = $RunId
+        stableDigest = [string]$gate.stableDigest
+        evaluatedUtc = [string]$gate.evaluatedUtc
+        manifestPath = $manifestPath
+    }
+}
+
 function Invoke-SBMSPrepare {
     param($Manifest, [string]$RunDirectory, [hashtable]$Adapter)
     if ($Manifest.state -eq 'Prepared') {
@@ -1092,7 +1191,7 @@ function Invoke-SBMSHardwareLab {
             throw "Real mutation is restricted to the protected run root: $requiredRoot"
         }
         if ($Profile -eq 'TestSigning' -and $Phase -in @('Prepare', 'Arm')) {
-            throw 'Real TestSigning Prepare/Arm is blocked until an authoritative Gate A pass and separately reviewed Gate B recovery and Gate C mutation contracts are implemented.'
+            $null = Assert-SBMSGateAAuthorizesTestSigning -RunDirectory $runDirectory -RunId $parsedRunId -Adapter $Adapter
         }
     }
     if (-not (Test-Path -LiteralPath $runDirectory)) { New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null }
@@ -1151,4 +1250,4 @@ function Invoke-SBMSHardwareLab {
     }
 }
 
-Export-ModuleMember -Function New-SBMSHardwareLabAdapter, Get-SBMSHardwareLabSnapshot, Invoke-SBMSHardwareLab, Invoke-SBMSHardwareLabWatchdog
+Export-ModuleMember -Function New-SBMSHardwareLabAdapter, Get-SBMSHardwareLabSnapshot, Test-SBMSHardwareLabWatchdogContract, Invoke-SBMSHardwareLab, Invoke-SBMSHardwareLabWatchdog
