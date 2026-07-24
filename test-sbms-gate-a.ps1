@@ -50,6 +50,14 @@ $productionRemoteHealth = Get-Command Confirm-SBMSGateARemoteHealth -CommandType
 Assert-True ($productionRemoteHealth.Definition -match '\$sessionEvidence\s*=\s*Get-SBMSGateARemoteSessionEvidence') 'Production SSH proof must capture private session evidence before creating its closure.'
 $gateHashDefinition = & $script:GateModule { (Get-Command Get-SBMSGateAHash -CommandType Function).Definition }
 Assert-True ($gateHashDefinition -notmatch 'Get-FileHash') 'Gate A hashing must not depend on PowerShell module auto-loading.'
+$productionProofEntry = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'lab\Confirm-SBMSLabRemoteHealth.ps1') -Raw -Encoding UTF8
+Assert-True ($productionProofEntry -notmatch '\.SecureRunDirectory\b') 'SSH proof entry must not redundantly rewrite the protected Run ACL after committing proof.'
+$hostExecutable = if ($PSVersionTable.PSEdition -eq 'Core') { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
+$proofEntryPath = (Join-Path $PSScriptRoot 'lab\Confirm-SBMSLabRemoteHealth.ps1').Replace("'", "''")
+$bootstrapRunId = [guid]::NewGuid()
+$bootstrapCommand = "`$PSModuleAutoLoadingPreference='None'; try { & '$proofEntryPath' -RunId '$bootstrapRunId' -Challenge 'bootstrap-smoke' } catch { if (`$_.Exception.Message -match 'not recognized|CouldNotAutoloadMatchingModule|ErrorsUpdatingTypes') { exit 2 }; exit 0 }; exit 3"
+$null = & $hostExecutable -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $bootstrapCommand
+Assert-Equal 0 $LASTEXITCODE 'Production SSH proof entry did not bootstrap with module auto-loading disabled.'
 
 $runId = [guid]::NewGuid()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('sbms-gate-a-test-' + [guid]::NewGuid().ToString('N'))
