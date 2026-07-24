@@ -16,14 +16,14 @@ The WinForms executable is a composition shell. `MainForm` owns controls, transl
 | `TopologyDiscoveryService` | parsing and classifying `--list` output, stable signatures | controls or process creation |
 | `DisplayModeService` | Win32 mode discovery, supported-mode selection, orientation normalization, and mode application | controls, process ownership, or recovery policy |
 | `TopologyRecoveryService` | cancellable topology/source/mode polling | mapping-row mutation or process restart policy |
-| `XmlConfigurationStore` | versioned XML load/save and atomic temporary-file replacement | control state |
+| `XmlConfigurationStore` / `GuiConfigMigrator` / `GuiConfigValidator` | schema-v2 XML, deterministic v1 migration, canonical tokens, persistent monitor UUID bindings, semantic and display-binding validation, durable atomic commit, quarantine, and validated last-known-good recovery | control state or implicit display retargeting |
 | `ResolutionMath` | parsing and resolution calculations | UI formatting decisions beyond resolution text |
 
 ## Runtime flow
 
 1. A start request creates a new lifecycle generation and enters `Starting`.
    A session-local singleton mutex prevents a second GUI from sharing the global host stop event or recovery root.
-2. `MainForm` validates the mapping and asks the host/native supervisors to create the required resources.
+2. `MainForm` resolves physical targets by the monitor-derived persistent UUID, validates the mapping, and asks the host/native supervisors to create the required resources. A missing UUID, a non-unique UUID, or a target that is not currently present remains unresolved and blocks Start; transient `\\.\DISPLAYn`, labels, resolution matches, and first-monitor fallback never replace a saved binding.
 3. Successful single-output, multi-group, and stream-only starts all enter `Running`.
 4. Native exit codes 100/101 enter `Recovering`. One episode permits at most three delayed attempts (250/500/1000 ms) inside a 30-second failure window; duplicate triggers coalesce.
 5. Terminal failure advances the lifecycle generation, cancels delayed work, stops all native processes, restores pending window journals, stops the device host, waits up to five seconds for virtual displays to clear, then records `Error` with causal and cleanup failures.
@@ -44,10 +44,11 @@ All lifecycle transitions are written to the session log with the previous state
 
 ## Verification boundaries
 
-- `test-sbms-gui-core.ps1` covers lifecycle generations, resolution math, topology parsing/recovery, and configuration round trips without administrator privileges.
+- `test-sbms-gui-core.ps1` covers lifecycle generations, resolution math, topology parsing/recovery, and basic configuration composition without administrator privileges.
+- `test-sbms-configuration.ps1` covers fixed v1 migration, canonical tokens, range/conflict validation, future-version protection, unsafe XML, exact-byte quarantine, locked files, LKG recovery, pre-commit failure, and real child-process kills before and after the atomic swap.
 - `test-sbms-process-job.ps1` proves normal and abrupt-owner Job cleanup with harmless child processes.
 - `test-sbms-start-gate.ps1` proves native and host processes cannot perform their first desktop/device action before Job assignment.
 - `test-sbms-supervisors.ps1` drives the real supervisors through Job assignment, duplicate Start rejection, ACK timeout cleanup, and bounded forced Stop using a harmless gated child.
 - `test-sbms-recovery-broker.ps1` hard-kills a harmless owner and verifies a real Win32 window returns from simulated virtual coordinates to its original rectangle.
-- `test-sbms-gui.ps1` compiles an as-invoker probe host and checks the configuration, risk, stream, and lock surfaces.
+- `test-sbms-gui.ps1` compiles an isolated as-invoker probe host and checks the configuration, risk, stream, lock, singleton, and stale-target fail-closed surfaces without touching the live user configuration.
 - Hardware-sensitive topology/driver behavior still requires a real Windows display session; source-only tests do not replace that evidence.

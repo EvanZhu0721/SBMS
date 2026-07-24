@@ -410,6 +410,33 @@ internal static class GuiCoreTests
         Assert(discovered.Count == 2 && discovered[0].Number == 1 && discovered[1].Number == 2, "discovery should number valid displays");
         Assert(topology.ParseVirtualSources(physicalLine + Environment.NewLine + virtualLine).Count == 1, "virtual discovery should filter physical displays");
         Assert(topology.BuildSignature(physicalLine + Environment.NewLine + virtualLine).Length > 0, "topology signature should be stable and nonempty");
+        var swappedDisplays = new List<DisplayChoice>
+        {
+            new DisplayChoice
+            {
+                DeviceName = @"\\.\DISPLAY1",
+                SunshineId = "{bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb}"
+            },
+            new DisplayChoice
+            {
+                DeviceName = @"\\.\DISPLAY2",
+                SunshineId = "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}"
+            }
+        };
+        DisplayChoice rebound = DisplayBindingResolver.ResolveUniquePhysicalByPersistentId(
+            swappedDisplays,
+            "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}");
+        Assert(rebound != null && rebound.DeviceName == @"\\.\DISPLAY2",
+            "persistent identity follows the same monitor when DISPLAY numbers swap");
+        swappedDisplays.Add(new DisplayChoice
+        {
+            DeviceName = @"\\.\DISPLAY3",
+            SunshineId = "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}"
+        });
+        Assert(DisplayBindingResolver.ResolveUniquePhysicalByPersistentId(
+                   swappedDisplays,
+                   "{aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}") == null,
+            "duplicate persistent identities fail closed instead of choosing a monitor");
 
         int fakeTick = 0;
         string topologyOutput = physicalLine + Environment.NewLine + virtualLine;
@@ -509,14 +536,39 @@ internal static class GuiCoreTests
                 SavedByBuild = "test-build",
                 English = true,
                 SourceText = "3840x2160",
+                TargetText = "2560x1440",
+                SingleRefresh = "60",
+                PrimaryResolution = "5120x2880",
+                PrimarySize = "27",
+                TargetResolution = "2560x1440",
+                TargetSize = "24",
+                ManualBaseHorizontal = "5120",
+                ManualBaseAspect = "16:9",
+                ManualBaseSize = "27",
+                ManualTargetHorizontal = "2560",
+                ManualTargetAspect = "16:9",
+                ManualTargetSize = "24",
                 FollowWindowsTopologyBeta = false
             };
-            config.BetaPairs.Add(new GuiConfigBridgePair { Enabled = true, Mode = "映射", Source = "1920x1080" });
+            config.BetaPairs.Add(new GuiConfigBridgePair
+            {
+                Enabled = true,
+                Mode = "output",
+                Target = @"1  \\.\DISPLAY1  2560x1440@60",
+                TargetDeviceName = @"\\.\DISPLAY1",
+                Horizontal = "2560",
+                Aspect = "16:9",
+                Orientation = "landscape",
+                Size = "24",
+                Strategy = "physical",
+                Refresh = "60",
+                Source = "1920x1080"
+            });
             store.Save(configPath, config);
             Assert(store.Exists(configPath), "configuration should exist after save");
             Assert(!File.Exists(configPath + ".tmp"), "temporary configuration should be removed");
             GuiConfigFile loaded = store.Load(configPath);
-            Assert(loaded.Version == 1, "configuration version should round-trip");
+            Assert(loaded.Version == GuiConfigFile.CurrentVersion, "configuration version should round-trip");
             Assert(loaded.SavedByBuild == "test-build" && loaded.English, "configuration scalar fields should round-trip");
             Assert(!loaded.FollowWindowsTopologyBeta, "configuration false boolean should round-trip");
             Assert(loaded.BetaPairs.Count == 1 && loaded.BetaPairs[0].Source == "1920x1080", "configuration pairs should round-trip");

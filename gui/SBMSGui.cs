@@ -163,6 +163,9 @@ namespace SBMSGui
         private bool loadingConfiguration;
         private bool configurationPersistenceReady;
         private bool configurationFileLoaded;
+        private bool configurationAutoSaveAllowed = true;
+        private bool configurationNeedsInitialSave;
+        private GuiConfigFile loadedConfiguration;
         private bool updatingPresetCombos;
         private bool updatingConfigurationInputs;
         private bool updatingBetaPairGrid;
@@ -174,6 +177,7 @@ namespace SBMSGui
         private int selectedBetaGroupIndex;
         private string pendingConfigSourceDevice = "";
         private string pendingConfigTargetDevice = "";
+        private string pendingConfigTargetPersistentId = "";
         private string pendingConfigLoadMessage = "";
 
         private static readonly Color ThemeBack = Color.FromArgb(0, 10, 4);
@@ -203,6 +207,8 @@ namespace SBMSGui
             public bool Enabled;
             public string Mode;
             public string Target;
+            public string TargetDeviceName;
+            public string TargetPersistentId;
             public string Horizontal;
             public string Aspect;
             public string Orientation;
@@ -210,6 +216,12 @@ namespace SBMSGui
             public string Strategy;
             public string Refresh;
             public string Source;
+        }
+
+        private sealed class SavedDisplayBinding
+        {
+            public string DeviceName;
+            public string PersistentId;
         }
 
         private sealed class DarkComboBox : ComboBox
@@ -711,12 +723,19 @@ namespace SBMSGui
         }
 
         public MainForm()
+            : this(null)
+        {
+        }
+
+        internal MainForm(string userDataDirectoryOverride)
         {
             root = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory));
             nativeExe = Path.Combine(root, "SBMSNative.exe");
             deviceHostExe = Path.Combine(root, "SBMSDeviceHost.exe");
             recoveryBrokerExe = Path.Combine(root, "SBMSRecoveryBroker.exe");
-            userDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName);
+            userDataDir = string.IsNullOrWhiteSpace(userDataDirectoryOverride)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), AppName)
+                : Path.GetFullPath(userDataDirectoryOverride);
             recoveryRootDirectory = Path.Combine(userDataDir, "recovery");
             migrationSessionDirectory = Path.Combine(
                 recoveryRootDirectory,
@@ -881,12 +900,17 @@ namespace SBMSGui
             }
             ApplyStrategy(false);
             RefreshDisplays();
+            ReportLoadedConfigurationDisplayIssues();
             ApplyLanguage();
             UpdateRuntimeOptionState();
             ApplyTheme(this);
             UpdateMainActionButtons();
             configurationPersistenceReady = true;
-            SaveConfigurationNow(false);
+            if (configurationAutoSaveAllowed && configurationNeedsInitialSave)
+            {
+                SaveConfigurationNow(false);
+                configurationNeedsInitialSave = false;
+            }
             AppendLog("GUI版本 = " + BuildLabel);
             AppendLog("配置文件 = " + configPath);
             AppendLog("日志文件 = " + sessionLogPath);
@@ -1982,26 +2006,30 @@ namespace SBMSGui
             loadingConfiguration = true;
             try
             {
-                if (!configurationStore.Exists(configPath))
+                ConfigurationLoadResult loadResult = configurationStore.LoadWithRecovery(configPath);
+                configurationAutoSaveAllowed = loadResult.AllowAutomaticSave;
+                configurationNeedsInitialSave =
+                    loadResult.Source == ConfigurationLoadSource.Defaults &&
+                    loadResult.AllowAutomaticSave;
+                if (loadResult.Config == null)
                 {
-                    pendingConfigLoadMessage = "配置文件未找到, 已使用默认配置";
+                    pendingConfigLoadMessage = loadResult.Diagnostics.Count == 0
+                        ? "配置不可用，已禁止自动覆盖"
+                        : string.Join(Environment.NewLine, loadResult.Diagnostics.ToArray());
                     return;
                 }
 
-                GuiConfigFile config = configurationStore.Load(configPath);
-                if (config == null)
-                {
-                    pendingConfigLoadMessage = "配置文件为空, 已使用默认配置";
-                    return;
-                }
-
-                ApplyConfiguration(config);
-                configurationFileLoaded = true;
-                pendingConfigLoadMessage = "配置已读取 = " + configPath;
+                loadedConfiguration = loadResult.Config;
+                ApplyConfiguration(loadResult.Config);
+                configurationFileLoaded = loadResult.Source != ConfigurationLoadSource.Defaults;
+                pendingConfigLoadMessage = string.Join(
+                    Environment.NewLine,
+                    loadResult.Diagnostics.ToArray());
             }
             catch (Exception ex)
             {
-                pendingConfigLoadMessage = "配置读取失败: " + ex.Message;
+                configurationAutoSaveAllowed = false;
+                pendingConfigLoadMessage = "配置读取失败，已禁止自动覆盖: " + ex.Message;
                 WriteDiagnosticLine(DateTime.Now.ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + " " + pendingConfigLoadMessage, true);
             }
             finally
@@ -2022,6 +2050,7 @@ namespace SBMSGui
             SetTextIfPresent(singleRefreshText, config.SingleRefresh);
             pendingConfigSourceDevice = config.SelectedSourceDevice ?? "";
             pendingConfigTargetDevice = config.SelectedTargetDevice ?? "";
+            pendingConfigTargetPersistentId = config.SelectedTargetPersistentId ?? "";
 
             SetTextIfPresent(primaryResolutionText, config.PrimaryResolution);
             SetTextIfPresent(primarySizeText, config.PrimarySize);
@@ -2061,19 +2090,96 @@ namespace SBMSGui
                     snapshots.Add(new BridgePairSnapshot
                     {
                         Enabled = pair.Enabled,
-                        Mode = pair.Mode,
+                        Mode = ConfigModeToUi(pair.Mode),
                         Target = pair.Target,
+                        TargetDeviceName = pair.TargetDeviceName,
+                        TargetPersistentId = pair.TargetPersistentId,
                         Horizontal = pair.Horizontal,
                         Aspect = pair.Aspect,
-                        Orientation = pair.Orientation,
+                        Orientation = ConfigOrientationToUi(pair.Orientation),
                         Size = pair.Size,
-                        Strategy = pair.Strategy,
+                        Strategy = ConfigStrategyToUi(pair.Strategy),
                         Refresh = pair.Refresh,
                         Source = pair.Source
                     });
                 }
                 RestoreBetaPairRows(snapshots, pendingConfigTargetDevice);
             }
+        }
+
+        private void ReportLoadedConfigurationDisplayIssues()
+        {
+            if (loadedConfiguration == null)
+            {
+                return;
+            }
+            var context = new ConfigurationDisplayContext();
+            foreach (DisplayChoice display in displays)
+            {
+                if (display.Virtual)
+                {
+                    context.VirtualDeviceNames.Add(display.DeviceName);
+                }
+                else
+                {
+                    context.PhysicalDeviceNames.Add(display.DeviceName);
+                    if (!string.IsNullOrWhiteSpace(display.SunshineId))
+                    {
+                        context.PhysicalPersistentIds.Add(display.SunshineId);
+                    }
+                }
+            }
+            ConfigurationValidationResult validation =
+                GuiConfigValidator.ValidateDisplayBindings(loadedConfiguration, context);
+            foreach (ConfigurationIssue issue in validation.Issues)
+            {
+                string line = "配置绑定 " + issue.ToString();
+                if (string.IsNullOrWhiteSpace(pendingConfigLoadMessage))
+                {
+                    pendingConfigLoadMessage = line;
+                }
+                else
+                {
+                    pendingConfigLoadMessage += Environment.NewLine + line;
+                }
+            }
+        }
+
+        private static string ConfigModeToUi(string value)
+        {
+            return string.Equals(value, "stream", StringComparison.OrdinalIgnoreCase)
+                ? "串流"
+                : "输出";
+        }
+
+        private static string ConfigOrientationToUi(string value)
+        {
+            if (string.Equals(value, "portrait", StringComparison.OrdinalIgnoreCase))
+            {
+                return "竖屏";
+            }
+            if (string.Equals(value, "landscape-flipped", StringComparison.OrdinalIgnoreCase))
+            {
+                return "横屏反向";
+            }
+            if (string.Equals(value, "portrait-flipped", StringComparison.OrdinalIgnoreCase))
+            {
+                return "竖屏反向";
+            }
+            return "横屏";
+        }
+
+        private static string ConfigStrategyToUi(string value)
+        {
+            if (string.Equals(value, "text-clarity", StringComparison.OrdinalIgnoreCase))
+            {
+                return "文字清晰优先";
+            }
+            if (string.Equals(value, "direct", StringComparison.OrdinalIgnoreCase))
+            {
+                return "直接使用源";
+            }
+            return "真实尺寸比例";
         }
 
         private void ConfigureConfigurationPersistence()
@@ -2131,7 +2237,8 @@ namespace SBMSGui
 
         private void ScheduleConfigurationSave()
         {
-            if (loadingConfiguration || !configurationPersistenceReady || exiting || updatingBetaPairGrid || rebuildingGroupTabs)
+            if (loadingConfiguration || !configurationPersistenceReady || !configurationAutoSaveAllowed ||
+                exiting || updatingBetaPairGrid || rebuildingGroupTabs)
             {
                 return;
             }
@@ -2141,14 +2248,22 @@ namespace SBMSGui
 
         private void SaveConfigurationNow(bool announce)
         {
-            if (loadingConfiguration)
+            if (loadingConfiguration || !configurationAutoSaveAllowed)
             {
+                if (announce && !configurationAutoSaveAllowed)
+                {
+                    AppendLog("配置自动保存已禁用；请先处理无法读取或来自更新版本的配置文件。");
+                }
                 return;
             }
             try
             {
                 GuiConfigFile config = CaptureConfiguration();
-                configurationStore.Save(configPath, config);
+                ConfigurationSaveResult result = configurationStore.Save(configPath, config);
+                if (result.BackupDegraded && !string.IsNullOrWhiteSpace(result.Diagnostic))
+                {
+                    AppendLog(result.Diagnostic);
+                }
                 if (announce)
                 {
                     AppendLog("配置已保存 = " + configPath);
@@ -2163,7 +2278,7 @@ namespace SBMSGui
         private GuiConfigFile CaptureConfiguration()
         {
             var config = new GuiConfigFile();
-            config.Version = 1;
+            config.Version = GuiConfigFile.CurrentVersion;
             config.SavedByBuild = BuildLabel;
             config.English = english;
             config.LightweightMode = lightweightMenuItem.Checked;
@@ -2174,7 +2289,19 @@ namespace SBMSGui
             config.TargetText = GetText(targetText);
             config.SingleRefresh = GetText(singleRefreshText);
             config.SelectedSourceDevice = GetSelectedDeviceName(sourceDisplayCombo);
+            if (string.IsNullOrWhiteSpace(config.SelectedSourceDevice))
+            {
+                config.SelectedSourceDevice = pendingConfigSourceDevice;
+            }
             config.SelectedTargetDevice = GetSelectedDeviceName(targetDisplayCombo);
+            DisplayChoice selectedTarget = targetDisplayCombo.SelectedItem as DisplayChoice;
+            config.SelectedTargetPersistentId = selectedTarget != null
+                ? selectedTarget.SunshineId
+                : pendingConfigTargetPersistentId;
+            if (string.IsNullOrWhiteSpace(config.SelectedTargetDevice))
+            {
+                config.SelectedTargetDevice = pendingConfigTargetDevice;
+            }
             config.PrimaryResolution = GetText(primaryResolutionText);
             config.PrimarySize = GetText(primarySizeText);
             config.TargetResolution = GetText(targetResolutionText);
@@ -2209,13 +2336,15 @@ namespace SBMSGui
                 config.BetaPairs.Add(new GuiConfigBridgePair
                 {
                     Enabled = snapshot.Enabled,
-                    Mode = snapshot.Mode,
+                    Mode = GuiConfigMigrator.CanonicalMode(snapshot.Mode),
                     Target = snapshot.Target,
+                    TargetDeviceName = snapshot.TargetDeviceName,
+                    TargetPersistentId = snapshot.TargetPersistentId,
                     Horizontal = snapshot.Horizontal,
                     Aspect = snapshot.Aspect,
-                    Orientation = snapshot.Orientation,
+                    Orientation = GuiConfigMigrator.CanonicalOrientation(snapshot.Orientation),
                     Size = snapshot.Size,
-                    Strategy = snapshot.Strategy,
+                    Strategy = GuiConfigMigrator.CanonicalStrategy(snapshot.Strategy),
                     Refresh = snapshot.Refresh,
                     Source = snapshot.Source
                 });
@@ -2388,6 +2517,147 @@ namespace SBMSGui
                 " visible=" + configLockPanel.Visible +
                 " index=" + (configLockPanel.Parent == null ? -1 : configLockPanel.Parent.Controls.GetChildIndex(configLockPanel));
             File.WriteAllText(screenshotPath + ".txt", lockInfo, Encoding.UTF8);
+        }
+
+        internal void RunConfigurationBindingProbe(string screenshotPath)
+        {
+            Show();
+            ShowConfigForm();
+            // Reproduce the first-row refresh path with a stale/reused
+            // transient selector. It must preserve the unresolved UUID rather
+            // than resolving targetText as a new binding.
+            targetText.Text = @"\\.\DISPLAY999";
+            targetDisplayCombo.SelectedIndex = -1;
+            SyncFirstBetaRowFromSingleControls();
+            string message;
+            bool blocked = HasUnresolvedOutputTarget(out message);
+            DataGridViewRow staleRow = betaPairGrid.Rows[0];
+            BridgePairSnapshot snapshot = CaptureBetaPairSnapshots()[0];
+            SavedDisplayBinding saved = staleRow.HeaderCell.Tag as SavedDisplayBinding;
+            string expectedBackup = configPath + ".bak.expected";
+            string expectedPrimary = configPath + ".expected";
+            string actualBackup = configPath + ".bak";
+            bool backupUnchanged = File.Exists(expectedBackup) && File.Exists(actualBackup) &&
+                                   BytesEqualForProbe(
+                                       File.ReadAllBytes(expectedBackup),
+                                       File.ReadAllBytes(actualBackup));
+            bool primaryUnchanged = File.Exists(expectedPrimary) && File.Exists(configPath) &&
+                                    BytesEqualForProbe(
+                                        File.ReadAllBytes(expectedPrimary),
+                                        File.ReadAllBytes(configPath));
+            string summary =
+                "loadedFromDisk=" + configurationFileLoaded +
+                " labelPreserved=" +
+                string.Equals(
+                    GetCellText(staleRow, BetaColTarget),
+                    @"99  \\.\DISPLAY999  2560x1440@60  Missing",
+                    StringComparison.Ordinal) +
+                " tagNull=" + (staleRow.Tag == null) +
+                " devicePreserved=" +
+                string.Equals(snapshot.TargetDeviceName, @"\\.\DISPLAY999",
+                    StringComparison.OrdinalIgnoreCase) +
+                " persistentIdPreserved=" +
+                string.Equals(
+                    saved == null ? "" : saved.PersistentId,
+                    "{99999999-9999-9999-9999-999999999999}",
+                    StringComparison.OrdinalIgnoreCase) +
+                " startBlocked=" + blocked +
+                " lifecycleIdle=" + (lifecycle.State == BridgeState.Idle) +
+                " feedbackVisible=" +
+                (!string.IsNullOrWhiteSpace(pendingConfigLoadMessage) &&
+                 pendingConfigLoadMessage.IndexOf(
+                     "{99999999-9999-9999-9999-999999999999}",
+                     StringComparison.OrdinalIgnoreCase) >= 0) +
+                " backupUnchanged=" + backupUnchanged +
+                " primaryUnchanged=" + primaryUnchanged +
+                " message=" + message;
+            Application.DoEvents();
+            using (var bitmap = new Bitmap(configInlineHost.Width, configInlineHost.Height))
+            {
+                configInlineHost.DrawToBitmap(bitmap, new Rectangle(0, 0, bitmap.Width, bitmap.Height));
+                bitmap.Save(screenshotPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            File.WriteAllText(screenshotPath + ".txt", summary, Encoding.UTF8);
+        }
+
+        internal static void PrepareConfigurationBindingProbe(string dataDirectory)
+        {
+            Directory.CreateDirectory(dataDirectory);
+            var config = new GuiConfigFile
+            {
+                SavedByBuild = "binding-probe",
+                ConfigTabIndex = 1,
+                StrategyIndex = 0,
+                FilterIndex = 0,
+                PrimaryResolution = "3840x2160",
+                TargetResolution = "2560x1440",
+                PrimarySize = "27",
+                TargetSize = "24",
+                ManualBaseHorizontal = "3840",
+                ManualBaseAspect = "16:9",
+                ManualBaseSize = "27",
+                ManualTargetHorizontal = "2560",
+                ManualTargetAspect = "16:9",
+                ManualTargetSize = "24",
+                SingleRefresh = "60",
+                SelectedTargetDevice = @"\\.\DISPLAY999",
+                SelectedTargetPersistentId = "{99999999-9999-9999-9999-999999999999}",
+                SelectedBetaGroupIndex = 0
+            };
+            config.BetaPairs.Add(new GuiConfigBridgePair
+            {
+                Enabled = true,
+                Mode = "output",
+                Target = @"99  \\.\DISPLAY999  2560x1440@60  Missing",
+                TargetDeviceName = @"\\.\DISPLAY999",
+                TargetPersistentId = "{99999999-9999-9999-9999-999999999999}",
+                Horizontal = "2560",
+                Aspect = "16:9",
+                Orientation = "landscape",
+                Size = "24",
+                Strategy = "physical",
+                Refresh = "60",
+                Source = "3840x2160"
+            });
+            config.BetaPairs.Add(new GuiConfigBridgePair
+            {
+                Enabled = true,
+                Mode = "stream",
+                Target = "",
+                TargetDeviceName = "",
+                TargetPersistentId = "",
+                Horizontal = "1920",
+                Aspect = "16:9",
+                Orientation = "landscape",
+                Size = "24",
+                Strategy = "physical",
+                Refresh = "60",
+                Source = "1920x1080"
+            });
+            string path = Path.Combine(dataDirectory, "config.xml");
+            var store = new XmlConfigurationStore();
+            config.SavedByBuild = "binding-probe-lkg";
+            store.Save(path, config);
+            config.SavedByBuild = "binding-probe-primary";
+            store.Save(path, config);
+            File.Copy(path + ".bak", path + ".bak.expected", true);
+            File.Copy(path, path + ".expected", true);
+        }
+
+        private static bool BytesEqualForProbe(byte[] left, byte[] right)
+        {
+            if (left == null || right == null || left.Length != right.Length)
+            {
+                return false;
+            }
+            for (int i = 0; i < left.Length; ++i)
+            {
+                if (left[i] != right[i])
+                {
+                    return false;
+                }
+            }
+            return true;
         }
 
         private void ToggleStartup()
@@ -3381,6 +3651,8 @@ namespace SBMSGui
                     DataGridViewRow row = betaPairGrid.Rows[i];
                     if (streamOnly)
                     {
+                        row.Tag = null;
+                        row.HeaderCell.Tag = null;
                         string streamLabel = "串流目标 " + (i + 1).ToString(CultureInfo.InvariantCulture);
                         AddComboItemIfMissing(BetaColTarget, streamLabel);
                         row.Cells[BetaColMode].Value = "串流";
@@ -3392,13 +3664,20 @@ namespace SBMSGui
                         {
                             row.Cells[BetaColMode].Value = "输出";
                         }
-                        DisplayChoice display = row.Tag as DisplayChoice ?? GetDefaultPhysicalDisplay("");
+                        DisplayChoice display = row.Tag as DisplayChoice;
+                        if (display == null &&
+                            row.HeaderCell.Tag == null &&
+                            string.IsNullOrWhiteSpace(GetCellText(row, BetaColTarget)))
+                        {
+                            display = GetDefaultPhysicalDisplay("");
+                        }
                         if (display != null)
                         {
                             string targetLabel = GetDisplayLabel(display);
                             AddComboItemIfMissing(BetaColTarget, targetLabel);
                             row.Cells[BetaColTarget].Value = targetLabel;
                             row.Tag = display;
+                            row.HeaderCell.Tag = CreateSavedDisplayBinding(display);
                         }
                     }
                 }
@@ -3429,18 +3708,22 @@ namespace SBMSGui
                 if (streamOnly)
                 {
                     row.Tag = null;
+                    row.HeaderCell.Tag = null;
                     string streamLabel = "串流目标 1";
                     AddComboItemIfMissing(BetaColTarget, streamLabel);
                     row.Cells[BetaColTarget].Value = streamLabel;
                 }
                 else
                 {
-                    targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice ??
-                                    FindDisplayByTargetLabel(targetText.Text.Trim()) ??
-                                    GetDefaultPhysicalDisplay("");
+                    // Programmatic restore must never reinterpret a stale
+                    // \\.\DISPLAYn label after Windows renumbers outputs.
+                    // Only an explicit combo/grid selection may create a new
+                    // persistent binding.
+                    targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice;
                     if (targetDisplay != null)
                     {
                         row.Tag = targetDisplay;
+                        row.HeaderCell.Tag = CreateSavedDisplayBinding(targetDisplay);
                         string targetLabel = GetDisplayLabel(targetDisplay);
                         AddComboItemIfMissing(BetaColTarget, targetLabel);
                         row.Cells[BetaColTarget].Value = targetLabel;
@@ -3646,6 +3929,10 @@ namespace SBMSGui
         {
             string previousSourceDevice = GetSelectedDeviceName(sourceDisplayCombo);
             string previousTargetDevice = GetSelectedDeviceName(targetDisplayCombo);
+            DisplayChoice previousTarget = targetDisplayCombo.SelectedItem as DisplayChoice;
+            string previousTargetPersistentId = previousTarget != null
+                ? previousTarget.SunshineId
+                : pendingConfigTargetPersistentId;
             List<BridgePairSnapshot> betaSnapshots = CaptureBetaPairSnapshots();
             if (string.IsNullOrWhiteSpace(previousSourceDevice) && IsDisplayDeviceSelector(sourceText.Text.Trim()))
             {
@@ -3673,6 +3960,9 @@ namespace SBMSGui
             if (!File.Exists(nativeExe))
             {
                 displayList.Items.Add("找不到 SBMSNative.exe");
+                RestoreBetaPairRows(betaSnapshots, previousTargetDevice);
+                pendingConfigTargetDevice = previousTargetDevice;
+                pendingConfigTargetPersistentId = previousTargetPersistentId;
                 return;
             }
 
@@ -3695,11 +3985,18 @@ namespace SBMSGui
             {
                 sourceDisplayCombo.Items.Add(T("按计算分辨率等待虚拟屏"));
             }
-            SelectDefaultDisplays(previousSourceDevice, previousTargetDevice);
+            SelectDefaultDisplays(previousSourceDevice, previousTargetDevice, previousTargetPersistentId);
             RefreshBetaTargetChoices();
             RestoreBetaPairRows(betaSnapshots, previousTargetDevice);
-            pendingConfigSourceDevice = "";
-            pendingConfigTargetDevice = "";
+            pendingConfigSourceDevice = sourceDisplayCombo.SelectedItem is DisplayChoice
+                ? ""
+                : previousSourceDevice;
+            pendingConfigTargetDevice = targetDisplayCombo.SelectedItem is DisplayChoice
+                ? ""
+                : previousTargetDevice;
+            pendingConfigTargetPersistentId = targetDisplayCombo.SelectedItem is DisplayChoice
+                ? ""
+                : previousTargetPersistentId;
             SyncSelectedDisplaysToSelectors();
             ApplyStreamModeToBetaPairGrid();
             RecalculateBetaPairGrid(false);
@@ -3733,11 +4030,19 @@ namespace SBMSGui
             var snapshots = new List<BridgePairSnapshot>();
             foreach (DataGridViewRow row in betaPairGrid.Rows)
             {
+                DisplayChoice targetDisplay = row.Tag as DisplayChoice;
+                SavedDisplayBinding unresolved = row.HeaderCell.Tag as SavedDisplayBinding;
                 snapshots.Add(new BridgePairSnapshot
                 {
                     Enabled = IsBetaRowEnabled(row),
                     Mode = GetCellText(row, BetaColMode),
                     Target = GetNormalTargetLabel(row),
+                    TargetDeviceName = targetDisplay != null
+                        ? targetDisplay.DeviceName
+                        : (unresolved != null ? unresolved.DeviceName : ""),
+                    TargetPersistentId = targetDisplay != null
+                        ? targetDisplay.SunshineId
+                        : (unresolved != null ? unresolved.PersistentId : ""),
                     Horizontal = GetCellText(row, BetaColHorizontal),
                     Aspect = GetCellText(row, BetaColAspect),
                     Orientation = GetCellText(row, BetaColOrientation),
@@ -3857,7 +4162,16 @@ namespace SBMSGui
         private void AddBetaGroupRowInternal(BridgePairSnapshot snapshot, bool selectNewRow)
         {
             string savedTargetLabel = snapshot != null ? (snapshot.Target ?? "").Trim() : "";
-            DisplayChoice display = FindDisplayByTargetLabel(savedTargetLabel) ?? GetDefaultPhysicalDisplay("");
+            string savedTargetDevice = snapshot != null ? (snapshot.TargetDeviceName ?? "").Trim() : "";
+            string savedTargetPersistentId =
+                snapshot != null ? (snapshot.TargetPersistentId ?? "").Trim() : "";
+            DisplayChoice display = FindPhysicalDisplayByPersistentId(savedTargetPersistentId);
+            if (display == null && string.IsNullOrWhiteSpace(savedTargetLabel) &&
+                string.IsNullOrWhiteSpace(savedTargetDevice) &&
+                string.IsNullOrWhiteSpace(savedTargetPersistentId))
+            {
+                display = GetDefaultPhysicalDisplay("");
+            }
             string rowMode = snapshot != null && !string.IsNullOrWhiteSpace(snapshot.Mode) ? snapshot.Mode : "输出";
             bool streamOnly = IsStreamModeText(rowMode);
             string targetLabel = streamOnly ? "" : (!string.IsNullOrWhiteSpace(savedTargetLabel) ? savedTargetLabel : (display != null ? GetDisplayLabel(display) : ""));
@@ -3881,6 +4195,13 @@ namespace SBMSGui
             AddComboItemIfMissing(BetaColTarget, targetLabel);
             int index = betaPairGrid.Rows.Add(enabled, streamOnly ? "串流" : "输出", targetLabel, rowHorizontal, rowAspect, rowOrientation, rowSize, rowStrategy, rowRefresh, rowSource);
             betaPairGrid.Rows[index].Tag = streamOnly ? null : display;
+            betaPairGrid.Rows[index].HeaderCell.Tag = streamOnly
+                ? null
+                : new SavedDisplayBinding
+                {
+                    DeviceName = display != null ? display.DeviceName : savedTargetDevice,
+                    PersistentId = display != null ? display.SunshineId : savedTargetPersistentId
+                };
             if (display != null && snapshot != null && string.IsNullOrWhiteSpace(snapshot.Horizontal))
             {
                 PopulateBetaRowFromDisplay(betaPairGrid.Rows[index], display);
@@ -3913,6 +4234,8 @@ namespace SBMSGui
                 Enabled = true,
                 Mode = "输出",
                 Target = display != null ? GetDisplayLabel(display) : "",
+                TargetDeviceName = display != null ? display.DeviceName : previousTargetDevice,
+                TargetPersistentId = display != null ? display.SunshineId : "",
                 Horizontal = horizontal,
                 Aspect = aspect,
                 Orientation = orientation,
@@ -3995,6 +4318,38 @@ namespace SBMSGui
             return null;
         }
 
+        private DisplayChoice FindPhysicalDisplayByDeviceName(string deviceName)
+        {
+            if (string.IsNullOrWhiteSpace(deviceName))
+            {
+                return null;
+            }
+            foreach (DisplayChoice display in GetPhysicalDisplays())
+            {
+                if (string.Equals(display.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return display;
+                }
+            }
+            return null;
+        }
+
+        private DisplayChoice FindPhysicalDisplayByPersistentId(string persistentId)
+        {
+            return DisplayBindingResolver.ResolveUniquePhysicalByPersistentId(
+                displays,
+                persistentId);
+        }
+
+        private static SavedDisplayBinding CreateSavedDisplayBinding(DisplayChoice display)
+        {
+            return new SavedDisplayBinding
+            {
+                DeviceName = display == null ? "" : display.DeviceName,
+                PersistentId = display == null ? "" : display.SunshineId
+            };
+        }
+
         private DisplayChoice GetDefaultPhysicalDisplay(string previousTargetDevice)
         {
             if (!string.IsNullOrWhiteSpace(previousTargetDevice))
@@ -4075,6 +4430,7 @@ namespace SBMSGui
                 if (IsBetaRowStreamOnly(row))
                 {
                     row.Tag = null;
+                    row.HeaderCell.Tag = null;
                     string streamLabel = "串流目标 " + (e.RowIndex + 1).ToString(CultureInfo.InvariantCulture);
                     AddComboItemIfMissing(BetaColTarget, streamLabel);
                     row.Cells[BetaColTarget].Value = streamLabel;
@@ -4085,6 +4441,7 @@ namespace SBMSGui
                     if (display != null)
                     {
                         row.Tag = display;
+                        row.HeaderCell.Tag = CreateSavedDisplayBinding(display);
                         string targetLabel = GetDisplayLabel(display);
                         AddComboItemIfMissing(BetaColTarget, targetLabel);
                         row.Cells[BetaColTarget].Value = targetLabel;
@@ -4097,6 +4454,7 @@ namespace SBMSGui
             {
                 DisplayChoice display = FindDisplayByTargetLabel(GetCellText(row, BetaColTarget));
                 row.Tag = display;
+                row.HeaderCell.Tag = display == null ? null : CreateSavedDisplayBinding(display);
                 if (display != null)
                 {
                     updatingBetaPairGrid = true;
@@ -4467,16 +4825,27 @@ namespace SBMSGui
             return "60";
         }
 
-        private void SelectDefaultDisplays(string previousSourceDevice, string previousTargetDevice)
+        private void SelectDefaultDisplays(
+            string previousSourceDevice,
+            string previousTargetDevice,
+            string previousTargetPersistentId)
         {
             SelectSourceByResolutionOrFirst(previousSourceDevice, sourceText.Text.Trim());
-            SelectTargetByResolutionOrFirst(previousTargetDevice, targetResolutionText.Text.Trim());
+            SelectTargetByResolutionOrFirst(
+                previousTargetDevice,
+                previousTargetPersistentId,
+                targetResolutionText.Text.Trim());
         }
 
         private void SelectSourceByResolutionOrFirst(string previousDevice, string resolution)
         {
             if (SelectComboByDevice(sourceDisplayCombo, previousDevice))
             {
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(previousDevice))
+            {
+                sourceDisplayCombo.SelectedIndex = -1;
                 return;
             }
 
@@ -4510,10 +4879,21 @@ namespace SBMSGui
             return false;
         }
 
-        private void SelectTargetByResolutionOrFirst(string previousDevice, string resolution)
+        private void SelectTargetByResolutionOrFirst(
+            string previousDevice,
+            string previousPersistentId,
+            string resolution)
         {
-            if (SelectComboByDevice(targetDisplayCombo, previousDevice))
+            DisplayChoice persistentMatch = FindPhysicalDisplayByPersistentId(previousPersistentId);
+            if (persistentMatch != null)
             {
+                targetDisplayCombo.SelectedItem = persistentMatch;
+                return;
+            }
+            if (!string.IsNullOrWhiteSpace(previousPersistentId) ||
+                !string.IsNullOrWhiteSpace(previousDevice))
+            {
+                targetDisplayCombo.SelectedIndex = -1;
                 return;
             }
 
@@ -4568,6 +4948,15 @@ namespace SBMSGui
         {
             DisplayChoice sourceDisplay = sourceDisplayCombo.SelectedItem as DisplayChoice;
             DisplayChoice targetDisplay = targetDisplayCombo.SelectedItem as DisplayChoice;
+            if (sourceDisplay != null)
+            {
+                pendingConfigSourceDevice = "";
+            }
+            if (targetDisplay != null)
+            {
+                pendingConfigTargetDevice = "";
+                pendingConfigTargetPersistentId = "";
+            }
             if (sourceDisplay != null && strategyCombo.SelectedIndex == 2)
             {
                 sourceText.Text = sourceDisplay.DeviceName;
@@ -4822,6 +5211,12 @@ namespace SBMSGui
             }
             if (IsBridgeSessionActive())
             {
+                return;
+            }
+            string unresolvedBinding;
+            if (HasUnresolvedOutputTarget(out unresolvedBinding))
+            {
+                AppendLog(unresolvedBinding);
                 return;
             }
             BridgeState previousState = lifecycle.State;
@@ -5152,6 +5547,36 @@ namespace SBMSGui
             }
         }
 
+        private bool HasUnresolvedOutputTarget(out string message)
+        {
+            message = "";
+            if (streamModeCheck.Checked && !IsMultiMappingEnabled())
+            {
+                return false;
+            }
+            if (!IsMultiMappingEnabled())
+            {
+                if (!(targetDisplayCombo.SelectedItem is DisplayChoice))
+                {
+                    message = "保存的目标显示器当前不可用；为避免错误改绑，SBMS 已阻止启动。请明确选择目标显示器。";
+                    return true;
+                }
+                return false;
+            }
+            for (int i = 0; i < betaPairGrid.Rows.Count; ++i)
+            {
+                DataGridViewRow row = betaPairGrid.Rows[i];
+                if (IsBetaRowEnabled(row) && !IsBetaRowStreamOnly(row) &&
+                    !(row.Tag is DisplayChoice))
+                {
+                    message = "BETA[" + (i + 1).ToString(CultureInfo.InvariantCulture) +
+                              "] 保存的目标显示器当前不可用；原绑定已保留，SBMS 不会自动改绑。";
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private bool StartNativeProcess(string args, bool restarted)
         {
             long processGeneration = lifecycle.Generation;
@@ -5445,21 +5870,23 @@ namespace SBMSGui
                     }
 
                     DisplayChoice previousTarget = row.Tag as DisplayChoice;
+                    SavedDisplayBinding savedBinding = row.HeaderCell.Tag as SavedDisplayBinding;
                     string requestedLabel = GetCellText(row, BetaColTarget);
-                    DisplayChoice target = FindDisplayByTargetLabel(requestedLabel);
-                    if (target == null && previousTarget != null)
-                    {
-                        target = GetDefaultPhysicalDisplay(previousTarget.DeviceName);
-                    }
+                    string persistentId = previousTarget != null
+                        ? previousTarget.SunshineId
+                        : (savedBinding != null ? savedBinding.PersistentId : "");
+                    DisplayChoice target = FindPhysicalDisplayByPersistentId(persistentId);
                     if (target == null)
                     {
-                        message = "拓扑变化后未找到 BETA 目标显示器: " + requestedLabel;
+                        message = "拓扑变化后无法按持久身份确认 BETA 目标显示器: " +
+                                  requestedLabel + " (" + persistentId + ")";
                         return false;
                     }
 
                     string targetLabel = GetDisplayLabel(target);
                     AddComboItemIfMissing(BetaColTarget, targetLabel);
                     row.Tag = target;
+                    row.HeaderCell.Tag = CreateSavedDisplayBinding(target);
                     row.Cells[BetaColTarget].Value = targetLabel;
                 }
             }
@@ -6981,16 +7408,35 @@ namespace SBMSGui
                 }
                 MainForm.WriteFatalError("domain", exception);
             };
+            bool probeLikeRequest = args.Length > 0 &&
+                                    args[0].EndsWith("-probe", StringComparison.OrdinalIgnoreCase);
+            bool probeRequest = IsSupportedProbeInvocation(args);
+            if (probeLikeRequest && !probeRequest)
+            {
+                Environment.ExitCode = 4;
+                return;
+            }
+            string instanceMutexName = @"Local\SBMS.Gui.Singleton";
+            string probeMutexSuffix = Environment.GetEnvironmentVariable("SBMS_GUI_PROBE_MUTEX");
+            if (probeRequest && !string.IsNullOrWhiteSpace(probeMutexSuffix))
+            {
+                Guid parsedProbeMutex;
+                if (!Guid.TryParse(probeMutexSuffix, out parsedProbeMutex))
+                {
+                    Environment.ExitCode = 4;
+                    return;
+                }
+                instanceMutexName = @"Local\SBMS.Gui.Probe.Singleton." + parsedProbeMutex.ToString("N");
+            }
             bool ownsInstance;
             using (var instanceMutex = new Mutex(
                 true,
-                @"Local\SBMS.Gui.Singleton",
+                instanceMutexName,
                 out ownsInstance))
             {
                 if (!ownsInstance)
                 {
-                    if (args.Length > 0 &&
-                        args[0].EndsWith("-probe", StringComparison.OrdinalIgnoreCase))
+                    if (probeRequest)
                     {
                         Environment.ExitCode = 3;
                         return;
@@ -7004,7 +7450,7 @@ namespace SBMSGui
                 }
             if (args.Length >= 2 && string.Equals(args[0], "--config-probe", StringComparison.OrdinalIgnoreCase))
             {
-                using (var form = new MainForm())
+                using (var form = new MainForm(GetProbeDataDirectory(args[1], "config")))
                 {
                     string tabs = form.RunConfigProbe(args[1]);
                     Console.WriteLine("config_probe_tabs=" + tabs);
@@ -7015,7 +7461,7 @@ namespace SBMSGui
             }
             if (args.Length >= 2 && string.Equals(args[0], "--risk-probe", StringComparison.OrdinalIgnoreCase))
             {
-                using (var form = new MainForm())
+                using (var form = new MainForm(GetProbeDataDirectory(args[1], "risk")))
                 {
                     form.RunRiskProbe(args[1]);
                     Console.WriteLine("risk_probe=" + args[1]);
@@ -7026,7 +7472,7 @@ namespace SBMSGui
             }
             if (args.Length >= 2 && string.Equals(args[0], "--stream-config-probe", StringComparison.OrdinalIgnoreCase))
             {
-                using (var form = new MainForm())
+                using (var form = new MainForm(GetProbeDataDirectory(args[1], "stream")))
                 {
                     form.RunStreamConfigProbe(args[1]);
                     Console.WriteLine("stream_config_probe=" + args[1]);
@@ -7037,7 +7483,7 @@ namespace SBMSGui
             }
             if (args.Length >= 2 && string.Equals(args[0], "--lock-probe", StringComparison.OrdinalIgnoreCase))
             {
-                using (var form = new MainForm())
+                using (var form = new MainForm(GetProbeDataDirectory(args[1], "lock")))
                 {
                     form.RunLockProbe(args[1]);
                     Console.WriteLine("lock_probe=" + args[1]);
@@ -7046,8 +7492,41 @@ namespace SBMSGui
                 Environment.Exit(0);
                 return;
             }
+            if (args.Length >= 2 && string.Equals(args[0], "--config-binding-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                string probeDataDirectory = GetProbeDataDirectory(args[1], "binding");
+                MainForm.PrepareConfigurationBindingProbe(probeDataDirectory);
+                using (var form = new MainForm(probeDataDirectory))
+                {
+                    form.RunConfigurationBindingProbe(args[1]);
+                    Console.WriteLine("config_binding_probe=" + args[1]);
+                }
+                Application.ExitThread();
+                Environment.Exit(0);
+                return;
+            }
             Application.Run(new MainForm());
             }
+        }
+
+        private static string GetProbeDataDirectory(string artifactPath, string probeName)
+        {
+            string directory = Path.GetDirectoryName(Path.GetFullPath(artifactPath));
+            return Path.Combine(directory, "user-data-" + probeName);
+        }
+
+        private static bool IsSupportedProbeInvocation(string[] args)
+        {
+            if (args == null || args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
+            {
+                return false;
+            }
+            string command = args[0] ?? "";
+            return string.Equals(command, "--config-probe", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(command, "--risk-probe", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(command, "--stream-config-probe", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(command, "--lock-probe", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(command, "--config-binding-probe", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

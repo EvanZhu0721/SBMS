@@ -7,6 +7,8 @@ namespace SBMSGui
         public bool Enabled;
         public string Mode;
         public string Target;
+        public string TargetDeviceName;
+        public string TargetPersistentId;
         public string Horizontal;
         public string Aspect;
         public string Orientation;
@@ -18,6 +20,8 @@ namespace SBMSGui
 
     public sealed class GuiConfigFile
     {
+        public const int CurrentVersion = 2;
+
         public int Version;
         public string SavedByBuild;
         public bool English;
@@ -30,6 +34,7 @@ namespace SBMSGui
         public string SingleRefresh;
         public string SelectedSourceDevice;
         public string SelectedTargetDevice;
+        public string SelectedTargetPersistentId;
         public string PrimaryResolution;
         public string PrimarySize;
         public string TargetResolution;
@@ -63,7 +68,7 @@ namespace SBMSGui
 
         public GuiConfigFile()
         {
-            Version = 1;
+            Version = CurrentVersion;
             FollowWindowsTopologyBeta = true;
             BetaPairs = new List<GuiConfigBridgePair>();
         }
