@@ -48,6 +48,8 @@ function New-PassEvidence {
 
 $productionRemoteHealth = Get-Command Confirm-SBMSGateARemoteHealth -CommandType Function -ErrorAction Stop
 Assert-True ($productionRemoteHealth.Definition -match '\$sessionEvidence\s*=\s*Get-SBMSGateARemoteSessionEvidence') 'Production SSH proof must capture private session evidence before creating its closure.'
+$gateHashDefinition = & $script:GateModule { (Get-Command Get-SBMSGateAHash -CommandType Function).Definition }
+Assert-True ($gateHashDefinition -notmatch 'Get-FileHash') 'Gate A hashing must not depend on PowerShell module auto-loading.'
 
 $runId = [guid]::NewGuid()
 $root = Join-Path ([IO.Path]::GetTempPath()) ('sbms-gate-a-test-' + [guid]::NewGuid().ToString('N'))
@@ -76,6 +78,26 @@ try {
     Assert-Throws { Confirm-FixtureRemoteHealth -RunId $runId -RunDirectory $root -Challenge $first.challenge -CaptureSession $sessionCapture } 'already consumed' 'SSH proof replay must be rejected.'
     $second = Invoke-SBMSGateA -RunId $runId -RunDirectory $root -CaptureEvidence $capture
     Assert-Equal 'PASS' $second.status 'Complete evidence and bound SSH proof should pass.'
+
+    $recoveryRunId = [guid]::NewGuid()
+    $recoveryRoot = Join-Path ([IO.Path]::GetTempPath()) ('sbms-gate-a-recovery-' + [guid]::NewGuid().ToString('N'))
+    $recoveryFirst = Invoke-SBMSGateA -RunId $recoveryRunId -RunDirectory $recoveryRoot -CaptureEvidence $capture
+    $recoveryGate = Join-Path $recoveryRoot 'gate-a'
+    $recoveryChallengePath = Join-Path $recoveryGate 'remote-challenge.json'
+    $recoveryProofPath = Join-Path $recoveryGate 'ssh-health-proof.json'
+    $recoveryState = Get-Content -LiteralPath $recoveryChallengePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $recoveryState | Add-Member -NotePropertyName consumeStartedUtc -NotePropertyValue '2026-07-24T00:00:00Z' -Force
+    $recoveryState | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $recoveryChallengePath -Encoding UTF8
+    [pscustomobject][ordered]@{
+        schemaVersion=1; runId=$recoveryRunId.ToString(); stableDigest=[string]$recoveryState.stableDigest
+        challengeSha256=[string]$recoveryState.challengeSha256; verifiedUtc='2026-07-24T00:00:00Z'
+        computerName='TESTHOST'; lastBootUtc='2026-07-14T00:00:00Z'; lastBootUnixSeconds=1783987200
+        clientAddress='192.0.2.20'; sshdAncestor=$true; nonLoopbackClient=$true; adminCapable=$true
+        evidenceReadable=$true; activePhysicalDisplay=$true; bitLockerRecoveryAccessVerified=$false
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $recoveryProofPath -Encoding UTF8
+    $recoveredProof = Confirm-FixtureRemoteHealth -RunId $recoveryRunId -RunDirectory $recoveryRoot -Challenge $recoveryFirst.challenge -CaptureSession { throw 'Capture must not run during proof recovery.' }
+    Assert-Equal $recoveryRunId.ToString() ([string]$recoveredProof.runId) 'Interrupted proof commit should resume safely.'
+    Remove-Item -LiteralPath $recoveryRoot -Recurse -Force
 
     $badProof = $proof.PSObject.Copy(); $badProof.runId = [guid]::NewGuid().ToString()
     $bad = Test-SBMSGateAEvidence -Evidence $evidence -RunId $runId.ToString() -StableDigest $first.stableDigest -RemoteProof $badProof -ChallengeSha256 $first.challengeSha256

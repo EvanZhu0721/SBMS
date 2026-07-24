@@ -35,7 +35,14 @@ function Write-SBMSGateAAtomic {
 function Get-SBMSGateAHash {
     param([Parameter(Mandatory)][string]$LiteralPath)
     if (-not (Test-Path -LiteralPath $LiteralPath -PathType Leaf)) { return $null }
-    (Get-FileHash -LiteralPath $LiteralPath -Algorithm SHA256).Hash
+    $stream = New-Object IO.FileStream($LiteralPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '')
+    } finally {
+        $sha256.Dispose()
+        $stream.Dispose()
+    }
 }
 
 function ConvertTo-SBMSGateAStableProjection {
@@ -162,7 +169,24 @@ function Confirm-SBMSGateARemoteHealthCore {
     if ($null -ne $state.consumedUtc) { throw 'Gate A challenge was already consumed.' }
     if ([long]$state.expiresUnixSeconds -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) { throw 'Gate A challenge expired.' }
     if ((Get-SBMSGateAStringHash $Challenge) -cne [string]$state.challengeSha256) { throw 'Gate A challenge mismatch.' }
-    if (Test-Path -LiteralPath $proofPath) { throw 'SSH health proof already exists for this run.' }
+    if (Test-Path -LiteralPath $proofPath) {
+        if ($null -eq $state.PSObject.Properties['consumeStartedUtc'] -or $null -ne $state.consumedUtc) {
+            throw 'SSH health proof already exists for this run.'
+        }
+        $existingProof = Get-Content -LiteralPath $proofPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$existingProof.runId -cne $RunId.ToString() -or
+            [string]$existingProof.stableDigest -cne [string]$state.stableDigest -or
+            [string]$existingProof.challengeSha256 -cne [string]$state.challengeSha256 -or
+            -not [bool]$existingProof.sshdAncestor -or -not [bool]$existingProof.nonLoopbackClient -or
+            -not [bool]$existingProof.adminCapable -or -not [bool]$existingProof.evidenceReadable -or
+            -not [bool]$existingProof.activePhysicalDisplay) {
+            throw 'Interrupted SSH proof is incomplete or does not match the Run.'
+        }
+        $state.consumedUtc = Get-SBMSGateAUtc
+        $state | Add-Member -NotePropertyName consumedProofSha256 -NotePropertyValue (Get-SBMSGateAHash $proofPath) -Force
+        Write-SBMSGateAAtomic $challengePath ($state | ConvertTo-Json -Depth 10)
+        return $existingProof
+    }
     $session = & $CaptureSession
     foreach ($property in @('sshdAncestor','nonLoopbackClient','adminCapable','evidenceReadable','activePhysicalDisplay','computerName','lastBootUtc','lastBootUnixSeconds','clientAddress')) {
         if ($null -eq $session.PSObject.Properties[$property]) { throw "SSH session evidence lacks '$property'." }
