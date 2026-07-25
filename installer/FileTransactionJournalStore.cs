@@ -435,7 +435,7 @@ namespace SBMSSetup
         }
     }
 
-    internal sealed class FileTransactionJournalStore
+    internal sealed partial class FileTransactionJournalStore
         : ITransactionJournalStore, ITransactionExecutionLeaseProvider,
           ITransactionJournalRepairState,
           IDisposable
@@ -453,6 +453,12 @@ namespace SBMSSetup
         private readonly string commonApplicationDataPath;
         private readonly string installerStateRoot;
         private readonly string transactionsDirectory;
+        private readonly string transactionLeaseIdentity;
+        private readonly object lifetimeGate = new object();
+        private IInstallerJournalChildLifetime childLifetime;
+        private int activeTransactionLeaseCount;
+        private bool disposing;
+        private bool disposed;
 
         internal FileTransactionJournalStore()
             : this(
@@ -542,6 +548,7 @@ namespace SBMSSetup
                     mutexFactory,
                     mutexName,
                     mutexTimeout);
+            transactionLeaseIdentity = mutexName;
             transactionsDirectory = Path.Combine(
                 installerStateRoot,
                 "transactions");
@@ -634,19 +641,120 @@ namespace SBMSSetup
 
         public IDisposable AcquireTransactionLease()
         {
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                if (childLifetime != null &&
+                    childLifetime.IsLeaseHeldByCurrentThread)
+                {
+                    throw new InvalidOperationException(
+                        "Journal and maintenance replay leases are non-reentrant.");
+                }
+                activeTransactionLeaseCount++;
+            }
+            return AcquireReservedTransactionLease(true);
+        }
+
+        private IDisposable AcquireTransactionLeaseCore(
+            bool prepareAndVerifyRoot)
+        {
             IDisposable lease = transactionLeaseCoordinator.Acquire();
             try
             {
-                aclPolicy.PrepareAndVerify(
-                    commonApplicationDataPath,
-                    installerStateRoot,
-                    false);
+                if (prepareAndVerifyRoot)
+                {
+                    aclPolicy.PrepareAndVerify(
+                        commonApplicationDataPath,
+                        installerStateRoot,
+                        false);
+                }
                 return lease;
             }
             catch
             {
                 lease.Dispose();
                 throw;
+            }
+        }
+
+        private IDisposable AcquireTransactionLeaseForMaintenanceReplay()
+        {
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                if (transactionLeaseCoordinator.IsHeldByCurrentThread)
+                {
+                    throw new InvalidOperationException(
+                        "Maintenance replay cannot nest inside a journal lease.");
+                }
+                activeTransactionLeaseCount++;
+            }
+            return AcquireReservedTransactionLease(true);
+        }
+
+        private IDisposable AcquireTransactionLeaseForStoreOperation()
+        {
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                if (childLifetime != null &&
+                    childLifetime.IsLeaseHeldByCurrentThread)
+                {
+                    throw new InvalidOperationException(
+                        "Journal and maintenance replay leases are non-reentrant.");
+                }
+                activeTransactionLeaseCount++;
+            }
+            return AcquireReservedTransactionLease(false);
+        }
+
+        private IDisposable AcquireReservedTransactionLease(
+            bool prepareAndVerifyRoot)
+        {
+            try
+            {
+                return new LifetimeBoundTransactionLease(
+                    this,
+                    AcquireTransactionLeaseCore(
+                        prepareAndVerifyRoot));
+            }
+            catch
+            {
+                ReleaseTransactionLeaseReservation();
+                throw;
+            }
+        }
+
+        private void ReleaseTransactionLeaseReservation()
+        {
+            lock (lifetimeGate)
+            {
+                if (activeTransactionLeaseCount <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Transaction lease lifetime accounting underflowed.");
+                }
+                activeTransactionLeaseCount--;
+            }
+        }
+
+        private void RegisterChildLifetime(
+            IInstallerJournalChildLifetime child)
+        {
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                if (child == null)
+                {
+                    throw new ArgumentNullException("child");
+                }
+                if (childLifetime != null &&
+                    !Object.ReferenceEquals(childLifetime, child))
+                {
+                    throw new InvalidOperationException(
+                        "Installer journal already owns another child lifetime.");
+                }
+                childLifetime = child;
             }
         }
 
@@ -698,7 +806,7 @@ namespace SBMSSetup
             Func<T> action)
         {
             using (IDisposable lease =
-                transactionLeaseCoordinator.Acquire())
+                AcquireTransactionLeaseForStoreOperation())
             {
                 aclPolicy.PrepareAndVerify(
                     commonApplicationDataPath,
@@ -719,10 +827,81 @@ namespace SBMSSetup
 
         public void Dispose()
         {
-            IDisposable disposable = journalFileSystem as IDisposable;
-            if (disposable != null)
+            lock (lifetimeGate)
             {
-                disposable.Dispose();
+                if (disposed)
+                {
+                    return;
+                }
+                if (disposing)
+                {
+                    throw new InvalidOperationException(
+                        "Installer journal disposal is already in progress.");
+                }
+                disposing = true;
+                if (activeTransactionLeaseCount != 0 ||
+                    (childLifetime != null &&
+                     childLifetime.HasActiveLease))
+                {
+                    disposing = false;
+                    throw new InvalidOperationException(
+                        "Cannot dispose journal while a transaction or replay lease is active.");
+                }
+                if (childLifetime != null)
+                {
+                    childLifetime.DisposeFromParent();
+                }
+                try
+                {
+                    IDisposable disposable =
+                        journalFileSystem as IDisposable;
+                    if (disposable != null)
+                    {
+                        disposable.Dispose();
+                    }
+                }
+                finally
+                {
+                    disposed = true;
+                    disposing = false;
+                }
+            }
+        }
+
+        private void ThrowIfDisposed()
+        {
+            if (disposed || disposing)
+            {
+                throw new ObjectDisposedException(
+                    "FileTransactionJournalStore");
+            }
+        }
+
+        private sealed class LifetimeBoundTransactionLease : IDisposable
+        {
+            private FileTransactionJournalStore owner;
+            private IDisposable innerLease;
+
+            internal LifetimeBoundTransactionLease(
+                FileTransactionJournalStore owner,
+                IDisposable innerLease)
+            {
+                this.owner = owner;
+                this.innerLease = innerLease;
+            }
+
+            public void Dispose()
+            {
+                FileTransactionJournalStore releaseOwner = owner;
+                IDisposable releaseLease = innerLease;
+                if (releaseOwner == null || releaseLease == null)
+                {
+                    return;
+                }
+                releaseLease.Dispose();
+                innerLease = null;
+                owner = null;
+                releaseOwner.ReleaseTransactionLeaseReservation();
             }
         }
 

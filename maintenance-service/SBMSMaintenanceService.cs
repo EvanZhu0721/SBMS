@@ -52,9 +52,12 @@ namespace SBMSSetup
         private static void StartRuntime(
             CancellationToken cancellation)
         {
-            // Offline baseline only: live pipe, token authorizer, replay
-            // provider, and ACL application are intentionally not wired.
             cancellation.ThrowIfCancellationRequested();
+            // Fail closed until pipe identity authorization and the protected
+            // App-root materializer are composed with the production replay
+            // store. An SCM start must never report a partial runtime.
+            throw new InvalidOperationException(
+                "Maintenance production dependencies are incomplete.");
         }
 
         private static void StopRuntimeCore(

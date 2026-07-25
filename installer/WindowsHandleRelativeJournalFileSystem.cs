@@ -46,7 +46,9 @@ namespace SBMSSetup
     // Every journal leaf operation is rooted at a no-follow installer directory
     // handle. No path-based File/Directory mutation occurs below that handle.
     internal sealed class WindowsHandleRelativeJournalFileSystem
-        : IAtomicJournalFileSystem, IDisposable
+        : IAtomicJournalFileSystem,
+          IJournalStorageAuthorityDescriptor,
+          IDisposable
     {
         private sealed class JournalRenameCommittedException : IOException
         {
@@ -132,6 +134,28 @@ namespace SBMSSetup
                 "Installer");
             this.securityProfile = securityProfile;
             this.testSeam = testSeam;
+        }
+
+        public string StorageAuthorityInvariantDigest
+        {
+            get
+            {
+                var fields = new System.Collections.Generic.List<string>
+                {
+                    "WindowsHandleRelativeJournalFileSystem",
+                    commonRootPath,
+                    installerRootPath,
+                    securityProfile.Owner.Value
+                };
+                foreach (SecurityIdentifier identity in
+                    securityProfile.FullControlIdentities)
+                {
+                    fields.Add(identity.Value);
+                }
+                return PayloadContractValidation.ComputeDigest(
+                    "SBMS.Journal.StorageAuthority.v1",
+                    fields);
+            }
         }
 
         public string GetDisplayPath(string relativePath)

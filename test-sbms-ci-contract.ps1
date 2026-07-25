@@ -35,6 +35,9 @@ $setupRuntime = Read-Utf8 'installer/SBMSSetup.cs'
 $releaseVerifier = Read-Utf8 'installer/ReleaseIntegrityVerifier.cs'
 $maintenanceHost = Read-Utf8 'maintenance-service/SBMSMaintenanceService.cs'
 $maintenanceContracts = Read-Utf8 'maintenance-service/MaintenanceServiceRuntimeContracts.cs'
+$maintenanceReplayStore = Read-Utf8 'maintenance-service/MaintenanceReplayProductionStore.cs'
+$maintenanceReplayFactory = Read-Utf8 'maintenance-service/MaintenanceReplayFileTransactionJournalFactory.cs'
+$journalStore = Read-Utf8 'installer/FileTransactionJournalStore.cs'
 
 Assert-True ($windowsCi.Contains('runs-on: windows-2022')) 'Hosted CI must pin windows-2022.'
 Assert-True ($windowsCi.Contains('permissions:') -and $windowsCi.Contains('contents: read')) 'CI permissions must be read-only.'
@@ -163,6 +166,27 @@ Assert-True ($maintenanceHost.Contains('args.Length != 0') -and $maintenanceHost
 Assert-True ($maintenanceHost.Contains('OnShutdown') -and $maintenanceHost.Contains('StopRuntime')) 'SCM shutdown must use the bounded lifecycle stop path.'
 Assert-True ($maintenanceContracts.Contains('IMaintenanceCommandAuthorizer') -and $maintenanceContracts.Contains('MaintenanceAuthorizationEvidence')) 'Dispatcher authorization must consume injected trusted evidence.'
 Assert-True (-not $maintenanceContracts.Contains('new Fake') -and -not $maintenanceHost.Contains('new Fake')) 'Production maintenance sources must not contain test fakes.'
+Assert-True ($maintenanceBuild.Contains('InstallerJournal.cs') -and $maintenanceBuild.Contains('MaintenanceReplayProductionStore.cs')) 'Maintenance build must compile the shared atomic publisher and replay adapter.'
+$maintenanceReplayReferences = [regex]::Matches(
+    $setupBuild,
+    '\$MaintenanceReplayProductionStoreSource')
+Assert-True ($maintenanceReplayReferences.Count -eq 2) 'Setup must define and compile the maintenance production replay adapter.'
+$maintenanceReplayFactoryReferences = [regex]::Matches(
+    $setupBuild,
+    '\$MaintenanceReplayFileTransactionJournalFactorySource')
+Assert-True ($maintenanceReplayFactoryReferences.Count -eq 2) 'Setup must define and compile the shared FileTransactionJournalStore replay factory.'
+Assert-True ($maintenanceReplayStore.Contains('@"maintenance-replay\v1"') -and $maintenanceReplayStore.Contains('AtomicDocumentBytePublisher')) 'Maintenance replay must use its fixed layout and the existing atomic publisher.'
+Assert-True ($maintenanceReplayFactory.Contains('CreateMaintenanceReplayStore') -and $maintenanceReplayFactory.Contains('journalFileSystem') -and $maintenanceReplayFactory.Contains('AcquireTransactionLeaseForMaintenanceReplay') -and $maintenanceReplayFactory.Contains('transactionLeaseIdentity') -and $maintenanceReplayFactory.Contains('StorageAuthorityInvariantDigest') -and $maintenanceReplayFactory.Contains('installerStateRoot')) 'Maintenance replay factory must derive exact root authority and reuse the journal filesystem and global transaction lease.'
+$codecStart = $maintenanceContracts.IndexOf('internal static class MaintenanceReplayRecordCodec', [StringComparison]::Ordinal)
+$codecEnd = $maintenanceContracts.IndexOf('internal sealed class MaintenanceWriteBeforeAckExecutor', [StringComparison]::Ordinal)
+Assert-True ($codecStart -ge 0 -and $codecEnd -gt $codecStart) 'Maintenance replay codec source boundaries are missing.'
+$maintenanceCodec = $maintenanceContracts.Substring($codecStart, $codecEnd - $codecStart)
+Assert-True ($maintenanceCodec.Contains('MaintenanceReplayContentFormatException') -and $maintenanceCodec.Contains('catch (SerializationException exception)') -and $maintenanceCodec.Contains('catch (InvalidDataContractException exception)')) 'Maintenance replay codec must whitelist deterministic serialization and validation format failures.'
+Assert-True (-not $maintenanceCodec.Contains('catch (Exception')) 'Maintenance replay codec must not relabel resource or runtime failures as deterministic corruption.'
+Assert-True ($maintenanceReplayStore.Contains('catch (MaintenanceReplayContentFormatException') -and $maintenanceReplayStore.Contains('catch (AtomicDocumentFormatException')) 'Maintenance replay fallback must catch only content and publisher format failures.'
+Assert-True ($maintenanceReplayFactory.Contains('lock (lifetimeGate)') -and $maintenanceReplayStore.Contains('lock (lifetimeGate)') -and $journalStore.Contains('activeTransactionLeaseCount')) 'Replay factory, child acquisition, and parent disposal must share one lifecycle gate.'
+Assert-True (-not $maintenanceReplayStore.Contains('new Mutex') -and -not $maintenanceReplayStore.Contains('PathAtomicJournalFileSystem') -and -not $maintenanceReplayStore.Contains('GetTempPath') -and -not $maintenanceReplayStore.Contains('CurrentDirectory')) 'Production replay adapter must not create another lock domain or path fallback.'
+Assert-True ($maintenanceHost.Contains('Maintenance production dependencies are incomplete.')) 'Maintenance host must fail closed while production dependencies are incomplete.'
 Assert-True ($package.Contains('"test-sbms-protected-payload-namespace-owner-contracts.ps1"')) 'Package source mirror must include the payload namespace owner contract wrapper.'
 Assert-True (-not $package.Contains('Sort-Object LastWriteTime')) 'Package must not select signing material by timestamp.'
 Assert-True (-not $package.Contains('-Filter "SBMSIndirectDisplay.cer"')) 'Development package must not discover an implicit certificate.'

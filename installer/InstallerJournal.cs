@@ -23,6 +23,11 @@ namespace SBMSSetup
         void DeleteFile(string relativePath);
     }
 
+    internal interface IJournalStorageAuthorityDescriptor
+    {
+        string StorageAuthorityInvariantDigest { get; }
+    }
+
     internal sealed class JournalFilePublicationException : IOException
     {
         internal JournalFilePublicationException(
@@ -469,6 +474,13 @@ namespace SBMSSetup
     internal interface ITransactionExecutionLeaseProvider
     {
         IDisposable AcquireTransactionLease();
+    }
+
+    internal interface IInstallerJournalChildLifetime
+    {
+        bool IsLeaseHeldByCurrentThread { get; }
+        bool HasActiveLease { get; }
+        void DisposeFromParent();
     }
 
     internal sealed class AtomicTransactionJournalStore :

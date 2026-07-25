@@ -27,11 +27,20 @@ try {
     }
     $sources = @(
         (Join-Path $root 'installer\InstallerTransactionModels.cs'),
+        (Join-Path $root 'installer\InstallerJournal.cs'),
+        (Join-Path $root 'installer\WindowsHandleRelativeJournalFileSystem.cs'),
+        (Join-Path $root 'installer\ProtectedEscrowManifestStore.cs'),
+        (Join-Path $root 'installer\ProtectedPayloadWorkspaceCheckpointStore.cs'),
+        (Join-Path $root 'installer\ProtectedPayloadBuildStateMachine.cs'),
+        (Join-Path $root 'installer\DurableProtectedPayloadBuildWorkspaceModel.cs'),
+        (Join-Path $root 'installer\FileTransactionJournalStore.cs'),
         (Join-Path $root 'installer\ProtectedPayloadStoreContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadBuildContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadNamespaceOwnerContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadBrokerContracts.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceServiceRuntimeContracts.cs'),
+        (Join-Path $root 'maintenance-service\MaintenanceReplayProductionStore.cs'),
+        (Join-Path $root 'maintenance-service\MaintenanceReplayFileTransactionJournalFactory.cs'),
         (Join-Path $root 'tests\MaintenanceServiceRuntimeContractTests.cs')
     )
     $compilerArgs = @(

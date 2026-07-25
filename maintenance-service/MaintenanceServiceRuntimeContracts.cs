@@ -466,6 +466,17 @@ namespace SBMSSetup
         Committed
     }
 
+    internal sealed class MaintenanceReplayContentFormatException
+        : IOException
+    {
+        internal MaintenanceReplayContentFormatException(
+            string message,
+            Exception innerException)
+            : base(message, innerException)
+        {
+        }
+    }
+
     [DataContract]
     internal sealed class MaintenanceReplayRecord
     {
@@ -485,6 +496,9 @@ namespace SBMSSetup
         internal string CommandInvariantDigest;
 
         [DataMember(Order = 6, IsRequired = true)]
+        internal string StorageKeyInvariantDigest;
+
+        [DataMember(Order = 7, IsRequired = true)]
         internal PayloadBrokerResponse Response;
 
         internal void Validate()
@@ -506,6 +520,19 @@ namespace SBMSSetup
             PayloadContractValidation.RequireSha256(
                 CommandInvariantDigest,
                 "Maintenance replay command digest");
+            PayloadContractValidation.RequireSha256(
+                StorageKeyInvariantDigest,
+                "Maintenance replay storage-key digest");
+            if (!String.Equals(
+                    StorageKeyInvariantDigest,
+                    ComputeStorageKeyInvariantDigest(
+                        TransactionId,
+                        RequestId),
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Maintenance replay storage-key binding changed.");
+            }
             if (State == MaintenanceReplayRecordState.Prepared)
             {
                 if (Response != null)
@@ -566,6 +593,15 @@ namespace SBMSSetup
                 Response.ValidateForCommand(command);
             }
         }
+
+        internal static string ComputeStorageKeyInvariantDigest(
+            string transactionId,
+            string requestId)
+        {
+            return PayloadContractValidation.ComputeDigest(
+                "SBMS.Maintenance.ReplayKey.v1",
+                new[] { transactionId, requestId });
+        }
     }
 
     internal static class MaintenanceReplayRecordCodec
@@ -573,12 +609,37 @@ namespace SBMSSetup
         internal static byte[] SerializeCanonical(
             MaintenanceReplayRecord record)
         {
-            record.Validate();
-            var serializer = NewSerializer();
-            using (var stream = new MemoryStream())
+            if (record == null)
             {
-                serializer.WriteObject(stream, record);
-                return stream.ToArray();
+                throw new MaintenanceReplayContentFormatException(
+                    "Maintenance replay record is missing.",
+                    null);
+            }
+            try
+            {
+                record.Validate();
+                var serializer = NewSerializer();
+                using (var stream = new MemoryStream())
+                {
+                    serializer.WriteObject(stream, record);
+                    return stream.ToArray();
+                }
+            }
+            catch (MaintenanceReplayContentFormatException)
+            {
+                throw;
+            }
+            catch (InvalidOperationException exception)
+            {
+                throw FormatFailure(exception);
+            }
+            catch (SerializationException exception)
+            {
+                throw FormatFailure(exception);
+            }
+            catch (InvalidDataContractException exception)
+            {
+                throw FormatFailure(exception);
             }
         }
 
@@ -587,8 +648,9 @@ namespace SBMSSetup
         {
             if (bytes == null || bytes.Length == 0)
             {
-                throw new InvalidOperationException(
-                    "Maintenance replay record bytes are missing.");
+                throw new MaintenanceReplayContentFormatException(
+                    "Maintenance replay record bytes are missing.",
+                    null);
             }
             MaintenanceReplayRecord record;
             try
@@ -598,23 +660,36 @@ namespace SBMSSetup
                     record =
                         (MaintenanceReplayRecord)NewSerializer().
                             ReadObject(stream);
+                    if (record == null)
+                    {
+                        throw new MaintenanceReplayContentFormatException(
+                            "Maintenance replay record decoded to null.",
+                            null);
+                    }
                     if (stream.Position != stream.Length)
                     {
-                        throw new InvalidOperationException(
-                            "Maintenance replay record has trailing data.");
+                        throw new MaintenanceReplayContentFormatException(
+                            "Maintenance replay record has trailing data.",
+                            null);
                     }
                 }
                 record.Validate();
             }
-            catch (InvalidOperationException)
+            catch (MaintenanceReplayContentFormatException)
             {
                 throw;
             }
-            catch (Exception exception)
+            catch (InvalidOperationException exception)
             {
-                throw new InvalidOperationException(
-                    "Maintenance replay record cannot be decoded.",
-                    exception);
+                throw FormatFailure(exception);
+            }
+            catch (SerializationException exception)
+            {
+                throw FormatFailure(exception);
+            }
+            catch (InvalidDataContractException exception)
+            {
+                throw FormatFailure(exception);
             }
             RequireExactBytes(
                 bytes,
@@ -630,8 +705,9 @@ namespace SBMSSetup
                 second == null ||
                 first.Length != second.Length)
             {
-                throw new InvalidOperationException(
-                    "Maintenance replay bytes differ.");
+                throw new MaintenanceReplayContentFormatException(
+                    "Maintenance replay bytes differ.",
+                    null);
             }
             int difference = 0;
             for (int index = 0; index < first.Length; ++index)
@@ -640,9 +716,18 @@ namespace SBMSSetup
             }
             if (difference != 0)
             {
-                throw new InvalidOperationException(
-                    "Maintenance replay bytes differ.");
+                throw new MaintenanceReplayContentFormatException(
+                    "Maintenance replay bytes differ.",
+                    null);
             }
+        }
+
+        private static MaintenanceReplayContentFormatException
+            FormatFailure(Exception exception)
+        {
+            return new MaintenanceReplayContentFormatException(
+                "Maintenance replay record cannot be encoded or decoded.",
+                exception);
         }
 
         private static DataContractJsonSerializer NewSerializer()
@@ -669,7 +754,8 @@ namespace SBMSSetup
         private readonly IMaintenanceReplayAtomicStore store;
 
         internal MaintenanceWriteBeforeAckExecutor(
-            IMaintenanceReplayAtomicStore store)
+            IMaintenanceReplayAtomicStore store,
+            string expectedRootAuthorityInvariantDigest)
         {
             if (store == null)
             {
@@ -678,6 +764,17 @@ namespace SBMSSetup
             PayloadContractValidation.RequireSha256(
                 store.RootAuthorityInvariantDigest,
                 "Maintenance replay store root authority");
+            PayloadContractValidation.RequireSha256(
+                expectedRootAuthorityInvariantDigest,
+                "Expected maintenance replay root authority");
+            if (!String.Equals(
+                    store.RootAuthorityInvariantDigest,
+                    expectedRootAuthorityInvariantDigest,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Maintenance replay root authority differs from composition.");
+            }
             this.store = store;
         }
 
@@ -736,6 +833,11 @@ namespace SBMSSetup
                         RequestId = command.RequestId,
                         CommandInvariantDigest =
                             command.InvariantDigest,
+                        StorageKeyInvariantDigest =
+                            MaintenanceReplayRecord.
+                                ComputeStorageKeyInvariantDigest(
+                                    command.TransactionId,
+                                    command.RequestId),
                         Response = null
                     };
                 prepared.ValidateRequest(command);
@@ -762,6 +864,11 @@ namespace SBMSSetup
                 TransactionId = command.TransactionId,
                 RequestId = command.RequestId,
                 CommandInvariantDigest = command.InvariantDigest,
+                StorageKeyInvariantDigest =
+                    MaintenanceReplayRecord.
+                        ComputeStorageKeyInvariantDigest(
+                            command.TransactionId,
+                            command.RequestId),
                 Response = response
             };
         }

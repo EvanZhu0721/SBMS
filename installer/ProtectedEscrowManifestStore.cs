@@ -146,6 +146,22 @@ namespace SBMSSetup
             }
         }
 
+        internal bool IsHeldByCurrentThread
+        {
+            get
+            {
+                lock (sync)
+                {
+                    return !poisoned &&
+                        ownedMutex != null &&
+                        Object.ReferenceEquals(
+                            ownerThread,
+                            Thread.CurrentThread) &&
+                        leaseIds.Count != 0;
+                }
+            }
+        }
+
         private void Release(long leaseId, Thread thread)
         {
             Mutex release = null;

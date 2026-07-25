@@ -7,6 +7,230 @@ using System.Threading;
 
 namespace SBMSSetup
 {
+    internal sealed class ReplayNativeFaultSeam
+        : IWindowsJournalIoTestSeam
+    {
+        internal bool FailNextPublishedVerification;
+        public void AfterTrustedInstallerRootOpened(string expectedPath) { }
+        public void AfterBackupPublished() { }
+        public void BeforePublishedFileIdVerification(
+            string destinationRelativePath)
+        {
+            if (FailNextPublishedVerification)
+            {
+                FailNextPublishedVerification = false;
+                throw new IOException(
+                    "Injected post-publication verification failure.");
+            }
+        }
+        public int BeforeNativeIo(string operation, int attempt)
+        {
+            return 0;
+        }
+    }
+
+    internal sealed class TestProgramDataPathProvider
+        : IInstallerProgramDataPathProvider
+    {
+        private readonly string root;
+        internal TestProgramDataPathProvider(string root)
+        {
+            this.root = root;
+        }
+        public string GetCommonApplicationDataPath()
+        {
+            return root;
+        }
+    }
+
+    internal sealed class NoOpInstallerJournalAclPolicy
+        : IInstallerJournalAclPolicy
+    {
+        public void PrepareAndVerify(
+            string commonApplicationDataRoot,
+            string installerStateRoot,
+            bool createIfMissing)
+        {
+        }
+    }
+
+    internal sealed class BlockingInstallerJournalAclPolicy
+        : IInstallerJournalAclPolicy
+    {
+        internal readonly ManualResetEvent Entered =
+            new ManualResetEvent(false);
+        internal readonly ManualResetEvent Release =
+            new ManualResetEvent(false);
+
+        public void PrepareAndVerify(
+            string commonApplicationDataRoot,
+            string installerStateRoot,
+            bool createIfMissing)
+        {
+            Entered.Set();
+            if (!Release.WaitOne(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException(
+                    "Lifecycle ACL barrier was not released.");
+            }
+        }
+    }
+
+    internal sealed class LifecycleBarrierFileSystem
+        : IAtomicJournalFileSystem,
+          IJournalStorageAuthorityDescriptor,
+          IDisposable
+    {
+        internal bool BlockAuthority;
+        internal readonly ManualResetEvent AuthorityEntered =
+            new ManualResetEvent(false);
+        internal readonly ManualResetEvent ReleaseAuthority =
+            new ManualResetEvent(false);
+        internal volatile bool Disposed;
+
+        public string StorageAuthorityInvariantDigest
+        {
+            get
+            {
+                AuthorityEntered.Set();
+                if (BlockAuthority &&
+                    !ReleaseAuthority.WaitOne(TimeSpan.FromSeconds(5)))
+                {
+                    throw new TimeoutException(
+                        "Lifecycle authority barrier was not released.");
+                }
+                return new string('a', 64);
+            }
+        }
+
+        public string GetDisplayPath(string relativePath)
+        {
+            return relativePath;
+        }
+        public bool FileExists(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void EnsureDirectory(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public Stream CreateNewFile(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public Stream OpenReadFile(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void PublishNewFile(
+            string sourceRelativePath,
+            string destinationRelativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void ReplaceFile(
+            string sourceRelativePath,
+            string destinationRelativePath,
+            string backupRelativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void DeleteFile(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void Dispose()
+        {
+            Disposed = true;
+        }
+    }
+
+    internal sealed class LeaseProbe
+    {
+        private readonly Func<IDisposable> acquire;
+        internal readonly ManualResetEvent Started =
+            new ManualResetEvent(false);
+        internal readonly Thread Thread;
+        internal volatile bool Acquired;
+        internal Exception Failure;
+
+        internal LeaseProbe(Func<IDisposable> acquire)
+        {
+            this.acquire = acquire;
+            Thread = new Thread(new ThreadStart(Run));
+        }
+
+        private void Run()
+        {
+            try
+            {
+                Started.Set();
+                using (IDisposable lease = acquire())
+                {
+                    Acquired = true;
+                }
+            }
+            catch (Exception exception)
+            {
+                Failure = exception;
+            }
+        }
+    }
+
+    internal sealed class NoOpDisposable : IDisposable
+    {
+        public void Dispose() { }
+    }
+
+    internal sealed class ThrowingReadFileSystem
+        : IAtomicJournalFileSystem
+    {
+        internal readonly Exception Failure;
+        internal int OpenReadCalls;
+        internal ThrowingReadFileSystem(Exception failure)
+        {
+            Failure = failure;
+        }
+        public string GetDisplayPath(string relativePath)
+        {
+            return relativePath;
+        }
+        public bool FileExists(string relativePath)
+        {
+            return !relativePath.EndsWith(
+                ".new",
+                StringComparison.Ordinal);
+        }
+        public void EnsureDirectory(string relativePath) { }
+        public Stream CreateNewFile(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public Stream OpenReadFile(string relativePath)
+        {
+            OpenReadCalls++;
+            throw Failure;
+        }
+        public void PublishNewFile(
+            string sourceRelativePath,
+            string destinationRelativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void ReplaceFile(
+            string sourceRelativePath,
+            string destinationRelativePath,
+            string backupRelativePath)
+        {
+            throw new NotSupportedException();
+        }
+        public void DeleteFile(string relativePath)
+        {
+            throw new NotSupportedException();
+        }
+    }
+
     internal sealed class FakeTerminator
         : IMaintenanceProcessTerminator
     {
@@ -186,6 +410,9 @@ namespace SBMSSetup
             Run("prepared retry inspects or resumes authoritative state without mutation", PreparedRetryUsesAuthoritativeReconciliation);
             Run("same replay key rejects a different command", ReplayKeyRejectsDifferentCommand);
             Run("atomic write faults use exact readback", AtomicFaultMatrix);
+            Run("replay read failures do not downgrade to backup", ReplayReadFailuresDoNotFallback);
+            Run("production-shaped replay uses native root and shared lease", ProductionReplayUsesNativeRoot);
+            Run("replay lifecycle gate closes create and acquire races", ReplayLifecycleGateClosesRaces);
             Run("fake lease is thread-affine and non-reentrant", FakeLeaseIsStrict);
             Console.WriteLine(
                 failures == 0
@@ -648,17 +875,24 @@ namespace SBMSSetup
             byte[] trailing = new byte[bytes.Length + 1];
             Array.Copy(bytes, trailing, bytes.Length);
             trailing[trailing.Length - 1] = (byte)' ';
-            RejectInvalid(delegate
+            RejectReplayFormat(delegate
             {
                 MaintenanceReplayRecordCodec.
                     DeserializeCanonical(trailing);
             }, null);
             bytes[bytes.Length - 1] ^= 1;
-            RejectInvalid(delegate
+            RejectReplayFormat(delegate
             {
                 MaintenanceReplayRecordCodec.
                     DeserializeCanonical(bytes);
             }, null);
+            MaintenanceReplayRecord forged = Prepared(command);
+            forged.StorageKeyInvariantDigest = Digest('9');
+            RejectReplayFormat(delegate
+            {
+                MaintenanceReplayRecordCodec.
+                    SerializeCanonical(forged);
+            }, "storage-key");
         }
 
         private static void PreparedRetryUsesAuthoritativeReconciliation()
@@ -667,7 +901,7 @@ namespace SBMSSetup
             reconcileCount = 0;
             var store = new FakeReplayStore();
             var executor =
-                new MaintenanceWriteBeforeAckExecutor(store);
+                Executor(store);
             PayloadBrokerCommand command = Command();
             WriteRecord(store, command, Prepared(command));
             PayloadBrokerResponse recovered =
@@ -710,8 +944,7 @@ namespace SBMSSetup
                 WriteRecord(store, original, record);
                 RejectInvalid(delegate
                 {
-                    new MaintenanceWriteBeforeAckExecutor(
-                        store).Execute(
+                    Executor(store).Execute(
                             different,
                             Mutate,
                             InspectOrResumeAuthoritativeState);
@@ -732,8 +965,7 @@ namespace SBMSSetup
             var lostPreparedReturn = new FakeReplayStore();
             lostPreparedReturn.Faults.Enqueue(
                 FakeStoreFault.AfterCommit);
-            new MaintenanceWriteBeforeAckExecutor(
-                lostPreparedReturn).Execute(
+            Executor(lostPreparedReturn).Execute(
                     command,
                     Mutate,
                     InspectOrResumeAuthoritativeState);
@@ -749,8 +981,7 @@ namespace SBMSSetup
             committedFailure.Faults.Enqueue(
                 FakeStoreFault.BeforeCommit);
             var executor =
-                new MaintenanceWriteBeforeAckExecutor(
-                    committedFailure);
+                Executor(committedFailure);
             RejectIo(delegate
             {
                 executor.Execute(
@@ -772,12 +1003,436 @@ namespace SBMSSetup
                 FakeStoreFault.CorruptAfterCommit);
             RejectIo(delegate
             {
-                new MaintenanceWriteBeforeAckExecutor(
-                    corrupt).Execute(
+                Executor(corrupt).Execute(
                         command,
                         Mutate,
                         InspectOrResumeAuthoritativeState);
             });
+        }
+
+        private static void ProductionReplayUsesNativeRoot()
+        {
+            string commonRoot = Path.Combine(
+                Path.GetTempPath(),
+                "SBMS-maintenance-native-" +
+                    Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(commonRoot);
+            var seam = new ReplayNativeFaultSeam();
+            SecurityIdentifier current =
+                WindowsIdentity.GetCurrent().User;
+            var profile = new WindowsJournalSecurityProfile
+            {
+                Owner = current,
+                FullControlIdentities =
+                    new[] { current }
+            };
+            try
+            {
+                using (var fileSystem =
+                    new WindowsHandleRelativeJournalFileSystem(
+                        commonRoot,
+                        profile,
+                        seam))
+                {
+                    string mutexName =
+                        @"Local\SBMS.Maintenance.Test." +
+                        Guid.NewGuid().ToString("N");
+                    var journal =
+                        new FileTransactionJournalStore(
+                            new TestProgramDataPathProvider(commonRoot),
+                            new NoOpInstallerJournalAclPolicy(),
+                            mutexName,
+                            TimeSpan.FromSeconds(2),
+                            null,
+                            fileSystem,
+                            new UnsecuredInstallerTransactionMutexFactory());
+                    IMaintenanceReplayAtomicStore store =
+                        journal.CreateMaintenanceReplayStore();
+                    Assert(
+                        Object.ReferenceEquals(
+                            store,
+                            journal.CreateMaintenanceReplayStore()),
+                        "Replay factory did not return its singleton.");
+                    RejectInvalid(delegate
+                    {
+                        new MaintenanceWriteBeforeAckExecutor(
+                            store,
+                            Digest('9'));
+                    }, "authority");
+                    mutationCount = 0;
+                    reconcileCount = 0;
+                    PayloadBrokerCommand command = Command();
+                    seam.FailNextPublishedVerification = true;
+                    Executor(
+                        store,
+                        journal.
+                            MaintenanceReplayRootAuthorityInvariantDigest).
+                        Execute(
+                            command,
+                            Mutate,
+                            InspectOrResumeAuthoritativeState);
+                    Assert(
+                        mutationCount == 1,
+                        "Native replay did not commit its first mutation.");
+
+                    string primary = Path.Combine(
+                        commonRoot,
+                        "SBMS",
+                        "Installer",
+                        "maintenance-replay",
+                        "v1",
+                        command.TransactionId,
+                        command.RequestId + ".json");
+                    string candidate = primary + ".new";
+                    Assert(
+                        File.Exists(primary),
+                        "Fixed maintenance replay layout was not used.");
+                    File.WriteAllBytes(primary, new byte[] { 1, 2, 3 });
+                    File.WriteAllBytes(candidate, new byte[] { 4 });
+                    Executor(
+                        store,
+                        journal.
+                            MaintenanceReplayRootAuthorityInvariantDigest).
+                        Execute(
+                            command,
+                            Mutate,
+                            InspectOrResumeAuthoritativeState);
+                    Assert(
+                        mutationCount == 1 &&
+                        reconcileCount == 1 &&
+                        !File.Exists(candidate),
+                        "Backup recovery remutated or retained stale candidate.");
+                    byte[] final = File.ReadAllBytes(primary);
+                    MaintenanceReplayRecord recovered =
+                        MaintenanceReplayRecordCodec.
+                            DeserializeCanonical(final);
+                    Assert(
+                        recovered.State ==
+                            MaintenanceReplayRecordState.Committed,
+                        "Backup recovery did not republish Committed.");
+                    string backup = primary + ".bak";
+                    File.WriteAllBytes(backup, final);
+                    using (FileStream oversized = new FileStream(
+                        primary,
+                        FileMode.Create,
+                        FileAccess.Write,
+                        FileShare.None))
+                    {
+                        oversized.SetLength(
+                            AtomicDocumentBytePublisher.
+                                MaximumDocumentBytes + 1L);
+                    }
+                    using (IMaintenanceReplayStoreLease readLease =
+                        store.AcquireExclusiveLease())
+                    {
+                        byte[] fallback;
+                        Assert(
+                            readLease.TryRead(
+                                command.TransactionId + ":" +
+                                    command.RequestId,
+                                out fallback) &&
+                            BytesEqual(final, fallback),
+                            "Oversized primary did not fall back to the valid backup.");
+                    }
+
+                    AssertBidirectionalLeaseExclusion(
+                        journal,
+                        store);
+                    IMaintenanceReplayStoreLease active =
+                        store.AcquireExclusiveLease();
+                    RejectInvalid(
+                        journal.Dispose,
+                        "active");
+                    active.Dispose();
+                    journal.Dispose();
+                    RejectDisposed(delegate
+                    {
+                        store.AcquireExclusiveLease();
+                    });
+                    RejectDisposed(delegate
+                    {
+                        journal.CreateMaintenanceReplayStore();
+                    });
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(commonRoot))
+                {
+                    Directory.Delete(commonRoot, true);
+                }
+            }
+        }
+
+        private static void ReplayReadFailuresDoNotFallback()
+        {
+            foreach (Exception expected in new Exception[]
+                {
+                    new UnauthorizedAccessException("denied"),
+                    new IOException("sharing"),
+                    new OutOfMemoryException("oom")
+                })
+            {
+                var fileSystem =
+                    new ThrowingReadFileSystem(expected);
+                var store =
+                    new MaintenanceReplayProductionStore(
+                        fileSystem,
+                        delegate
+                        {
+                            return new NoOpDisposable();
+                        },
+                        Digest('f'));
+                using (IMaintenanceReplayStoreLease lease =
+                    store.AcquireExclusiveLease())
+                {
+                    Exception observed = null;
+                    try
+                    {
+                        byte[] ignored;
+                        lease.TryRead(
+                            TransactionId + ":" + RequestId,
+                            out ignored);
+                    }
+                    catch (Exception exception)
+                    {
+                        observed = exception;
+                    }
+                    Assert(
+                        Object.ReferenceEquals(expected, observed) &&
+                        fileSystem.OpenReadCalls == 1,
+                        "Primary read failure was replaced by backup fallback.");
+                }
+                store.DisposeFromParent();
+            }
+        }
+
+        private static void ReplayLifecycleGateClosesRaces()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "SBMS-maintenance-lifecycle-" +
+                    Guid.NewGuid().ToString("N"));
+            var createFileSystem =
+                new LifecycleBarrierFileSystem
+                {
+                    BlockAuthority = true
+                };
+            var createJournal =
+                NewLifecycleJournal(
+                    root,
+                    new NoOpInstallerJournalAclPolicy(),
+                    createFileSystem);
+            IMaintenanceReplayAtomicStore created = null;
+            Exception createFailure = null;
+            Exception disposeFailure = null;
+            var disposeCompleted = new ManualResetEvent(false);
+            var createThread = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    created =
+                        createJournal.CreateMaintenanceReplayStore();
+                }
+                catch (Exception exception)
+                {
+                    createFailure = exception;
+                }
+            }));
+            createThread.Start();
+            Assert(
+                createFileSystem.AuthorityEntered.WaitOne(
+                    TimeSpan.FromSeconds(2)),
+                "Create did not enter the authority barrier.");
+            var disposeThread = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    createJournal.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    disposeFailure = exception;
+                }
+                finally
+                {
+                    disposeCompleted.Set();
+                }
+            }));
+            disposeThread.Start();
+            Assert(
+                !disposeCompleted.WaitOne(100),
+                "Dispose bypassed an in-progress replay factory call.");
+            createFileSystem.ReleaseAuthority.Set();
+            Assert(
+                createThread.Join(2000) &&
+                disposeThread.Join(2000) &&
+                createFailure == null &&
+                disposeFailure == null &&
+                created != null &&
+                createFileSystem.Disposed,
+                "Create and Dispose did not serialize on one lifecycle gate.");
+            RejectDisposed(delegate
+            {
+                created.AcquireExclusiveLease();
+            });
+
+            var acquireFileSystem =
+                new LifecycleBarrierFileSystem();
+            var blockingAcl =
+                new BlockingInstallerJournalAclPolicy();
+            var acquireJournal =
+                NewLifecycleJournal(
+                    root + "-acquire",
+                    blockingAcl,
+                    acquireFileSystem);
+            IMaintenanceReplayAtomicStore acquireStore =
+                acquireJournal.CreateMaintenanceReplayStore();
+            Exception acquireFailure = null;
+            Exception racedDisposeFailure = null;
+            var leaseAcquired = new ManualResetEvent(false);
+            var releaseLease = new ManualResetEvent(false);
+            var acquireThread = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    using (IMaintenanceReplayStoreLease lease =
+                        acquireStore.AcquireExclusiveLease())
+                    {
+                        leaseAcquired.Set();
+                        if (!releaseLease.WaitOne(
+                                TimeSpan.FromSeconds(5)))
+                        {
+                            throw new TimeoutException(
+                                "Lifecycle lease barrier was not released.");
+                        }
+                    }
+                }
+                catch (Exception exception)
+                {
+                    acquireFailure = exception;
+                }
+            }));
+            acquireThread.Start();
+            Assert(
+                blockingAcl.Entered.WaitOne(TimeSpan.FromSeconds(2)),
+                "Acquire did not enter the shared-lease barrier.");
+            var racedDisposeThread =
+                new Thread(new ThreadStart(delegate
+                {
+                    try
+                    {
+                        acquireJournal.Dispose();
+                    }
+                    catch (Exception exception)
+                    {
+                        racedDisposeFailure = exception;
+                    }
+                }));
+            racedDisposeThread.Start();
+            Assert(
+                racedDisposeThread.Join(2000) &&
+                racedDisposeFailure is InvalidOperationException &&
+                !acquireFileSystem.Disposed,
+                "Parent disposal released storage during child acquisition.");
+            blockingAcl.Release.Set();
+            Assert(
+                leaseAcquired.WaitOne(TimeSpan.FromSeconds(2)),
+                "Child acquisition did not resume after its barrier.");
+            releaseLease.Set();
+            Assert(
+                acquireThread.Join(2000) &&
+                acquireFailure == null,
+                "Child lease did not close cleanly after the race.");
+            acquireJournal.Dispose();
+            Assert(
+                acquireFileSystem.Disposed,
+                "Parent did not dispose storage after the child lease closed.");
+        }
+
+        private static FileTransactionJournalStore NewLifecycleJournal(
+            string root,
+            IInstallerJournalAclPolicy aclPolicy,
+            IAtomicJournalFileSystem fileSystem)
+        {
+            return new FileTransactionJournalStore(
+                new TestProgramDataPathProvider(root),
+                aclPolicy,
+                @"Local\SBMS.Maintenance.Lifecycle." +
+                    Guid.NewGuid().ToString("N"),
+                TimeSpan.FromSeconds(2),
+                null,
+                fileSystem,
+                new UnsecuredInstallerTransactionMutexFactory());
+        }
+
+        private static void AssertBidirectionalLeaseExclusion(
+            FileTransactionJournalStore journal,
+            IMaintenanceReplayAtomicStore replay)
+        {
+            LeaseProbe replayProbe;
+            using (IDisposable journalLease =
+                journal.AcquireTransactionLease())
+            {
+                RejectInvalid(delegate
+                {
+                    replay.AcquireExclusiveLease();
+                }, "nest");
+                replayProbe = StartBlockedProbe(
+                    delegate
+                    {
+                        return replay.AcquireExclusiveLease();
+                    },
+                    "Replay did not share the journal lock domain.");
+            }
+            AssertProbeCompletes(
+                replayProbe,
+                "Replay did not enter after journal lease release.");
+
+            LeaseProbe journalProbe;
+            using (IMaintenanceReplayStoreLease replayLease =
+                replay.AcquireExclusiveLease())
+            {
+                RejectInvalid(delegate
+                {
+                    journal.AcquireTransactionLease();
+                }, "non-reentrant");
+                journalProbe = StartBlockedProbe(
+                    delegate
+                    {
+                        return journal.AcquireTransactionLease();
+                    },
+                    "Journal did not share the replay lock domain.");
+            }
+            AssertProbeCompletes(
+                journalProbe,
+                "Journal did not enter after replay lease release.");
+        }
+
+        private static LeaseProbe StartBlockedProbe(
+            Func<IDisposable> acquire,
+            string message)
+        {
+            var probe = new LeaseProbe(acquire);
+            probe.Thread.Start();
+            probe.Started.WaitOne();
+            Thread.Sleep(100);
+            Assert(!probe.Acquired, message);
+            return probe;
+        }
+
+        private static void AssertProbeCompletes(
+            LeaseProbe probe,
+            string message)
+        {
+            Assert(
+                probe.Thread.Join(TimeSpan.FromSeconds(2)),
+                message);
+            if (probe.Failure != null)
+            {
+                throw probe.Failure;
+            }
+            Assert(probe.Acquired, message);
         }
 
         private static void FakeLeaseIsStrict()
@@ -821,6 +1476,11 @@ namespace SBMSSetup
                 TransactionId = command.TransactionId,
                 RequestId = command.RequestId,
                 CommandInvariantDigest = command.InvariantDigest,
+                StorageKeyInvariantDigest =
+                    MaintenanceReplayRecord.
+                        ComputeStorageKeyInvariantDigest(
+                            command.TransactionId,
+                            command.RequestId),
                 Response = null
             };
         }
@@ -835,6 +1495,11 @@ namespace SBMSSetup
                 TransactionId = command.TransactionId,
                 RequestId = command.RequestId,
                 CommandInvariantDigest = command.InvariantDigest,
+                StorageKeyInvariantDigest =
+                    MaintenanceReplayRecord.
+                        ComputeStorageKeyInvariantDigest(
+                            command.TransactionId,
+                            command.RequestId),
                 Response = Response(command)
             };
         }
@@ -854,6 +1519,23 @@ namespace SBMSSetup
                     MaintenanceReplayRecordCodec.
                         SerializeCanonical(record));
             }
+        }
+
+        private static MaintenanceWriteBeforeAckExecutor Executor(
+            IMaintenanceReplayAtomicStore store)
+        {
+            return new MaintenanceWriteBeforeAckExecutor(
+                store,
+                Digest('f'));
+        }
+
+        private static MaintenanceWriteBeforeAckExecutor Executor(
+            IMaintenanceReplayAtomicStore store,
+            string expectedRootAuthorityInvariantDigest)
+        {
+            return new MaintenanceWriteBeforeAckExecutor(
+                store,
+                expectedRootAuthorityInvariantDigest);
         }
 
         private static PayloadBrokerResponse Mutate(
@@ -955,6 +1637,24 @@ namespace SBMSSetup
             return new string(value, 64);
         }
 
+        private static bool BytesEqual(byte[] first, byte[] second)
+        {
+            if (first == null ||
+                second == null ||
+                first.Length != second.Length)
+            {
+                return false;
+            }
+            for (int index = 0; index < first.Length; ++index)
+            {
+                if (first[index] != second[index])
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         private static void Run(string name, Action action)
         {
             try
@@ -991,6 +1691,33 @@ namespace SBMSSetup
             }
             throw new InvalidOperationException(
                 "Expected InvalidOperationException.");
+        }
+
+        private static void RejectReplayFormat(
+            Action action,
+            string messagePart)
+        {
+            try
+            {
+                action();
+            }
+            catch (MaintenanceReplayContentFormatException exception)
+            {
+                if (messagePart == null ||
+                    exception.Message.IndexOf(
+                        messagePart,
+                        StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    (exception.InnerException != null &&
+                     exception.InnerException.Message.IndexOf(
+                        messagePart,
+                        StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    return;
+                }
+                throw;
+            }
+            throw new InvalidOperationException(
+                "Expected MaintenanceReplayContentFormatException.");
         }
 
         private static void RejectCanceled(Action action)
@@ -1047,6 +1774,20 @@ namespace SBMSSetup
             }
             throw new InvalidOperationException(
                 "Expected IO failure.");
+        }
+
+        private static void RejectDisposed(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            throw new InvalidOperationException(
+                "Expected ObjectDisposedException.");
         }
 
         private static void Assert(bool condition, string message)
