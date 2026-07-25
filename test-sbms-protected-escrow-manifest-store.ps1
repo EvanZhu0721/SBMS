@@ -25,6 +25,9 @@ try {
         (Join-Path $root 'installer\InstallerJournal.cs'),
         (Join-Path $root 'installer\WindowsHandleRelativeJournalFileSystem.cs'),
         (Join-Path $root 'installer\ProtectedEscrowManifestStore.cs'),
+        (Join-Path $root 'installer\ProtectedPayloadStoreContracts.cs'),
+        (Join-Path $root 'installer\ProtectedPayloadBuildContracts.cs'),
+        (Join-Path $root 'installer\ProtectedPayloadWorkspaceCheckpointStore.cs'),
         (Join-Path $root 'installer\FileTransactionJournalStore.cs'),
         (Join-Path $root 'tests\ProtectedEscrowManifestStoreTests.cs')
     )

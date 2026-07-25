@@ -216,6 +216,7 @@ namespace SBMSSetup
             Run("named mutex serializes journal access", TestNamedMutex);
             Run("mutex timeout fails before ACL or filesystem IO", TestMutexTimeout);
             Run("transaction lease spans multiple journal operations", TestTransactionLease);
+            Run("payload checkpoint store shares transaction lease", TestPayloadCheckpointSharedLease);
             Run("ProgramData SBMS parent reparse fails closed", TestParentReparse);
             Run("final state root reparse fails closed", TestFinalReparse);
             Run("ACL inheritance flags fail closed", TestAclInheritanceFlags);
@@ -1358,6 +1359,70 @@ namespace SBMSSetup
                     throw new InvalidOperationException(
                         "Transaction lease handoff failed.",
                         workerFailure);
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestPayloadCheckpointSharedLease()
+        {
+            string root = NewRoot();
+            const string transactionId =
+                "00000000000000000000000000000021";
+            const string authorityDigest =
+                "3333333333333333333333333333333333333333333333333333333333333333";
+            try
+            {
+                var acl = new RecordingAclPolicy();
+                FileTransactionJournalStore journal = Store(
+                    root,
+                    acl,
+                    TimeSpan.FromSeconds(2));
+                IProtectedPayloadWorkspaceCheckpointStore workspace =
+                    journal.CreateProtectedPayloadWorkspaceCheckpointStore(
+                        transactionId,
+                        authorityDigest);
+                AssertThrows<InvalidOperationException>(
+                    delegate { workspace.Load(); },
+                    "Payload checkpoint access bypassed transaction lease.");
+                using (journal.AcquireTransactionLease())
+                {
+                    PayloadWorkspaceCheckpointReceipt initialized =
+                        workspace.Initialize(
+                            new PayloadBuildWorkspaceCheckpoint
+                            {
+                                SchemaVersion = 3,
+                                Revision = 4,
+                                TransactionId = transactionId,
+                                RecoveryAuthorityInvariantDigest =
+                                    authorityDigest,
+                                NamespaceRoot =
+                                    new PayloadNamespaceRootIdentity
+                                    {
+                                        SchemaVersion = 1,
+                                        CanonicalRootPath =
+                                            @"C:\Program Files\SBMS",
+                                        VolumeSerialNumber = 0x4321UL,
+                                        RootFileId =
+                                            "44444444444444444444444444444444"
+                                    },
+                                Committed =
+                                    new PayloadNamespaceCheckpoint
+                                    {
+                                        SchemaVersion = 1,
+                                        Revision = 2,
+                                        TransactionId = transactionId,
+                                        Shape =
+                                            PayloadNamespaceShape.Empty
+                                    }
+                            });
+                    Equal(
+                        initialized.State.InvariantDigest,
+                        workspace.Load().Receipt.State.InvariantDigest,
+                        "Shared-lease payload checkpoint readback changed.");
                 }
             }
             finally

@@ -1447,6 +1447,9 @@ namespace SBMSSetup
         [DataMember(Order = 11, IsRequired = true)]
         internal List<PayloadCompletedPurgeCheckpoint> CompletedPurges;
 
+        [DataMember(Order = 12, IsRequired = true)]
+        internal long RecoveryGeneration;
+
         internal PayloadBuildWorkspaceCheckpoint()
         {
             Quarantines = new List<PayloadQuarantineCheckpoint>();
@@ -1457,8 +1460,9 @@ namespace SBMSSetup
 
         internal void Validate()
         {
-            if (SchemaVersion != 2 ||
+            if (SchemaVersion != 3 ||
                 Revision < 0 ||
+                RecoveryGeneration < 0 ||
                 NamespaceRoot == null ||
                 Committed == null ||
                 Quarantines == null ||
@@ -1723,6 +1727,8 @@ namespace SBMSSetup
                     SchemaVersion.ToString(
                         CultureInfo.InvariantCulture),
                     Revision.ToString(CultureInfo.InvariantCulture),
+                    RecoveryGeneration.ToString(
+                        CultureInfo.InvariantCulture),
                     TransactionId,
                     RecoveryAuthorityInvariantDigest,
                     NamespaceRoot.InvariantDigest,
@@ -1755,7 +1761,7 @@ namespace SBMSSetup
                     fields.Add(completed.InvariantDigest);
                 }
                 return PayloadContractValidation.ComputeDigest(
-                    "SBMS.PayloadBuildWorkspaceCheckpoint.v1",
+                    "SBMS.PayloadBuildWorkspaceCheckpoint.v3",
                     fields);
             }
         }
@@ -1766,6 +1772,7 @@ namespace SBMSSetup
             {
                 SchemaVersion = SchemaVersion,
                 Revision = Revision,
+                RecoveryGeneration = RecoveryGeneration,
                 TransactionId = TransactionId,
                 RecoveryAuthorityInvariantDigest =
                     RecoveryAuthorityInvariantDigest,

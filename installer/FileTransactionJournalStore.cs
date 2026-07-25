@@ -661,6 +661,18 @@ namespace SBMSSetup
                 transactionId);
         }
 
+        internal IProtectedPayloadWorkspaceCheckpointStore
+            CreateProtectedPayloadWorkspaceCheckpointStore(
+                string transactionId,
+                string recoveryAuthorityInvariantDigest)
+        {
+            return new ProtectedPayloadWorkspaceCheckpointStore(
+                journalFileSystem,
+                transactionLeaseCoordinator,
+                transactionId,
+                recoveryAuthorityInvariantDigest);
+        }
+
         private T WithExclusiveStoreLock<T>(
             bool createRootIfMissing,
             Func<T> action)

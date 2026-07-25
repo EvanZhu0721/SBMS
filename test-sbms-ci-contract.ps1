@@ -83,6 +83,7 @@ $contractsBlock = [regex]::Match(
     $runner,
     '(?s)\$contracts\s*=\s*@\((?<body>.*?)\)\s*\r?\n')
 Assert-True ($contractsBlock.Success -and $contractsBlock.Groups['body'].Value -match "(?m)^\s*'test-sbms-protected-payload-build-state-machine\.ps1',?\s*$") 'Hosted contract suite must execute the protected payload build state-machine crash matrix.'
+Assert-True ($contractsBlock.Success -and $contractsBlock.Groups['body'].Value -match "(?m)^\s*'test-sbms-protected-payload-workspace-checkpoint-store\.ps1',?\s*$") 'Hosted contract suite must execute the protected payload workspace checkpoint store contract.'
 Assert-True ($runner.Contains("'test-sbms-file-transaction-journal-store.ps1'")) 'Hosted contract suite must execute the production journal store contract.'
 Assert-True ($runner.Contains("'test-sbms-windows-transaction-platform.ps1'")) 'Hosted contract suite must execute the Windows transaction platform contract.'
 Assert-True ($runner.Contains("'test-sbms-windows-mutation-execution.ps1'")) 'Hosted contract suite must execute the Windows mutation execution outcome matrix.'
@@ -93,6 +94,7 @@ Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payloa
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-transaction-executor.ps1') -PathType Leaf) 'Protected payload transaction executor contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-build-contracts.ps1') -PathType Leaf) 'Protected payload build workspace contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-build-state-machine.ps1') -PathType Leaf) 'Protected payload build state-machine contract script is missing.'
+Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-workspace-checkpoint-store.ps1') -PathType Leaf) 'Protected payload workspace checkpoint store contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-windows-transaction-platform.ps1') -PathType Leaf) 'Windows transaction platform contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-windows-mutation-execution.ps1') -PathType Leaf) 'Windows mutation execution contract script is missing.'
 Assert-True ($runner.Contains("'test-sbms-installer-audit.ps1'")) 'Hosted contract suite must execute the read-only installer inventory and ownership tests.'
@@ -112,6 +114,10 @@ $buildStateMachineReferences = [regex]::Matches(
     $setupBuild,
     '\$ProtectedPayloadBuildStateMachineSource')
 Assert-True ($buildStateMachineReferences.Count -eq 2) 'Setup must define and pass the protected payload build state machine source to the compiler.'
+$workspaceCheckpointStoreReferences = [regex]::Matches(
+    $setupBuild,
+    '\$ProtectedPayloadWorkspaceCheckpointStoreSource')
+Assert-True ($workspaceCheckpointStoreReferences.Count -eq 2) 'Setup must define and pass the protected payload workspace checkpoint store source to the compiler.'
 Assert-True (-not $package.Contains('Sort-Object LastWriteTime')) 'Package must not select signing material by timestamp.'
 Assert-True (-not $package.Contains('-Filter "SBMSIndirectDisplay.cer"')) 'Development package must not discover an implicit certificate.'
 

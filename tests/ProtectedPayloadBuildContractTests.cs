@@ -1277,7 +1277,7 @@ namespace SBMSSetup
         {
             var checkpoint = new PayloadBuildWorkspaceCheckpoint
             {
-                SchemaVersion = 2,
+                SchemaVersion = 3,
                 Revision = 11,
                 TransactionId = TransactionId,
                 RecoveryAuthorityInvariantDigest =

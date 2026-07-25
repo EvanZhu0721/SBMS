@@ -13,32 +13,31 @@ if (-not $csc) {
 }
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
-    'SBMS-file-transaction-journal-store-' + [guid]::NewGuid().ToString('N')
+    'SBMS-protected-payload-workspace-checkpoint-store-' +
+    [guid]::NewGuid().ToString('N')
 )
-$output = Join-Path $testRoot 'FileTransactionJournalStoreTests.exe'
+$output = Join-Path $testRoot 'ProtectedPayloadWorkspaceCheckpointStoreTests.exe'
 [void](New-Item -ItemType Directory -Path $testRoot)
 
 try {
     $sourcePaths = @(
         (Join-Path $root 'installer\InstallerTransactionModels.cs'),
         (Join-Path $root 'installer\InstallerJournal.cs'),
-        (Join-Path $root 'installer\WindowsHandleRelativeJournalFileSystem.cs'),
-        (Join-Path $root 'installer\ProtectedEscrowManifestStore.cs'),
         (Join-Path $root 'installer\ProtectedPayloadStoreContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadBuildContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadWorkspaceCheckpointStore.cs'),
-        (Join-Path $root 'installer\FileTransactionJournalStore.cs'),
-        (Join-Path $root 'tests\FileTransactionJournalStoreTests.cs')
+        (Join-Path $root 'tests\ProtectedPayloadWorkspaceCheckpointStoreTests.cs')
     )
     foreach ($sourcePath in $sourcePaths) {
         if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-            throw "Missing file transaction journal source: $sourcePath"
+            throw "Missing protected payload workspace checkpoint store source: $sourcePath"
         }
     }
 
     $compilerArgs = @(
         '/nologo',
         '/target:exe',
+        '/platform:x64',
         '/optimize+',
         "/out:$output",
         '/reference:System.Runtime.Serialization.dll',
@@ -47,13 +46,13 @@ try {
     & $csc @compilerArgs
     $compileExitCode = $LASTEXITCODE
     if ($compileExitCode -ne 0) {
-        throw "File transaction journal test compilation failed with exit code $compileExitCode."
+        throw "Protected payload workspace checkpoint store compilation failed with exit code $compileExitCode."
     }
 
     & $output
     $testExitCode = $LASTEXITCODE
     if ($testExitCode -ne 0) {
-        throw "File transaction journal tests failed with exit code $testExitCode."
+        throw "Protected payload workspace checkpoint store tests failed with exit code $testExitCode."
     }
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
