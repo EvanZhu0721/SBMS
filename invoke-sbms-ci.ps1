@@ -47,6 +47,7 @@ $contracts = @(
     'test-sbms-protected-payload-build-contracts.ps1',
     'test-sbms-protected-payload-build-state-machine.ps1',
     'test-sbms-durable-protected-payload-workspace-model.ps1',
+    'test-sbms-windows-isolated-temp-protected-payload-native-tree.ps1',
     'test-sbms-protected-payload-workspace-checkpoint-store.ps1',
     'test-sbms-file-transaction-journal-store.ps1',
     'test-sbms-windows-transaction-platform.ps1',
