@@ -1,0 +1,106 @@
+name: Hardware evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Observation scenario; product state must already be prepared by the operator.
+        required: true
+        type: choice
+        default: AuditOnly
+        options:
+          - AuditOnly
+          - SingleOutput
+          - MultiGroup
+          - StreamOnly
+          - TopologyRecovery
+      acknowledge_system_state:
+        description: Confirm non-AuditOnly scenarios observe an operator-prepared live SBMS state.
+        required: true
+        type: boolean
+        default: false
+      candidate_sha:
+        description: Full commit SHA of the candidate that produced the tested payload.
+        required: true
+        type: string
+      release_manifest_path:
+        description: Absolute path to the installed candidate SBMS.release.json; required outside AuditOnly.
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbms-hardware-evidence
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: [self-hosted, Windows, sbms-hardware]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.candidate_sha }}
+      - name: Bind checkout to candidate
+        shell: pwsh
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          $candidate = $env:CANDIDATE_SHA.Trim().ToLowerInvariant()
+          if ($candidate -notmatch '^[0-9a-f]{40}$') {
+            throw 'candidate_sha must be a full 40-character Git commit.'
+          }
+          $checkout = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($checkout -cne $candidate) {
+            throw "Checked out '$checkout', expected '$candidate'."
+          }
+      - name: Enforce explicit acknowledgement
+        if: inputs.scenario != 'AuditOnly' && !inputs.acknowledge_system_state
+        shell: pwsh
+        run: throw 'Non-AuditOnly evidence requires explicit acknowledgement.'
+      - name: Require candidate payload provenance
+        if: inputs.scenario != 'AuditOnly' && inputs.release_manifest_path == ''
+        shell: pwsh
+        run: throw 'Non-AuditOnly evidence requires the installed candidate SBMS.release.json path.'
+      - name: Collect observation-only evidence
+        shell: pwsh
+        env:
+          SCENARIO: ${{ inputs.scenario }}
+          RELEASE_MANIFEST_PATH: ${{ inputs.release_manifest_path }}
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP ('hardware-' + $env:SCENARIO)
+          New-Item -ItemType Directory -Path $evidence -Force | Out-Null
+          $candidate = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          $arguments = @{
+            Scenario = $env:SCENARIO
+            EvidenceDirectory = $evidence
+            RepositoryCommit = $candidate
+          }
+          $manifest = $env:RELEASE_MANIFEST_PATH
+          if (-not [string]::IsNullOrWhiteSpace($manifest)) {
+            $arguments.ReleaseManifestPath = $manifest
+          }
+          if ($env:SCENARIO -ne 'AuditOnly') {
+            $arguments.AcknowledgeSystemChanges = $true
+          }
+          $metadata = [ordered]@{
+            schemaVersion = 1
+            workflowRunId = '${{ github.run_id }}'
+            repositoryCommit = $candidate
+            scenario = $env:SCENARIO
+          }
+          $metadata | ConvertTo-Json |
+            Set-Content -LiteralPath (Join-Path $evidence 'workflow-run.json') -Encoding UTF8
+          ./test-sbms-hardware.ps1 @arguments
+      - name: Upload hardware evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hardware-${{ inputs.scenario }}-${{ inputs.candidate_sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/hardware-${{ inputs.scenario }}
+          if-no-files-found: error
+          retention-days: 90

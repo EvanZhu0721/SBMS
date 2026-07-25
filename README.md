@@ -66,6 +66,9 @@ SBMSRecoveryBroker.exe
 
 ## Validation
 
+The hosted clean-build gate, machine-readable reports, and separate manual
+hardware tier are documented in [`docs/CI.md`](docs/CI.md).
+
 Run the source-level GUI checks without changing the driver or display topology:
 
 ```powershell

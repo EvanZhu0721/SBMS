@@ -103,7 +103,6 @@ function New-TestCatalogSignature {
 }
 
 $script:FixtureBinary = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$script:FixtureVersion = (Get-Item -LiteralPath $script:FixtureBinary).VersionInfo
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
     'SBMS-driver-certification-' + [guid]::NewGuid().ToString('N')
 )
@@ -112,6 +111,9 @@ New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 try {
     $driver = Join-Path $testRoot 'driver'
     New-TestDriver -Directory $driver
+    $fixtureVersion = (
+        Get-Item -LiteralPath (Join-Path $driver 'SBMSIndirectDisplay.dll')
+    ).VersionInfo
     $toolchain = [pscustomobject]@{ wdk = 'test-wdk'; msbuild = 'test-msbuild' }
     $commit = '0123456789abcdef0123456789abcdef01234567'
     $fakeSignTool = Join-Path $testRoot 'signtool.exe'
@@ -147,8 +149,8 @@ try {
         SourceCommit = $commit
         BuildCommand = '.\build-sbms-driver.ps1 -Production'
         Toolchain = $toolchain
-        ExpectedWindowsVersion = [string]$script:FixtureVersion.FileVersion
-        ExpectedProductVersion = [string]$script:FixtureVersion.ProductVersion
+        ExpectedWindowsVersion = [string]$fixtureVersion.FileVersion
+        ExpectedProductVersion = [string]$fixtureVersion.ProductVersion
         ExpectedDriverVer = '07/24/2026,0.3.0.0'
         SigningPolicy = $policy
         SignToolPath = $fakeSignTool

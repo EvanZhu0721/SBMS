@@ -298,13 +298,6 @@ if (Test-Path -LiteralPath $driverPackage) {
     throw "Missing built driver package: $driverPackage"
 }
 
-$driverCer = Get-ChildItem -LiteralPath (Join-Path $Root "Windows-driver-samples\video\IndirectDisplay\x64\Release") -Filter "SBMSIndirectDisplay.cer" -File -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
-if ($driverCer) {
-    Copy-Item -LiteralPath $driverCer.FullName -Destination (Join-Path $ReleaseDir "driver") -Force
-}
-
 $historicalReleaseNotesPath = Join-Path $Root "RELEASE_NOTES.md"
 $historicalReleaseNotes = [System.IO.File]::ReadAllText(
     $historicalReleaseNotesPath,

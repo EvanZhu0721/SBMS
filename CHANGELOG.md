@@ -8,6 +8,10 @@ and bug fixes.
 
 ### Added
 
+- Issue #16: pinned Windows 2022 pull-request CI with dual-PowerShell contract
+  tests, clean build/package verification, integration/UI smoke, versioned JSON
+  reports, retained logs, a manual self-hosted hardware-evidence tier, and
+  commit/payload-bound release-candidate qualification.
 - Issue #11: local Obsidian development record and semantic-version workflow.
 - Issue #15: `VERSION`-derived GUI, installer, native, device-host, driver,
   manifest, diagnostic, release-note, and package metadata.
@@ -22,6 +26,9 @@ and bug fixes.
 
 ### Changed
 
+- Issue #16: native and device-host builds resolve Visual Studio through
+  explicit input, `VSINSTALLDIR`, `vswhere`, or standard VS 2022 locations;
+  development packaging no longer discovers a test certificate by timestamp.
 - Issue #13: Start and Stop are generation-safe and idempotent, child shutdown
   returns structured graceful/timeout/kill results, and recovery is bounded to
   three attempts with 250/500/1000 ms backoff inside a 30-second failure window.

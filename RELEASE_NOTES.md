@@ -4,6 +4,12 @@
 
 ### v0.2.0 reliability
 
+- Pull requests now run pinned Windows 2022 gates for dual-PowerShell contracts,
+  a clean all-component package build, process integration, and isolated GUI
+  smoke. Stable JSON summaries and raw logs are retained; real display evidence
+  remains a separate manual self-hosted tier. A candidate qualifies only after
+  its CI, integration, exact payload manifest, and non-AuditOnly hardware report
+  are downloaded, commit-matched, hash-bound, and retained together.
 - Repeated Start and Stop requests now coalesce safely, and stale callbacks from an earlier session cannot mutate a newer run.
 - If SBMS closes unexpectedly, its native and host children are terminated automatically. When window migration is enabled, a separate recovery broker replays the durable journal to return pending windows to the physical desktop.
 - Topology and source recovery now use bounded backoff and a terminal cleanup path instead of retrying indefinitely. Logs retain transition, retry, timeout, exit-code, and terminal-failure details.

@@ -1,3 +1,7 @@
+param(
+    [switch] $RequireCleanSource
+)
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
@@ -48,11 +52,15 @@ function Invoke-Test {
 }
 
 try {
-    & (Join-Path $Root 'package-sbms.ps1') `
-        -SkipProgramFiles `
-        -SkipSourceCopy `
-        -AllowDirtySource `
-        -OutputRoot $TestRoot
+    $packageArguments = @{
+        SkipProgramFiles = $true
+        SkipSourceCopy = $true
+        OutputRoot = $TestRoot
+    }
+    if (-not $RequireCleanSource) {
+        $packageArguments.AllowDirtySource = $true
+    }
+    & (Join-Path $Root 'package-sbms.ps1') @packageArguments
 
     $ReleaseDir = Join-Path $TestRoot $ExpectedBaseName
     $ZipPath = Join-Path $TestRoot $ExpectedZipName

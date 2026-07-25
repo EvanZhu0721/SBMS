@@ -1,3 +1,7 @@
+param(
+    [string] $VsDevCmdPath
+)
+
 $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
@@ -6,7 +10,8 @@ $BuildMetadata = Get-SBMSBuildMetadata -RepositoryRoot $Root
 Assert-SBMSVersionSourceContract -RepositoryRoot $Root
 $Source = Join-Path $Root "device-host\SBMSDeviceHost.cpp"
 $Out = Join-Path $Root "SBMSDeviceHost.exe"
-$VsDevCmd = "C:\BuildTools\Common7\Tools\VsDevCmd.bat"
+Import-Module (Join-Path $Root "build\SBMS.Toolchain.psm1") -Force
+$VsDevCmd = Resolve-SBMSVsDevCmd -ExplicitPath $VsDevCmdPath
 $GeneratedRoot = Join-Path $Root "obj\version\device-host"
 $VersionResource = Join-Path $GeneratedRoot "SBMSDeviceHost.version.rc"
 $VersionResourceBinary = Join-Path $GeneratedRoot "SBMSDeviceHost.version.res"
@@ -17,10 +22,6 @@ Write-SBMSGeneratedFile -LiteralPath $VersionResource -Content (
 if (-not (Test-Path $Source)) {
     throw "Missing source: $Source"
 }
-if (-not (Test-Path $VsDevCmd)) {
-    throw "Missing VsDevCmd: $VsDevCmd"
-}
-
 $Command = "`"$VsDevCmd`" -arch=x64 -host_arch=x64 >nul && rc /nologo /fo`"$VersionResourceBinary`" `"$VersionResource`" && cl /nologo /std:c++17 /EHsc /O2 /MD /W4 /DUNICODE /D_UNICODE `"$Source`" `"$VersionResourceBinary`" /Fe:`"$Out`" swdevice.lib user32.lib"
 cmd.exe /d /c $Command
 
