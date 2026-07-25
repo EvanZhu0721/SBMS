@@ -61,6 +61,7 @@ namespace SBMSSetup
         private const uint FileReadData = 0x0001;
         private const uint FileWriteData = 0x0002;
         private const uint FileAppendData = 0x0004;
+        private const uint FileTraverse = 0x0020;
         private const uint FileReadAttributes = 0x0080;
         private const uint FileWriteAttributes = 0x0100;
         private const uint DeleteAccess = 0x00010000;
@@ -155,8 +156,7 @@ namespace SBMSSetup
                     leafName,
                     FileReadData | FileReadAttributes | ReadControl |
                         Synchronize,
-                    FileOpen,
-                    false);
+                    FileOpen);
                 return leaf != null;
             }
             finally
@@ -203,8 +203,20 @@ namespace SBMSSetup
                     FileNonDirectoryFile | FileWriteThrough |
                         FileSynchronousIoNonAlert | FileOpenReparsePoint,
                     null);
-                VerifyLeafHandle(leaf, true);
-                return new FileStream(leaf, FileAccess.Write, 4096, false);
+                try
+                {
+                    VerifyLeafHandle(leaf, true);
+                    return new FileStream(
+                        leaf,
+                        FileAccess.Write,
+                        4096,
+                        false);
+                }
+                catch
+                {
+                    leaf.Dispose();
+                    throw;
+                }
             }
             finally
             {
@@ -233,8 +245,20 @@ namespace SBMSSetup
                     FileNonDirectoryFile | FileSynchronousIoNonAlert |
                         FileOpenReparsePoint,
                     null);
-                VerifyLeafHandle(leaf, false);
-                return new FileStream(leaf, FileAccess.Read, 4096, false);
+                try
+                {
+                    VerifyLeafHandle(leaf, false);
+                    return new FileStream(
+                        leaf,
+                        FileAccess.Read,
+                        4096,
+                        false);
+                }
+                catch
+                {
+                    leaf.Dispose();
+                    throw;
+                }
             }
             finally
             {
@@ -311,8 +335,7 @@ namespace SBMSSetup
                 parent,
                 GetLeafName(relativePath),
                 DeleteAccess | FileReadAttributes | ReadControl | Synchronize,
-                FileOpen,
-                false))
+                FileOpen))
             {
                 if (leaf == null)
                 {
@@ -416,10 +439,31 @@ namespace SBMSSetup
                         throw new InvalidDataException(
                             "Expected SBMS installer journal directory is missing.");
                     }
+                    SafeFileHandle anchor = null;
                     try
                     {
                         VerifyRestrictedAcl(installer);
-                        installerRootHandle = installer;
+                        byte[] installerId = GetFileId(installer);
+                        anchor = OpenRelative(
+                            sbms,
+                            "Installer",
+                            FileReadData | FileTraverse |
+                                FileReadAttributes | ReadControl | Synchronize,
+                            FileOpen,
+                            FileDirectoryFile |
+                                FileSynchronousIoNonAlert |
+                                FileOpenReparsePoint,
+                            null);
+                        VerifyDirectoryHandle(anchor, installerRootPath);
+                        VerifyRestrictedAcl(anchor);
+                        if (!BytesEqual(installerId, GetFileId(anchor)))
+                        {
+                            throw new InvalidDataException(
+                                "Installer journal anchor changed while reopening.");
+                        }
+                        installerRootHandle = anchor;
+                        anchor = null;
+                        installer.Dispose();
                         installer = null;
                         if (testSeam != null)
                         {
@@ -429,6 +473,10 @@ namespace SBMSSetup
                     }
                     finally
                     {
+                        if (anchor != null)
+                        {
+                            anchor.Dispose();
+                        }
                         if (installer != null)
                         {
                             installer.Dispose();
@@ -587,7 +635,6 @@ namespace SBMSSetup
                     expectedId = GetFileId(source);
                     RenameRelative(
                         source,
-                        parent,
                         GetLeafName(destinationRelativePath),
                         replace);
                     nameCommitted = true;
@@ -681,13 +728,13 @@ namespace SBMSSetup
             SafeFileHandle root,
             string name,
             uint access,
-            uint disposition,
-            bool allowMissing)
+            uint disposition)
         {
             RejectNamedReparse(root, name);
+            SafeFileHandle handle = null;
             try
             {
-                SafeFileHandle handle = OpenRelative(
+                handle = OpenRelative(
                     root,
                     name,
                     access,
@@ -700,14 +747,22 @@ namespace SBMSSetup
             }
             catch (Win32Exception ex)
             {
+                if (handle != null)
+                {
+                    handle.Dispose();
+                }
                 if (ex.NativeErrorCode == ErrorFileNotFound ||
                     ex.NativeErrorCode == ErrorPathNotFound)
                 {
                     return null;
                 }
-                if (allowMissing)
+                throw;
+            }
+            catch
+            {
+                if (handle != null)
                 {
-                    return null;
+                    handle.Dispose();
                 }
                 throw;
             }
@@ -1108,7 +1163,6 @@ namespace SBMSSetup
 
         private void RenameRelative(
             SafeFileHandle source,
-            SafeFileHandle destinationRoot,
             string destinationName,
             bool replace)
         {
@@ -1126,10 +1180,11 @@ namespace SBMSSetup
                     Marshal.WriteByte(buffer, index, 0);
                 }
                 Marshal.WriteInt32(buffer, 0, replace ? 1 : 0);
-                Marshal.WriteIntPtr(
-                    buffer,
-                    rootOffset,
-                    destinationRoot.DangerousGetHandle());
+                // ValidateSameParent has already constrained this operation to
+                // the source directory. A simple name with RootDirectory=NULL
+                // avoids the I/O manager reopening an already anchored target
+                // directory and creating a self-induced sharing conflict.
+                Marshal.WriteIntPtr(buffer, rootOffset, IntPtr.Zero);
                 Marshal.WriteInt32(buffer, lengthOffset, nameBytes.Length);
                 Marshal.Copy(
                     nameBytes,

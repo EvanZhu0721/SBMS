@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -376,12 +377,26 @@ namespace SBMSSetup
                 string source = Path.Combine(installer, "source.bin");
                 string link = Path.Combine(installer, "journal.json");
                 File.WriteAllBytes(source, new byte[] { 1 });
-                if (!CreateHardLink(link, source, IntPtr.Zero))
+                int error = 0;
+                bool created = false;
+                Stopwatch deadline = Stopwatch.StartNew();
+                while (!(created = CreateHardLink(
+                    link,
+                    source,
+                    IntPtr.Zero)))
                 {
-                    int error = System.Runtime.InteropServices.Marshal.
+                    error = System.Runtime.InteropServices.Marshal.
                         GetLastWin32Error();
-                    if (error == 1 || error == 5 || error == 50 ||
-                        error == 1314)
+                    if ((error != 32 && error != 33) ||
+                        deadline.ElapsedMilliseconds >= 2000)
+                    {
+                        break;
+                    }
+                    Thread.Sleep(25);
+                }
+                if (!created)
+                {
+                    if (error == 1 || error == 50)
                     {
                         Console.WriteLine(
                             "CAPABILITY hardlink fixture unavailable error=" +
