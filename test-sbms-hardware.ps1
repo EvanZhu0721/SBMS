@@ -6,6 +6,13 @@ Collects SBMS hardware acceptance evidence without installing or removing driver
 AuditOnly writes evidence and runs the read-only SBMSNative --list audit when available.
 There is intentionally no All scenario. Run SingleOutput, MultiGroup, StreamOnly, and
 TopologyRecovery as four independent invocations so each result has complete evidence.
+
+.PARAMETER RepositoryCommit
+Full commit identifier that produced the candidate under observation.
+
+.PARAMETER ReleaseManifestPath
+Path to the installed candidate SBMS.release.json. When supplied with
+RepositoryCommit, every manifest-bound artifact is verified before observation.
 #>
 [CmdletBinding()]
 param(
@@ -13,6 +20,8 @@ param(
 
     [switch] $AcknowledgeSystemChanges,
     [string] $EvidenceDirectory,
+    [string] $RepositoryCommit,
+    [string] $ReleaseManifestPath,
 
     [ValidateRange(1, 3600)]
     [int] $TimeoutSeconds = 60,
@@ -74,6 +83,7 @@ $script:CopiedSessionLog = $null
 $script:CopiedSessionLogSource = $null
 $script:RecoveryLogMarker = $null
 $script:CopiedSessionLogIsCurrent = $false
+$script:TestedPayload = $null
 
 function Add-Check {
     param(
@@ -107,17 +117,88 @@ function Get-IsAdministrator {
 function Get-ProcessEvidence {
     $names = @('SBMS.exe', 'SBMSGui.exe', 'SBMSDeviceHost.exe', 'SBMSNative.exe', 'DisplayBridge.exe', 'IddSampleApp.exe')
     $rows = @(Get-CimInstance Win32_Process | Where-Object { $names -contains $_.Name } | ForEach-Object {
+        $hash = $null
+        if (-not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
+            (Test-Path -LiteralPath $_.ExecutablePath -PathType Leaf)) {
+            $hash = (Get-FileHash -LiteralPath $_.ExecutablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
         [pscustomobject][ordered]@{
             Name = $_.Name
             ProcessId = [int]$_.ProcessId
             ParentProcessId = [int]$_.ParentProcessId
             SessionId = [int]$_.SessionId
             ExecutablePath = $_.ExecutablePath
+            Sha256 = $hash
             CommandLine = $_.CommandLine
             CreationDate = $_.CreationDate
         }
     })
     return $rows
+}
+
+function Get-TestedPayloadEvidence {
+    param(
+        [string] $ManifestPath,
+        [string] $ExpectedCommit
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ManifestPath) -or
+        [string]::IsNullOrWhiteSpace($ExpectedCommit)) {
+        return $null
+    }
+    $commit = $ExpectedCommit.Trim().ToLowerInvariant()
+    if ($commit -notmatch '^(?:[0-9a-f]{40}|[0-9a-f]{64})$') {
+        throw "RepositoryCommit is invalid: '$ExpectedCommit'."
+    }
+    $fullManifestPath = [IO.Path]::GetFullPath($ManifestPath)
+    if (-not (Test-Path -LiteralPath $fullManifestPath -PathType Leaf)) {
+        throw "Release manifest does not exist: $fullManifestPath"
+    }
+    $payloadRoot = [IO.Path]::GetDirectoryName($fullManifestPath)
+    $manifest = [IO.File]::ReadAllText($fullManifestPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    if ([string]$manifest.source.commit -cne $commit) {
+        throw "Release manifest commit '$($manifest.source.commit)' does not match '$commit'."
+    }
+    if ([bool]$manifest.source.dirty) {
+        throw 'Release manifest is from a dirty source tree.'
+    }
+
+    $verified = New-Object System.Collections.Generic.List[object]
+    foreach ($artifact in @($manifest.artifacts)) {
+        $relative = ([string]$artifact.path).Replace('/', '\')
+        if ([string]::IsNullOrWhiteSpace($relative) -or [IO.Path]::IsPathRooted($relative)) {
+            throw "Release manifest contains an invalid artifact path: '$relative'."
+        }
+        $fullPath = [IO.Path]::GetFullPath((Join-Path $payloadRoot $relative))
+        if (-not (Test-PathWithinRoot -Path $fullPath -Root $payloadRoot) -or
+            -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+            throw "Release artifact is missing or escapes the payload root: '$relative'."
+        }
+        $item = Get-Item -LiteralPath $fullPath
+        $hash = (Get-FileHash -LiteralPath $fullPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ([long]$artifact.bytes -ne [long]$item.Length -or
+            [string]$artifact.sha256 -cne $hash) {
+            throw "Release artifact metadata mismatch: '$relative'."
+        }
+        $verified.Add([pscustomobject][ordered]@{
+            path = ([string]$artifact.path).Replace('\', '/')
+            bytes = [long]$item.Length
+            sha256 = $hash
+        })
+    }
+    if ($verified.Count -eq 0) {
+        throw 'Release manifest contains no artifacts.'
+    }
+
+    return [pscustomobject][ordered]@{
+        sourceCommit = $commit
+        manifestPath = $fullManifestPath
+        manifestSha256 = (Get-FileHash -LiteralPath $fullManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        payloadRoot = $payloadRoot
+        artifactCount = $verified.Count
+        artifactsVerified = $true
+        artifacts = $verified.ToArray()
+    }
 }
 
 function Test-PathWithinRoot {
@@ -147,6 +228,155 @@ function Test-TrustedSbmsExecutablePath {
         return $true
     }
     return $false
+}
+
+function Get-RuntimePayloadBindingEvidence {
+    param(
+        [object[]] $Processes,
+        $TestedPayload
+    )
+    if ($null -eq $TestedPayload) {
+        return $null
+    }
+    $productNames = @('SBMS.exe', 'SBMSGui.exe', 'SBMSDeviceHost.exe', 'SBMSNative.exe')
+    $productProcesses = @($Processes | Where-Object { $_.Name -in $productNames })
+    if ($productProcesses.Count -eq 0) {
+        throw 'No running SBMS product process was available for payload binding.'
+    }
+    $bound = New-Object System.Collections.Generic.List[object]
+    foreach ($process in $productProcesses) {
+        if ([string]::IsNullOrWhiteSpace($process.ExecutablePath) -or
+            [string]::IsNullOrWhiteSpace($process.Sha256) -or
+            -not (Test-PathWithinRoot -Path $process.ExecutablePath -Root $TestedPayload.payloadRoot)) {
+            throw "Running process '$($process.Name)' is outside the tested payload root."
+        }
+        $relative = [IO.Path]::GetFullPath($process.ExecutablePath).Substring(
+            [IO.Path]::GetFullPath([string]$TestedPayload.payloadRoot).TrimEnd('\').Length + 1
+        ).Replace('\', '/')
+        $matches = @($TestedPayload.artifacts | Where-Object {
+            [string]$_.path -ceq $relative -and [string]$_.sha256 -ceq [string]$process.Sha256
+        })
+        if ($matches.Count -ne 1) {
+            throw "Running process '$($process.Name)' does not match the tested manifest artifact '$relative'."
+        }
+        $bound.Add([pscustomobject][ordered]@{
+            name = [string]$process.Name
+            processId = [int]$process.ProcessId
+            path = $relative
+            sha256 = [string]$process.Sha256
+        })
+    }
+    return $bound.ToArray()
+}
+
+function Test-TestedPayloadProcess {
+    param(
+        $Process,
+        $TestedPayload
+    )
+    if ($null -eq $Process -or $null -eq $TestedPayload -or
+        [string]::IsNullOrWhiteSpace($Process.ExecutablePath) -or
+        [string]::IsNullOrWhiteSpace($Process.Sha256) -or
+        -not (Test-PathWithinRoot -Path $Process.ExecutablePath -Root $TestedPayload.payloadRoot)) {
+        return $false
+    }
+    $relative = [IO.Path]::GetFullPath([string]$Process.ExecutablePath).Substring(
+        [IO.Path]::GetFullPath([string]$TestedPayload.payloadRoot).TrimEnd('\').Length + 1
+    ).Replace('\', '/')
+    return @($TestedPayload.artifacts | Where-Object {
+        [string]$_.path -ceq $relative -and [string]$_.sha256 -ceq [string]$Process.Sha256
+    }).Count -eq 1
+}
+
+function Get-TestedPayloadExecutable {
+    param(
+        $TestedPayload,
+        [string] $FileName
+    )
+    $matches = @($TestedPayload.artifacts | Where-Object {
+        [IO.Path]::GetFileName([string]$_.path) -ceq $FileName
+    })
+    if ($matches.Count -ne 1) {
+        throw "Tested payload does not uniquely identify '$FileName'."
+    }
+    $path = [IO.Path]::GetFullPath((Join-Path $TestedPayload.payloadRoot ([string]$matches[0].path).Replace('/', '\')))
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Tested payload executable is missing: $path"
+    }
+    return $path
+}
+
+function Get-ActiveDriverBindingEvidence {
+    param(
+        [object[]] $SignedDrivers,
+        [object[]] $PnpDevices,
+        $TestedPayload
+    )
+    if ($null -eq $TestedPayload) {
+        return $null
+    }
+    $virtualDrivers = @($SignedDrivers | Where-Object {
+        $_.DeviceName -match '(?i)SBMS|IddSample|Indirect Display' -or
+        $_.DeviceID -match '(?i)^(SWD|ROOT)\\(SBMS|IDDSAMPLE)'
+    })
+    if ($virtualDrivers.Count -eq 0) {
+        throw 'No active SBMS indirect-display driver record was found.'
+    }
+    foreach ($driver in $virtualDrivers) {
+        $present = @($PnpDevices | Where-Object {
+            [string]$_.InstanceId -ieq [string]$driver.DeviceID -and
+            [string]$_.Status -ceq 'OK' -and
+            [string]$_.Problem -match '^(?:CM_PROB_NONE|0)$'
+        })
+        if ($present.Count -ne 1) {
+            throw "SBMS driver record '$($driver.DeviceID)' is not bound to one present, problem-free PnP device."
+        }
+    }
+    $publishedNames = @($virtualDrivers | Select-Object -ExpandProperty InfName -Unique)
+    if ($publishedNames.Count -ne 1 -or [string]::IsNullOrWhiteSpace($publishedNames[0])) {
+        throw 'Active SBMS driver records do not resolve one published INF.'
+    }
+    $manifestInfs = @($TestedPayload.artifacts | Where-Object { [string]$_.path -match '(?i)\.inf$' })
+    $manifestDlls = @($TestedPayload.artifacts | Where-Object { [string]$_.path -match '(?i)\.dll$' -and [string]$_.path -match '(?i)driver/' })
+    if ($manifestInfs.Count -ne 1 -or $manifestDlls.Count -ne 1) {
+        throw 'Tested payload does not uniquely identify its driver INF and DLL.'
+    }
+    $publishedInf = Join-Path (Join-Path $env:SystemRoot 'INF') ([string]$publishedNames[0])
+    if (-not (Test-Path -LiteralPath $publishedInf -PathType Leaf)) {
+        throw "Active published INF is missing: $publishedInf"
+    }
+    $publishedHash = (Get-FileHash -LiteralPath $publishedInf -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($publishedHash -cne [string]$manifestInfs[0].sha256) {
+        throw 'Active published INF does not match the tested payload.'
+    }
+
+    $originalInfName = [IO.Path]::GetFileName([string]$manifestInfs[0].path)
+    $driverDllName = [IO.Path]::GetFileName([string]$manifestDlls[0].path)
+    $repositoryRoot = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
+    $matches = New-Object System.Collections.Generic.List[object]
+    foreach ($directory in @(Get-ChildItem -LiteralPath $repositoryRoot -Directory -Filter (($originalInfName.ToLowerInvariant()) + '_*') -ErrorAction SilentlyContinue)) {
+        $inf = Join-Path $directory.FullName $originalInfName
+        $dll = Join-Path $directory.FullName $driverDllName
+        if ((Test-Path -LiteralPath $inf -PathType Leaf) -and
+            (Test-Path -LiteralPath $dll -PathType Leaf)) {
+            $infHash = (Get-FileHash -LiteralPath $inf -Algorithm SHA256).Hash.ToLowerInvariant()
+            $dllHash = (Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($infHash -ceq [string]$manifestInfs[0].sha256 -and
+                $dllHash -ceq [string]$manifestDlls[0].sha256) {
+                $matches.Add([pscustomobject][ordered]@{
+                    publishedInf = [string]$publishedNames[0]
+                    publishedInfSha256 = $publishedHash
+                    driverStoreDirectory = $directory.FullName
+                    driverDllSha256 = $dllHash
+                    deviceIds = @($virtualDrivers | Select-Object -ExpandProperty DeviceID)
+                })
+            }
+        }
+    }
+    if ($matches.Count -eq 0) {
+        throw 'No active Driver Store payload matches the tested candidate INF and DLL.'
+    }
+    return $matches[0]
 }
 
 function Find-NativeExecutable {
@@ -224,9 +454,18 @@ function Get-RuntimeSnapshot {
     $currentSessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
     $processRows = @(Get-ProcessEvidence)
     $processSampleUtc = (Get-Date).ToUniversalTime()
-    $trustedSessionRows = @($processRows | Where-Object {
-        $_.SessionId -eq $currentSessionId -and (Test-TrustedSbmsExecutablePath $_.ExecutablePath)
-    })
+    $payloadBindings = @()
+    if ($Scenario -ne 'AuditOnly' -and $null -ne $script:TestedPayload) {
+        $payloadBindings = @(Get-RuntimePayloadBindingEvidence -Processes $processRows -TestedPayload $script:TestedPayload)
+        $trustedSessionRows = @($processRows | Where-Object {
+            $_.SessionId -eq $currentSessionId -and
+            (Test-TestedPayloadProcess -Process $_ -TestedPayload $script:TestedPayload)
+        })
+    } else {
+        $trustedSessionRows = @($processRows | Where-Object {
+            $_.SessionId -eq $currentSessionId -and (Test-TrustedSbmsExecutablePath $_.ExecutablePath)
+        })
+    }
     $gui = @($trustedSessionRows | Where-Object { $_.Name -in @('SBMS.exe', 'SBMSGui.exe') })
     $guiPids = @($gui | Select-Object -ExpandProperty ProcessId)
     $host = @($trustedSessionRows | Where-Object {
@@ -260,6 +499,7 @@ function Get-RuntimeSnapshot {
         guiProcesses = @($gui | Select-Object Name, ProcessId, ParentProcessId, SessionId, ExecutablePath, CommandLine)
         hostProcesses = @($host | Select-Object Name, ProcessId, ParentProcessId, SessionId, ExecutablePath, CommandLine)
         nativeProcesses = @($native | Select-Object Name, ProcessId, ParentProcessId, SessionId, ExecutablePath, CommandLine)
+        payloadBindings = $payloadBindings
         virtualCount = if (-not $ProcessOnly -and $list.Available -and $list.ExitCode -eq 0) { Get-VirtualDisplayCount $list.Output } else { -1 }
         nativeListAvailable = $list.Available
         nativeListExitCode = $list.ExitCode
@@ -567,6 +807,12 @@ $startedUtc = (Get-Date).ToUniversalTime()
 $environmentInfo = $null
 $osInfo = $null
 $nativeAudit = $null
+$runtimeBinding = $null
+$driverBinding = $null
+$pnp = @()
+$pnpAuditAvailable = $false
+$drivers = @()
+$driverAuditAvailable = $false
 $summaryPath = Join-Path $EvidenceDirectory 'summary.json'
 $exitCode = 0
 
@@ -593,9 +839,28 @@ try {
     Write-EvidenceText 'environment.txt' (($environmentInfo | Format-List | Out-String) + ($osInfo | Format-List | Out-String)) | Out-Null
     Add-Check 'EnvironmentAudit' 'PASS' 'Captured OS, administrator, interactive-session and PowerShell state'
 
+    $script:TestedPayload = Get-TestedPayloadEvidence `
+        -ManifestPath $ReleaseManifestPath `
+        -ExpectedCommit $RepositoryCommit
+    if ($null -eq $script:TestedPayload) {
+        Add-Check 'CandidateProvenance' 'SKIP' 'RepositoryCommit and ReleaseManifestPath were not both supplied; this observation cannot qualify a release candidate'
+    } else {
+        Write-EvidenceText 'tested-payload.json' ($script:TestedPayload | ConvertTo-Json -Depth 8) | Out-Null
+        Add-Check 'CandidateProvenance' 'PASS' ("Verified {0} manifest-bound artifact(s) for commit {1}" -f $script:TestedPayload.artifactCount, $script:TestedPayload.sourceCommit)
+    }
+
     $processEvidence = @(Get-ProcessEvidence)
     Write-EvidenceText 'processes.txt' ($processEvidence | Format-Table -AutoSize) | Out-Null
     Add-Check 'ProcessAudit' 'PASS' ("Captured {0} related running process(es)" -f $processEvidence.Count)
+    if ($Scenario -ne 'AuditOnly') {
+        if ($null -eq $script:TestedPayload) {
+            Add-Check 'RuntimePayloadBinding' 'SKIP' 'Candidate provenance is unavailable.'
+        } else {
+            $runtimeBinding = @(Get-RuntimePayloadBindingEvidence -Processes $processEvidence -TestedPayload $script:TestedPayload)
+            Write-EvidenceText 'runtime-payload-binding.json' ($runtimeBinding | ConvertTo-Json -Depth 6) | Out-Null
+            Add-Check 'RuntimePayloadBinding' 'PASS' ("Bound {0} running product process(es) to the tested payload." -f $runtimeBinding.Count)
+        }
+    }
 
     try {
         $pnp = @(Get-PnpDevice -ErrorAction Stop | Where-Object {
@@ -603,6 +868,7 @@ try {
         } | Select-Object Status, Class, FriendlyName, InstanceId, Problem)
         Write-EvidenceText 'pnp-devices.txt' ($pnp | Format-Table -AutoSize) | Out-Null
         Add-Check 'PnpAudit' 'PASS' ("Captured {0} display/SBMS-related PnP device(s)" -f $pnp.Count)
+        $pnpAuditAvailable = $true
     } catch {
         Write-EvidenceText 'pnp-devices.txt' $_.Exception.ToString() | Out-Null
         Add-Check 'PnpAudit' 'SKIP' $_.Exception.Message
@@ -614,12 +880,29 @@ try {
         } | Select-Object DeviceName, DeviceClass, DriverProviderName, DriverVersion, DriverDate, InfName, IsSigned, DeviceID)
         Write-EvidenceText 'signed-drivers.txt' ($drivers | Format-Table -AutoSize) | Out-Null
         Add-Check 'DriverAudit' 'PASS' ("Captured {0} signed display/SBMS-related driver record(s)" -f $drivers.Count)
+        $driverAuditAvailable = $true
     } catch {
         Write-EvidenceText 'signed-drivers.txt' $_.Exception.ToString() | Out-Null
         Add-Check 'DriverAudit' 'SKIP' $_.Exception.Message
     }
+    if ($Scenario -ne 'AuditOnly') {
+        if ($null -eq $script:TestedPayload -or -not $driverAuditAvailable -or -not $pnpAuditAvailable) {
+            Add-Check 'DriverPayloadBinding' 'SKIP' 'Candidate provenance, signed-driver inventory, or present-device inventory is unavailable.'
+        } else {
+            $driverBinding = Get-ActiveDriverBindingEvidence `
+                -SignedDrivers $drivers `
+                -PnpDevices $pnp `
+                -TestedPayload $script:TestedPayload
+            Write-EvidenceText 'driver-payload-binding.json' ($driverBinding | ConvertTo-Json -Depth 6) | Out-Null
+            Add-Check 'DriverPayloadBinding' 'PASS' ("Bound present device, active INF {0}, and Driver Store DLL to the tested payload." -f $driverBinding.publishedInf)
+        }
+    }
 
-    $script:NativeExe = Find-NativeExecutable
+    $script:NativeExe = if ($Scenario -ne 'AuditOnly' -and $null -ne $script:TestedPayload) {
+        Get-TestedPayloadExecutable -TestedPayload $script:TestedPayload -FileName 'SBMSNative.exe'
+    } else {
+        Find-NativeExecutable
+    }
     $nativeAudit = Invoke-NativeList
     Write-EvidenceText 'native-list.txt' ("Executable: $($script:NativeExe)`r`nExitCode: $($nativeAudit.ExitCode)`r`nError: $($nativeAudit.Error)`r`n`r`n$($nativeAudit.Output)") | Out-Null
     if (-not $nativeAudit.Available) {
@@ -700,7 +983,7 @@ try {
             $_.status -eq 'SKIP' -and
             (
                 ($Scenario -eq 'AuditOnly' -and $_.name -in @('PnpAudit', 'DriverAudit', 'NativeListAudit')) -or
-                ($Scenario -ne 'AuditOnly' -and $_.name -in @('NativeListAudit', 'GuiLogs', 'LifecycleLog'))
+                ($Scenario -ne 'AuditOnly' -and $_.name -in @('CandidateProvenance', 'RuntimePayloadBinding', 'DriverPayloadBinding', 'NativeListAudit', 'GuiLogs', 'LifecycleLog'))
             )
         })
         if ($failed.Count -gt 0) {
@@ -713,6 +996,10 @@ try {
             schemaVersion = 1
             scenario = $Scenario
             result = $result
+            repositoryCommit = if ([string]::IsNullOrWhiteSpace($RepositoryCommit)) { $null } else { $RepositoryCommit.Trim().ToLowerInvariant() }
+            testedPayload = $script:TestedPayload
+            runtimePayloadBinding = $runtimeBinding
+            driverPayloadBinding = $driverBinding
             startedUtc = $startedUtc.ToString('o')
             finishedUtc = (Get-Date).ToUniversalTime().ToString('o')
             observationOnly = $true
