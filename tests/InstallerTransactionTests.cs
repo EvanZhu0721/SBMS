@@ -7,6 +7,15 @@ namespace SBMSSetup
 {
     internal static class InstallerTransactionTests
     {
+        private enum PartialRecoveryComponent
+        {
+            None,
+            Payload,
+            Integrations,
+            Configuration,
+            Escrow
+        }
+
         private static int passed;
         private static int failed;
 
@@ -15,6 +24,8 @@ namespace SBMSSetup
             internal string State = "empty";
             internal InstalledReleaseState Installed = Absent();
             internal bool DriverPresent;
+            internal bool DisplayDegraded;
+            internal PartialRecoveryComponent PartialRecovery;
             internal EscrowEvidence Escrow = EmptyEscrow();
         }
 
@@ -39,6 +50,10 @@ namespace SBMSSetup
             internal bool RequirePreparedIntent;
             internal bool SawCompleteContext;
             internal bool MutateReceivedContext;
+            internal bool DegradeDisplayOnCrash;
+            internal bool ThrowStrictInspectWhenDegraded;
+            internal int FailFinalizeCount;
+            internal bool FailRollbackFinalize;
 
             internal FakePlatform(
                 FakeMachine machine,
@@ -87,7 +102,82 @@ namespace SBMSSetup
                 {
                     throw new InvalidOperationException("inspection failed");
                 }
+                if (machine.DisplayDegraded &&
+                    ThrowStrictInspectWhenDegraded)
+                {
+                    throw new InvalidOperationException(
+                        "strict display capture unavailable");
+                }
                 return Snapshot(machine);
+            }
+
+            public MachineSnapshot InspectForRecovery()
+            {
+                MachineSnapshot snapshot = Snapshot(machine);
+                if (machine.PartialRecovery ==
+                    PartialRecoveryComponent.None)
+                {
+                    return snapshot;
+                }
+                string root = Path.Combine(
+                    Path.GetTempPath(),
+                    "SBMS-partial-recovery");
+                snapshot.Recovery = new RecoveryEvidenceEnvelope
+                {
+                    PayloadState = machine.PartialRecovery ==
+                        PartialRecoveryComponent.Payload
+                            ? RecoveryEvidenceState.Partial
+                            : RecoveryEvidenceState.Complete,
+                    PayloadLocator = Path.Combine(root, "payload"),
+                    IntegrationsState = machine.PartialRecovery ==
+                        PartialRecoveryComponent.Integrations
+                            ? RecoveryEvidenceState.Partial
+                            : RecoveryEvidenceState.Complete,
+                    IntegrationsLocator =
+                        Path.Combine(root, "integrations"),
+                    ConfigurationState = machine.PartialRecovery ==
+                        PartialRecoveryComponent.Configuration
+                            ? RecoveryEvidenceState.Partial
+                            : RecoveryEvidenceState.Complete,
+                    ConfigurationLocator =
+                        Path.Combine(root, "configuration"),
+                    EscrowState = machine.PartialRecovery ==
+                        PartialRecoveryComponent.Escrow
+                            ? RecoveryEvidenceState.Partial
+                            : RecoveryEvidenceState.Complete,
+                    EscrowLocator = Path.Combine(root, "escrow"),
+                    CaptureErrorFingerprint =
+                        "native-partial-success"
+                };
+                if (machine.PartialRecovery ==
+                    PartialRecoveryComponent.Payload)
+                {
+                    snapshot.Payload.Present = true;
+                    snapshot.Payload.ReleaseVersion = String.Empty;
+                    snapshot.Payload.PackageFingerprint =
+                        new String('a', 64);
+                }
+                else if (machine.PartialRecovery ==
+                    PartialRecoveryComponent.Integrations)
+                {
+                    snapshot.Integrations.ShortcutFingerprint =
+                        String.Empty;
+                }
+                else if (machine.PartialRecovery ==
+                    PartialRecoveryComponent.Configuration)
+                {
+                    snapshot.Configuration.ContentFingerprint =
+                        String.Empty;
+                }
+                else if (machine.PartialRecovery ==
+                    PartialRecoveryComponent.Escrow)
+                {
+                    snapshot.Escrow.Complete = false;
+                    snapshot.Escrow.ManifestPath =
+                        Path.Combine(root, "escrow", "manifest.json");
+                    snapshot.Escrow.ManifestSha256 = String.Empty;
+                }
+                return snapshot;
             }
 
             public void Apply(
@@ -169,6 +259,10 @@ namespace SBMSSetup
                 }
                 if (CrashAfter == mutation)
                 {
+                    if (DegradeDisplayOnCrash)
+                    {
+                        machine.DisplayDegraded = true;
+                    }
                     throw new SimulatedTransactionProcessCrashException(
                         "crash-after-" + mutation);
                 }
@@ -213,12 +307,18 @@ namespace SBMSSetup
                 }
             }
 
-            public void Reconcile(
+            public void ApplyCompensation(
+                InstallerCompensationAction action,
                 MachineSnapshot baseline,
                 TransactionJournal journal,
                 MachineSnapshot observed)
             {
-                ++ReconcileCount;
+                EscrowEvidence retainedEscrow =
+                    CloneEscrow(machine.Escrow);
+                if (ReconcileCount == 0)
+                {
+                    ++ReconcileCount;
+                }
                 journal.Context.Validate();
                 if (FailReconcile)
                 {
@@ -231,7 +331,54 @@ namespace SBMSSetup
                         baseline.Payload.PackageFingerprint))
                     : Absent();
                 machine.DriverPresent = baseline.Driver.Present;
-                machine.Escrow = CloneEscrow(baseline.Escrow);
+                machine.DisplayDegraded = false;
+                machine.PartialRecovery =
+                    PartialRecoveryComponent.None;
+                machine.Escrow = retainedEscrow;
+            }
+
+            public void VerifyCompensation(
+                InstallerCompensationAction action,
+                MachineSnapshot baseline,
+                TransactionJournal journal,
+                MachineSnapshot observed)
+            {
+                if (!EquivalentForRollback(baseline, observed))
+                {
+                    throw new InvalidOperationException(
+                        "compensation did not restore baseline");
+                }
+            }
+
+            public string FinalizeCommitted(TransactionJournal journal)
+            {
+                if (FailFinalizeCount > 0)
+                {
+                    --FailFinalizeCount;
+                    throw new IOException("fake-finalization-failure");
+                }
+                machine.Escrow = EmptyEscrow();
+                return "fake-finalization-readback";
+            }
+
+            public bool EquivalentForRollback(
+                MachineSnapshot expected,
+                MachineSnapshot actual)
+            {
+                MachineSnapshot normalized = SnapshotClone.Clone(actual);
+                normalized.Escrow = CloneEscrow(expected.Escrow);
+                return Equivalent(expected, normalized);
+            }
+
+            public string FinalizeRolledBack(TransactionJournal journal)
+            {
+                if (FailRollbackFinalize)
+                {
+                    throw new IOException(
+                        "fake-rollback-finalization-failure");
+                }
+                machine.Escrow = CloneEscrow(journal.Baseline.Escrow);
+                return "fake-rollback-finalization-readback";
             }
 
             public bool Equivalent(
@@ -298,6 +445,39 @@ namespace SBMSSetup
             }
         }
 
+        private sealed class SaveCrashInjector : IJournalSaveFaultInjector
+        {
+            private readonly JournalSaveCrashPoint point;
+            private int remainingFailures;
+
+            internal int RemainingFailures
+            {
+                get { return remainingFailures; }
+            }
+
+            internal SaveCrashInjector(JournalSaveCrashPoint point)
+                : this(point, 1)
+            {
+            }
+
+            internal SaveCrashInjector(
+                JournalSaveCrashPoint point,
+                int failureCount)
+            {
+                this.point = point;
+                remainingFailures = failureCount;
+            }
+
+            public void After(JournalSaveCrashPoint current)
+            {
+                if (remainingFailures > 0 && current == point)
+                {
+                    --remainingFailures;
+                    throw new IOException("save-crash-" + current);
+                }
+            }
+        }
+
         private static void Main()
         {
             Run("authoritative operation classification", TestClassification);
@@ -314,9 +494,17 @@ namespace SBMSSetup
             Run("crash recovery uses journal context and escrow", TestContextCrashRecovery);
             Run("platform receives a detached transaction context", TestDetachedContext);
             Run("journal revision and torn backup are durable", TestJournalRevisionBackup);
+            Run("failed save preserves the caller durable revision", TestSaveRevisionIsolation);
             Run("journal and structured snapshot validation fail closed", TestStrictValidation);
             Run("driver evidence presence semantics fail closed", TestDriverEvidenceSemantics);
             Run("rollback setup failures preserve both errors", TestRollbackFailureEvidence);
+            Run("request flags remove disabled mutations", TestRequestAwarePlan);
+            Run("explicit downgrade commits successfully", TestExplicitDowngradeSuccess);
+            Run("degraded display evidence reaches recovery", TestDegradedDisplayRecovery);
+            Run("committed finalization retries before rotation", TestFinalizationRetry);
+            Run("rollback cleanup failure is recovery failure", TestRollbackCleanupFailure);
+            Run("partial native evidence reaches first compensation", TestPartialRecoveryEnvelope);
+            Run("degraded recovery envelope fails closed on unsafe evidence", TestPartialRecoveryValidation);
 
             Console.WriteLine(
                 "Installer transaction contract: " + passed +
@@ -523,7 +711,9 @@ namespace SBMSSetup
             })
             {
                 foreach (InstallerMutation mutation in
-                    InstallerTransactionPlan.ForOperation(operation))
+                    InstallerTransactionPlan.ForOperation(
+                        operation,
+                        RequestFor(operation).Flags))
                 {
                     foreach (bool after in new[] { false, true })
                     {
@@ -549,6 +739,28 @@ namespace SBMSSetup
                                 Snapshot(machine).EvidenceDigest == baseline,
                                 "Fault did not restore baseline: " +
                                 operation + "/" + mutation + "/" + after);
+                            TransactionJournal rolledBack = store.Load();
+                            foreach (CompensationIntent intent in rolledBack.Intents)
+                            {
+                                Assert(
+                                    !String.IsNullOrWhiteSpace(
+                                        intent.BeforeEvidence),
+                                    "Forward before-evidence was not durable.");
+                                Assert(
+                                    !String.IsNullOrWhiteSpace(
+                                        intent.CompensationBeforeEvidence),
+                                    "Compensation before-evidence was not durable.");
+                                if (after &&
+                                    intent.Mutation == mutation)
+                                {
+                                    Assert(
+                                        !String.Equals(
+                                            intent.BeforeEvidence,
+                                            intent.CompensationBeforeEvidence,
+                                            StringComparison.Ordinal),
+                                        "Rollback overwrote forward before-evidence.");
+                                }
+                            }
                         }
                         finally
                         {
@@ -957,6 +1169,124 @@ namespace SBMSSetup
             }
         }
 
+        private static void TestSaveRevisionIsolation()
+        {
+            foreach (JournalSaveCrashPoint point in new[]
+            {
+                JournalSaveCrashPoint.CandidateFlushed,
+                JournalSaveCrashPoint.PrimaryReadback
+            })
+            {
+                string root = NewRoot();
+                try
+                {
+                    var durableStore = Store(root);
+                    TransactionJournal journal = NewJournal(
+                        InstallOperation.Upgrade,
+                        Snapshot(MachineFor(InstallOperation.Upgrade)),
+                        Release("2.0.0", "two"));
+                    durableStore.Save(journal);
+                    long durableRevision = journal.Revision;
+                    string durableUpdatedUtc = journal.UpdatedUtc;
+                    string durableDigest = journal.ContentDigest;
+
+                    journal.Status = TransactionStatus.Applying;
+                    journal.Intents.Add(new CompensationIntent
+                    {
+                        Sequence = 0,
+                        Mutation = InstallerMutation.CreateEscrow,
+                        Status = CompensationIntentStatus.Prepared,
+                        InverseAction = InstallerTransactionPlan.InverseFor(
+                            InstallerMutation.CreateEscrow),
+                        BeforeEvidence = journal.Baseline.EvidenceDigest,
+                        AfterEvidence = String.Empty,
+                        RecoveryError = String.Empty,
+                        CompensationBeforeEvidence = String.Empty
+                    });
+                    journal.AddStage(
+                        "MutationPrepared",
+                        InstallerMutation.CreateEscrow,
+                        "Prepared",
+                        null,
+                        "");
+
+                    var injector = new SaveCrashInjector(
+                        point,
+                        point == JournalSaveCrashPoint.PrimaryReadback
+                            ? 2
+                            : 1);
+                    var faultingStore = new AtomicTransactionJournalStore(
+                        durableStore.JournalPath,
+                        null,
+                        injector);
+                    AssertAnyThrows(
+                        delegate { faultingStore.Save(journal); },
+                        "Injected journal save crash did not escape.");
+                    Equal(
+                        0,
+                        injector.RemainingFailures,
+                        "Save did not reach every injected failure boundary.");
+                    if (point == JournalSaveCrashPoint.PrimaryReadback)
+                    {
+                        Equal(
+                            durableRevision + 1,
+                            journal.Revision,
+                            "Published revision was not synchronized before readback.");
+                        Assert(
+                            !String.Equals(
+                                durableDigest,
+                                journal.ContentDigest,
+                                StringComparison.Ordinal),
+                            "Published digest was not synchronized before readback.");
+                    }
+
+                    TransactionJournal durable = durableStore.Load();
+                    Equal(
+                        durable.Revision,
+                        journal.Revision,
+                        "Caller revision diverged from the durable revision.");
+                    Equal(
+                        durable.UpdatedUtc,
+                        journal.UpdatedUtc,
+                        "Caller timestamp diverged from durable readback.");
+                    Equal(
+                        durable.ContentDigest,
+                        journal.ContentDigest,
+                        "Caller digest diverged from durable readback.");
+                    if (point == JournalSaveCrashPoint.CandidateFlushed)
+                    {
+                        Equal(
+                            durableRevision,
+                            journal.Revision,
+                            "Pre-publish failure advanced caller revision.");
+                        Equal(
+                            durableUpdatedUtc,
+                            journal.UpdatedUtc,
+                            "Pre-publish failure advanced caller timestamp.");
+                        Equal(
+                            durableDigest,
+                            journal.ContentDigest,
+                            "Pre-publish failure advanced caller digest.");
+                    }
+
+                    journal.Status = TransactionStatus.RecoveryFailed;
+                    journal.RollbackResult = "Failed";
+                    journal.OriginalError = "original";
+                    journal.RecoveryError = "recovery";
+                    durableStore.Save(journal);
+                    TransactionJournal recovery = durableStore.Load();
+                    Assert(
+                        recovery.Status == TransactionStatus.RecoveryFailed &&
+                        recovery.Revision == durable.Revision + 1,
+                        "RecoveryFailed save could not continue after save fault.");
+                }
+                finally
+                {
+                    DeleteRoot(root);
+                }
+            }
+        }
+
         private static void TestDriverEvidenceSemantics()
         {
             AssertAnyThrows(
@@ -1027,7 +1357,7 @@ namespace SBMSSetup
                     platform.FaultBefore = InstallerMutation.CreateEscrow;
                     if (!failSave)
                     {
-                        platform.FailInspectAtCount = 2;
+                        platform.FailInspectAtCount = 3;
                     }
                     AssertAnyThrows(
                         delegate
@@ -1050,6 +1380,287 @@ namespace SBMSSetup
                     DeleteRoot(root);
                 }
             }
+        }
+
+        private static void TestRequestAwarePlan()
+        {
+            var flags = new InstallerRequestFlags
+            {
+                InstallDriver = false,
+                CreateShortcut = false,
+                CreateStartupTask = false,
+                PreserveConfiguration = true
+            };
+            InstallerMutation[] plan = InstallerTransactionPlan.ForOperation(
+                InstallOperation.FreshInstall,
+                flags);
+            Assert(Array.IndexOf(plan, InstallerMutation.StageDriver) < 0 &&
+                   Array.IndexOf(plan, InstallerMutation.ActivateDriver) < 0 &&
+                   Array.IndexOf(plan, InstallerMutation.ApplyIntegrations) < 0,
+                "Disabled request flags produced fake-applied mutations.");
+        }
+
+        private static void TestExplicitDowngradeSuccess()
+        {
+            string root = NewRoot();
+            try
+            {
+                var store = Store(root);
+                var machine = MachineFor(InstallOperation.ExplicitDowngrade);
+                TransactionJournal result = new InstallerTransactionEngine(
+                    new FakePlatform(machine, store),
+                    store).Execute(RequestFor(
+                        InstallOperation.ExplicitDowngrade));
+                Assert(result.Status == TransactionStatus.Committed &&
+                       result.Operation == InstallOperation.ExplicitDowngrade &&
+                       result.FinalizationStatus ==
+                           TransactionFinalizationStatus.Complete &&
+                       machine.Installed.Release.Version == "1.0.0",
+                    "Explicit downgrade did not commit its authoritative target.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestDegradedDisplayRecovery()
+        {
+            string root = NewRoot();
+            try
+            {
+                var store = Store(root);
+                var machine = MachineFor(InstallOperation.Upgrade);
+                var crashing = new FakePlatform(machine, store)
+                {
+                    CrashAfter = InstallerMutation.ActivateDriver,
+                    DegradeDisplayOnCrash = true,
+                    ThrowStrictInspectWhenDegraded = true
+                };
+                AssertCrash(
+                    new InstallerTransactionEngine(crashing, store),
+                    RequestFor(InstallOperation.Upgrade));
+                Assert(machine.DisplayDegraded,
+                    "Crash fixture did not create degraded display evidence.");
+                var resumed = new FakePlatform(machine, store);
+                Assert(new InstallerTransactionEngine(
+                        resumed,
+                        store).RecoverPending(),
+                    "Degraded recovery was not attempted.");
+                Assert(store.Load().Status == TransactionStatus.RolledBack &&
+                       !machine.DisplayDegraded,
+                    "Degraded evidence blocked baseline reconciliation.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestFinalizationRetry()
+        {
+            string root = NewRoot();
+            try
+            {
+                var store = Store(root);
+                var machine = new FakeMachine();
+                var first = new FakePlatform(machine, store)
+                {
+                    FailFinalizeCount = 1
+                };
+                AssertAnyThrows(
+                    delegate
+                    {
+                        new InstallerTransactionEngine(first, store).Execute(
+                            Request(
+                                InstallOperationRequest.Auto,
+                                Release("1.0.0", "one")));
+                    },
+                    "Finalization failure was hidden.");
+                TransactionJournal pending = store.Load();
+                Assert(pending.Status == TransactionStatus.Committed &&
+                       pending.FinalizationStatus ==
+                           TransactionFinalizationStatus.Failed,
+                    "Committed finalization failure is not durable.");
+                var resumed = new FakePlatform(machine, store);
+                Assert(new InstallerTransactionEngine(
+                        resumed,
+                        store).RecoverPending(),
+                    "Committed finalization was not retried.");
+                Assert(store.Load().FinalizationStatus ==
+                           TransactionFinalizationStatus.Complete,
+                    "Finalization retry did not produce durable readback.");
+                store.PrepareForNewTransaction();
+                Assert(store.Load() == null,
+                    "Completed finalization did not permit rotation.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestRollbackCleanupFailure()
+        {
+            string root = NewRoot();
+            try
+            {
+                var store = Store(root);
+                var platform = new FakePlatform(
+                    new FakeMachine(),
+                    store)
+                {
+                    FaultAfter = InstallerMutation.CreateEscrow,
+                    FailRollbackFinalize = true
+                };
+                AssertAnyThrows(
+                    delegate
+                    {
+                        new InstallerTransactionEngine(
+                            platform,
+                            store).Execute(Request(
+                                InstallOperationRequest.Auto,
+                                Release("1.0.0", "one")));
+                    },
+                    "Rollback cleanup failure was hidden.");
+                TransactionJournal failed = store.Load();
+                Assert(failed.Status ==
+                           TransactionStatus.RecoveryFailed &&
+                       failed.RollbackResult == "Failed" &&
+                       failed.RecoveryError.IndexOf(
+                           "rollback-finalization",
+                           StringComparison.Ordinal) >= 0,
+                    "Escrow cleanup failure was mislabeled as a verified rollback.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestPartialRecoveryEnvelope()
+        {
+            foreach (PartialRecoveryComponent component in new[]
+            {
+                PartialRecoveryComponent.Payload,
+                PartialRecoveryComponent.Integrations,
+                PartialRecoveryComponent.Configuration,
+                PartialRecoveryComponent.Escrow
+            })
+            {
+                string root = NewRoot();
+                try
+                {
+                    var store = Store(root);
+                    var machine = MachineFor(InstallOperation.Upgrade);
+                    var crashing = new FakePlatform(machine, store)
+                    {
+                        CrashAfter = InstallerMutation.StagePayload
+                    };
+                    AssertCrash(
+                        new InstallerTransactionEngine(
+                            crashing,
+                            store),
+                        RequestFor(InstallOperation.Upgrade));
+                    machine.PartialRecovery = component;
+                    var resumed = new FakePlatform(machine, store);
+                    Assert(new InstallerTransactionEngine(
+                            resumed,
+                            store).RecoverPending(),
+                        "Partial recovery was not attempted for " +
+                        component + ".");
+                    TransactionJournal journal = store.Load();
+                    Assert(resumed.ReconcileCount > 0 &&
+                           journal.Status ==
+                               TransactionStatus.RolledBack,
+                        "Partial evidence blocked compensation for " +
+                        component + ".");
+                    Assert(journal.Intents[0].BeforeEvidence !=
+                               journal.Intents[0]
+                                   .CompensationBeforeEvidence &&
+                           !String.IsNullOrWhiteSpace(
+                               journal.Intents[0]
+                                   .CompensationBeforeEvidence),
+                        "Compensation overwrote forward evidence for " +
+                        component + ".");
+                }
+                finally
+                {
+                    DeleteRoot(root);
+                }
+            }
+        }
+
+        private static void TestPartialRecoveryValidation()
+        {
+            WindowsPathSafety.RequireCanonicalFullyQualified(
+                @"C:\SBMS\Installer\transactions",
+                "valid drive path");
+            WindowsPathSafety.RequireCanonicalFullyQualified(
+                @"\\server\share\SBMS\Installer",
+                "valid UNC path");
+            foreach (string unsafePath in new[]
+            {
+                @"\Windows\System32",
+                @"C:Windows\System32",
+                @"C:\SBMS\..\Windows",
+                "C:\\SBMS\\" + ((char)1) + "bad",
+                @"\\server\",
+                @"\\server\\share"
+            })
+            {
+                AssertAnyThrows(
+                    delegate
+                    {
+                        WindowsPathSafety.RequireCanonicalFullyQualified(
+                            unsafePath,
+                            "unsafe path");
+                    },
+                    "Unsafe Windows path was accepted: " +
+                    unsafePath);
+            }
+
+            MachineSnapshot value = Snapshot(new FakeMachine());
+            value.Recovery = new RecoveryEvidenceEnvelope
+            {
+                PayloadState = RecoveryEvidenceState.Partial,
+                PayloadLocator = "relative",
+                IntegrationsState = RecoveryEvidenceState.Complete,
+                IntegrationsLocator = String.Empty,
+                ConfigurationState = RecoveryEvidenceState.Complete,
+                ConfigurationLocator = String.Empty,
+                EscrowState = RecoveryEvidenceState.Complete,
+                EscrowLocator = String.Empty,
+                CaptureErrorFingerprint = "partial"
+            };
+            AssertAnyThrows(
+                delegate { value.ValidateForRecovery(); },
+                "Relative degraded locator was accepted.");
+
+            value.Recovery.PayloadLocator =
+                Path.Combine(Path.GetTempPath(), "payload");
+            value.Recovery.EscrowState =
+                RecoveryEvidenceState.Partial;
+            value.Recovery.EscrowLocator =
+                Path.Combine(Path.GetTempPath(), "escrow");
+            value.Escrow.ManifestPath =
+                Path.Combine(Path.GetTempPath(), "manifest.json");
+            value.Escrow.ManifestSha256 = "not-a-sha256";
+            AssertAnyThrows(
+                delegate { value.ValidateForRecovery(); },
+                "Malformed degraded digest was accepted.");
+
+            value.Escrow.ManifestSha256 = String.Empty;
+            value.Escrow.PayloadFileCount = -1;
+            AssertAnyThrows(
+                delegate { value.ValidateForRecovery(); },
+                "Negative degraded evidence count was accepted.");
+
+            value.Escrow.PayloadFileCount = 0;
+            value.ValidateForRecovery();
+            AssertAnyThrows(
+                delegate { value.Validate(); },
+                "Strict validation accepted a degraded envelope.");
         }
 
         private static TransactionJournal NewJournal(
@@ -1199,8 +1810,12 @@ namespace SBMSSetup
                 },
                 Display = new DisplayEvidence
                 {
-                    ActivePhysicalPathCount = 1,
-                    ActivePhysicalPathFingerprint = "display-state:" + state
+                    ActivePhysicalPathCount =
+                        machine.DisplayDegraded ? 0 : 1,
+                    ActivePhysicalPathFingerprint =
+                        machine.DisplayDegraded
+                            ? ""
+                            : "display-state:" + state
                 },
                 Escrow = CloneEscrow(machine.Escrow)
             };

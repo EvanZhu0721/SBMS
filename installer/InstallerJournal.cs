@@ -20,11 +20,28 @@ namespace SBMSSetup
         void After(TerminalRotationCrashPoint point);
     }
 
+    internal enum JournalSaveCrashPoint
+    {
+        CandidateFlushed,
+        PrimaryPublished,
+        PrimaryReadback
+    }
+
+    internal interface IJournalSaveFaultInjector
+    {
+        void After(JournalSaveCrashPoint point);
+    }
+
     internal interface ITransactionJournalStore
     {
         void Save(TransactionJournal journal);
         TransactionJournal Load();
         void PrepareForNewTransaction();
+    }
+
+    internal interface ITransactionExecutionLeaseProvider
+    {
+        IDisposable AcquireTransactionLease();
     }
 
     internal sealed class AtomicTransactionJournalStore : ITransactionJournalStore
@@ -33,15 +50,24 @@ namespace SBMSSetup
         private readonly string backupPath;
         private readonly string historyDirectory;
         private readonly ITerminalRotationFaultInjector rotationFaultInjector;
+        private readonly IJournalSaveFaultInjector saveFaultInjector;
 
         internal AtomicTransactionJournalStore(string journalPath)
-            : this(journalPath, null)
+            : this(journalPath, null, null)
         {
         }
 
         internal AtomicTransactionJournalStore(
             string journalPath,
             ITerminalRotationFaultInjector rotationFaultInjector)
+            : this(journalPath, rotationFaultInjector, null)
+        {
+        }
+
+        internal AtomicTransactionJournalStore(
+            string journalPath,
+            ITerminalRotationFaultInjector rotationFaultInjector,
+            IJournalSaveFaultInjector saveFaultInjector)
         {
             if (String.IsNullOrWhiteSpace(journalPath))
             {
@@ -53,6 +79,7 @@ namespace SBMSSetup
                 Path.GetDirectoryName(this.journalPath),
                 "history");
             this.rotationFaultInjector = rotationFaultInjector;
+            this.saveFaultInjector = saveFaultInjector;
         }
 
         internal string JournalPath
@@ -82,6 +109,13 @@ namespace SBMSSetup
             {
                 throw new InvalidOperationException(
                     "A non-terminal installer transaction blocks a new transaction.");
+            }
+            if (existing.Status == TransactionStatus.Committed &&
+                existing.FinalizationStatus !=
+                    TransactionFinalizationStatus.Complete)
+            {
+                throw new InvalidOperationException(
+                    "Committed installer finalization blocks journal rotation.");
             }
             Directory.CreateDirectory(historyDirectory);
             string archivePath = Path.Combine(
@@ -153,13 +187,15 @@ namespace SBMSSetup
 
         public void Save(TransactionJournal journal)
         {
-            if (journal != null)
+            if (journal == null)
             {
-                journal.UpdatedUtc = DateTime.UtcNow.ToString(
-                    "o",
-                    CultureInfo.InvariantCulture);
+                Validate(journal, false);
             }
-            Validate(journal, false);
+            TransactionJournal candidate = Clone(journal);
+            candidate.UpdatedUtc = DateTime.UtcNow.ToString(
+                "o",
+                CultureInfo.InvariantCulture);
+            Validate(candidate, false);
             string directory = Path.GetDirectoryName(journalPath);
             if (String.IsNullOrWhiteSpace(directory))
             {
@@ -192,30 +228,32 @@ namespace SBMSSetup
             {
                 if (!String.Equals(
                     previous.TransactionId,
-                    journal.TransactionId,
+                    candidate.TransactionId,
                     StringComparison.Ordinal))
                 {
                     throw new InvalidDataException(
                         "Refusing to overwrite a different transaction journal.");
                 }
-                if (journal.Revision != previous.Revision)
+                if (candidate.Revision != previous.Revision)
                 {
                     throw new InvalidDataException(
                         "Refusing to save a stale transaction journal revision.");
                 }
             }
-            else if (journal.Revision != 0)
+            else if (candidate.Revision != 0)
             {
                 throw new InvalidDataException(
                     "Initial transaction journal revision must be zero.");
             }
-            journal.Revision = previous == null
+            candidate.Revision = previous == null
                 ? 1
                 : checked(previous.Revision + 1);
-            journal.ContentDigest = ComputeContentDigest(journal);
+            candidate.ContentDigest = ComputeContentDigest(candidate);
+            bool primaryPublished = false;
             try
             {
-                WriteExact(temporaryPath, journal);
+                WriteExact(temporaryPath, candidate);
+                InjectSaveFault(JournalSaveCrashPoint.CandidateFlushed);
                 if (primaryIsValid)
                 {
                     File.Replace(temporaryPath, journalPath, backupPath, true);
@@ -228,8 +266,24 @@ namespace SBMSSetup
                     }
                     File.Move(temporaryPath, journalPath);
                 }
+                primaryPublished = true;
+                // Once the atomic publication API returns, this revision is
+                // the authoritative primary even if verification IO is
+                // temporarily unavailable. Keep the caller aligned so a
+                // later recovery save cannot present a stale revision.
+                CopyPersistedFields(candidate, journal);
+                InjectSaveFault(JournalSaveCrashPoint.PrimaryPublished);
+                InjectSaveFault(JournalSaveCrashPoint.PrimaryReadback);
                 TransactionJournal persisted = ReadExact(journalPath);
-                ValidateReadback(journal, persisted);
+                ValidateReadback(candidate, persisted);
+            }
+            catch
+            {
+                if (primaryPublished)
+                {
+                    TrySynchronizePublishedCandidate(candidate, journal);
+                }
+                throw;
             }
             finally
             {
@@ -237,6 +291,46 @@ namespace SBMSSetup
                 {
                     File.Delete(temporaryPath);
                 }
+            }
+        }
+
+        private void TrySynchronizePublishedCandidate(
+            TransactionJournal candidate,
+            TransactionJournal caller)
+        {
+            try
+            {
+                InjectSaveFault(JournalSaveCrashPoint.PrimaryReadback);
+                TransactionJournal persisted = ReadExact(journalPath);
+                ValidateReadback(candidate, persisted);
+                CopyPersistedFields(candidate, caller);
+            }
+            catch
+            {
+                // The caller retains the last known durable persistence fields.
+                // A later Save will resolve an invalid primary through the
+                // verified backup rather than inheriting an unverified revision.
+            }
+        }
+
+        private static void CopyPersistedFields(
+            TransactionJournal source,
+            TransactionJournal destination)
+        {
+            destination.Revision = source.Revision;
+            destination.UpdatedUtc = source.UpdatedUtc;
+            destination.ContentDigest = source.ContentDigest;
+        }
+
+        private static TransactionJournal Clone(TransactionJournal journal)
+        {
+            var serializer = new DataContractJsonSerializer(
+                typeof(TransactionJournal));
+            using (var stream = new MemoryStream())
+            {
+                serializer.WriteObject(stream, journal);
+                stream.Position = 0;
+                return serializer.ReadObject(stream) as TransactionJournal;
             }
         }
 
@@ -325,7 +419,7 @@ namespace SBMSSetup
             {
                 throw new InvalidDataException("Transaction journal is empty.");
             }
-            if (journal.SchemaVersion != 2)
+            if (journal.SchemaVersion != 3)
             {
                 throw new InvalidDataException(
                     "Unsupported transaction journal schema.");
@@ -435,7 +529,9 @@ namespace SBMSSetup
             {
                 CompensationIntent intent = journal.Intents[index];
                 InstallerMutation[] expectedPlan =
-                    InstallerTransactionPlan.ForOperation(journal.Operation);
+                    InstallerTransactionPlan.ForOperation(
+                        journal.Operation,
+                        journal.Context.RequestFlags);
                 if (intent == null ||
                     intent.Sequence != index ||
                     index >= expectedPlan.Length ||
@@ -443,7 +539,12 @@ namespace SBMSSetup
                     !Enum.IsDefined(typeof(InstallerMutation), intent.Mutation) ||
                     !Enum.IsDefined(
                         typeof(CompensationIntentStatus),
-                        intent.Status))
+                        intent.Status) ||
+                    !Enum.IsDefined(
+                        typeof(InstallerCompensationAction),
+                        intent.InverseAction) ||
+                    intent.InverseAction !=
+                        InstallerTransactionPlan.InverseFor(intent.Mutation))
                 {
                     throw new InvalidDataException(
                         "Transaction compensation intent is invalid.");
@@ -533,6 +634,18 @@ namespace SBMSSetup
                 throw new InvalidDataException(
                     "RolledBack journal is not verified.");
             }
+            if (journal.Status == TransactionStatus.RolledBack)
+            {
+                foreach (CompensationIntent intent in journal.Intents)
+                {
+                    if (intent.Status !=
+                        CompensationIntentStatus.Restored)
+                    {
+                        throw new InvalidDataException(
+                            "RolledBack journal contains an unverified compensation.");
+                    }
+                }
+            }
             if (journal.Status == TransactionStatus.RecoveryFailed &&
                 (journal.RollbackResult != "Failed" ||
                  String.IsNullOrWhiteSpace(journal.OriginalError) ||
@@ -544,7 +657,9 @@ namespace SBMSSetup
             if (journal.Status == TransactionStatus.Committed)
             {
                 InstallerMutation[] plan =
-                    InstallerTransactionPlan.ForOperation(journal.Operation);
+                    InstallerTransactionPlan.ForOperation(
+                        journal.Operation,
+                        journal.Context.RequestFlags);
                 if (journal.Intents.Count != plan.Length)
                 {
                     throw new InvalidDataException(
@@ -559,6 +674,24 @@ namespace SBMSSetup
                         throw new InvalidDataException(
                             "Committed journal plan is incomplete.");
                     }
+                }
+                if (journal.FinalizationStatus !=
+                        TransactionFinalizationStatus.Pending &&
+                    journal.FinalizationStatus !=
+                        TransactionFinalizationStatus.Complete &&
+                    journal.FinalizationStatus !=
+                        TransactionFinalizationStatus.Failed)
+                {
+                    throw new InvalidDataException(
+                        "Committed journal finalization state is invalid.");
+                }
+                if (journal.FinalizationStatus ==
+                        TransactionFinalizationStatus.Complete &&
+                    String.IsNullOrWhiteSpace(
+                        journal.FinalizationEvidence))
+                {
+                    throw new InvalidDataException(
+                        "Completed finalization has no readback evidence.");
                 }
             }
         }
@@ -638,6 +771,15 @@ namespace SBMSSetup
                     actual.LastError,
                     expected.LastError,
                     StringComparison.Ordinal) ||
+                actual.FinalizationStatus != expected.FinalizationStatus ||
+                !String.Equals(
+                    actual.FinalizationEvidence,
+                    expected.FinalizationEvidence,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    actual.FinalizationError,
+                    expected.FinalizationError,
+                    StringComparison.Ordinal) ||
                 !String.Equals(
                     actual.ContentDigest,
                     expected.ContentDigest,
@@ -652,7 +794,24 @@ namespace SBMSSetup
                 CompensationIntent actualIntent = actual.Intents[index];
                 if (actualIntent.Sequence != expectedIntent.Sequence ||
                     actualIntent.Mutation != expectedIntent.Mutation ||
-                    actualIntent.Status != expectedIntent.Status)
+                    actualIntent.Status != expectedIntent.Status ||
+                    actualIntent.InverseAction != expectedIntent.InverseAction ||
+                    !String.Equals(
+                        actualIntent.BeforeEvidence,
+                        expectedIntent.BeforeEvidence,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        actualIntent.AfterEvidence,
+                        expectedIntent.AfterEvidence,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        actualIntent.RecoveryError,
+                        expectedIntent.RecoveryError,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        actualIntent.CompensationBeforeEvidence,
+                        expectedIntent.CompensationBeforeEvidence,
+                        StringComparison.Ordinal))
                 {
                     throw new InvalidDataException(
                         "Persisted compensation intent mismatch.");
@@ -702,6 +861,14 @@ namespace SBMSSetup
             }
         }
 
+        private void InjectSaveFault(JournalSaveCrashPoint point)
+        {
+            if (saveFaultInjector != null)
+            {
+                saveFaultInjector.After(point);
+            }
+        }
+
         private static string ComputeContentDigest(TransactionJournal journal)
         {
             var builder = new StringBuilder();
@@ -719,12 +886,20 @@ namespace SBMSSetup
             Append(builder, journal.OriginalError);
             Append(builder, journal.RecoveryError);
             Append(builder, journal.RollbackResult);
+            Append(builder, journal.FinalizationStatus.ToString());
+            Append(builder, journal.FinalizationEvidence);
+            Append(builder, journal.FinalizationError);
             Append(builder, journal.Context.InvariantDigest);
             foreach (CompensationIntent intent in journal.Intents)
             {
                 Append(builder, intent.Sequence.ToString(CultureInfo.InvariantCulture));
                 Append(builder, intent.Mutation.ToString());
                 Append(builder, intent.Status.ToString());
+                Append(builder, intent.InverseAction.ToString());
+                Append(builder, intent.BeforeEvidence);
+                Append(builder, intent.AfterEvidence);
+                Append(builder, intent.RecoveryError);
+                Append(builder, intent.CompensationBeforeEvidence);
             }
             foreach (TransactionStageEvent stage in journal.StageEvents)
             {

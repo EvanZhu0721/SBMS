@@ -6,6 +6,150 @@ using System.Runtime.Serialization;
 
 namespace SBMSSetup
 {
+    internal static class WindowsPathSafety
+    {
+        internal static void RequireCanonicalFullyQualified(
+            string value,
+            string label)
+        {
+            if (String.IsNullOrWhiteSpace(value) ||
+                ContainsControl(value) ||
+                value.IndexOf('/') >= 0 ||
+                value.StartsWith(@"\\?\", StringComparison.Ordinal) ||
+                value.StartsWith(@"\\.\", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    label + " is not a canonical Windows path.");
+            }
+
+            bool driveAbsolute =
+                value.Length >= 3 &&
+                Char.IsLetter(value[0]) &&
+                value[1] == ':' &&
+                value[2] == '\\';
+            bool unc = value.StartsWith(
+                @"\\",
+                StringComparison.Ordinal);
+            if (!driveAbsolute && !unc)
+            {
+                throw new InvalidOperationException(
+                    label + " is not fully qualified.");
+            }
+
+            string[] segments;
+            int firstSegment;
+            if (driveAbsolute)
+            {
+                segments = value.Substring(3).Split('\\');
+                firstSegment = 0;
+            }
+            else
+            {
+                segments = value.Substring(2).Split('\\');
+                if (segments.Length < 2 ||
+                    String.IsNullOrWhiteSpace(segments[0]) ||
+                    String.IsNullOrWhiteSpace(segments[1]))
+                {
+                    throw new InvalidOperationException(
+                        label + " UNC server/share is incomplete.");
+                }
+                firstSegment = 0;
+            }
+            for (int index = firstSegment;
+                 index < segments.Length;
+                 ++index)
+            {
+                string segment = segments[index];
+                bool trailingEmpty =
+                    index == segments.Length - 1 &&
+                    segment.Length == 0;
+                if ((!trailingEmpty && segment.Length == 0) ||
+                    segment == "." ||
+                    segment == ".." ||
+                    segment.IndexOf(':') >= 0)
+                {
+                    throw new InvalidOperationException(
+                        label + " is not canonical.");
+                }
+            }
+
+            string canonical;
+            try
+            {
+                canonical = Path.GetFullPath(value);
+            }
+            catch (Exception failure)
+            {
+                throw new InvalidOperationException(
+                    label + " is not a valid Windows path.",
+                    failure);
+            }
+            if (!String.Equals(
+                TrimDirectorySeparator(canonical),
+                TrimDirectorySeparator(value),
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    label + " is not canonical.");
+            }
+        }
+
+        internal static bool ContainsControl(string value)
+        {
+            if (value == null)
+            {
+                return false;
+            }
+            foreach (char character in value)
+            {
+                if (Char.IsControl(character))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        internal static void RequireCanonicalRelative(
+            string value,
+            string label)
+        {
+            if (String.IsNullOrWhiteSpace(value) ||
+                ContainsControl(value) ||
+                value.IndexOf('/') >= 0 ||
+                value[0] == '\\' ||
+                (value.Length >= 2 && value[1] == ':'))
+            {
+                throw new InvalidOperationException(
+                    label + " is not a canonical relative Windows path.");
+            }
+            string[] segments = value.Split('\\');
+            foreach (string segment in segments)
+            {
+                if (segment.Length == 0 ||
+                    segment == "." ||
+                    segment == ".." ||
+                    segment.IndexOf(':') >= 0)
+                {
+                    throw new InvalidOperationException(
+                        label + " is not canonical.");
+                }
+            }
+        }
+
+        private static string TrimDirectorySeparator(string value)
+        {
+            if (value.Length == 3 &&
+                Char.IsLetter(value[0]) &&
+                value[1] == ':' &&
+                value[2] == '\\')
+            {
+                return value;
+            }
+            return value.TrimEnd('\\');
+        }
+    }
+
     internal enum InstallOperation
     {
         FreshInstall,
@@ -50,7 +194,38 @@ namespace SBMSSetup
     internal enum CompensationIntentStatus
     {
         Prepared,
-        Applied
+        Applied,
+        RestorePrepared,
+        Restored,
+        RestoreFailed
+    }
+
+    internal enum InstallerCompensationAction
+    {
+        RetainEscrowUntilBaselineVerified,
+        RemoveTransactionPayloadStaging,
+        RemoveTransactionDriverStaging,
+        RestoreBaselinePayload,
+        RestoreBaselineDeviceBindings,
+        RestoreBaselineIntegrations,
+        RestoreBaselineOwnedAssets,
+        RestoreBaselineDevices,
+        RestoreBaselineDriverPackages
+    }
+
+    internal enum TransactionFinalizationStatus
+    {
+        NotRequired,
+        Pending,
+        Complete,
+        Failed
+    }
+
+    internal enum RecoveryEvidenceState
+    {
+        Complete,
+        Partial,
+        Unavailable
     }
 
     [DataContract]
@@ -212,6 +387,9 @@ namespace SBMSSetup
         [DataMember(Order = 7)]
         internal int ProblemCode;
 
+        [DataMember(Order = 8)]
+        internal bool PackagePresent;
+
         internal void Validate()
         {
             if (Present)
@@ -221,18 +399,37 @@ namespace SBMSSetup
                 Require(BindingFingerprint, "driver binding fingerprint");
                 Require(DeviceInstanceFingerprint, "device instance fingerprint");
             }
-            else if (!String.IsNullOrEmpty(PackageSetFingerprint) ||
+            else if ((!PackagePresent &&
+                      !String.IsNullOrEmpty(PackageSetFingerprint)) ||
                      !String.IsNullOrEmpty(ActivePublishedInf) ||
                      !String.IsNullOrEmpty(BindingFingerprint) ||
                      !String.IsNullOrEmpty(DeviceInstanceFingerprint))
             {
                 throw new InvalidOperationException(
-                    "Absent driver carries package or binding identity.");
+                    "Driver evidence carries an inconsistent package or binding identity.");
+            }
+            if (PackagePresent)
+            {
+                Require(PackageSetFingerprint, "driver package set fingerprint");
             }
             if (!Present && (HasProblem || ProblemCode != 0))
             {
                 throw new InvalidOperationException(
                     "Absent driver carries a device problem state.");
+            }
+            if (HasProblem != (ProblemCode != 0))
+            {
+                throw new InvalidOperationException(
+                    "Driver problem flag and problem code disagree.");
+            }
+        }
+
+        internal void ValidateForRecovery()
+        {
+            if (PackagePresent && String.IsNullOrWhiteSpace(PackageSetFingerprint))
+            {
+                throw new InvalidOperationException(
+                    "Recovery driver package fingerprint is missing.");
             }
             if (HasProblem != (ProblemCode != 0))
             {
@@ -291,6 +488,9 @@ namespace SBMSSetup
                     throw new InvalidOperationException(
                         "Complete escrow manifest evidence is invalid.");
                 }
+                WindowsPathSafety.RequireCanonicalFullyQualified(
+                    ManifestPath,
+                    "Complete escrow manifest path");
             }
             else if (!String.IsNullOrEmpty(ManifestPath) ||
                      !String.IsNullOrEmpty(ManifestSha256) ||
@@ -301,6 +501,107 @@ namespace SBMSSetup
             {
                 throw new InvalidOperationException(
                     "Incomplete escrow carries completed evidence.");
+            }
+        }
+    }
+
+    internal enum EscrowRetentionState
+    {
+        Building,
+        SealedForRollback,
+        FinalizationPending,
+        Finalized,
+        RetainedAfterCleanupFailure
+    }
+
+    [DataContract]
+    internal sealed class EscrowContentEntry
+    {
+        [DataMember(Order = 1)]
+        internal string RelativePath;
+
+        [DataMember(Order = 2)]
+        internal long Length;
+
+        [DataMember(Order = 3)]
+        internal string Sha256;
+
+        internal void Validate()
+        {
+            if (Length < 0 ||
+                String.IsNullOrWhiteSpace(Sha256))
+            {
+                throw new InvalidOperationException(
+                    "Escrow content entry is unsafe or incomplete.");
+            }
+            WindowsPathSafety.RequireCanonicalRelative(
+                RelativePath,
+                "Escrow content entry path");
+        }
+    }
+
+    [DataContract]
+    internal sealed class EscrowManifest
+    {
+        [DataMember(Order = 1)]
+        internal int SchemaVersion;
+
+        [DataMember(Order = 2)]
+        internal string TransactionId;
+
+        [DataMember(Order = 3)]
+        internal string BaselineEvidenceDigest;
+
+        [DataMember(Order = 4)]
+        internal List<EscrowContentEntry> Content;
+
+        [DataMember(Order = 5)]
+        internal bool Sealed;
+
+        [DataMember(Order = 6)]
+        internal string SealedUtc;
+
+        [DataMember(Order = 7)]
+        internal EscrowRetentionState RetentionState;
+
+        [DataMember(Order = 8)]
+        internal string FinalizationEvidence;
+
+        internal EscrowManifest()
+        {
+            Content = new List<EscrowContentEntry>();
+        }
+
+        internal void Validate()
+        {
+            Guid parsed;
+            if (SchemaVersion != 1 ||
+                !Guid.TryParseExact(TransactionId, "N", out parsed) ||
+                String.IsNullOrWhiteSpace(BaselineEvidenceDigest) ||
+                Content == null)
+            {
+                throw new InvalidOperationException(
+                    "Escrow manifest identity is incomplete.");
+            }
+            foreach (EscrowContentEntry entry in Content)
+            {
+                if (entry == null)
+                {
+                    throw new InvalidOperationException(
+                        "Escrow manifest contains a null content entry.");
+                }
+                entry.Validate();
+            }
+            if (Sealed && String.IsNullOrWhiteSpace(SealedUtc))
+            {
+                throw new InvalidOperationException(
+                    "Sealed escrow has no durable seal timestamp.");
+            }
+            if (!Sealed &&
+                RetentionState != EscrowRetentionState.Building)
+            {
+                throw new InvalidOperationException(
+                    "Unsealed escrow cannot enter retention lifecycle.");
             }
         }
     }
@@ -375,6 +676,114 @@ namespace SBMSSetup
                     "Active physical path fingerprint is missing.");
             }
         }
+
+        internal void ValidateForRecovery()
+        {
+            if (ActivePhysicalPathCount < 0)
+            {
+                throw new InvalidOperationException(
+                    "Active physical display path count is invalid.");
+            }
+            if (ActivePhysicalPathCount > 0 &&
+                String.IsNullOrWhiteSpace(ActivePhysicalPathFingerprint))
+            {
+                throw new InvalidOperationException(
+                    "Active physical path fingerprint is missing.");
+            }
+        }
+    }
+
+    [DataContract]
+    internal sealed class RecoveryEvidenceEnvelope
+    {
+        [DataMember(Order = 1)]
+        internal RecoveryEvidenceState PayloadState;
+
+        [DataMember(Order = 2)]
+        internal string PayloadLocator;
+
+        [DataMember(Order = 3)]
+        internal RecoveryEvidenceState IntegrationsState;
+
+        [DataMember(Order = 4)]
+        internal string IntegrationsLocator;
+
+        [DataMember(Order = 5)]
+        internal RecoveryEvidenceState ConfigurationState;
+
+        [DataMember(Order = 6)]
+        internal string ConfigurationLocator;
+
+        [DataMember(Order = 7)]
+        internal RecoveryEvidenceState EscrowState;
+
+        [DataMember(Order = 8)]
+        internal string EscrowLocator;
+
+        [DataMember(Order = 9)]
+        internal string CaptureErrorFingerprint;
+
+        internal void Validate()
+        {
+            ValidateComponent(
+                PayloadState,
+                PayloadLocator,
+                "payload");
+            ValidateComponent(
+                IntegrationsState,
+                IntegrationsLocator,
+                "integrations");
+            ValidateComponent(
+                ConfigurationState,
+                ConfigurationLocator,
+                "configuration");
+            ValidateComponent(
+                EscrowState,
+                EscrowLocator,
+                "escrow");
+            if (CaptureErrorFingerprint == null ||
+                ContainsControl(CaptureErrorFingerprint))
+            {
+                throw new InvalidOperationException(
+                    "Recovery capture error fingerprint is invalid.");
+            }
+        }
+
+        private static void ValidateComponent(
+            RecoveryEvidenceState state,
+            string locator,
+            string label)
+        {
+            if (!Enum.IsDefined(typeof(RecoveryEvidenceState), state))
+            {
+                throw new InvalidOperationException(
+                    "Recovery " + label + " state is invalid.");
+            }
+            if (state == RecoveryEvidenceState.Complete)
+            {
+                if (locator != null && ContainsControl(locator))
+                {
+                    throw new InvalidOperationException(
+                        "Recovery " + label + " locator is invalid.");
+                }
+                return;
+            }
+            if (String.IsNullOrWhiteSpace(locator) ||
+                WindowsPathSafety.ContainsControl(locator))
+            {
+                throw new InvalidOperationException(
+                    "Degraded recovery " + label +
+                    " evidence has no safe absolute locator.");
+            }
+            WindowsPathSafety.RequireCanonicalFullyQualified(
+                locator,
+                "Degraded recovery " + label + " locator");
+        }
+
+        internal static bool ContainsControl(string value)
+        {
+            return WindowsPathSafety.ContainsControl(value);
+        }
     }
 
     [DataContract]
@@ -398,6 +807,9 @@ namespace SBMSSetup
         [DataMember(Order = 6)]
         internal EscrowEvidence Escrow;
 
+        [DataMember(Order = 7)]
+        internal RecoveryEvidenceEnvelope Recovery;
+
         internal void Validate()
         {
             if (Payload == null || Driver == null || Integrations == null ||
@@ -412,6 +824,20 @@ namespace SBMSSetup
             Configuration.Validate();
             Display.Validate();
             Escrow.Validate();
+            if (Recovery != null)
+            {
+                Recovery.Validate();
+                if (Recovery.PayloadState != RecoveryEvidenceState.Complete ||
+                    Recovery.IntegrationsState !=
+                        RecoveryEvidenceState.Complete ||
+                    Recovery.ConfigurationState !=
+                        RecoveryEvidenceState.Complete ||
+                    Recovery.EscrowState != RecoveryEvidenceState.Complete)
+                {
+                    throw new InvalidOperationException(
+                        "Strict snapshot validation rejects degraded recovery evidence.");
+                }
+            }
             if (Payload.Present)
             {
                 if (String.IsNullOrWhiteSpace(Payload.ReleaseVersion) ||
@@ -429,6 +855,165 @@ namespace SBMSSetup
             }
         }
 
+        // Recovery must be able to inspect damage caused by a partial native
+        // operation. It validates the evidence envelope without requiring the
+        // healthy display/device invariants enforced for normal commit.
+        internal void ValidateForRecovery()
+        {
+            if (Payload == null || Driver == null || Integrations == null ||
+                Configuration == null || Display == null || Escrow == null)
+            {
+                throw new InvalidOperationException(
+                    "Recovery snapshot structured evidence is incomplete.");
+            }
+            RecoveryEvidenceEnvelope envelope = Recovery ??
+                new RecoveryEvidenceEnvelope
+                {
+                    PayloadState = RecoveryEvidenceState.Complete,
+                    PayloadLocator = String.Empty,
+                    IntegrationsState = RecoveryEvidenceState.Complete,
+                    IntegrationsLocator = String.Empty,
+                    ConfigurationState = RecoveryEvidenceState.Complete,
+                    ConfigurationLocator = String.Empty,
+                    EscrowState = RecoveryEvidenceState.Complete,
+                    EscrowLocator = String.Empty,
+                    CaptureErrorFingerprint = String.Empty
+                };
+            envelope.Validate();
+            if (envelope.PayloadState == RecoveryEvidenceState.Complete)
+            {
+                Payload.Validate();
+            }
+            else
+            {
+                ValidatePartialPayload(Payload);
+            }
+            Driver.ValidateForRecovery();
+            if (envelope.IntegrationsState ==
+                RecoveryEvidenceState.Complete)
+            {
+                Integrations.Validate();
+            }
+            else
+            {
+                ValidatePartialText(
+                    Integrations.ShortcutFingerprint,
+                    "shortcut");
+                ValidatePartialText(
+                    Integrations.StartupTaskFingerprint,
+                    "startup task");
+            }
+            if (envelope.ConfigurationState ==
+                RecoveryEvidenceState.Complete)
+            {
+                Configuration.Validate();
+            }
+            else
+            {
+                ValidatePartialText(
+                    Configuration.SchemaVersion,
+                    "configuration schema");
+                ValidatePartialText(
+                    Configuration.ContentFingerprint,
+                    "configuration fingerprint");
+            }
+            Display.ValidateForRecovery();
+            if (envelope.EscrowState == RecoveryEvidenceState.Complete)
+            {
+                Escrow.Validate();
+            }
+            else
+            {
+                ValidatePartialEscrow(Escrow);
+            }
+        }
+
+        private static void ValidatePartialPayload(PayloadEvidence payload)
+        {
+            ValidatePartialText(
+                payload.ReleaseVersion,
+                "payload release version");
+            ValidatePartialText(
+                payload.PackageFingerprint,
+                "payload package fingerprint");
+        }
+
+        private static void ValidatePartialEscrow(EscrowEvidence escrow)
+        {
+            if (escrow.DriverPackageCount < 0 ||
+                escrow.PayloadFileCount < 0 ||
+                escrow.ConfigurationFileCount < 0 ||
+                escrow.IntegrationCount < 0)
+            {
+                throw new InvalidOperationException(
+                    "Recovery escrow evidence count is invalid.");
+            }
+            if (escrow.ManifestPath == null ||
+                WindowsPathSafety.ContainsControl(
+                    escrow.ManifestPath) ||
+                (!String.IsNullOrEmpty(escrow.ManifestPath) &&
+                 !IsCanonicalFullyQualified(escrow.ManifestPath)))
+            {
+                throw new InvalidOperationException(
+                    "Recovery escrow manifest path is invalid.");
+            }
+            if (escrow.ManifestSha256 == null ||
+                (escrow.ManifestSha256.Length != 0 &&
+                 !IsSha256(escrow.ManifestSha256)))
+            {
+                throw new InvalidOperationException(
+                    "Recovery escrow manifest digest is invalid.");
+            }
+        }
+
+        private static bool IsCanonicalFullyQualified(string value)
+        {
+            try
+            {
+                WindowsPathSafety.RequireCanonicalFullyQualified(
+                    value,
+                    "Recovery escrow manifest path");
+                return true;
+            }
+            catch (InvalidOperationException)
+            {
+                return false;
+            }
+        }
+
+        private static void ValidatePartialText(
+            string value,
+            string label)
+        {
+            if (value == null ||
+                RecoveryEvidenceEnvelope.ContainsControl(value) ||
+                (value.Length > 0 &&
+                 String.IsNullOrWhiteSpace(value)))
+            {
+                throw new InvalidOperationException(
+                    "Recovery " + label + " evidence is invalid.");
+            }
+        }
+
+        private static bool IsSha256(string value)
+        {
+            if (value == null || value.Length != 64)
+            {
+                return false;
+            }
+            foreach (char character in value)
+            {
+                bool digit = character >= '0' && character <= '9';
+                bool lower = character >= 'a' && character <= 'f';
+                bool upper = character >= 'A' && character <= 'F';
+                if (!digit && !lower && !upper)
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         internal string EvidenceDigest
         {
             get
@@ -440,6 +1025,7 @@ namespace SBMSSetup
                     Payload.ReleaseVersion,
                     Payload.PackageFingerprint,
                     Driver.PackageSetFingerprint,
+                    Driver.PackagePresent.ToString(CultureInfo.InvariantCulture),
                     Driver.Present.ToString(CultureInfo.InvariantCulture),
                     Driver.ActivePublishedInf,
                     Driver.BindingFingerprint,
@@ -459,6 +1045,64 @@ namespace SBMSSetup
                     Escrow.PayloadFileCount.ToString(CultureInfo.InvariantCulture),
                     Escrow.ConfigurationFileCount.ToString(CultureInfo.InvariantCulture),
                     Escrow.IntegrationCount.ToString(CultureInfo.InvariantCulture)
+                });
+            }
+        }
+
+        internal string RecoveryEvidenceDigest
+        {
+            get
+            {
+                ValidateForRecovery();
+                return String.Join("|", new[]
+                {
+                    Payload.Present.ToString(CultureInfo.InvariantCulture),
+                    Payload.ReleaseVersion ?? String.Empty,
+                    Payload.PackageFingerprint ?? String.Empty,
+                    Driver.PackageSetFingerprint ?? String.Empty,
+                    Driver.PackagePresent.ToString(CultureInfo.InvariantCulture),
+                    Driver.Present.ToString(CultureInfo.InvariantCulture),
+                    Driver.ActivePublishedInf ?? String.Empty,
+                    Driver.BindingFingerprint ?? String.Empty,
+                    Driver.DeviceInstanceFingerprint ?? String.Empty,
+                    Driver.HasProblem.ToString(CultureInfo.InvariantCulture),
+                    Driver.ProblemCode.ToString(CultureInfo.InvariantCulture),
+                    Integrations.ShortcutFingerprint ?? String.Empty,
+                    Integrations.StartupTaskFingerprint ?? String.Empty,
+                    Configuration.SchemaVersion ?? String.Empty,
+                    Configuration.ContentFingerprint ?? String.Empty,
+                    Display.ActivePhysicalPathCount.ToString(CultureInfo.InvariantCulture),
+                    Display.ActivePhysicalPathFingerprint ?? String.Empty,
+                    Escrow.ManifestPath ?? String.Empty,
+                    Escrow.ManifestSha256 ?? String.Empty,
+                    Escrow.Complete.ToString(CultureInfo.InvariantCulture),
+                    Escrow.DriverPackageCount.ToString(
+                        CultureInfo.InvariantCulture),
+                    Escrow.PayloadFileCount.ToString(
+                        CultureInfo.InvariantCulture),
+                    Escrow.ConfigurationFileCount.ToString(
+                        CultureInfo.InvariantCulture),
+                    Escrow.IntegrationCount.ToString(
+                        CultureInfo.InvariantCulture),
+                    Recovery == null
+                        ? RecoveryEvidenceState.Complete.ToString()
+                        : Recovery.PayloadState.ToString(),
+                    Recovery == null ? String.Empty : Recovery.PayloadLocator,
+                    Recovery == null
+                        ? RecoveryEvidenceState.Complete.ToString()
+                        : Recovery.IntegrationsState.ToString(),
+                    Recovery == null ? String.Empty : Recovery.IntegrationsLocator,
+                    Recovery == null
+                        ? RecoveryEvidenceState.Complete.ToString()
+                        : Recovery.ConfigurationState.ToString(),
+                    Recovery == null ? String.Empty : Recovery.ConfigurationLocator,
+                    Recovery == null
+                        ? RecoveryEvidenceState.Complete.ToString()
+                        : Recovery.EscrowState.ToString(),
+                    Recovery == null ? String.Empty : Recovery.EscrowLocator,
+                    Recovery == null
+                        ? String.Empty
+                        : Recovery.CaptureErrorFingerprint
                 });
             }
         }
@@ -498,11 +1142,9 @@ namespace SBMSSetup
                 throw new InvalidOperationException(
                     "Transaction context identity is not an N-format GUID.");
             }
-            if (!Path.IsPathRooted(EscrowLocator))
-            {
-                throw new InvalidOperationException(
-                    "Escrow locator is not an absolute path.");
-            }
+            WindowsPathSafety.RequireCanonicalFullyQualified(
+                EscrowLocator,
+                "Escrow locator");
             string normalizedEscrow = EscrowLocator.TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar);
@@ -581,7 +1223,8 @@ namespace SBMSSetup
                     BindingFingerprint = source.Driver.BindingFingerprint,
                     DeviceInstanceFingerprint = source.Driver.DeviceInstanceFingerprint,
                     HasProblem = source.Driver.HasProblem,
-                    ProblemCode = source.Driver.ProblemCode
+                    ProblemCode = source.Driver.ProblemCode,
+                    PackagePresent = source.Driver.PackagePresent
                 },
                 Integrations = new IntegrationEvidence
                 {
@@ -608,7 +1251,26 @@ namespace SBMSSetup
                     PayloadFileCount = source.Escrow.PayloadFileCount,
                     ConfigurationFileCount = source.Escrow.ConfigurationFileCount,
                     IntegrationCount = source.Escrow.IntegrationCount
-                }
+                },
+                Recovery = source.Recovery == null
+                    ? null
+                    : new RecoveryEvidenceEnvelope
+                    {
+                        PayloadState = source.Recovery.PayloadState,
+                        PayloadLocator = source.Recovery.PayloadLocator,
+                        IntegrationsState =
+                            source.Recovery.IntegrationsState,
+                        IntegrationsLocator =
+                            source.Recovery.IntegrationsLocator,
+                        ConfigurationState =
+                            source.Recovery.ConfigurationState,
+                        ConfigurationLocator =
+                            source.Recovery.ConfigurationLocator,
+                        EscrowState = source.Recovery.EscrowState,
+                        EscrowLocator = source.Recovery.EscrowLocator,
+                        CaptureErrorFingerprint =
+                            source.Recovery.CaptureErrorFingerprint
+                    }
             };
         }
     }
@@ -624,6 +1286,21 @@ namespace SBMSSetup
 
         [DataMember(Order = 3)]
         internal CompensationIntentStatus Status;
+
+        [DataMember(Order = 4)]
+        internal InstallerCompensationAction InverseAction;
+
+        [DataMember(Order = 5)]
+        internal string BeforeEvidence;
+
+        [DataMember(Order = 6)]
+        internal string AfterEvidence;
+
+        [DataMember(Order = 7)]
+        internal string RecoveryError;
+
+        [DataMember(Order = 8)]
+        internal string CompensationBeforeEvidence;
     }
 
     [DataContract]
@@ -705,6 +1382,15 @@ namespace SBMSSetup
         [DataMember(Order = 17)]
         internal string ContentDigest;
 
+        [DataMember(Order = 18)]
+        internal TransactionFinalizationStatus FinalizationStatus;
+
+        [DataMember(Order = 19)]
+        internal string FinalizationEvidence;
+
+        [DataMember(Order = 20)]
+        internal string FinalizationError;
+
         internal TransactionJournal()
         {
             Intents = new List<CompensationIntent>();
@@ -744,7 +1430,7 @@ namespace SBMSSetup
             context.Validate();
             return new TransactionJournal
             {
-                SchemaVersion = 2,
+                SchemaVersion = 3,
                 TransactionId = transactionId,
                 Operation = operation,
                 Status = TransactionStatus.Created,
@@ -760,6 +1446,10 @@ namespace SBMSSetup
                 CreatedUtc = now,
                 UpdatedUtc = now,
                 Context = context
+                ,
+                FinalizationStatus = TransactionFinalizationStatus.NotRequired,
+                FinalizationEvidence = String.Empty,
+                FinalizationError = String.Empty
             };
         }
 
@@ -778,6 +1468,27 @@ namespace SBMSSetup
                 Mutation = mutation.HasValue ? mutation.Value.ToString() : String.Empty,
                 Outcome = outcome ?? String.Empty,
                 ObservedEvidence = observed == null ? String.Empty : observed.EvidenceDigest,
+                Detail = detail ?? String.Empty
+            });
+        }
+
+        internal void AddRecoveryStage(
+            string stage,
+            InstallerMutation? mutation,
+            string outcome,
+            MachineSnapshot observed,
+            string detail)
+        {
+            StageEvents.Add(new TransactionStageEvent
+            {
+                Sequence = StageEvents.Count,
+                TimestampUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture),
+                Stage = stage ?? String.Empty,
+                Mutation = mutation.HasValue ? mutation.Value.ToString() : String.Empty,
+                Outcome = outcome ?? String.Empty,
+                ObservedEvidence = observed == null
+                    ? String.Empty
+                    : observed.RecoveryEvidenceDigest,
                 Detail = detail ?? String.Empty
             });
         }
@@ -914,15 +1625,67 @@ namespace SBMSSetup
             InstallerMutation.RemoveOwnedPayload
         };
 
-        internal static InstallerMutation[] ForOperation(InstallOperation operation)
+        internal static InstallerMutation[] ForOperation(
+            InstallOperation operation,
+            InstallerRequestFlags flags)
         {
+            if (flags == null)
+            {
+                throw new ArgumentNullException("flags");
+            }
             InstallerMutation[] source =
                 operation == InstallOperation.Uninstall
                     ? UninstallMutations
                     : InstallMutations;
-            InstallerMutation[] result = new InstallerMutation[source.Length];
-            Array.Copy(source, result, source.Length);
-            return result;
+            var result = new List<InstallerMutation>();
+            foreach (InstallerMutation mutation in source)
+            {
+                if (!flags.InstallDriver &&
+                    (mutation == InstallerMutation.StageDriver ||
+                     mutation == InstallerMutation.ActivateDriver))
+                {
+                    continue;
+                }
+                if (mutation == InstallerMutation.ApplyIntegrations &&
+                    !flags.CreateShortcut &&
+                    !flags.CreateStartupTask)
+                {
+                    continue;
+                }
+                result.Add(mutation);
+            }
+            return result.ToArray();
+        }
+
+        internal static InstallerCompensationAction InverseFor(
+            InstallerMutation mutation)
+        {
+            switch (mutation)
+            {
+                case InstallerMutation.CreateEscrow:
+                    return InstallerCompensationAction.RetainEscrowUntilBaselineVerified;
+                case InstallerMutation.StagePayload:
+                    return InstallerCompensationAction.RemoveTransactionPayloadStaging;
+                case InstallerMutation.StageDriver:
+                    return InstallerCompensationAction.RemoveTransactionDriverStaging;
+                case InstallerMutation.CommitPayload:
+                case InstallerMutation.RemoveOwnedPayload:
+                    return InstallerCompensationAction.RestoreBaselinePayload;
+                case InstallerMutation.ActivateDriver:
+                    return InstallerCompensationAction.RestoreBaselineDeviceBindings;
+                case InstallerMutation.ApplyIntegrations:
+                case InstallerMutation.RemoveIntegrations:
+                    return InstallerCompensationAction.RestoreBaselineIntegrations;
+                case InstallerMutation.RemoveOwnedDevices:
+                    return InstallerCompensationAction.RestoreBaselineDevices;
+                case InstallerMutation.RemoveOwnedPackages:
+                    return InstallerCompensationAction.RestoreBaselineDriverPackages;
+                case InstallerMutation.RemoveStaleOwnedAssets:
+                    return InstallerCompensationAction.RestoreBaselineOwnedAssets;
+                default:
+                    throw new InvalidOperationException(
+                        "No compensation action is defined for " + mutation + ".");
+            }
         }
     }
 }

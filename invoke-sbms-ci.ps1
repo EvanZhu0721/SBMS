@@ -39,6 +39,8 @@ $contracts = @(
     'test-sbms-release-evidence.ps1',
     'test-sbms-installer-integrity.ps1',
     'test-sbms-installer-transaction.ps1',
+    'test-sbms-file-transaction-journal-store.ps1',
+    'test-sbms-windows-transaction-platform.ps1',
     'test-sbms-installer-audit.ps1',
     'test-sbms-ci-contract.ps1'
 )

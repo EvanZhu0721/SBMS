@@ -73,6 +73,10 @@ Assert-True ($runner.Contains('status --porcelain --untracked-files=all')) 'CI s
 Assert-True ($runner.Contains('summary.json') -and $runner.Contains('summary.md')) 'Machine and human summaries are required.'
 Assert-True ($runner.Contains('RedirectStandardOutput') -and $runner.Contains('RedirectStandardError')) 'Test stdout/stderr must be retained.'
 Assert-True ($runner.Contains("'test-sbms-installer-transaction.ps1'")) 'Hosted contract suite must execute the transactional installer fault matrix.'
+Assert-True ($runner.Contains("'test-sbms-file-transaction-journal-store.ps1'")) 'Hosted contract suite must execute the production journal store contract.'
+Assert-True ($runner.Contains("'test-sbms-windows-transaction-platform.ps1'")) 'Hosted contract suite must execute the Windows transaction platform contract.'
+Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-file-transaction-journal-store.ps1') -PathType Leaf) 'Production journal store contract script is missing.'
+Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-windows-transaction-platform.ps1') -PathType Leaf) 'Windows transaction platform contract script is missing.'
 Assert-True ($runner.Contains("'test-sbms-installer-audit.ps1'")) 'Hosted contract suite must execute the read-only installer inventory and ownership tests.'
 
 Assert-True ($nativeBuild.Contains('Resolve-SBMSVsDevCmd')) 'Native build must use shared toolchain discovery.'
