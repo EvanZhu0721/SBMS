@@ -15,6 +15,9 @@ namespace SBMSSetup
     {
         void BeforeOwnershipReplayFlush(PayloadBuildStepKind step);
         void AfterSealMarkerFlushed();
+        void AfterQuarantineMarkerFlushed();
+        void AfterPurgeChildDeleted();
+        void AfterPurgeRootDeleted();
     }
 
     // This adapter is deliberately limited to a random, isolated child of
@@ -271,6 +274,10 @@ namespace SBMSSetup
         {
             private const string OwnershipMarkerDomain =
                 "SBMS.Payload.NativeOwnership.v1";
+        private const string QuarantineMarkerDomain =
+            "SBMS.Payload.NativeQuarantine.v1";
+        private const string PurgeMarkerDomain =
+            "SBMS.Payload.NativePurge.v1";
             private WindowsIsolatedTempProtectedPayloadNativeTree owner;
 
             internal Session(
@@ -336,6 +343,8 @@ namespace SBMSSetup
                         return Partial(step, before);
                     case PayloadBuildStepKind.SealCandidate:
                         return SealCandidate(before, plan);
+                    case PayloadBuildStepKind.QuarantineBuild:
+                        return QuarantineBuild(before, plan);
                     default:
                         throw new NotSupportedException(
                             "The isolated temp backend does not yet support " +
@@ -347,8 +356,51 @@ namespace SBMSSetup
                 PayloadQuarantineCheckpoint quarantine,
                 PayloadPurgeCheckpoint purge)
             {
-                throw new NotSupportedException(
-                    "Isolated temp quarantine purge is not implemented.");
+                RequireHeld();
+                RequirePurgeBinding(quarantine, purge);
+                byte[] marker = CreatePurgeMarker(purge);
+                SafeFileHandle directory =
+                    NativeIo.TryOpenRelativeForPurge(
+                        owner.rootHandle,
+                        quarantine.QuarantineLeafName,
+                        true,
+                        true);
+                if (directory == null)
+                {
+                    RequireFreshRelativeAbsence(
+                        quarantine.QuarantineLeafName);
+                    return;
+                }
+                try
+                {
+                    NativeIo.RequireIdentity(
+                        directory,
+                        quarantine.VolumeSerialNumber,
+                        quarantine.RootFileId,
+                        "Payload purge root identity changed.");
+                    NativeIo.RequireQuarantineMarker(
+                        directory,
+                        CreateQuarantineMarker(quarantine));
+                    if (!NativeIo.HasPurgeMarker(directory))
+                    {
+                        RequireQuarantineTreeExact(
+                            quarantine,
+                            directory);
+                    }
+                    NativeIo.PreparePurgeMarker(directory, marker);
+                    DeleteDirectoryChildrenExact(directory);
+                    NativeIo.MarkDeleteOnClose(directory);
+                }
+                finally
+                {
+                    directory.Dispose();
+                }
+                RequireFreshRelativeAbsence(
+                    quarantine.QuarantineLeafName);
+                if (owner.testSeam != null)
+                {
+                    owner.testSeam.AfterPurgeRootDeleted();
+                }
             }
 
             public PayloadQuarantineAbsenceObservation
@@ -356,8 +408,43 @@ namespace SBMSSetup
                     PayloadBuildWorkspaceCheckpoint checkpoint,
                     PayloadQuarantineCheckpoint quarantine)
             {
-                throw new NotSupportedException(
-                    "Isolated temp quarantine observation is not implemented.");
+                RequireHeld();
+                checkpoint.Validate();
+                quarantine.Validate();
+                SafeFileHandle existing = NativeIo.TryOpenRelative(
+                    owner.rootHandle,
+                    quarantine.QuarantineLeafName,
+                    true,
+                    false);
+                if (existing != null)
+                {
+                    existing.Dispose();
+                    throw new InvalidDataException(
+                        "Payload quarantine still exists.");
+                }
+                RequireFreshRelativeAbsence(
+                    quarantine.QuarantineLeafName);
+                var observation =
+                    new PayloadQuarantineAbsenceObservation
+                    {
+                        SchemaVersion = 1,
+                        TransactionId = checkpoint.TransactionId,
+                        RecoveryAuthorityInvariantDigest =
+                            checkpoint.RecoveryAuthorityInvariantDigest,
+                        NamespaceRootInvariantDigest =
+                            checkpoint.NamespaceRoot.InvariantDigest,
+                        QuarantineId = quarantine.QuarantineId,
+                        QuarantineLeafName =
+                            quarantine.QuarantineLeafName,
+                        VolumeSerialNumber =
+                            quarantine.VolumeSerialNumber,
+                        RootFileId = quarantine.RootFileId,
+                        ObservedAtWorkspaceRevision =
+                            checkpoint.Revision,
+                        Exists = false
+                    };
+                observation.Validate();
+                return observation;
             }
 
             public void Dispose()
@@ -391,13 +478,6 @@ namespace SBMSSetup
             private void ValidateKnownTree(
                 PayloadBuildWorkspaceCheckpoint checkpoint)
             {
-                if (checkpoint.Quarantines.Count != 0 ||
-                    checkpoint.PendingPurges.Count != 0)
-                {
-                    throw new NotSupportedException(
-                        "The isolated temp backend does not yet validate " +
-                        "quarantine or pending-purge trees.");
-                }
                 ValidateNamespaceChildren(checkpoint);
                 ValidateCommittedDirectory(
                     checkpoint.Committed.Current);
@@ -405,8 +485,32 @@ namespace SBMSSetup
                     checkpoint.Committed.Candidate);
                 ValidateCommittedDirectory(
                     checkpoint.Committed.Backup);
+                foreach (PayloadQuarantineCheckpoint quarantine in
+                    checkpoint.Quarantines)
+                {
+                    PayloadPurgeCheckpoint purge =
+                        FindPurgeForQuarantine(
+                            checkpoint,
+                            quarantine.QuarantineId);
+                    if (purge == null)
+                    {
+                        ValidateStoredQuarantine(quarantine);
+                    }
+                    else
+                    {
+                        ValidatePendingPurge(quarantine, purge);
+                    }
+                }
                 PayloadPartialTreeObservation partial =
                     checkpoint.ActivePartialTree;
+                if (partial != null &&
+                    IsActiveIntent(
+                        checkpoint,
+                        PayloadBuildStepKind.QuarantineBuild))
+                {
+                    ValidateQuarantinePhysicalShape(checkpoint);
+                    return;
+                }
                 if (partial != null &&
                     IsActiveIntent(
                         checkpoint,
@@ -453,6 +557,216 @@ namespace SBMSSetup
                     "Isolated native payload tree differs from checkpoint.");
             }
 
+            private static PayloadPurgeCheckpoint FindPurgeForQuarantine(
+                PayloadBuildWorkspaceCheckpoint checkpoint,
+                string quarantineId)
+            {
+                PayloadPurgeCheckpoint found = null;
+                foreach (PayloadPurgeCheckpoint purge in
+                    checkpoint.PendingPurges)
+                {
+                    if (String.Equals(
+                            purge.QuarantineId,
+                            quarantineId,
+                            StringComparison.Ordinal))
+                    {
+                        if (found != null)
+                        {
+                            throw new InvalidDataException(
+                                "Multiple purges target one quarantine.");
+                        }
+                        found = purge;
+                    }
+                }
+                return found;
+            }
+
+            private void ValidatePendingPurge(
+                PayloadQuarantineCheckpoint quarantine,
+                PayloadPurgeCheckpoint purge)
+            {
+                RequirePurgeBinding(quarantine, purge);
+                SafeFileHandle directory =
+                    NativeIo.TryOpenRelativeForPurge(
+                        owner.rootHandle,
+                        quarantine.QuarantineLeafName,
+                        true,
+                        false);
+                if (purge.Phase == PayloadPurgePhase.ObservedAbsent)
+                {
+                    if (directory != null)
+                    {
+                        directory.Dispose();
+                        throw new InvalidDataException(
+                            "Observed-absent quarantine reappeared.");
+                    }
+                    RequireFreshRelativeAbsence(
+                        quarantine.QuarantineLeafName);
+                    return;
+                }
+                if (directory == null)
+                {
+                    RequireFreshRelativeAbsence(
+                        quarantine.QuarantineLeafName);
+                    return;
+                }
+                using (directory)
+                {
+                    NativeIo.RequireIdentity(
+                        directory,
+                        quarantine.VolumeSerialNumber,
+                        quarantine.RootFileId,
+                        "Pending purge root identity changed.");
+                    NativeIo.RequireQuarantineMarker(
+                        directory,
+                        CreateQuarantineMarker(quarantine));
+                    byte[] marker = CreatePurgeMarker(purge);
+                    if (NativeIo.HasPurgeMarker(directory))
+                    {
+                        NativeIo.RequirePurgeMarker(directory, marker);
+                        ValidatePurgeRemainder(directory);
+                    }
+                    else
+                    {
+                        RequireQuarantineTreeExact(
+                            quarantine,
+                            directory);
+                    }
+                }
+            }
+
+            private static void RequirePurgeBinding(
+                PayloadQuarantineCheckpoint quarantine,
+                PayloadPurgeCheckpoint purge)
+            {
+                quarantine.Validate();
+                purge.Validate();
+                if (purge.Phase != PayloadPurgePhase.Armed &&
+                    purge.Phase != PayloadPurgePhase.ObservedAbsent)
+                {
+                    throw new InvalidDataException(
+                        "Payload purge phase is unsupported.");
+                }
+                if (!String.Equals(
+                        purge.QuarantineId,
+                        quarantine.QuarantineId,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        purge.TransactionId,
+                        quarantine.TransactionId,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        purge.RecoveryAuthorityInvariantDigest,
+                        quarantine.RecoveryAuthorityInvariantDigest,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        purge.NamespaceRootInvariantDigest,
+                        quarantine.NamespaceRootInvariantDigest,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        purge.QuarantineInvariantDigest,
+                        quarantine.InvariantDigest,
+                        StringComparison.Ordinal) ||
+                    purge.VolumeSerialNumber !=
+                        quarantine.VolumeSerialNumber ||
+                    !String.Equals(
+                        purge.RootFileId,
+                        quarantine.RootFileId,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        "Payload purge does not bind the quarantine exactly.");
+                }
+            }
+
+            private void DeleteDirectoryChildrenExact(
+                SafeFileHandle directory)
+            {
+                while (true)
+                {
+                    IList<NativeDirectoryEntry> entries =
+                        NativeIo.Enumerate(directory);
+                    if (entries.Count == 0)
+                    {
+                        return;
+                    }
+                    foreach (NativeDirectoryEntry entry in entries)
+                    {
+                        SafeFileHandle child =
+                            NativeIo.OpenRelativeForPurge(
+                                directory,
+                                entry.Name,
+                                entry.IsDirectory,
+                                false);
+                        try
+                        {
+                            NativeIdentity identity =
+                                NativeIo.Identity(child);
+                            NativeIo.RequireEnumeratedEntry(
+                                directory,
+                                entry,
+                                identity);
+                            if (entry.IsDirectory)
+                            {
+                                DeleteDirectoryChildrenExact(child);
+                            }
+                            else
+                            {
+                                NativeIo.RequireSingleLinkFile(child);
+                            }
+                            NativeIo.MarkDeleteOnClose(child);
+                        }
+                        finally
+                        {
+                            child.Dispose();
+                        }
+                        NativeIo.RequireRelativeAbsent(
+                            directory,
+                            entry.Name);
+                        if (owner.testSeam != null)
+                        {
+                            owner.testSeam.AfterPurgeChildDeleted();
+                        }
+                    }
+                }
+            }
+
+            private static void ValidatePurgeRemainder(
+                SafeFileHandle directory)
+            {
+                foreach (NativeDirectoryEntry entry in
+                    NativeIo.Enumerate(directory))
+                {
+                    using (SafeFileHandle child =
+                        NativeIo.OpenRelativeForPurge(
+                            directory,
+                            entry.Name,
+                            entry.IsDirectory,
+                            false))
+                    {
+                        NativeIdentity identity =
+                            NativeIo.Identity(child);
+                        NativeIo.RequireEnumeratedEntry(
+                            directory,
+                            entry,
+                            identity);
+                        if (entry.IsDirectory)
+                        {
+                            ValidatePurgeRemainder(child);
+                        }
+                        else
+                        {
+                            NativeIo.RequireSingleLinkFile(child);
+                        }
+                    }
+                }
+            }
+
+            private void RequireFreshRelativeAbsence(string name)
+            {
+                NativeIo.RequireRelativeAbsent(owner.rootHandle, name);
+            }
+
             private void ValidateNamespaceChildren(
                 PayloadBuildWorkspaceCheckpoint checkpoint)
             {
@@ -467,6 +781,11 @@ namespace SBMSSetup
                 AddCommittedLeaf(
                     allowed,
                     checkpoint.Committed.Backup);
+                foreach (PayloadQuarantineCheckpoint quarantine in
+                    checkpoint.Quarantines)
+                {
+                    allowed.Add(quarantine.QuarantineLeafName);
+                }
                 if (checkpoint.ActivePartialTree != null)
                 {
                     allowed.Add(
@@ -478,6 +797,14 @@ namespace SBMSSetup
                         allowed.Add(PayloadNamespaceNames.ForSlot(
                             PayloadDirectorySlot.Candidate,
                             checkpoint.TransactionId));
+                    }
+                    else if (IsActiveIntent(
+                            checkpoint,
+                            PayloadBuildStepKind.QuarantineBuild))
+                    {
+                        allowed.Add(
+                            ".SBMS.quarantine." +
+                            checkpoint.ActiveBuild.ActiveIntent.IntentId);
                     }
                 }
                 else if (IsActiveIntent(
@@ -496,6 +823,124 @@ namespace SBMSSetup
                             "The isolated payload namespace contains an " +
                             "unknown root entry.");
                     }
+                }
+            }
+
+            private void ValidateQuarantinePhysicalShape(
+                PayloadBuildWorkspaceCheckpoint checkpoint)
+            {
+                PayloadQuarantineCheckpoint quarantine =
+                    BuildProjectedQuarantine(
+                        checkpoint,
+                        checkpoint.ActiveBuild.ActiveIntent.IntentId,
+                        PayloadQuarantineReason.InterruptedBuild);
+                byte[] marker = CreateQuarantineMarker(quarantine);
+                SafeFileHandle source = null;
+                SafeFileHandle destination = null;
+                try
+                {
+                    source = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        quarantine.SourceLeafName,
+                        true,
+                        false);
+                    destination = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        quarantine.QuarantineLeafName,
+                        true,
+                        false);
+                    if ((source == null) == (destination == null))
+                    {
+                        throw new InvalidDataException(
+                            "Payload quarantine requires exactly one of " +
+                            "source or destination.");
+                    }
+                    SafeFileHandle actual =
+                        source == null ? destination : source;
+                    NativeIo.RequireIdentity(
+                        actual,
+                        quarantine.VolumeSerialNumber,
+                        quarantine.RootFileId,
+                        "Payload quarantine directory identity changed.");
+                    RequireQuarantineTreeExact(quarantine, actual);
+                    if (source != null)
+                    {
+                        NativeIo.RequireOptionalQuarantineMarker(
+                            source,
+                            marker);
+                    }
+                    else
+                    {
+                        NativeIo.RequireQuarantineMarker(
+                            destination,
+                            marker);
+                    }
+                }
+                finally
+                {
+                    if (source != null)
+                    {
+                        source.Dispose();
+                    }
+                    if (destination != null)
+                    {
+                        destination.Dispose();
+                    }
+                }
+            }
+
+            private void ValidateStoredQuarantine(
+                PayloadQuarantineCheckpoint quarantine)
+            {
+                if (quarantine.SourceKind !=
+                    PayloadQuarantineSourceKind.PartialBuild)
+                {
+                    throw new NotSupportedException(
+                        "The isolated temp backend only validates partial-" +
+                        "build quarantines.");
+                }
+                using (SafeFileHandle directory = NativeIo.OpenRelative(
+                    owner.rootHandle,
+                    quarantine.QuarantineLeafName,
+                    true,
+                    false,
+                    false))
+                {
+                    NativeIo.RequireIdentity(
+                        directory,
+                        quarantine.VolumeSerialNumber,
+                        quarantine.RootFileId,
+                        "Stored payload quarantine identity changed.");
+                    NativeIo.RequireQuarantineMarker(
+                        directory,
+                        CreateQuarantineMarker(quarantine));
+                    RequireQuarantineTreeExact(quarantine, directory);
+                }
+            }
+
+            private void RequireQuarantineTreeExact(
+                PayloadQuarantineCheckpoint quarantine,
+                SafeFileHandle directory)
+            {
+                NativeIdentity identity = NativeIo.Identity(directory);
+                var observed = new PayloadPartialTreeObservation
+                {
+                    SchemaVersion = 1,
+                    BuildId = quarantine.SourceBuildId,
+                    LeafName = quarantine.SourceLeafName,
+                    Exists = true,
+                    VolumeSerialNumber = identity.VolumeSerialNumber,
+                    RootFileId = identity.FileId,
+                    Entries = ObserveEntries(directory)
+                };
+                if (!String.Equals(
+                        observed.InvariantDigest,
+                        quarantine.PartialTreeInvariantDigest,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        "Payload quarantine tree differs from its exact " +
+                        "partial-build observation.");
                 }
             }
 
@@ -962,6 +1407,117 @@ namespace SBMSSetup
                 }
             }
 
+            private static PayloadQuarantineCheckpoint
+                BuildProjectedQuarantine(
+                    PayloadBuildWorkspaceCheckpoint checkpoint,
+                    string quarantineId,
+                    PayloadQuarantineReason reason)
+            {
+                PayloadCandidateBuildJournal build =
+                    checkpoint.ActiveBuild;
+                PayloadPartialTreeObservation partial =
+                    checkpoint.ActivePartialTree;
+                var quarantine = new PayloadQuarantineCheckpoint
+                {
+                    SchemaVersion = 1,
+                    QuarantineId = quarantineId,
+                    TransactionId = checkpoint.TransactionId,
+                    RecoveryAuthorityInvariantDigest =
+                        checkpoint.RecoveryAuthorityInvariantDigest,
+                    NamespaceRootInvariantDigest =
+                        checkpoint.NamespaceRoot.InvariantDigest,
+                    SourceKind =
+                        PayloadQuarantineSourceKind.PartialBuild,
+                    SourceBuildId = build.BuildId,
+                    QuarantineLeafName =
+                        ".SBMS.quarantine." + quarantineId,
+                    VolumeSerialNumber = partial.VolumeSerialNumber,
+                    RootFileId = partial.RootFileId,
+                    PartialTreeInvariantDigest =
+                        partial.InvariantDigest,
+                    Reason = reason,
+                    SourceLeafName = partial.LeafName,
+                    TargetManifestInvariantDigest =
+                        build.TargetManifestInvariantDigest,
+                    SourceReceiptInvariantDigest =
+                        build.SourceReceiptInvariantDigest
+                };
+                quarantine.Validate();
+                return quarantine;
+            }
+
+            private static byte[] CreateQuarantineMarker(
+                PayloadQuarantineCheckpoint quarantine)
+            {
+                quarantine.Validate();
+                var body = new List<byte>();
+                AppendMarkerField(body, QuarantineMarkerDomain);
+                AppendMarkerField(body, quarantine.TransactionId);
+                AppendMarkerField(
+                    body,
+                    quarantine.RecoveryAuthorityInvariantDigest);
+                AppendMarkerField(
+                    body,
+                    quarantine.NamespaceRootInvariantDigest);
+                AppendMarkerField(body, quarantine.QuarantineId);
+                AppendMarkerField(body, quarantine.SourceKind.ToString());
+                AppendMarkerField(body, quarantine.SourceBuildId);
+                AppendMarkerField(body, quarantine.SourceLeafName);
+                AppendMarkerField(body, quarantine.QuarantineLeafName);
+                AppendMarkerField(
+                    body,
+                    quarantine.VolumeSerialNumber.ToString(
+                        "x16",
+                        CultureInfo.InvariantCulture));
+                AppendMarkerField(body, quarantine.RootFileId);
+                AppendMarkerField(
+                    body,
+                    quarantine.PartialTreeInvariantDigest);
+                AppendMarkerField(body, quarantine.Reason.ToString());
+                AppendMarkerField(
+                    body,
+                    quarantine.TargetManifestInvariantDigest);
+                AppendMarkerField(
+                    body,
+                    quarantine.SourceReceiptInvariantDigest);
+                using (SHA256 sha = SHA256.Create())
+                {
+                    body.AddRange(sha.ComputeHash(body.ToArray()));
+                }
+                return body.ToArray();
+            }
+
+            private static byte[] CreatePurgeMarker(
+                PayloadPurgeCheckpoint purge)
+            {
+                purge.Validate();
+                var body = new List<byte>();
+                AppendMarkerField(body, PurgeMarkerDomain);
+                AppendMarkerField(body, purge.PurgeId);
+                AppendMarkerField(body, purge.QuarantineId);
+                AppendMarkerField(body, purge.TransactionId);
+                AppendMarkerField(
+                    body,
+                    purge.RecoveryAuthorityInvariantDigest);
+                AppendMarkerField(
+                    body,
+                    purge.NamespaceRootInvariantDigest);
+                AppendMarkerField(
+                    body,
+                    purge.QuarantineInvariantDigest);
+                AppendMarkerField(
+                    body,
+                    purge.VolumeSerialNumber.ToString(
+                        "x16",
+                        CultureInfo.InvariantCulture));
+                AppendMarkerField(body, purge.RootFileId);
+                using (SHA256 sha = SHA256.Create())
+                {
+                    body.AddRange(sha.ComputeHash(body.ToArray()));
+                }
+                return body.ToArray();
+            }
+
             private void RewriteFile(
                 PayloadBuildWorkspaceCheckpoint checkpoint,
                 PayloadBuildMutationPlan plan,
@@ -1200,6 +1756,106 @@ namespace SBMSSetup
                         result,
                         null);
                 }
+            }
+
+            private PayloadBuildPhysicalResult QuarantineBuild(
+                PayloadBuildWorkspaceCheckpoint checkpoint,
+                PayloadBuildMutationPlan plan)
+            {
+                PayloadQuarantineCheckpoint quarantine =
+                    BuildProjectedQuarantine(
+                        checkpoint,
+                        plan.QuarantineId,
+                        plan.QuarantineReason);
+                byte[] marker = CreateQuarantineMarker(quarantine);
+                SafeFileHandle source = null;
+                SafeFileHandle destination = null;
+                try
+                {
+                    source = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        quarantine.SourceLeafName,
+                        true,
+                        true);
+                    destination = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        quarantine.QuarantineLeafName,
+                        true,
+                        false);
+                    if ((source == null) == (destination == null))
+                    {
+                        throw new InvalidDataException(
+                            "Payload quarantine requires exactly one of " +
+                            "source or destination.");
+                    }
+                    if (source != null)
+                    {
+                        NativeIo.RequireIdentity(
+                            source,
+                            quarantine.VolumeSerialNumber,
+                            quarantine.RootFileId,
+                            "Payload quarantine source identity changed.");
+                        RequireQuarantineTreeExact(quarantine, source);
+                        NativeIo.PrepareQuarantineMarker(source, marker);
+                        if (owner.testSeam != null)
+                        {
+                            owner.testSeam.
+                                AfterQuarantineMarkerFlushed();
+                        }
+                        NativeIo.RenameSameParent(
+                            source,
+                            quarantine.QuarantineLeafName);
+                    }
+                    else
+                    {
+                        NativeIo.RequireIdentity(
+                            destination,
+                            quarantine.VolumeSerialNumber,
+                            quarantine.RootFileId,
+                            "Payload quarantine destination identity changed.");
+                        NativeIo.RequireQuarantineMarker(
+                            destination,
+                            marker);
+                        RequireQuarantineTreeExact(
+                            quarantine,
+                            destination);
+                    }
+                }
+                finally
+                {
+                    if (source != null)
+                    {
+                        source.Dispose();
+                    }
+                    if (destination != null)
+                    {
+                        destination.Dispose();
+                    }
+                }
+                using (SafeFileHandle quarantined = NativeIo.OpenRelative(
+                    owner.rootHandle,
+                    quarantine.QuarantineLeafName,
+                    true,
+                    false,
+                    false))
+                {
+                    NativeIo.RequireIdentity(
+                        quarantined,
+                        quarantine.VolumeSerialNumber,
+                        quarantine.RootFileId,
+                        "Payload quarantine rename changed identity.");
+                    NativeIo.RequireQuarantineMarker(
+                        quarantined,
+                        marker);
+                    RequireQuarantineTreeExact(
+                        quarantine,
+                        quarantined);
+                }
+                return new PayloadBuildPhysicalResult(
+                    PayloadBuildStepKind.QuarantineBuild,
+                    null,
+                    null,
+                    quarantine);
             }
 
             private PayloadBuildPhysicalResult Partial(
@@ -1489,6 +2145,10 @@ namespace SBMSSetup
                 "SBMS.Payload.Owner.v1";
             private const string SealEaName =
                 "SBMS.Payload.Seal.v1";
+            private const string QuarantineEaName =
+                "SBMS.Payload.Quarantine.v1";
+            private const string PurgeEaName =
+                "SBMS.Payload.Purge.v1";
             private const uint FileReadData = 0x0001;
             private const uint FileWriteData = 0x0002;
             private const uint FileAppendData = 0x0004;
@@ -1589,6 +2249,108 @@ namespace SBMSSetup
                     access,
                     create ? FileOpenIf : FileOpen,
                     options,
+                    null);
+                try
+                {
+                    RequireType(handle, directory);
+                    return handle;
+                }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+            }
+
+            internal static SafeFileHandle OpenRelativeForPurge(
+                SafeFileHandle root,
+                string name,
+                bool directory,
+                bool writeEa)
+            {
+                ValidateName(name);
+                uint access = FileReadData | FileReadEa |
+                    FileReadAttributes | DeleteAccess |
+                    ReadControl | Synchronize;
+                if (directory)
+                {
+                    access |= FileTraverse;
+                }
+                if (writeEa)
+                {
+                    access |= FileWriteData | FileWriteEa;
+                }
+                SafeFileHandle handle = OpenNativeWithShare(
+                    root,
+                    name,
+                    access,
+                    FileOpen,
+                    FileSynchronousIoNonAlert |
+                    FileOpenReparsePoint |
+                    (directory
+                        ? FileDirectoryFile
+                        : FileNonDirectoryFile),
+                    null,
+                    ShareRead | ShareWrite);
+                try
+                {
+                    RequireType(handle, directory);
+                    return handle;
+                }
+                catch
+                {
+                    handle.Dispose();
+                    throw;
+                }
+            }
+
+            internal static SafeFileHandle TryOpenRelativeForPurge(
+                SafeFileHandle root,
+                string name,
+                bool directory,
+                bool writeEa)
+            {
+                try
+                {
+                    return OpenRelativeForPurge(
+                        root,
+                        name,
+                        directory,
+                        writeEa);
+                }
+                catch (Win32Exception failure)
+                {
+                    if (failure.NativeErrorCode == ErrorFileNotFound ||
+                        failure.NativeErrorCode == ErrorPathNotFound)
+                    {
+                        return null;
+                    }
+                    throw;
+                }
+            }
+
+            private static SafeFileHandle OpenRelativeForIdentityCheck(
+                SafeFileHandle root,
+                string name,
+                bool directory)
+            {
+                ValidateName(name);
+                uint access = FileReadData | FileReadEa |
+                    FileReadAttributes | ReadControl | Synchronize;
+                if (directory)
+                {
+                    access |= FileTraverse;
+                }
+                SafeFileHandle handle = OpenNative(
+                    root,
+                    name,
+                    access,
+                    FileOpen,
+                    FileSynchronousIoNonAlert |
+                    FileOpenReparsePoint |
+                    (directory
+                        ? FileDirectoryFile
+                        : FileNonDirectoryFile),
                     null);
                 try
                 {
@@ -1710,6 +2472,101 @@ namespace SBMSSetup
                     SetExtendedAttribute(handle, SealEaName, expected);
                 }
                 RequireSealMarker(handle, expected);
+                Flush(handle);
+            }
+
+            internal static void RequireOptionalQuarantineMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(
+                    handle,
+                    QuarantineEaName);
+                if (actual != null && !BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload quarantine marker belongs to a different " +
+                        "durable intent.");
+                }
+            }
+
+            internal static void RequireQuarantineMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(
+                    handle,
+                    QuarantineEaName);
+                if (!BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload quarantine marker does not match the " +
+                        "durable quarantine record.");
+                }
+            }
+
+            internal static void PrepareQuarantineMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(
+                    handle,
+                    QuarantineEaName);
+                if (actual != null && !BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload quarantine marker belongs to a different " +
+                        "durable intent.");
+                }
+                if (actual == null)
+                {
+                    SetExtendedAttribute(
+                        handle,
+                        QuarantineEaName,
+                        expected);
+                }
+                RequireQuarantineMarker(handle, expected);
+                Flush(handle);
+            }
+
+            internal static bool HasPurgeMarker(SafeFileHandle handle)
+            {
+                return QueryExtendedAttribute(handle, PurgeEaName) != null;
+            }
+
+            internal static void RequirePurgeMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(
+                    handle,
+                    PurgeEaName);
+                if (!BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload purge marker does not match the active " +
+                        "durable purge.");
+                }
+            }
+
+            internal static void PreparePurgeMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(
+                    handle,
+                    PurgeEaName);
+                if (actual != null && !BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload purge marker belongs to a different " +
+                        "durable purge.");
+                }
+                if (actual == null)
+                {
+                    SetExtendedAttribute(handle, PurgeEaName, expected);
+                }
+                RequirePurgeMarker(handle, expected);
                 Flush(handle);
             }
 
@@ -1855,6 +2712,102 @@ namespace SBMSSetup
                     Marshal.FreeHGlobal(buffer);
                 }
                 return result;
+            }
+
+            internal static void RequireEnumeratedEntry(
+                SafeFileHandle parent,
+                NativeDirectoryEntry expected,
+                NativeIdentity openedIdentity)
+            {
+                bool found = false;
+                foreach (NativeDirectoryEntry current in Enumerate(parent))
+                {
+                    if (String.Equals(
+                            current.Name,
+                            expected.Name,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (found ||
+                            current.IsDirectory != expected.IsDirectory)
+                        {
+                            throw new InvalidDataException(
+                                "Payload purge entry changed after open.");
+                        }
+                        found = true;
+                    }
+                }
+                if (!found ||
+                    openedIdentity.VolumeSerialNumber == 0 ||
+                    String.IsNullOrEmpty(openedIdentity.FileId))
+                {
+                    throw new InvalidDataException(
+                        "Payload purge entry identity is no longer bound " +
+                        "to the enumerated name.");
+                }
+                using (SafeFileHandle rebound =
+                    OpenRelativeForIdentityCheck(
+                        parent,
+                        expected.Name,
+                        expected.IsDirectory))
+                {
+                    NativeIdentity reboundIdentity = Identity(rebound);
+                    if (reboundIdentity.VolumeSerialNumber !=
+                            openedIdentity.VolumeSerialNumber ||
+                        !String.Equals(
+                            reboundIdentity.FileId,
+                            openedIdentity.FileId,
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException(
+                            "Payload purge entry FileId changed after " +
+                            "enumeration and open.");
+                    }
+                }
+            }
+
+            internal static void RequireRelativeAbsent(
+                SafeFileHandle parent,
+                string name)
+            {
+                ValidateName(name);
+                foreach (NativeDirectoryEntry entry in Enumerate(parent))
+                {
+                    if (String.Equals(
+                            entry.Name,
+                            name,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidDataException(
+                            "Payload purge deletion was not freshly " +
+                            "observed absent.");
+                    }
+                }
+            }
+
+            internal static void MarkDeleteOnClose(
+                SafeFileHandle handle)
+            {
+                IntPtr buffer = Marshal.AllocHGlobal(1);
+                try
+                {
+                    Marshal.WriteByte(buffer, 0, 1);
+                    IoStatusBlock io;
+                    int status = NtSetInformationFile(
+                        handle,
+                        out io,
+                        buffer,
+                        1,
+                        13);
+                    if (status < 0)
+                    {
+                        throw new Win32Exception(
+                            unchecked((int)RtlNtStatusToDosError(status)));
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(buffer);
+                }
             }
 
             internal static void RenameSameParent(
@@ -2274,6 +3227,25 @@ namespace SBMSSetup
                 uint options,
                 byte[] extendedAttributes)
             {
+                return OpenNativeWithShare(
+                    root,
+                    name,
+                    access,
+                    disposition,
+                    options,
+                    extendedAttributes,
+                    ShareRead | ShareWrite | ShareDelete);
+            }
+
+            private static SafeFileHandle OpenNativeWithShare(
+                SafeFileHandle root,
+                string name,
+                uint access,
+                uint disposition,
+                uint options,
+                byte[] extendedAttributes,
+                uint shareAccess)
+            {
                 IntPtr nameBuffer = IntPtr.Zero;
                 IntPtr unicodeBuffer = IntPtr.Zero;
                 bool rootAddRef = false;
@@ -2328,7 +3300,7 @@ namespace SBMSSetup
                         out io,
                         IntPtr.Zero,
                         0x00000080,
-                        ShareRead | ShareWrite | ShareDelete,
+                        shareAccess,
                         disposition,
                         options,
                         eaBuffer,

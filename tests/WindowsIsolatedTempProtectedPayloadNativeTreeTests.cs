@@ -43,10 +43,34 @@ namespace SBMSSetup
                 SealInvalidPhysicalShapesFailClosed);
             Run("direct Seal marker tamper fails closed",
                 DirectSealMarkerTamperFailsClosed);
+            Run("Quarantine marker crash replays across adapter instances",
+                QuarantineMarkerCrashReplaysAcrossInstances);
+            Run("Quarantine rename CAS loss replays across adapter instances",
+                QuarantineRenameCasLossReplaysAcrossInstances);
+            Run("Quarantine invalid physical shapes fail closed",
+                QuarantineInvalidPhysicalShapesFailClosed);
+            Run("Quarantine foreign and tampered markers fail closed",
+                QuarantineForeignAndTamperedMarkersFailClosed);
             Run("durable model publishes a complete native candidate",
                 DurableModelPublishesCompleteNativeCandidate);
             Run("hardlinked build entries fail closed",
                 HardlinkedBuildEntryFailsClosed);
+            Run("purge completes through fresh absence",
+                PurgeCompletesThroughFreshAbsence);
+            Run("purge child-delete crash replays across instances",
+                PurgeChildDeleteCrashReplaysAcrossInstances);
+            Run("purge root-delete crash replays across instances",
+                PurgeRootDeleteCrashReplaysAcrossInstances);
+            Run("purge delete CAS loss replays across instances",
+                PurgeDeleteCasLossReplaysAcrossInstances);
+            Run("purge missing and foreign markers fail closed",
+                PurgeMissingAndForeignMarkersFailClosed);
+            Run("purge completion rejects recreated same-name leaf",
+                PurgeCompletionRejectsRecreatedSameNameLeaf);
+            Run("purge access error retains Armed and retries",
+                PurgeAccessErrorRetainsArmedAndRetries);
+            Run("purge reparse and hardlink entries fail closed",
+                PurgeReparseAndHardlinkEntriesFailClosed);
             Console.WriteLine(
                 "Windows isolated temp payload native tree tests: " +
                 passed + " passed, " + failed + " failed.");
@@ -1188,6 +1212,477 @@ namespace SBMSSetup
             }
         }
 
+        private static void QuarantineMarkerCrashReplaysAcrossInstances()
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            MemoryCheckpointStore store = null;
+            BuildFixture fixture = null;
+            string quarantineId = Id(3700);
+            string sourcePath = null;
+            string quarantinePath = null;
+            string firstFileId = null;
+            try
+            {
+                var seam = new ThrowAfterQuarantineMarkerOnce();
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root, seam))
+                {
+                    fixture = Build(tree.RootIdentity);
+                    store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToQuarantinablePartial(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            3701);
+                        sourcePath = Path.Combine(
+                            root,
+                            store.State.ActivePartialTree.LeafName);
+                        quarantinePath = Path.Combine(
+                            root,
+                            ".SBMS.quarantine." + quarantineId);
+                        firstFileId = ReadDirectoryFileId(sourcePath);
+                        Equal(
+                            PayloadBuildAdvanceKind.InProgress,
+                            machine.Quarantine(
+                                source,
+                                fixture.Manifest,
+                                quarantineId,
+                                quarantineId,
+                                PayloadQuarantineReason.
+                                    InterruptedBuild).Kind,
+                            "Quarantine intent was not published.");
+                        Throws<IOException>(
+                            delegate
+                            {
+                                machine.Quarantine(
+                                    source,
+                                    fixture.Manifest,
+                                    quarantineId,
+                                    quarantineId,
+                                    PayloadQuarantineReason.
+                                        InterruptedBuild);
+                            },
+                            "Injected crash after quarantine marker flush " +
+                            "did not escape.");
+                    }
+                }
+                True(
+                    Directory.Exists(sourcePath) &&
+                    !Directory.Exists(quarantinePath),
+                    "Marker crash did not leave source-only quarantine.");
+
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree replayTree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                using (
+                    var replayModel =
+                        new DurableProtectedPayloadBuildWorkspaceModel(
+                            store,
+                            lease,
+                            replayTree))
+                using (FakeSource replaySource =
+                    new FakeSource(fixture.Manifest, fixture.Bytes))
+                using (
+                    var replayMachine =
+                        new DeterministicProtectedPayloadBuildStateMachine(
+                            fixture.Authority,
+                            replayModel))
+                {
+                    Equal(
+                        PayloadBuildAdvanceKind.Quarantined,
+                        replayMachine.Quarantine(
+                            replaySource,
+                            fixture.Manifest,
+                            quarantineId,
+                            quarantineId,
+                            PayloadQuarantineReason.
+                                InterruptedBuild).Kind,
+                        "Source-only quarantine did not replay across " +
+                        "adapter instances.");
+                }
+                True(
+                    !Directory.Exists(sourcePath) &&
+                    Directory.Exists(quarantinePath),
+                    "Quarantine replay did not produce destination-only.");
+                Equal(
+                    firstFileId,
+                    ReadDirectoryFileId(quarantinePath),
+                    "Quarantine replay changed root FileId.");
+                Equal(
+                    firstFileId,
+                    store.State.Quarantines[0].RootFileId,
+                    "Durable quarantine recorded another FileId.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void
+            QuarantineRenameCasLossReplaysAcrossInstances()
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            MemoryCheckpointStore store = null;
+            BuildFixture fixture = null;
+            string quarantineId = Id(3720);
+            string sourcePath = null;
+            string quarantinePath = null;
+            string firstFileId = null;
+            try
+            {
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    fixture = Build(tree.RootIdentity);
+                    store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToQuarantinablePartial(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            3721);
+                        sourcePath = Path.Combine(
+                            root,
+                            store.State.ActivePartialTree.LeafName);
+                        quarantinePath = Path.Combine(
+                            root,
+                            ".SBMS.quarantine." + quarantineId);
+                        firstFileId = ReadDirectoryFileId(sourcePath);
+                        machine.Quarantine(
+                            source,
+                            fixture.Manifest,
+                            quarantineId,
+                            quarantineId,
+                            PayloadQuarantineReason.InterruptedBuild);
+                        store.FailNextSave = true;
+                        Throws<IOException>(
+                            delegate
+                            {
+                                machine.Quarantine(
+                                    source,
+                                    fixture.Manifest,
+                                    quarantineId,
+                                    quarantineId,
+                                    PayloadQuarantineReason.
+                                        InterruptedBuild);
+                            },
+                            "Injected post-rename quarantine CAS loss did " +
+                            "not escape.");
+                    }
+                }
+                True(
+                    !Directory.Exists(sourcePath) &&
+                    Directory.Exists(quarantinePath),
+                    "CAS loss did not leave destination-only quarantine.");
+
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree replayTree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                using (
+                    var replayModel =
+                        new DurableProtectedPayloadBuildWorkspaceModel(
+                            store,
+                            lease,
+                            replayTree))
+                using (FakeSource replaySource =
+                    new FakeSource(fixture.Manifest, fixture.Bytes))
+                using (
+                    var replayMachine =
+                        new DeterministicProtectedPayloadBuildStateMachine(
+                            fixture.Authority,
+                            replayModel))
+                {
+                    Equal(
+                        PayloadBuildAdvanceKind.Quarantined,
+                        replayMachine.Quarantine(
+                            replaySource,
+                            fixture.Manifest,
+                            quarantineId,
+                            quarantineId,
+                            PayloadQuarantineReason.
+                                InterruptedBuild).Kind,
+                        "Destination-only quarantine did not replay across " +
+                        "adapter instances.");
+                }
+                Equal(
+                    firstFileId,
+                    ReadDirectoryFileId(quarantinePath),
+                    "Destination-only replay changed root FileId.");
+                string payloadPath = Path.Combine(
+                    quarantinePath,
+                    "SBMS.exe");
+                using (var drift = new FileStream(
+                    payloadPath,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.Read))
+                {
+                    drift.WriteByte(0x51);
+                }
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree verifyTree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    AssertCheckpointRejected(
+                        verifyTree,
+                        store.State,
+                        "Committed quarantine destination tree drift was " +
+                        "accepted.");
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void QuarantineInvalidPhysicalShapesFailClosed()
+        {
+            string root = NewRootPath();
+            string displaced = NewRootPath();
+            try
+            {
+                var lease = new MemoryLeaseCoordinator();
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        string quarantineId = Id(3740);
+                        DriveToQuarantinablePartial(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            3741);
+                        machine.Quarantine(
+                            source,
+                            fixture.Manifest,
+                            quarantineId,
+                            quarantineId,
+                            PayloadQuarantineReason.InterruptedBuild);
+                        string sourcePath = Path.Combine(
+                            root,
+                            store.State.ActivePartialTree.LeafName);
+                        string destinationPath = Path.Combine(
+                            root,
+                            ".SBMS.quarantine." + quarantineId);
+
+                        Directory.CreateDirectory(destinationPath);
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Quarantine both-shape was accepted.");
+                        Directory.Delete(destinationPath);
+
+                        Directory.Move(sourcePath, displaced);
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Quarantine neither-shape was accepted.");
+                        Directory.Move(displaced, sourcePath);
+
+                        Directory.Move(sourcePath, displaced);
+                        Directory.CreateDirectory(sourcePath);
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Replacement quarantine source FileId was " +
+                            "accepted.");
+                        Directory.Delete(sourcePath);
+                        Directory.Move(displaced, sourcePath);
+
+                        string drift = Path.Combine(
+                            sourcePath,
+                            "foreign.bin");
+                        File.WriteAllBytes(drift, new byte[] { 1 });
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Quarantine source tree drift was accepted.");
+                        File.Delete(drift);
+
+                        Directory.Move(sourcePath, destinationPath);
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Destination-only quarantine without marker was " +
+                            "accepted.");
+                        Directory.Move(destinationPath, sourcePath);
+
+                        Directory.Move(sourcePath, displaced);
+                        Directory.CreateDirectory(destinationPath);
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Wrong destination quarantine FileId was " +
+                            "accepted.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+                DeleteRoot(displaced);
+            }
+        }
+
+        private static void
+            QuarantineForeignAndTamperedMarkersFailClosed()
+        {
+            string root = NewRootPath();
+            try
+            {
+                var seam = new ThrowAfterQuarantineMarkerOnce();
+                var lease = new MemoryLeaseCoordinator();
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root, seam))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        string quarantineId = Id(3760);
+                        DriveToQuarantinablePartial(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            3761);
+                        PayloadBuildWorkspaceCheckpoint beforeIntent =
+                            store.State.DeepClone();
+                        machine.Quarantine(
+                            source,
+                            fixture.Manifest,
+                            quarantineId,
+                            quarantineId,
+                            PayloadQuarantineReason.InterruptedBuild);
+                        Throws<IOException>(
+                            delegate
+                            {
+                                machine.Quarantine(
+                                    source,
+                                    fixture.Manifest,
+                                    quarantineId,
+                                    quarantineId,
+                                    PayloadQuarantineReason.
+                                        InterruptedBuild);
+                            },
+                            "Quarantine source marker fixture was not made.");
+                        string sourcePath = Path.Combine(
+                            root,
+                            store.State.ActivePartialTree.LeafName);
+                        string foreignId = Id(3780);
+                        PayloadBuildMutationPlan foreign =
+                            PayloadBuildMutationPlan.Publish(
+                                fixture.Authority,
+                                new PayloadBuildWorkspaceState(beforeIntent),
+                                fixture.Manifest,
+                                fixture.SourceReceipt,
+                                PayloadBuildStepKind.QuarantineBuild,
+                                -1,
+                                foreignId,
+                                foreignId,
+                                PayloadQuarantineReason.InterruptedBuild);
+                        AssertCheckpointRejected(
+                            tree,
+                            foreign.ExpectedControlAfter.Checkpoint,
+                            "Foreign quarantine marker was accepted.");
+
+                        WriteExtendedAttributeForTest(
+                            sourcePath,
+                            "SBMS.Payload.Quarantine.v1",
+                            new byte[] { 0x74, 0x61, 0x6d, 0x70, 0x65, 0x72 });
+                        AssertCheckpointRejected(
+                            tree,
+                            store.State,
+                            "Tampered quarantine marker was accepted.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
         private static void DurableModelPublishesCompleteNativeCandidate()
         {
             string root = NewRootPath();
@@ -1427,6 +1922,647 @@ namespace SBMSSetup
             }
         }
 
+        private static void PurgeCompletesThroughFreshAbsence()
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            try
+            {
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        string quarantineId = Id(4300);
+                        string purgeId = Id(4301);
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            4310);
+                        Equal(
+                            PayloadPurgeAdvanceKind.Armed,
+                            machine.AdvancePurge(
+                                quarantineId,
+                                purgeId).Kind,
+                            "Native purge did not arm.");
+                        Equal(
+                            PayloadPurgeAdvanceKind.ObservedAbsent,
+                            machine.AdvancePurge(
+                                quarantineId,
+                                purgeId).Kind,
+                            "Native purge did not observe fresh absence.");
+                        Equal(
+                            PayloadPurgeAdvanceKind.Complete,
+                            machine.AdvancePurge(
+                                quarantineId,
+                                purgeId).Kind,
+                            "Native purge did not complete.");
+                        True(
+                            store.State.Quarantines.Count == 0 &&
+                            store.State.PendingPurges.Count == 0 &&
+                            store.State.CompletedPurges.Count == 1,
+                            "Native purge left logical maintenance state.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void
+            PurgeChildDeleteCrashReplaysAcrossInstances()
+        {
+            ExercisePurgeCrashReplay(true);
+        }
+
+        private static void
+            PurgeRootDeleteCrashReplaysAcrossInstances()
+        {
+            ExercisePurgeCrashReplay(false);
+        }
+
+        private static void ExercisePurgeCrashReplay(bool afterChild)
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            MemoryCheckpointStore store = null;
+            BuildFixture fixture = null;
+            string quarantineId = Id(afterChild ? 4400 : 4420);
+            string purgeId = Id(afterChild ? 4401 : 4421);
+            string quarantinePath = null;
+            try
+            {
+                IWindowsIsolatedTempPayloadNativeTreeTestSeam seam =
+                    afterChild
+                        ? (IWindowsIsolatedTempPayloadNativeTreeTestSeam)
+                            new ThrowAfterPurgeChildOnce()
+                        : new ThrowAfterPurgeRootOnce();
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root, seam))
+                {
+                    fixture = Build(tree.RootIdentity);
+                    store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            afterChild ? 4410 : 4430);
+                        quarantinePath = Path.Combine(
+                            root,
+                            ".SBMS.quarantine." + quarantineId);
+                        machine.AdvancePurge(quarantineId, purgeId);
+                        Throws<IOException>(
+                            delegate
+                            {
+                                machine.AdvancePurge(
+                                    quarantineId,
+                                    purgeId);
+                            },
+                            "Injected purge deletion crash did not escape.");
+                    }
+                }
+                Equal(
+                    PayloadPurgePhase.Armed,
+                    store.State.PendingPurges[0].Phase,
+                    "Purge crash advanced durable phase.");
+                True(
+                    afterChild
+                        ? Directory.Exists(quarantinePath)
+                        : !Directory.Exists(quarantinePath),
+                    "Purge crash left the wrong physical shape.");
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree replayTree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                using (
+                    var replayModel =
+                        new DurableProtectedPayloadBuildWorkspaceModel(
+                            store,
+                            lease,
+                            replayTree))
+                using (
+                    var replayMachine =
+                        new DeterministicProtectedPayloadBuildStateMachine(
+                            fixture.Authority,
+                            replayModel))
+                {
+                    Equal(
+                        PayloadPurgeAdvanceKind.ObservedAbsent,
+                        replayMachine.AdvancePurge(
+                            quarantineId,
+                            purgeId).Kind,
+                        "Purge crash did not replay to observed absence.");
+                    Equal(
+                        PayloadPurgeAdvanceKind.Complete,
+                        replayMachine.AdvancePurge(
+                            quarantineId,
+                            purgeId).Kind,
+                        "Replayed purge did not complete.");
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void PurgeDeleteCasLossReplaysAcrossInstances()
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            try
+            {
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    string quarantineId = Id(4450);
+                    string purgeId = Id(4451);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            4460);
+                        machine.AdvancePurge(quarantineId, purgeId);
+                        store.FailNextSave = true;
+                        Throws<IOException>(
+                            delegate
+                            {
+                                machine.AdvancePurge(
+                                    quarantineId,
+                                    purgeId);
+                            },
+                            "Injected purge absence CAS loss did not escape.");
+                    }
+                    True(
+                        !Directory.Exists(Path.Combine(
+                            root,
+                            ".SBMS.quarantine." + quarantineId)) &&
+                        store.State.PendingPurges[0].Phase ==
+                            PayloadPurgePhase.Armed,
+                        "Purge CAS loss did not leave root-absent Armed.");
+                    using (
+                        WindowsIsolatedTempProtectedPayloadNativeTree
+                            replayTree =
+                                WindowsIsolatedTempProtectedPayloadNativeTree.
+                                    CreateForIsolatedTests(root))
+                    using (
+                        var replayModel =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                replayTree))
+                    using (
+                        var replayMachine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                replayModel))
+                    {
+                        Equal(
+                            PayloadPurgeAdvanceKind.ObservedAbsent,
+                            replayMachine.AdvancePurge(
+                                quarantineId,
+                                purgeId).Kind,
+                            "Root-absent Armed purge did not replay.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void PurgeMissingAndForeignMarkersFailClosed()
+        {
+            ExercisePurgeMarkerRejection(false);
+            ExercisePurgeMarkerRejection(true);
+        }
+
+        private static void ExercisePurgeMarkerRejection(bool foreign)
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            try
+            {
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    string quarantineId = Id(foreign ? 4510 : 4500);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            foreign ? 4520 : 4530);
+                        machine.AdvancePurge(
+                            quarantineId,
+                            Id(foreign ? 4511 : 4501));
+                    }
+                    string quarantinePath = Path.Combine(
+                        root,
+                        ".SBMS.quarantine." + quarantineId);
+                    if (foreign)
+                    {
+                        WriteExtendedAttributeForTest(
+                            quarantinePath,
+                            "SBMS.Payload.Purge.v1",
+                            new byte[] { 0x66, 0x6f, 0x72, 0x65, 0x69, 0x67, 0x6e });
+                    }
+                    else
+                    {
+                        File.Delete(Path.Combine(
+                            quarantinePath,
+                            "SBMS.exe"));
+                    }
+                    using (
+                        WindowsIsolatedTempProtectedPayloadNativeTree
+                            verifyTree =
+                                WindowsIsolatedTempProtectedPayloadNativeTree.
+                                    CreateForIsolatedTests(root))
+                    {
+                        AssertCheckpointRejected(
+                            verifyTree,
+                            store.State,
+                            foreign
+                                ? "Foreign purge marker was accepted."
+                                : "Partial purge without marker was accepted.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void
+            PurgeCompletionRejectsRecreatedSameNameLeaf()
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            try
+            {
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    string quarantineId = Id(4550);
+                    string purgeId = Id(4551);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            4560);
+                        machine.AdvancePurge(quarantineId, purgeId);
+                        machine.AdvancePurge(quarantineId, purgeId);
+                    }
+                    Directory.CreateDirectory(Path.Combine(
+                        root,
+                        ".SBMS.quarantine." + quarantineId));
+                    using (
+                        WindowsIsolatedTempProtectedPayloadNativeTree
+                            replayTree =
+                                WindowsIsolatedTempProtectedPayloadNativeTree.
+                                    CreateForIsolatedTests(root))
+                    using (
+                        var replayModel =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                replayTree))
+                    {
+                        Throws<InvalidDataException>(
+                            delegate
+                            {
+                                using (
+                                    var replayMachine =
+                                        new DeterministicProtectedPayloadBuildStateMachine(
+                                            fixture.Authority,
+                                            replayModel))
+                                {
+                                    replayMachine.AdvancePurge(
+                                        quarantineId,
+                                        purgeId);
+                                }
+                            },
+                            "ObservedAbsent accepted a recreated same-name leaf.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void PurgeAccessErrorRetainsArmedAndRetries()
+        {
+            string root = NewRootPath();
+            var lease = new MemoryLeaseCoordinator();
+            try
+            {
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    string quarantineId = Id(4580);
+                    string purgeId = Id(4581);
+                    string lockedFile = null;
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            4590);
+                        machine.AdvancePurge(quarantineId, purgeId);
+                        lockedFile = Path.Combine(
+                            root,
+                            ".SBMS.quarantine." + quarantineId,
+                            "SBMS.exe");
+                        using (SafeFileHandleForTest held =
+                            CreateFileForTest(
+                                lockedFile,
+                                0x0080,
+                                0x00000001 | 0x00000002,
+                                IntPtr.Zero,
+                                3,
+                                0,
+                                IntPtr.Zero))
+                        {
+                            True(
+                                held != null && !held.IsInvalid,
+                                "Access-error fixture could not hold file.");
+                            Throws<Exception>(
+                                delegate
+                                {
+                                    machine.AdvancePurge(
+                                        quarantineId,
+                                        purgeId);
+                                },
+                                "Purge ignored a no-share-delete handle.");
+                        }
+                        Equal(
+                            PayloadPurgePhase.Armed,
+                            store.State.PendingPurges[0].Phase,
+                            "Access error advanced durable purge phase.");
+                        Equal(
+                            PayloadPurgeAdvanceKind.ObservedAbsent,
+                            machine.AdvancePurge(
+                                quarantineId,
+                                purgeId).Kind,
+                            "Access-error purge did not retry.");
+                    }
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void PurgeReparseAndHardlinkEntriesFailClosed()
+        {
+            ExerciseUnsafePurgeEntry(true);
+            ExerciseUnsafePurgeEntry(false);
+        }
+
+        private static void ExerciseUnsafePurgeEntry(bool reparse)
+        {
+            string root = NewRootPath();
+            string external = NewRootPath();
+            string reparsePath = null;
+            var lease = new MemoryLeaseCoordinator();
+            Directory.CreateDirectory(external);
+            try
+            {
+                PayloadBuildWorkspaceCheckpoint armed;
+                string quarantineId = Id(reparse ? 4620 : 4630);
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree tree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    BuildFixture fixture = Build(tree.RootIdentity);
+                    var store = new MemoryCheckpointStore(
+                        lease,
+                        fixture.Initial.Checkpoint);
+                    using (
+                        var model =
+                            new DurableProtectedPayloadBuildWorkspaceModel(
+                                store,
+                                lease,
+                                tree))
+                    using (FakeSource source =
+                        new FakeSource(fixture.Manifest, fixture.Bytes))
+                    using (
+                        var machine =
+                            new DeterministicProtectedPayloadBuildStateMachine(
+                                fixture.Authority,
+                                model))
+                    {
+                        DriveToCommittedQuarantine(
+                            machine,
+                            store,
+                            source,
+                            fixture,
+                            quarantineId,
+                            reparse ? 4640 : 4650);
+                        machine.AdvancePurge(
+                            quarantineId,
+                            Id(reparse ? 4621 : 4631));
+                        armed = store.State.DeepClone();
+                    }
+                }
+                string quarantinePath = Path.Combine(
+                    root,
+                    ".SBMS.quarantine." + quarantineId);
+                string sentinel = Path.Combine(external, "sentinel.bin");
+                File.WriteAllBytes(sentinel, new byte[] { 0x71, 0x72 });
+                if (reparse)
+                {
+                    string driver = Path.Combine(
+                        quarantinePath,
+                        "driver");
+                    Directory.Delete(driver, true);
+                    if (!CreateSymbolicLink(driver, external, 3) &&
+                        !CreateDirectoryJunction(driver, external))
+                    {
+                        throw new InvalidOperationException(
+                            "Unable to create purge reparse fixture.");
+                    }
+                    reparsePath = driver;
+                }
+                else
+                {
+                    string payload = Path.Combine(
+                        quarantinePath,
+                        "SBMS.exe");
+                    File.Delete(payload);
+                    True(
+                        CreateHardLink(
+                            payload,
+                            sentinel,
+                            IntPtr.Zero),
+                        "Unable to create purge hardlink fixture.");
+                }
+                using (
+                    WindowsIsolatedTempProtectedPayloadNativeTree verifyTree =
+                        WindowsIsolatedTempProtectedPayloadNativeTree.
+                            CreateForIsolatedTests(root))
+                {
+                    AssertCheckpointRejected(
+                        verifyTree,
+                        armed,
+                        reparse
+                            ? "Purge accepted a reparse child."
+                            : "Purge accepted a multiply-linked file.");
+                }
+                True(
+                    File.Exists(sentinel) &&
+                    BytesEqual(
+                        File.ReadAllBytes(sentinel),
+                        new byte[] { 0x71, 0x72 }),
+                    "Unsafe purge fixture touched external content.");
+            }
+            finally
+            {
+                if (reparsePath != null &&
+                    Directory.Exists(reparsePath))
+                {
+                    Directory.Delete(reparsePath, false);
+                }
+                DeleteRoot(root);
+                DeleteRoot(external);
+            }
+        }
+
         private static BuildFixture Build(
             PayloadNamespaceRootIdentity root)
         {
@@ -1606,6 +2742,95 @@ namespace SBMSSetup
             }
             throw new InvalidOperationException(
                 "Build did not publish SealCandidate within the test bound.");
+        }
+
+        private static void DriveToQuarantinablePartial(
+            DeterministicProtectedPayloadBuildStateMachine machine,
+            MemoryCheckpointStore store,
+            FakeSource source,
+            BuildFixture fixture,
+            int firstId)
+        {
+            for (int attempt = 0; attempt < 40; ++attempt)
+            {
+                PayloadBuildWorkspaceCheckpoint checkpoint = store.State;
+                if (checkpoint.ActiveBuild != null &&
+                    checkpoint.ActiveBuild.ActiveIntent == null &&
+                    checkpoint.ActivePartialTree != null &&
+                    checkpoint.ActivePartialTree.Exists)
+                {
+                    foreach (PayloadTreeEntryCheckpoint entry in
+                        checkpoint.ActivePartialTree.Entries)
+                    {
+                        if (!entry.IsDirectory && entry.Length > 0)
+                        {
+                            return;
+                        }
+                    }
+                }
+                Equal(
+                    PayloadBuildAdvanceKind.InProgress,
+                    machine.Advance(
+                        source,
+                        fixture.Manifest,
+                        fixture.BuildId,
+                        Id(firstId + attempt)).Kind,
+                    "Build terminated before a quarantinable partial tree.");
+            }
+            throw new InvalidOperationException(
+                "Build did not produce a quarantinable partial tree.");
+        }
+
+        private static void DriveToCommittedQuarantine(
+            DeterministicProtectedPayloadBuildStateMachine machine,
+            MemoryCheckpointStore store,
+            FakeSource source,
+            BuildFixture fixture,
+            string quarantineId,
+            int firstId)
+        {
+            for (int attempt = 0; attempt < 60; ++attempt)
+            {
+                PayloadCandidateBuildJournal build =
+                    store.State.ActiveBuild;
+                if (build != null &&
+                    build.ActiveIntent == null &&
+                    build.AllEntriesVerified)
+                {
+                    break;
+                }
+                Equal(
+                    PayloadBuildAdvanceKind.InProgress,
+                    machine.Advance(
+                        source,
+                        fixture.Manifest,
+                        fixture.BuildId,
+                        Id(firstId + attempt)).Kind,
+                    "Build terminated before a complete partial tree.");
+                if (attempt == 59)
+                {
+                    throw new InvalidOperationException(
+                        "Build did not produce a complete partial tree.");
+                }
+            }
+            Equal(
+                PayloadBuildAdvanceKind.InProgress,
+                machine.Quarantine(
+                    source,
+                    fixture.Manifest,
+                    quarantineId,
+                    quarantineId,
+                    PayloadQuarantineReason.InterruptedBuild).Kind,
+                "Quarantine intent was not published.");
+            Equal(
+                PayloadBuildAdvanceKind.Quarantined,
+                machine.Quarantine(
+                    source,
+                    fixture.Manifest,
+                    quarantineId,
+                    quarantineId,
+                    PayloadQuarantineReason.InterruptedBuild).Kind,
+                "Quarantine was not committed.");
         }
 
         private static string CandidatePath(string root)
@@ -2173,6 +3398,117 @@ namespace SBMSSetup
                         "simulated crash after seal marker flush");
                 }
             }
+
+            public void AfterQuarantineMarkerFlushed()
+            {
+            }
+
+            public void AfterPurgeChildDeleted()
+            {
+            }
+
+            public void AfterPurgeRootDeleted()
+            {
+            }
+        }
+
+        private sealed class ThrowAfterQuarantineMarkerOnce
+            : IWindowsIsolatedTempPayloadNativeTreeTestSeam
+        {
+            private bool pending = true;
+
+            public void BeforeOwnershipReplayFlush(
+                PayloadBuildStepKind step)
+            {
+            }
+
+            public void AfterSealMarkerFlushed()
+            {
+            }
+
+            public void AfterQuarantineMarkerFlushed()
+            {
+                if (pending)
+                {
+                    pending = false;
+                    throw new IOException(
+                        "simulated crash after quarantine marker flush");
+                }
+            }
+
+            public void AfterPurgeChildDeleted()
+            {
+            }
+
+            public void AfterPurgeRootDeleted()
+            {
+            }
+        }
+
+        private sealed class ThrowAfterPurgeChildOnce
+            : IWindowsIsolatedTempPayloadNativeTreeTestSeam
+        {
+            private bool pending = true;
+
+            public void BeforeOwnershipReplayFlush(
+                PayloadBuildStepKind step)
+            {
+            }
+
+            public void AfterSealMarkerFlushed()
+            {
+            }
+
+            public void AfterQuarantineMarkerFlushed()
+            {
+            }
+
+            public void AfterPurgeChildDeleted()
+            {
+                if (pending)
+                {
+                    pending = false;
+                    throw new IOException(
+                        "simulated crash after purge child deletion");
+                }
+            }
+
+            public void AfterPurgeRootDeleted()
+            {
+            }
+        }
+
+        private sealed class ThrowAfterPurgeRootOnce
+            : IWindowsIsolatedTempPayloadNativeTreeTestSeam
+        {
+            private bool pending = true;
+
+            public void BeforeOwnershipReplayFlush(
+                PayloadBuildStepKind step)
+            {
+            }
+
+            public void AfterSealMarkerFlushed()
+            {
+            }
+
+            public void AfterQuarantineMarkerFlushed()
+            {
+            }
+
+            public void AfterPurgeChildDeleted()
+            {
+            }
+
+            public void AfterPurgeRootDeleted()
+            {
+                if (pending)
+                {
+                    pending = false;
+                    throw new IOException(
+                        "simulated crash after purge root deletion");
+                }
+            }
         }
 
         private sealed class ReplayFlushFailureSeam
@@ -2197,6 +3533,18 @@ namespace SBMSSetup
             }
 
             public void AfterSealMarkerFlushed()
+            {
+            }
+
+            public void AfterQuarantineMarkerFlushed()
+            {
+            }
+
+            public void AfterPurgeChildDeleted()
+            {
+            }
+
+            public void AfterPurgeRootDeleted()
             {
             }
         }
