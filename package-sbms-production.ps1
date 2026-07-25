@@ -246,7 +246,6 @@ foreach ($name in @(
         'NOTICE.md',
         'RELEASE_NOTES.md',
         'install-sbms-driver.ps1',
-        'install-sbms-program-files.ps1',
         'Verify-SBMSWhqlProvenance.ps1',
         'run-sbms-native.ps1',
         'diagnose-sbms.ps1'

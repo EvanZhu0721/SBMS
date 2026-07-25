@@ -248,10 +248,10 @@ copies SBMS to Program Files, can stage the verified driver package in Driver
 Store without activating it, and can create a Start Menu shortcut and startup
 task.
 
-If the current shell is not elevated, run this from the release directory in an administrator PowerShell:
+Run the signed setup executable from the release directory:
 
 ```powershell
-.\install-sbms-program-files.ps1
+.\SBMSSetup.exe
 ```
 
 ## Development

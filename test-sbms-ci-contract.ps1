@@ -71,6 +71,7 @@ Assert-True ($runner.Contains("EnvironmentVariables.Remove('PSModulePath')")) 'C
 Assert-True ($runner.Contains('status --porcelain --untracked-files=all')) 'CI source cleanliness must include untracked files.'
 Assert-True ($runner.Contains('summary.json') -and $runner.Contains('summary.md')) 'Machine and human summaries are required.'
 Assert-True ($runner.Contains('RedirectStandardOutput') -and $runner.Contains('RedirectStandardError')) 'Test stdout/stderr must be retained.'
+Assert-True ($runner.Contains("'test-sbms-installer-transaction.ps1'")) 'Hosted contract suite must execute the transactional installer fault matrix.'
 
 Assert-True ($nativeBuild.Contains('Resolve-SBMSVsDevCmd')) 'Native build must use shared toolchain discovery.'
 Assert-True ($hostBuild.Contains('Resolve-SBMSVsDevCmd')) 'Device-host build must use shared toolchain discovery.'

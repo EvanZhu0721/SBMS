@@ -38,6 +38,7 @@ $contracts = @(
     'test-sbms-production-release.ps1',
     'test-sbms-release-evidence.ps1',
     'test-sbms-installer-integrity.ps1',
+    'test-sbms-installer-transaction.ps1',
     'test-sbms-ci-contract.ps1'
 )
 $integration = @(

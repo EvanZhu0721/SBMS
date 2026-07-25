@@ -369,6 +369,28 @@ Invoke-Test 'Development installer still compiles with integrity gate disabled' 
     }
 }
 
+Invoke-Test 'Release packaging has no legacy Program Files installer bypass' {
+    Assert-True (
+        -not (Test-Path -LiteralPath (Join-Path $root 'install-sbms-program-files.ps1'))
+    ) 'Legacy Program Files mutation helper still exists.'
+    foreach ($relativePath in @(
+        'package-sbms.ps1',
+        'package-sbms-production.ps1',
+        'README.md'
+    )) {
+        $source = [System.IO.File]::ReadAllText(
+            (Join-Path $root $relativePath),
+            [System.Text.Encoding]::UTF8
+        )
+        Assert-True (
+            $source.IndexOf(
+                'install-sbms-program-files.ps1',
+                [System.StringComparison]::OrdinalIgnoreCase
+            ) -lt 0
+        ) "$relativePath still references the legacy Program Files installer bypass."
+    }
+}
+
 Invoke-Test 'Standalone driver installer stages without changing active PnP state' {
     $source = [System.IO.File]::ReadAllText(
         (Join-Path $root 'install-sbms-driver.ps1'),

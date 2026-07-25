@@ -217,6 +217,7 @@ $sourceFiles = @(
     "test-sbms-recovery-broker.ps1",
     "test-sbms-start-gate.ps1",
     "test-sbms-supervisors.ps1",
+    "test-sbms-installer-transaction.ps1",
     "build-sbms-device-host.ps1",
     "build-sbms-driver.ps1",
     "build-sbms-gui.ps1",
@@ -224,7 +225,6 @@ $sourceFiles = @(
     "build-sbms-recovery-broker.ps1",
     "build-sbms-setup.ps1",
     "install-sbms-driver.ps1",
-    "install-sbms-program-files.ps1",
     "run-sbms-native.ps1",
     "diagnose-sbms.ps1",
     "check-displays.ps1",
@@ -282,7 +282,6 @@ $releaseFiles = @(
     "NOTICE.md",
     "RELEASE_NOTES.md",
     "install-sbms-driver.ps1",
-    "install-sbms-program-files.ps1",
     "run-sbms-native.ps1",
     "diagnose-sbms.ps1"
 )
