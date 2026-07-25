@@ -673,6 +673,26 @@ namespace SBMSSetup
                 recoveryAuthorityInvariantDigest);
         }
 
+        internal IProtectedPayloadBuildWorkspaceModel
+            CreateDurableProtectedPayloadBuildWorkspaceModel(
+                string transactionId,
+                string recoveryAuthorityInvariantDigest,
+                IProtectedPayloadNativeTree nativeTree)
+        {
+            if (nativeTree == null)
+            {
+                throw new ArgumentNullException("nativeTree");
+            }
+            // A successful factory call transfers nativeTree ownership to the
+            // returned model. The model must not outlive this journal store.
+            return new DurableProtectedPayloadBuildWorkspaceModel(
+                CreateProtectedPayloadWorkspaceCheckpointStore(
+                    transactionId,
+                    recoveryAuthorityInvariantDigest),
+                transactionLeaseCoordinator,
+                nativeTree);
+        }
+
         private T WithExclusiveStoreLock<T>(
             bool createRootIfMissing,
             Func<T> action)

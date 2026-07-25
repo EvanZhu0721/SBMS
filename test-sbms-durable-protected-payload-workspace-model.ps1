@@ -13,34 +13,31 @@ if (-not $csc) {
 }
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
-    'SBMS-file-transaction-journal-store-' + [guid]::NewGuid().ToString('N')
+    'SBMS-durable-protected-payload-workspace-model-' +
+    [guid]::NewGuid().ToString('N')
 )
-$output = Join-Path $testRoot 'FileTransactionJournalStoreTests.exe'
+$output = Join-Path $testRoot 'DurableProtectedPayloadBuildWorkspaceModelTests.exe'
 [void](New-Item -ItemType Directory -Path $testRoot)
 
 try {
     $sourcePaths = @(
         (Join-Path $root 'installer\InstallerTransactionModels.cs'),
-        (Join-Path $root 'installer\InstallerJournal.cs'),
-        (Join-Path $root 'installer\WindowsHandleRelativeJournalFileSystem.cs'),
-        (Join-Path $root 'installer\ProtectedEscrowManifestStore.cs'),
         (Join-Path $root 'installer\ProtectedPayloadStoreContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadBuildContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadBuildStateMachine.cs'),
-        (Join-Path $root 'installer\ProtectedPayloadWorkspaceCheckpointStore.cs'),
         (Join-Path $root 'installer\DurableProtectedPayloadBuildWorkspaceModel.cs'),
-        (Join-Path $root 'installer\FileTransactionJournalStore.cs'),
-        (Join-Path $root 'tests\FileTransactionJournalStoreTests.cs')
+        (Join-Path $root 'tests\DurableProtectedPayloadBuildWorkspaceModelTests.cs')
     )
     foreach ($sourcePath in $sourcePaths) {
         if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-            throw "Missing file transaction journal source: $sourcePath"
+            throw "Missing durable protected payload workspace-model source: $sourcePath"
         }
     }
 
     $compilerArgs = @(
         '/nologo',
         '/target:exe',
+        '/platform:x64',
         '/optimize+',
         "/out:$output",
         '/reference:System.Runtime.Serialization.dll',
@@ -49,13 +46,13 @@ try {
     & $csc @compilerArgs
     $compileExitCode = $LASTEXITCODE
     if ($compileExitCode -ne 0) {
-        throw "File transaction journal test compilation failed with exit code $compileExitCode."
+        throw "Durable protected payload workspace-model compilation failed with exit code $compileExitCode."
     }
 
     & $output
     $testExitCode = $LASTEXITCODE
     if ($testExitCode -ne 0) {
-        throw "File transaction journal tests failed with exit code $testExitCode."
+        throw "Durable protected payload workspace-model tests failed with exit code $testExitCode."
     }
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

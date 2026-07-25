@@ -204,6 +204,71 @@ namespace SBMSSetup
             }
         }
 
+        private sealed class LeaseProbeNativeTree
+            : IProtectedPayloadNativeTree
+        {
+            internal int OpenCount;
+            internal bool Disposed;
+
+            public IProtectedPayloadNativeTreeSession OpenExclusive(
+                PayloadNamespaceRootIdentity expectedRoot)
+            {
+                if (Disposed)
+                {
+                    throw new ObjectDisposedException(
+                        "LeaseProbeNativeTree");
+                }
+                expectedRoot.Validate();
+                ++OpenCount;
+                return new LeaseProbeNativeTreeSession();
+            }
+
+            public void Dispose()
+            {
+                Disposed = true;
+            }
+
+            private sealed class LeaseProbeNativeTreeSession
+                : IProtectedPayloadNativeTreeSession
+            {
+                public void DemandNamespaceExclusionHeld()
+                {
+                }
+
+                public void ValidateCheckpoint(
+                    PayloadBuildWorkspaceCheckpoint checkpoint)
+                {
+                    checkpoint.Validate();
+                }
+
+                public PayloadBuildPhysicalResult ApplyBuildStepExact(
+                    PayloadBuildMutationPlan plan,
+                    ITrustedReleasePayloadSource source)
+                {
+                    throw new NotSupportedException();
+                }
+
+                public void DeleteQuarantineTreeExact(
+                    PayloadQuarantineCheckpoint quarantine,
+                    PayloadPurgeCheckpoint purge)
+                {
+                    throw new NotSupportedException();
+                }
+
+                public PayloadQuarantineAbsenceObservation
+                    ObserveQuarantineAbsenceExact(
+                        PayloadBuildWorkspaceCheckpoint checkpoint,
+                        PayloadQuarantineCheckpoint quarantine)
+                {
+                    throw new NotSupportedException();
+                }
+
+                public void Dispose()
+                {
+                }
+            }
+        }
+
         private static int passed;
         private static int failed;
 
@@ -217,6 +282,7 @@ namespace SBMSSetup
             Run("mutex timeout fails before ACL or filesystem IO", TestMutexTimeout);
             Run("transaction lease spans multiple journal operations", TestTransactionLease);
             Run("payload checkpoint store shares transaction lease", TestPayloadCheckpointSharedLease);
+            Run("durable payload model factory shares transaction lease", TestDurablePayloadModelSharedLease);
             Run("ProgramData SBMS parent reparse fails closed", TestParentReparse);
             Run("final state root reparse fails closed", TestFinalReparse);
             Run("ACL inheritance flags fail closed", TestAclInheritanceFlags);
@@ -1427,6 +1493,133 @@ namespace SBMSSetup
             }
             finally
             {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestDurablePayloadModelSharedLease()
+        {
+            string root = NewRoot();
+            const string transactionId =
+                "00000000000000000000000000000022";
+            const string authorityDigest =
+                "5555555555555555555555555555555555555555555555555555555555555555";
+            IProtectedPayloadBuildWorkspaceModel model = null;
+            var nativeTree = new LeaseProbeNativeTree();
+            try
+            {
+                FileTransactionJournalStore journal = Store(
+                    root,
+                    new RecordingAclPolicy(),
+                    TimeSpan.FromSeconds(2));
+                AssertThrows<ArgumentNullException>(
+                    delegate
+                    {
+                        journal.CreateDurableProtectedPayloadBuildWorkspaceModel(
+                            transactionId,
+                            authorityDigest,
+                            null);
+                    },
+                    "Durable payload model factory accepted a null native tree.");
+                IProtectedPayloadWorkspaceCheckpointStore workspace =
+                    journal.CreateProtectedPayloadWorkspaceCheckpointStore(
+                        transactionId,
+                        authorityDigest);
+                using (journal.AcquireTransactionLease())
+                {
+                    workspace.Initialize(
+                        new PayloadBuildWorkspaceCheckpoint
+                        {
+                            SchemaVersion = 3,
+                            Revision = 4,
+                            TransactionId = transactionId,
+                            RecoveryAuthorityInvariantDigest =
+                                authorityDigest,
+                            NamespaceRoot =
+                                new PayloadNamespaceRootIdentity
+                                {
+                                    SchemaVersion = 1,
+                                    CanonicalRootPath =
+                                        @"C:\Program Files\SBMS",
+                                    VolumeSerialNumber = 0x5432UL,
+                                    RootFileId =
+                                        "66666666666666666666666666666666"
+                                },
+                            Committed =
+                                new PayloadNamespaceCheckpoint
+                                {
+                                    SchemaVersion = 1,
+                                    Revision = 2,
+                                    TransactionId = transactionId,
+                                    Shape =
+                                        PayloadNamespaceShape.Empty
+                                }
+                        });
+                }
+
+                model =
+                    journal.CreateDurableProtectedPayloadBuildWorkspaceModel(
+                        transactionId,
+                        authorityDigest,
+                        nativeTree);
+                using (journal.AcquireTransactionLease())
+                {
+                    Equal(
+                        4L,
+                        model.Inspect().Revision,
+                        "Factory model could not nest under journal lease.");
+                }
+
+                Exception workerFailure = null;
+                IProtectedPayloadBuildWorkspaceModel workspaceModel = model;
+                using (IDisposable lease =
+                    journal.AcquireTransactionLease())
+                using (var finished = new ManualResetEvent(false))
+                {
+                    var worker = new Thread(delegate()
+                    {
+                        try
+                        {
+                            workspaceModel.Inspect();
+                        }
+                        catch (Exception failure)
+                        {
+                            workerFailure = failure;
+                        }
+                        finally
+                        {
+                            finished.Set();
+                        }
+                    });
+                    worker.IsBackground = true;
+                    worker.Start();
+                    Assert(!finished.WaitOne(150),
+                        "Factory model bypassed the journal transaction lease.");
+                    lease.Dispose();
+                    Assert(finished.WaitOne(2000),
+                        "Factory model did not resume after lease release.");
+                    worker.Join();
+                }
+                if (workerFailure != null)
+                {
+                    throw new InvalidOperationException(
+                        "Durable payload model lease handoff failed.",
+                        workerFailure);
+                }
+                Equal(
+                    2,
+                    nativeTree.OpenCount,
+                    "Durable payload model native session count changed.");
+            }
+            finally
+            {
+                if (model != null)
+                {
+                    model.Dispose();
+                }
+                Assert(
+                    model == null || nativeTree.Disposed,
+                    "Durable payload model did not dispose its native tree.");
                 DeleteRoot(root);
             }
         }
