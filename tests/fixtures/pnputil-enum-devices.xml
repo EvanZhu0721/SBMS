@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PnpUtil>
+  <Device InstanceId="SWD\SBMS\VirtualDisplay-0001">
+    <DeviceDescription>SBMS Virtual Display Adapter</DeviceDescription>
+    <ClassName>Display</ClassName>
+    <ClassGuid>{4d36e968-e325-11ce-bfc1-08002be10318}</ClassGuid>
+    <ManufacturerName>SBMS</ManufacturerName>
+    <Status>已启动（此文本故意本地化且不得解析）</Status>
+    <DriverName>oem56.inf</DriverName>
+    <HardwareIds>
+      <HardwareId>SBMS\IndirectDisplay</HardwareId>
+    </HardwareIds>
+    <CompatibleIds />
+    <Parent>HTREE\ROOT\0</Parent>
+    <Service>WUDFRd</Service>
+    <MatchingDrivers>
+      <DriverName DriverName="oem56.inf">
+        <ProviderName>SBMS</ProviderName>
+        <ClassName>Display</ClassName>
+        <ClassGuid>{4d36e968-e325-11ce-bfc1-08002be10318}</ClassGuid>
+        <DriverVersion>07/25/2026 0.3.0.0</DriverVersion>
+        <SignerName>Microsoft Windows Hardware Compatibility Publisher</SignerName>
+        <MatchingDeviceId>SBMS\IndirectDisplay</MatchingDeviceId>
+        <Rank>00FF0001</Rank>
+        <Status>最佳匹配</Status>
+      </DriverName>
+    </MatchingDrivers>
+  </Device>
+  <Device InstanceId="PCI\VEN_1002&amp;DEV_744C\1">
+    <DeviceDescription>Unrelated physical GPU</DeviceDescription>
+    <ClassName>Display</ClassName>
+    <ClassGuid>{4d36e968-e325-11ce-bfc1-08002be10318}</ClassGuid>
+    <ManufacturerName>AMD</ManufacturerName>
+    <Status>Started</Status>
+    <DriverName>oem12.inf</DriverName>
+    <HardwareIds>
+      <HardwareId>PCI\VEN_1002&amp;DEV_744C</HardwareId>
+    </HardwareIds>
+    <Parent>PCIROOT(0)#PCI(0100)</Parent>
+    <Service>amduw23g</Service>
+  </Device>
+</PnpUtil>

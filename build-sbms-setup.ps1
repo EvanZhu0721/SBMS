@@ -53,6 +53,9 @@ $TransactionSource = Join-Path $Root 'installer\InstallTransaction.cs'
 $TransactionModelsSource = Join-Path $Root 'installer\InstallerTransactionModels.cs'
 $TransactionEngineSource = Join-Path $Root 'installer\InstallerTransactionEngine.cs'
 $TransactionJournalSource = Join-Path $Root 'installer\InstallerJournal.cs'
+$WindowsInventorySource = Join-Path $Root 'installer\WindowsInstallerInventory.cs'
+$OwnershipSource = Join-Path $Root 'installer\InstallerOwnership.cs'
+$AuditOnlySource = Join-Path $Root 'installer\InstallerAuditOnly.cs'
 $VerifierSource = Join-Path $Root 'installer\ReleaseIntegrityVerifier.cs'
 $DriverVerifierSource = Join-Path $Root 'installer\DriverCatalogVerifier.cs'
 $Manifest = $GeneratedManifest
@@ -78,7 +81,7 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
+& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

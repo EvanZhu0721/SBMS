@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PnpUtil>
+  <Driver DriverName="oem56.inf">
+    <OriginalName>SBMSIndirectDisplay.inf</OriginalName>
+    <ProviderName>SBMS</ProviderName>
+    <ClassName>Display</ClassName>
+    <ClassGuid>{4d36e968-e325-11ce-bfc1-08002be10318}</ClassGuid>
+    <DriverVersion>07/25/2026 0.3.0.0</DriverVersion>
+    <SignerName>Microsoft Windows Hardware Compatibility Publisher</SignerName>
+    <CatalogAttributes>
+      <Attribute>Declarative</Attribute>
+      <Attribute>Universal</Attribute>
+    </CatalogAttributes>
+    <WhcpVersion>10.0</WhcpVersion>
+    <Files>
+      <File Name="SBMSIndirectDisplay.dll" />
+    </Files>
+    <CatalogFile>sbmsindirectdisplay.cat</CatalogFile>
+  </Driver>
+  <Driver DriverName="oem12.inf">
+    <OriginalName>vendor.inf</OriginalName>
+    <ProviderName>Other Vendor</ProviderName>
+    <ClassName>Display</ClassName>
+    <ClassGuid>{4d36e968-e325-11ce-bfc1-08002be10318}</ClassGuid>
+    <DriverVersion>01/01/2025 1.0.0.0</DriverVersion>
+    <SignerName>Other Signer</SignerName>
+    <CatalogAttributes>
+      <Attribute>Declarative</Attribute>
+    </CatalogAttributes>
+    <WhcpVersion>Unknown</WhcpVersion>
+    <Files>
+      <File Name="vendor.dll" />
+    </Files>
+    <CatalogFile>vendor.cat</CatalogFile>
+  </Driver>
+</PnpUtil>

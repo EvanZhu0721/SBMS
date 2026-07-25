@@ -27,6 +27,7 @@ $releaseEvidence = Read-Utf8 'Confirm-SBMSReleaseCandidateEvidence.ps1'
 $hardwareHarness = Read-Utf8 'test-sbms-hardware.ps1'
 $nativeBuild = Read-Utf8 'build-sbms-native.ps1'
 $hostBuild = Read-Utf8 'build-sbms-device-host.ps1'
+$setupBuild = Read-Utf8 'build-sbms-setup.ps1'
 $package = Read-Utf8 'package-sbms.ps1'
 
 Assert-True ($windowsCi.Contains('runs-on: windows-2022')) 'Hosted CI must pin windows-2022.'
@@ -72,11 +73,13 @@ Assert-True ($runner.Contains('status --porcelain --untracked-files=all')) 'CI s
 Assert-True ($runner.Contains('summary.json') -and $runner.Contains('summary.md')) 'Machine and human summaries are required.'
 Assert-True ($runner.Contains('RedirectStandardOutput') -and $runner.Contains('RedirectStandardError')) 'Test stdout/stderr must be retained.'
 Assert-True ($runner.Contains("'test-sbms-installer-transaction.ps1'")) 'Hosted contract suite must execute the transactional installer fault matrix.'
+Assert-True ($runner.Contains("'test-sbms-installer-audit.ps1'")) 'Hosted contract suite must execute the read-only installer inventory and ownership tests.'
 
 Assert-True ($nativeBuild.Contains('Resolve-SBMSVsDevCmd')) 'Native build must use shared toolchain discovery.'
 Assert-True ($hostBuild.Contains('Resolve-SBMSVsDevCmd')) 'Device-host build must use shared toolchain discovery.'
 Assert-True (-not $nativeBuild.Contains('$VsDevCmd = "C:\BuildTools')) 'Native build still hard-codes a personal toolchain.'
 Assert-True (-not $hostBuild.Contains('$VsDevCmd = "C:\BuildTools')) 'Device-host build still hard-codes a personal toolchain.'
+Assert-True ($setupBuild.Contains('/platform:x64')) 'Setup must compile explicitly as x64 before using SetupAPI inventory.'
 Assert-True (-not $package.Contains('Sort-Object LastWriteTime')) 'Package must not select signing material by timestamp.'
 Assert-True (-not $package.Contains('-Filter "SBMSIndirectDisplay.cer"')) 'Development package must not discover an implicit certificate.'
 
