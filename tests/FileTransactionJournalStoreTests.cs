@@ -70,6 +70,78 @@ namespace SBMSSetup
             }
         }
 
+        private sealed class DirectorySwapSeam : IWindowsJournalIoTestSeam
+        {
+            internal string HeldPath;
+            internal string AttackerPath;
+
+            public void AfterTrustedInstallerRootOpened(string expectedPath)
+            {
+                HeldPath = expectedPath + "-held";
+                AttackerPath = expectedPath;
+                Directory.Move(expectedPath, HeldPath);
+                Directory.CreateDirectory(AttackerPath);
+            }
+
+            public void AfterBackupPublished()
+            {
+            }
+
+            public void BeforePublishedFileIdVerification(
+                string destinationRelativePath)
+            {
+            }
+        }
+
+        private sealed class BackupCrashSeam : IWindowsJournalIoTestSeam
+        {
+            public void AfterTrustedInstallerRootOpened(string expectedPath)
+            {
+            }
+
+            public void AfterBackupPublished()
+            {
+                throw new IOException("simulated backup publish crash");
+            }
+
+            public void BeforePublishedFileIdVerification(
+                string destinationRelativePath)
+            {
+            }
+        }
+
+        private sealed class PublicationVerificationFaultSeam
+            : IWindowsJournalIoTestSeam
+        {
+            private readonly string destination;
+
+            internal PublicationVerificationFaultSeam(string destination)
+            {
+                this.destination = destination;
+            }
+
+            public void AfterTrustedInstallerRootOpened(string expectedPath)
+            {
+            }
+
+            public void AfterBackupPublished()
+            {
+            }
+
+            public void BeforePublishedFileIdVerification(
+                string destinationRelativePath)
+            {
+                if (String.Equals(
+                    destination,
+                    destinationRelativePath,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException(
+                        "simulated persistent post-rename verification failure");
+                }
+            }
+        }
+
         private static int passed;
         private static int failed;
 
@@ -86,7 +158,23 @@ namespace SBMSSetup
             Run("final state root reparse fails closed", TestFinalReparse);
             Run("ACL inheritance flags fail closed", TestAclInheritanceFlags);
             Run("verify-after-swap rejection escapes", TestVerifyAfterSwap);
-            Run("production policy remains feature gated", TestProductionFeatureGate);
+            Run("unattached production policy fails closed", TestProductionFeatureGate);
+            Run("attached native policy clears feature gate", TestAttachedNativePolicy);
+            Run("native rooted IO lifecycle stays below temp root", TestNativeIoLifecycle);
+            Run("native rooted IO rejects hardlinked leaf", TestNativeHardlink);
+            Run("native rooted IO rejects parent directory reparse", TestNativeParentReparse);
+            Run("native rooted IO rejects final directory reparse", TestNativeFinalReparse);
+            Run("native rooted IO survives directory path swap", TestNativeDirectorySwap);
+            Run("native backup publish crash remains recoverable", TestNativeBackupCrash);
+            Run("native candidate rename reports committed publication", TestNativeCandidateRenameOutcome);
+            Run("native backup rename does not report candidate publication", TestNativeBackupRenameOutcome);
+            Run("native rooted IO rejects hostile SBMS parent ACL", TestNativeHostileParentAcl);
+            Run("hidden pending WAL blocks a new transaction", TestHiddenPendingWal);
+            Run("native rooted IO rejects unexpected ACL entry", TestNativeExtraAcl);
+            Run("native rooted IO rejects inherited ACL", TestNativeInheritedAcl);
+            Run("secure mutex accepts only its protected descriptor", TestSecureMutex);
+            Run("secure mutex rejects low-trust precreation", TestSecureMutexPrecreation);
+            Run("secure mutex preserves abandoned semantics", TestSecureMutexAbandoned);
             Console.WriteLine(
                 "RESULT passed=" + passed + " failed=" + failed);
             return failed == 0 ? 0 : 1;
@@ -122,6 +210,744 @@ namespace SBMSSetup
             finally
             {
                 DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeIoLifecycle()
+        {
+            string root = NewRoot();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                null);
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json.new"),
+                    new byte[] { 1, 2, 3 });
+                fileSystem.PublishNewFile(
+                    "journal.json.new",
+                    "journal.json");
+                Equal(
+                    3,
+                    ReadBytes(fileSystem.OpenReadFile("journal.json")).Length,
+                    "Native journal readback length changed.");
+
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json.next"),
+                    new byte[] { 4, 5, 6, 7 });
+                fileSystem.ReplaceFile(
+                    "journal.json.next",
+                    "journal.json",
+                    "journal.json.bak");
+                Equal(
+                    4,
+                    ReadBytes(fileSystem.OpenReadFile("journal.json")).Length,
+                    "Native replacement did not publish the candidate.");
+                Equal(
+                    3,
+                    ReadBytes(fileSystem.OpenReadFile("journal.json.bak")).Length,
+                    "Native replacement did not retain the backup.");
+
+                fileSystem.EnsureDirectory("history");
+                WriteBytes(
+                    fileSystem.CreateNewFile("history\\terminal.new"),
+                    new byte[] { 9 });
+                fileSystem.PublishNewFile(
+                    "history\\terminal.new",
+                    "history\\terminal.json");
+                Assert(
+                    fileSystem.FileExists("history\\terminal.json"),
+                    "Native history publish was not visible.");
+                fileSystem.DeleteFile("history\\terminal.json");
+                Assert(
+                    !fileSystem.FileExists("history\\terminal.json"),
+                    "Native history delete did not complete.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestAttachedNativePolicy()
+        {
+            string root = NewRoot();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                null);
+            try
+            {
+                var policy = new WindowsInstallerJournalAclPolicy();
+                policy.Attach(fileSystem);
+                policy.PrepareAndVerify(
+                    root,
+                    Path.Combine(root, "SBMS", "Installer"),
+                    true);
+                Assert(
+                    Directory.Exists(
+                        Path.Combine(root, "SBMS", "Installer")),
+                    "Attached native policy did not prepare the secure root.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeHardlink()
+        {
+            string root = NewRoot();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                null);
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                string installer = Path.Combine(root, "SBMS", "Installer");
+                string source = Path.Combine(installer, "source.bin");
+                string link = Path.Combine(installer, "journal.json");
+                File.WriteAllBytes(source, new byte[] { 1 });
+                if (!CreateHardLink(link, source, IntPtr.Zero))
+                {
+                    throw new InvalidOperationException(
+                        "Unable to create isolated hardlink fixture.");
+                }
+                AssertThrows<InvalidDataException>(
+                    delegate { fileSystem.FileExists("journal.json"); },
+                    "Native journal IO accepted a multi-link leaf.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeDirectorySwap()
+        {
+            string root = NewRoot();
+            var seam = new DirectorySwapSeam();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                seam);
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json"),
+                    new byte[] { 1 });
+                Assert(
+                    File.Exists(Path.Combine(seam.HeldPath, "journal.json")),
+                    "Rooted IO did not remain on the opened directory object.");
+                Assert(
+                    !File.Exists(Path.Combine(seam.AttackerPath, "journal.json")),
+                    "Rooted IO followed the swapped path.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeBackupCrash()
+        {
+            string root = NewRoot();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                new BackupCrashSeam());
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json"),
+                    new byte[] { 1, 2, 3 });
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json.next"),
+                    new byte[] { 4, 5, 6, 7 });
+                AssertThrows<IOException>(
+                    delegate
+                    {
+                        fileSystem.ReplaceFile(
+                            "journal.json.next",
+                            "journal.json",
+                            "journal.json.bak");
+                    },
+                    "Backup publish crash did not escape.");
+                Assert(
+                    !fileSystem.FileExists("journal.json"),
+                    "Crash boundary unexpectedly retained a primary.");
+                Equal(
+                    3,
+                    ReadBytes(
+                        fileSystem.OpenReadFile("journal.json.bak")).Length,
+                    "Crash boundary lost the verified old primary.");
+                Assert(
+                    fileSystem.FileExists("journal.json.next"),
+                    "Crash boundary lost the unpublished candidate.");
+                fileSystem.PublishNewFile(
+                    "journal.json.next",
+                    "journal.json");
+                Equal(
+                    4,
+                    ReadBytes(fileSystem.OpenReadFile("journal.json")).Length,
+                    "Recovery did not publish the retained candidate.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeCandidateRenameOutcome()
+        {
+            string root = NewRoot();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                new PublicationVerificationFaultSeam("journal.json"));
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json.new"),
+                    new byte[] { 7, 8, 9 });
+                try
+                {
+                    fileSystem.PublishNewFile(
+                        "journal.json.new",
+                        "journal.json");
+                    throw new InvalidOperationException(
+                        "Post-candidate verification failure did not escape.");
+                }
+                catch (JournalFilePublicationException failure)
+                {
+                    Assert(
+                        failure.CandidatePublished,
+                        "Committed candidate rename was reported as unpublished.");
+                }
+                Equal(
+                    3,
+                    File.ReadAllBytes(
+                        Path.Combine(
+                            root,
+                            "SBMS",
+                            "Installer",
+                            "journal.json")).Length,
+                    "Committed candidate was not present after verification failure.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeBackupRenameOutcome()
+        {
+            string root = NewRoot();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                new PublicationVerificationFaultSeam("journal.json.bak"));
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json"),
+                    new byte[] { 1 });
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json.new"),
+                    new byte[] { 2, 3 });
+                try
+                {
+                    fileSystem.ReplaceFile(
+                        "journal.json.new",
+                        "journal.json",
+                        "journal.json.bak");
+                    throw new InvalidOperationException(
+                        "Post-backup verification failure did not escape.");
+                }
+                catch (JournalFilePublicationException failure)
+                {
+                    Assert(
+                        !failure.CandidatePublished,
+                        "Backup-only rename was reported as candidate publication.");
+                }
+                Assert(
+                    fileSystem.FileExists("journal.json.bak"),
+                    "Committed backup rename was not retained.");
+                Assert(
+                    !fileSystem.FileExists("journal.json"),
+                    "Backup-only failure unexpectedly retained the primary name.");
+                Assert(
+                    fileSystem.FileExists("journal.json.new"),
+                    "Backup-only failure lost the unpublished candidate.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeHostileParentAcl()
+        {
+            string root = NewRoot();
+            Directory.CreateDirectory(Path.Combine(root, "SBMS"));
+            try
+            {
+                using (var fileSystem =
+                    new WindowsHandleRelativeJournalFileSystem(
+                        root,
+                        CurrentSecurityProfile(),
+                        null))
+                {
+                    AssertThrows<UnauthorizedAccessException>(
+                        delegate { fileSystem.PrepareAndVerify(true); },
+                        "Native root accepted a permissive precreated SBMS parent.");
+                }
+                Assert(
+                    !Directory.Exists(
+                        Path.Combine(root, "SBMS", "Installer")),
+                    "Hostile parent was used to create installer state.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestHiddenPendingWal()
+        {
+            string root = NewRoot();
+            string installer = Path.Combine(root, "SBMS", "Installer");
+            string detached = installer + "-detached";
+            using (var fileSystem =
+                new WindowsHandleRelativeJournalFileSystem(
+                    root,
+                    CurrentSecurityProfile(),
+                    null))
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json"),
+                    new byte[] { 1, 2, 3 });
+            }
+            Directory.Move(installer, detached);
+            var native = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                null);
+            var store = new FileTransactionJournalStore(
+                new FixedProgramDataPathProvider(root),
+                new WindowsInstallerJournalAclPolicy(),
+                TestMutexName(),
+                TimeSpan.FromSeconds(2),
+                null,
+                native,
+                new UnsecuredInstallerTransactionMutexFactory());
+            try
+            {
+                AssertThrows<InvalidDataException>(
+                    delegate { store.PrepareForNewTransaction(); },
+                    "A detached pending WAL was treated as an empty store.");
+                Assert(
+                    File.Exists(Path.Combine(detached, "journal.json")),
+                    "Hidden pending WAL fixture was altered.");
+            }
+            finally
+            {
+                store.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeParentReparse()
+        {
+            string root = NewRoot();
+            string target = NewRoot();
+            string link = Path.Combine(root, "SBMS");
+            try
+            {
+                if (!CreateSymbolicLink(link, target, 3) &&
+                    !CreateDirectoryJunction(link, target))
+                {
+                    throw new InvalidOperationException(
+                        "Unable to create parent reparse fixture.");
+                }
+                Assert(
+                    (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0,
+                    "Parent reparse fixture is not a reparse point.");
+                using (var fileSystem =
+                    new WindowsHandleRelativeJournalFileSystem(
+                        root,
+                        CurrentSecurityProfile(),
+                        null))
+                {
+                    AssertThrows<Exception>(
+                        delegate { fileSystem.PrepareAndVerify(true); },
+                        "Native root followed a parent directory reparse.");
+                }
+            }
+            finally
+            {
+                DeleteReparseFixture(link);
+                DeleteRoot(root);
+                DeleteRoot(target);
+            }
+        }
+
+        private static void TestNativeFinalReparse()
+        {
+            string root = NewRoot();
+            string target = NewRoot();
+            string link = Path.Combine(root, "SBMS", "Installer");
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(root, "SBMS"));
+                if (!CreateSymbolicLink(link, target, 3) &&
+                    !CreateDirectoryJunction(link, target))
+                {
+                    throw new InvalidOperationException(
+                        "Unable to create final reparse fixture.");
+                }
+                Assert(
+                    (File.GetAttributes(link) & FileAttributes.ReparsePoint) != 0,
+                    "Final reparse fixture is not a reparse point.");
+                using (var fileSystem =
+                    new WindowsHandleRelativeJournalFileSystem(
+                        root,
+                        CurrentSecurityProfile(),
+                        null))
+                {
+                    AssertThrows<Exception>(
+                        delegate { fileSystem.PrepareAndVerify(true); },
+                        "Native root followed the final directory reparse.");
+                }
+            }
+            finally
+            {
+                DeleteReparseFixture(link);
+                DeleteRoot(root);
+                DeleteRoot(target);
+            }
+        }
+
+        private static void TestNativeExtraAcl()
+        {
+            string root = NewRoot();
+            CreateNativeRoot(root);
+            try
+            {
+                string installer = Path.Combine(root, "SBMS", "Installer");
+                DirectorySecurity security =
+                    new DirectoryInfo(installer).GetAccessControl();
+                security.AddAccessRule(
+                    new FileSystemAccessRule(
+                        new SecurityIdentifier(
+                            WellKnownSidType.WorldSid,
+                            null),
+                        FileSystemRights.Read,
+                        AccessControlType.Allow));
+                new DirectoryInfo(installer).SetAccessControl(security);
+                using (var fileSystem =
+                    new WindowsHandleRelativeJournalFileSystem(
+                        root,
+                        CurrentSecurityProfile(),
+                        null))
+                {
+                    AssertThrows<UnauthorizedAccessException>(
+                        delegate { fileSystem.PrepareAndVerify(false); },
+                        "Native root accepted an unexpected ACL entry.");
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestNativeInheritedAcl()
+        {
+            string root = NewRoot();
+            CreateNativeRoot(root);
+            try
+            {
+                string installer = Path.Combine(root, "SBMS", "Installer");
+                DirectorySecurity security =
+                    new DirectoryInfo(installer).GetAccessControl();
+                security.SetAccessRuleProtection(false, true);
+                new DirectoryInfo(installer).SetAccessControl(security);
+                using (var fileSystem =
+                    new WindowsHandleRelativeJournalFileSystem(
+                        root,
+                        CurrentSecurityProfile(),
+                        null))
+                {
+                    AssertThrows<UnauthorizedAccessException>(
+                        delegate { fileSystem.PrepareAndVerify(false); },
+                        "Native root accepted ACL inheritance.");
+                }
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void CreateNativeRoot(string root)
+        {
+            using (var fileSystem =
+                new WindowsHandleRelativeJournalFileSystem(
+                    root,
+                    CurrentSecurityProfile(),
+                    null))
+            {
+                fileSystem.PrepareAndVerify(true);
+            }
+        }
+
+        private static void TestSecureMutex()
+        {
+            string name = TestMutexName();
+            var factory = new SecureInstallerTransactionMutexFactory(
+                CurrentSecurityProfile());
+            using (Mutex first = factory.OpenOrCreate(name))
+            using (Mutex second = factory.OpenOrCreate(name))
+            {
+                Assert(first.WaitOne(1000), "Secure mutex was not acquirable.");
+                first.ReleaseMutex();
+                Assert(second.WaitOne(1000), "Secure mutex reopen failed.");
+                second.ReleaseMutex();
+            }
+        }
+
+        private static void TestSecureMutexPrecreation()
+        {
+            string name = TestMutexName();
+            using (var insecure = new Mutex(false, name))
+            {
+                MutexSecurity security = insecure.GetAccessControl();
+                security.SetAccessRuleProtection(false, false);
+                security.AddAccessRule(
+                    new MutexAccessRule(
+                        new SecurityIdentifier(
+                            WellKnownSidType.WorldSid,
+                            null),
+                        MutexRights.Synchronize,
+                        AccessControlType.Allow));
+                insecure.SetAccessControl(security);
+                var factory = new SecureInstallerTransactionMutexFactory(
+                    CurrentSecurityProfile());
+                AssertThrows<UnauthorizedAccessException>(
+                    delegate
+                    {
+                        using (factory.OpenOrCreate(name))
+                        {
+                        }
+                    },
+                    "Secure mutex accepted a low-trust precreated object.");
+            }
+        }
+
+        private static void TestSecureMutexAbandoned()
+        {
+            string name = TestMutexName();
+            var factory = new SecureInstallerTransactionMutexFactory(
+                CurrentSecurityProfile());
+            Exception workerFailure = null;
+            var worker = new Thread(delegate()
+            {
+                try
+                {
+                    Mutex mutex = factory.OpenOrCreate(name);
+                    mutex.WaitOne();
+                    // Deliberately exit without ReleaseMutex.
+                }
+                catch (Exception ex)
+                {
+                    workerFailure = ex;
+                }
+            });
+            worker.Start();
+            worker.Join();
+            if (workerFailure != null)
+            {
+                throw new InvalidOperationException(
+                    "Abandoned mutex fixture failed.",
+                    workerFailure);
+            }
+            using (Mutex recovered = factory.OpenOrCreate(name))
+            {
+                bool acquired = false;
+                try
+                {
+                    acquired = recovered.WaitOne(1000);
+                }
+                catch (AbandonedMutexException)
+                {
+                    acquired = true;
+                }
+                Assert(acquired, "Secure abandoned mutex was not recoverable.");
+                recovered.ReleaseMutex();
+            }
+        }
+
+        private static WindowsJournalSecurityProfile CurrentSecurityProfile()
+        {
+            SecurityIdentifier current =
+                WindowsIdentity.GetCurrent().User;
+            return new WindowsJournalSecurityProfile
+            {
+                Owner = current,
+                FullControlIdentities = new[] { current }
+            };
+        }
+
+        private static void WriteBytes(Stream stream, byte[] bytes)
+        {
+            using (stream)
+            {
+                stream.Write(bytes, 0, bytes.Length);
+                var file = stream as FileStream;
+                if (file != null)
+                {
+                    file.Flush(true);
+                }
+                else
+                {
+                    stream.Flush();
+                }
+            }
+        }
+
+        private static byte[] ReadBytes(Stream stream)
+        {
+            using (stream)
+            using (var memory = new MemoryStream())
+            {
+                stream.CopyTo(memory);
+                return memory.ToArray();
+            }
+        }
+
+        private static bool CreateDirectoryJunction(
+            string link,
+            string target)
+        {
+            Directory.CreateDirectory(link);
+            Microsoft.Win32.SafeHandles.SafeFileHandle handle =
+                OpenReparseDirectory(
+                    link,
+                    0x40000000,
+                    0,
+                    IntPtr.Zero,
+                    3,
+                    0x02200000,
+                    IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                Directory.Delete(link, false);
+                return false;
+            }
+            using (handle)
+            {
+                string printName = Path.GetFullPath(target);
+                string substituteName = @"\??\" + printName;
+                byte[] substituteBytes =
+                    System.Text.Encoding.Unicode.GetBytes(substituteName);
+                byte[] printBytes =
+                    System.Text.Encoding.Unicode.GetBytes(printName);
+                int pathBytesLength =
+                    substituteBytes.Length + 2 + printBytes.Length + 2;
+                int dataLength = 8 + pathBytesLength;
+                byte[] buffer = new byte[8 + dataLength];
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(unchecked((int)0xA0000003)),
+                    0,
+                    buffer,
+                    0,
+                    4);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes((ushort)dataLength),
+                    0,
+                    buffer,
+                    4,
+                    2);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes((ushort)0),
+                    0,
+                    buffer,
+                    8,
+                    2);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(
+                        checked((ushort)substituteBytes.Length)),
+                    0,
+                    buffer,
+                    10,
+                    2);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(
+                        checked((ushort)(substituteBytes.Length + 2))),
+                    0,
+                    buffer,
+                    12,
+                    2);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(
+                        checked((ushort)printBytes.Length)),
+                    0,
+                    buffer,
+                    14,
+                    2);
+                Buffer.BlockCopy(
+                    substituteBytes,
+                    0,
+                    buffer,
+                    16,
+                    substituteBytes.Length);
+                Buffer.BlockCopy(
+                    printBytes,
+                    0,
+                    buffer,
+                    16 + substituteBytes.Length + 2,
+                    printBytes.Length);
+                int returned;
+                bool success = SetReparsePoint(
+                    handle,
+                    0x000900A4,
+                    buffer,
+                    buffer.Length,
+                    null,
+                    0,
+                    out returned,
+                    IntPtr.Zero);
+                if (!success)
+                {
+                    Directory.Delete(link, false);
+                }
+                return success;
+            }
+        }
+
+        private static void DeleteReparseFixture(string path)
+        {
+            if (Directory.Exists(path) ||
+                (File.Exists(path) &&
+                 (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0))
+            {
+                Directory.Delete(path, false);
             }
         }
 
@@ -650,5 +1476,54 @@ namespace SBMSSetup
             }
             throw new InvalidOperationException(message);
         }
+
+        [System.Runtime.InteropServices.DllImport(
+            "kernel32.dll",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+            SetLastError = true)]
+        private static extern bool CreateHardLink(
+            string fileName,
+            string existingFileName,
+            IntPtr securityAttributes);
+
+        [System.Runtime.InteropServices.DllImport(
+            "kernel32.dll",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+            SetLastError = true)]
+        [return: System.Runtime.InteropServices.MarshalAs(
+            System.Runtime.InteropServices.UnmanagedType.I1)]
+        private static extern bool CreateSymbolicLink(
+            string symbolicFileName,
+            string targetFileName,
+            int flags);
+
+        [System.Runtime.InteropServices.DllImport(
+            "kernel32.dll",
+            EntryPoint = "CreateFileW",
+            CharSet = System.Runtime.InteropServices.CharSet.Unicode,
+            SetLastError = true)]
+        private static extern Microsoft.Win32.SafeHandles.SafeFileHandle
+            OpenReparseDirectory(
+                string fileName,
+                uint desiredAccess,
+                uint shareMode,
+                IntPtr securityAttributes,
+                uint creationDisposition,
+                uint flagsAndAttributes,
+                IntPtr templateFile);
+
+        [System.Runtime.InteropServices.DllImport(
+            "kernel32.dll",
+            EntryPoint = "DeviceIoControl",
+            SetLastError = true)]
+        private static extern bool SetReparsePoint(
+            Microsoft.Win32.SafeHandles.SafeFileHandle device,
+            uint controlCode,
+            byte[] input,
+            int inputLength,
+            byte[] output,
+            int outputLength,
+            out int bytesReturned,
+            IntPtr overlapped);
     }
 }

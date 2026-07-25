@@ -19,6 +19,75 @@ namespace SBMSSetup
         private static int passed;
         private static int failed;
 
+        private sealed class PostRenameVerificationFaultFileSystem
+            : IAtomicJournalFileSystem
+        {
+            private readonly IAtomicJournalFileSystem inner;
+
+            internal PostRenameVerificationFaultFileSystem(string root)
+            {
+                inner = new PathAtomicJournalFileSystem(root);
+            }
+
+            public string GetDisplayPath(string relativePath)
+            {
+                return inner.GetDisplayPath(relativePath);
+            }
+
+            public bool FileExists(string relativePath)
+            {
+                return inner.FileExists(relativePath);
+            }
+
+            public void EnsureDirectory(string relativePath)
+            {
+                inner.EnsureDirectory(relativePath);
+            }
+
+            public Stream CreateNewFile(string relativePath)
+            {
+                return inner.CreateNewFile(relativePath);
+            }
+
+            public Stream OpenReadFile(string relativePath)
+            {
+                return inner.OpenReadFile(relativePath);
+            }
+
+            public void PublishNewFile(
+                string sourceRelativePath,
+                string destinationRelativePath)
+            {
+                inner.PublishNewFile(
+                    sourceRelativePath,
+                    destinationRelativePath);
+                throw new JournalFilePublicationException(
+                    true,
+                    new IOException(
+                        "simulated persistent post-rename verification failure"));
+            }
+
+            public void ReplaceFile(
+                string sourceRelativePath,
+                string destinationRelativePath,
+                string backupRelativePath)
+            {
+                inner.ReplaceFile(
+                    sourceRelativePath,
+                    destinationRelativePath,
+                    backupRelativePath);
+                throw new JournalFilePublicationException(
+                    true,
+                    new IOException(
+                        "simulated persistent post-rename verification failure"));
+            }
+
+            public void DeleteFile(string relativePath)
+            {
+                inner.DeleteFile(relativePath);
+            }
+        }
+
         private sealed class FakeMachine
         {
             internal string State = "empty";
@@ -495,6 +564,7 @@ namespace SBMSSetup
             Run("platform receives a detached transaction context", TestDetachedContext);
             Run("journal revision and torn backup are durable", TestJournalRevisionBackup);
             Run("failed save preserves the caller durable revision", TestSaveRevisionIsolation);
+            Run("committed rename synchronizes caller before verification failure", TestCommittedRenameRevisionSynchronization);
             Run("journal and structured snapshot validation fail closed", TestStrictValidation);
             Run("driver evidence presence semantics fail closed", TestDriverEvidenceSemantics);
             Run("rollback setup failures preserve both errors", TestRollbackFailureEvidence);
@@ -1284,6 +1354,86 @@ namespace SBMSSetup
                 {
                     DeleteRoot(root);
                 }
+            }
+        }
+
+        private static void TestCommittedRenameRevisionSynchronization()
+        {
+            string root = NewRoot();
+            try
+            {
+                var durableStore = Store(root);
+                TransactionJournal journal = NewJournal(
+                    InstallOperation.Upgrade,
+                    Snapshot(MachineFor(InstallOperation.Upgrade)),
+                    Release("2.0.0", "two"));
+                durableStore.Save(journal);
+                long durableRevision = journal.Revision;
+                string durableDigest = journal.ContentDigest;
+
+                journal.Status = TransactionStatus.Applying;
+                journal.Intents.Add(new CompensationIntent
+                {
+                    Sequence = 0,
+                    Mutation = InstallerMutation.CreateEscrow,
+                    Status = CompensationIntentStatus.Prepared,
+                    InverseAction = InstallerTransactionPlan.InverseFor(
+                        InstallerMutation.CreateEscrow),
+                    BeforeEvidence = journal.Baseline.EvidenceDigest,
+                    AfterEvidence = String.Empty,
+                    RecoveryError = String.Empty,
+                    CompensationBeforeEvidence = String.Empty
+                });
+                journal.AddStage(
+                    "MutationPrepared",
+                    InstallerMutation.CreateEscrow,
+                    "Prepared",
+                    null,
+                    "");
+                var faultingStore = new AtomicTransactionJournalStore(
+                    durableStore.JournalPath,
+                    new PostRenameVerificationFaultFileSystem(
+                        Path.GetDirectoryName(durableStore.JournalPath)),
+                    null,
+                    null);
+                AssertAnyThrows(
+                    delegate { faultingStore.Save(journal); },
+                    "Post-rename verification failure did not escape.");
+                Equal(
+                    durableRevision + 1,
+                    journal.Revision,
+                    "Committed candidate revision was not copied to the caller.");
+                Assert(
+                    !String.Equals(
+                        durableDigest,
+                        journal.ContentDigest,
+                        StringComparison.Ordinal),
+                    "Committed candidate digest was not copied to the caller.");
+
+                TransactionJournal durable = durableStore.Load();
+                Equal(
+                    durable.Revision,
+                    journal.Revision,
+                    "Caller revision diverged from the committed primary.");
+                Equal(
+                    durable.ContentDigest,
+                    journal.ContentDigest,
+                    "Caller digest diverged from the committed primary.");
+
+                journal.Status = TransactionStatus.RecoveryFailed;
+                journal.RollbackResult = "Failed";
+                journal.OriginalError = "original";
+                journal.RecoveryError = "verification unavailable";
+                durableStore.Save(journal);
+                TransactionJournal recovery = durableStore.Load();
+                Assert(
+                    recovery.Status == TransactionStatus.RecoveryFailed &&
+                    recovery.Revision == durable.Revision + 1,
+                    "RecoveryFailed save could not continue from committed revision.");
+            }
+            finally
+            {
+                DeleteRoot(root);
             }
         }
 

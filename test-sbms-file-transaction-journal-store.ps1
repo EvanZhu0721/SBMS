@@ -22,6 +22,7 @@ try {
     $sourcePaths = @(
         (Join-Path $root 'installer\InstallerTransactionModels.cs'),
         (Join-Path $root 'installer\InstallerJournal.cs'),
+        (Join-Path $root 'installer\WindowsHandleRelativeJournalFileSystem.cs'),
         (Join-Path $root 'installer\FileTransactionJournalStore.cs'),
         (Join-Path $root 'tests\FileTransactionJournalStoreTests.cs')
     )

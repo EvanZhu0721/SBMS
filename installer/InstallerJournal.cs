@@ -7,6 +7,129 @@ using System.Text;
 
 namespace SBMSSetup
 {
+    internal interface IAtomicJournalFileSystem
+    {
+        string GetDisplayPath(string relativePath);
+        bool FileExists(string relativePath);
+        void EnsureDirectory(string relativePath);
+        Stream CreateNewFile(string relativePath);
+        Stream OpenReadFile(string relativePath);
+        void PublishNewFile(string sourceRelativePath, string destinationRelativePath);
+        void ReplaceFile(
+            string sourceRelativePath,
+            string destinationRelativePath,
+            string backupRelativePath);
+        void DeleteFile(string relativePath);
+    }
+
+    internal sealed class JournalFilePublicationException : IOException
+    {
+        internal JournalFilePublicationException(
+            bool candidatePublished,
+            Exception innerException)
+            : base(
+                candidatePublished
+                    ? "Journal candidate naming was published but verification failed."
+                    : "Journal publication failed before candidate naming committed.",
+                innerException)
+        {
+            CandidatePublished = candidatePublished;
+        }
+
+        internal bool CandidatePublished { get; private set; }
+    }
+
+    internal sealed class PathAtomicJournalFileSystem
+        : IAtomicJournalFileSystem
+    {
+        private readonly string root;
+
+        internal PathAtomicJournalFileSystem(string root)
+        {
+            this.root = Path.GetFullPath(root);
+        }
+
+        public string GetDisplayPath(string relativePath)
+        {
+            return Resolve(relativePath);
+        }
+
+        public bool FileExists(string relativePath)
+        {
+            return File.Exists(Resolve(relativePath));
+        }
+
+        public void EnsureDirectory(string relativePath)
+        {
+            Directory.CreateDirectory(Resolve(relativePath));
+        }
+
+        public Stream CreateNewFile(string relativePath)
+        {
+            return new FileStream(
+                Resolve(relativePath),
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                4096,
+                FileOptions.WriteThrough);
+        }
+
+        public Stream OpenReadFile(string relativePath)
+        {
+            return new FileStream(
+                Resolve(relativePath),
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read);
+        }
+
+        public void PublishNewFile(
+            string sourceRelativePath,
+            string destinationRelativePath)
+        {
+            File.Move(Resolve(sourceRelativePath), Resolve(destinationRelativePath));
+        }
+
+        public void ReplaceFile(
+            string sourceRelativePath,
+            string destinationRelativePath,
+            string backupRelativePath)
+        {
+            File.Replace(
+                Resolve(sourceRelativePath),
+                Resolve(destinationRelativePath),
+                Resolve(backupRelativePath),
+                true);
+        }
+
+        public void DeleteFile(string relativePath)
+        {
+            File.Delete(Resolve(relativePath));
+        }
+
+        private string Resolve(string relativePath)
+        {
+            if (relativePath == null)
+            {
+                throw new ArgumentNullException("relativePath");
+            }
+            string combined = Path.GetFullPath(Path.Combine(root, relativePath));
+            string prefix = root.EndsWith(
+                Path.DirectorySeparatorChar.ToString(),
+                StringComparison.Ordinal)
+                ? root
+                : root + Path.DirectorySeparatorChar;
+            if (!String.Equals(combined, root, StringComparison.OrdinalIgnoreCase) &&
+                !combined.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "Journal relative path escaped its trusted root.");
+            }
+            return combined;
+        }
+    }
+
     internal enum TerminalRotationCrashPoint
     {
         ArchiveTempFlushed,
@@ -46,6 +169,10 @@ namespace SBMSSetup
 
     internal sealed class AtomicTransactionJournalStore : ITransactionJournalStore
     {
+        private readonly IAtomicJournalFileSystem fileSystem;
+        private readonly string journalFileName;
+        private readonly string backupFileName;
+        private readonly string historyDirectoryName;
         private readonly string journalPath;
         private readonly string backupPath;
         private readonly string historyDirectory;
@@ -68,16 +195,36 @@ namespace SBMSSetup
             string journalPath,
             ITerminalRotationFaultInjector rotationFaultInjector,
             IJournalSaveFaultInjector saveFaultInjector)
+            : this(
+                journalPath,
+                new PathAtomicJournalFileSystem(
+                    Path.GetDirectoryName(Path.GetFullPath(journalPath))),
+                rotationFaultInjector,
+                saveFaultInjector)
+        {
+        }
+
+        internal AtomicTransactionJournalStore(
+            string journalPath,
+            IAtomicJournalFileSystem fileSystem,
+            ITerminalRotationFaultInjector rotationFaultInjector,
+            IJournalSaveFaultInjector saveFaultInjector)
         {
             if (String.IsNullOrWhiteSpace(journalPath))
             {
                 throw new ArgumentException("Journal path is required.", "journalPath");
             }
-            this.journalPath = Path.GetFullPath(journalPath);
-            backupPath = this.journalPath + ".bak";
-            historyDirectory = Path.Combine(
-                Path.GetDirectoryName(this.journalPath),
-                "history");
+            if (fileSystem == null)
+            {
+                throw new ArgumentNullException("fileSystem");
+            }
+            this.fileSystem = fileSystem;
+            journalFileName = Path.GetFileName(journalPath);
+            backupFileName = journalFileName + ".bak";
+            historyDirectoryName = "history";
+            this.journalPath = fileSystem.GetDisplayPath(journalFileName);
+            backupPath = fileSystem.GetDisplayPath(backupFileName);
+            historyDirectory = fileSystem.GetDisplayPath(historyDirectoryName);
             this.rotationFaultInjector = rotationFaultInjector;
             this.saveFaultInjector = saveFaultInjector;
         }
@@ -117,13 +264,13 @@ namespace SBMSSetup
                 throw new InvalidOperationException(
                     "Committed installer finalization blocks journal rotation.");
             }
-            Directory.CreateDirectory(historyDirectory);
+            fileSystem.EnsureDirectory(historyDirectoryName);
             string archivePath = Path.Combine(
-                historyDirectory,
+                historyDirectoryName,
                 existing.TransactionId + "-r" +
                 existing.Revision.ToString(CultureInfo.InvariantCulture) +
                 "-" + existing.Status.ToString() + ".json");
-            if (File.Exists(archivePath))
+            if (fileSystem.FileExists(archivePath))
             {
                 TransactionJournal archivedExisting = ReadExact(archivePath);
                 ValidateReadback(existing, archivedExisting);
@@ -131,7 +278,7 @@ namespace SBMSSetup
             else
             {
                 string archiveTemporaryPath = archivePath + ".new";
-                if (File.Exists(archiveTemporaryPath))
+                if (fileSystem.FileExists(archiveTemporaryPath))
                 {
                     TransactionJournal temporaryExisting = null;
                     try
@@ -143,7 +290,7 @@ namespace SBMSSetup
                         // The active terminal journal was already validated
                         // above. A torn, unreadable archive temp is therefore
                         // safe to discard and deterministically rebuild.
-                        File.Delete(archiveTemporaryPath);
+                        fileSystem.DeleteFile(archiveTemporaryPath);
                         WriteExact(archiveTemporaryPath, existing);
                     }
                     if (temporaryExisting != null)
@@ -159,27 +306,27 @@ namespace SBMSSetup
                 }
                 InjectRotationFault(
                     TerminalRotationCrashPoint.ArchiveTempFlushed);
-                File.Move(archiveTemporaryPath, archivePath);
+                fileSystem.PublishNewFile(archiveTemporaryPath, archivePath);
                 InjectRotationFault(
                     TerminalRotationCrashPoint.ArchivePublished);
             }
             string staleArchiveTemporaryPath = archivePath + ".new";
-            if (File.Exists(staleArchiveTemporaryPath))
+            if (fileSystem.FileExists(staleArchiveTemporaryPath))
             {
-                File.Delete(staleArchiveTemporaryPath);
+                fileSystem.DeleteFile(staleArchiveTemporaryPath);
             }
             // Delete the stale backup first. At every crash boundary the
             // terminal primary remains authoritative until no Applying backup
             // can be mistaken for the active transaction.
-            if (File.Exists(backupPath))
+            if (fileSystem.FileExists(backupFileName))
             {
-                File.Delete(backupPath);
+                fileSystem.DeleteFile(backupFileName);
             }
             InjectRotationFault(
                 TerminalRotationCrashPoint.StaleBackupDeleted);
-            if (File.Exists(journalPath))
+            if (fileSystem.FileExists(journalFileName))
             {
-                File.Delete(journalPath);
+                fileSystem.DeleteFile(journalFileName);
             }
             InjectRotationFault(
                 TerminalRotationCrashPoint.ActivePrimaryDeleted);
@@ -196,33 +343,35 @@ namespace SBMSSetup
                 "o",
                 CultureInfo.InvariantCulture);
             Validate(candidate, false);
-            string directory = Path.GetDirectoryName(journalPath);
-            if (String.IsNullOrWhiteSpace(directory))
+            fileSystem.EnsureDirectory(String.Empty);
+            string temporaryPath = journalFileName + ".new";
+            // The global transaction lease guarantees one writer. A fixed
+            // candidate name makes a power-loss remnant deterministic and
+            // safely cleanable before the next attempted save.
+            if (fileSystem.FileExists(temporaryPath))
             {
-                throw new InvalidOperationException("Journal directory is missing.");
+                fileSystem.DeleteFile(temporaryPath);
             }
-            Directory.CreateDirectory(directory);
-            string temporaryPath = journalPath + ".new." + Guid.NewGuid().ToString("N");
             TransactionJournal previous = null;
             bool primaryIsValid = false;
-            if (File.Exists(journalPath))
+            if (fileSystem.FileExists(journalFileName))
             {
                 try
                 {
-                    previous = ReadExact(journalPath);
+                    previous = ReadExact(journalFileName);
                     primaryIsValid = true;
                 }
                 catch
                 {
-                    if (File.Exists(backupPath))
+                    if (fileSystem.FileExists(backupFileName))
                     {
-                        previous = ReadExact(backupPath);
+                        previous = ReadExact(backupFileName);
                     }
                 }
             }
-            else if (File.Exists(backupPath))
+            else if (fileSystem.FileExists(backupFileName))
             {
-                previous = ReadExact(backupPath);
+                previous = ReadExact(backupFileName);
             }
             if (previous != null)
             {
@@ -256,15 +405,18 @@ namespace SBMSSetup
                 InjectSaveFault(JournalSaveCrashPoint.CandidateFlushed);
                 if (primaryIsValid)
                 {
-                    File.Replace(temporaryPath, journalPath, backupPath, true);
+                    fileSystem.ReplaceFile(
+                        temporaryPath,
+                        journalFileName,
+                        backupFileName);
                 }
                 else
                 {
-                    if (File.Exists(journalPath))
+                    if (fileSystem.FileExists(journalFileName))
                     {
-                        File.Delete(journalPath);
+                        fileSystem.DeleteFile(journalFileName);
                     }
-                    File.Move(temporaryPath, journalPath);
+                    fileSystem.PublishNewFile(temporaryPath, journalFileName);
                 }
                 primaryPublished = true;
                 // Once the atomic publication API returns, this revision is
@@ -274,8 +426,17 @@ namespace SBMSSetup
                 CopyPersistedFields(candidate, journal);
                 InjectSaveFault(JournalSaveCrashPoint.PrimaryPublished);
                 InjectSaveFault(JournalSaveCrashPoint.PrimaryReadback);
-                TransactionJournal persisted = ReadExact(journalPath);
+                TransactionJournal persisted = ReadExact(journalFileName);
                 ValidateReadback(candidate, persisted);
+            }
+            catch (JournalFilePublicationException publicationFailure)
+            {
+                if (publicationFailure.CandidatePublished)
+                {
+                    primaryPublished = true;
+                    CopyPersistedFields(candidate, journal);
+                }
+                throw;
             }
             catch
             {
@@ -287,9 +448,9 @@ namespace SBMSSetup
             }
             finally
             {
-                if (File.Exists(temporaryPath))
+                if (fileSystem.FileExists(temporaryPath))
                 {
-                    File.Delete(temporaryPath);
+                    fileSystem.DeleteFile(temporaryPath);
                 }
             }
         }
@@ -301,7 +462,7 @@ namespace SBMSSetup
             try
             {
                 InjectSaveFault(JournalSaveCrashPoint.PrimaryReadback);
-                TransactionJournal persisted = ReadExact(journalPath);
+                TransactionJournal persisted = ReadExact(journalFileName);
                 ValidateReadback(candidate, persisted);
                 CopyPersistedFields(candidate, caller);
             }
@@ -337,22 +498,22 @@ namespace SBMSSetup
         public TransactionJournal Load()
         {
             Exception primaryFailure = null;
-            if (File.Exists(journalPath))
+            if (fileSystem.FileExists(journalFileName))
             {
                 try
                 {
-                    return ReadExact(journalPath);
+                    return ReadExact(journalFileName);
                 }
                 catch (Exception ex)
                 {
                     primaryFailure = ex;
                 }
             }
-            if (File.Exists(backupPath))
+            if (fileSystem.FileExists(backupFileName))
             {
                 try
                 {
-                    return ReadExact(backupPath);
+                    return ReadExact(backupFileName);
                 }
                 catch (Exception backupFailure)
                 {
@@ -370,31 +531,29 @@ namespace SBMSSetup
             return null;
         }
 
-        private static void WriteExact(string path, TransactionJournal journal)
+        private void WriteExact(string path, TransactionJournal journal)
         {
             var serializer = new DataContractJsonSerializer(typeof(TransactionJournal));
-            using (var stream = new FileStream(
-                path,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                4096,
-                FileOptions.WriteThrough))
+            using (Stream stream = fileSystem.CreateNewFile(path))
             {
                 serializer.WriteObject(stream, journal);
-                stream.Flush(true);
+                FileStream fileStream = stream as FileStream;
+                if (fileStream != null)
+                {
+                    fileStream.Flush(true);
+                }
+                else
+                {
+                    stream.Flush();
+                }
             }
         }
 
-        private static TransactionJournal ReadExact(string path)
+        private TransactionJournal ReadExact(string path)
         {
             var serializer = new DataContractJsonSerializer(typeof(TransactionJournal));
             TransactionJournal journal;
-            using (var stream = new FileStream(
-                path,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read))
+            using (Stream stream = fileSystem.OpenReadFile(path))
             {
                 journal = serializer.ReadObject(stream) as TransactionJournal;
             }

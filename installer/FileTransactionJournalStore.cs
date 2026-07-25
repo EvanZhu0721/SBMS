@@ -130,6 +130,7 @@ namespace SBMSSetup
         private static readonly SecurityIdentifier LocalSystem =
             new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
         private readonly IInstallerJournalPathInspector inspector;
+        private WindowsHandleRelativeJournalFileSystem nativeFileSystem;
 
         internal WindowsInstallerJournalAclPolicy()
             : this(new WindowsInstallerJournalPathInspector())
@@ -146,11 +147,31 @@ namespace SBMSSetup
             this.inspector = inspector;
         }
 
+        internal void Attach(
+            WindowsHandleRelativeJournalFileSystem nativeFileSystem)
+        {
+            if (nativeFileSystem == null)
+            {
+                throw new ArgumentNullException("nativeFileSystem");
+            }
+            if (this.nativeFileSystem != null)
+            {
+                throw new InvalidOperationException(
+                    "Installer journal policy is already attached.");
+            }
+            this.nativeFileSystem = nativeFileSystem;
+        }
+
         public void PrepareAndVerify(
             string commonApplicationDataRoot,
             string installerStateRoot,
             bool createIfMissing)
         {
+            if (nativeFileSystem != null)
+            {
+                nativeFileSystem.PrepareAndVerify(createIfMissing);
+                return;
+            }
             if (String.IsNullOrWhiteSpace(commonApplicationDataRoot) ||
                 !Path.IsPathRooted(commonApplicationDataRoot) ||
                 String.IsNullOrWhiteSpace(installerStateRoot) ||
@@ -190,15 +211,12 @@ namespace SBMSSetup
                 // before AtomicTransactionJournalStore opens it by name.
             }
 
-            // AtomicTransactionJournalStore currently performs path-based
-            // File.Move/Replace/Delete operations. .NET Framework exposes no
-            // supported root-handle-relative API for those operations, so an
-            // attacker able to exchange a checked directory can redirect IO
-            // between this validation and the subsequent open. Do not present
-            // verify-before/verify-after checks as a security boundary.
+            // An unattached policy can provide diagnostic metadata only. The
+            // production constructor attaches the native handle-relative
+            // filesystem before this method is reachable; any unsupported or
+            // partial construction remains fail-closed.
             throw new PlatformNotSupportedException(
-                "Production installer journal IO is disabled until all journal " +
-                "operations use trusted root-handle-relative Windows APIs.");
+                "Installer journal policy has no trusted native IO capability.");
         }
 
         private InstallerJournalPathMetadata ValidateDirectoryComponent(
@@ -299,8 +317,127 @@ namespace SBMSSetup
         }
     }
 
+    internal interface IInstallerTransactionMutexFactory
+    {
+        Mutex OpenOrCreate(string name);
+    }
+
+    internal sealed class UnsecuredInstallerTransactionMutexFactory
+        : IInstallerTransactionMutexFactory
+    {
+        public Mutex OpenOrCreate(string name)
+        {
+            return new Mutex(false, name);
+        }
+    }
+
+    internal sealed class SecureInstallerTransactionMutexFactory
+        : IInstallerTransactionMutexFactory
+    {
+        private readonly WindowsJournalSecurityProfile profile;
+
+        internal SecureInstallerTransactionMutexFactory(
+            WindowsJournalSecurityProfile profile)
+        {
+            if (profile == null)
+            {
+                throw new ArgumentNullException("profile");
+            }
+            this.profile = profile;
+        }
+
+        public Mutex OpenOrCreate(string name)
+        {
+            MutexSecurity requested = BuildSecurity();
+            bool created;
+            Mutex mutex = new Mutex(false, name, out created, requested);
+            try
+            {
+                Verify(mutex.GetAccessControl());
+                return mutex;
+            }
+            catch
+            {
+                mutex.Dispose();
+                throw;
+            }
+        }
+
+        private MutexSecurity BuildSecurity()
+        {
+            var security = new MutexSecurity();
+            security.SetAccessRuleProtection(true, false);
+            security.SetOwner(profile.Owner);
+            foreach (SecurityIdentifier identity in
+                profile.FullControlIdentities)
+            {
+                security.AddAccessRule(
+                    new MutexAccessRule(
+                        identity,
+                        MutexRights.FullControl,
+                        AccessControlType.Allow));
+            }
+            return security;
+        }
+
+        private void Verify(MutexSecurity security)
+        {
+            if (!security.AreAccessRulesProtected)
+            {
+                throw new UnauthorizedAccessException(
+                    "Installer transaction mutex ACL inheritance is enabled.");
+            }
+            var owner = security.GetOwner(
+                typeof(SecurityIdentifier)) as SecurityIdentifier;
+            if (owner == null || !owner.Equals(profile.Owner))
+            {
+                throw new UnauthorizedAccessException(
+                    "Installer transaction mutex has an untrusted owner.");
+            }
+            AuthorizationRuleCollection rules = security.GetAccessRules(
+                true,
+                true,
+                typeof(SecurityIdentifier));
+            if (rules.Count != profile.FullControlIdentities.Length)
+            {
+                throw new UnauthorizedAccessException(
+                    "Installer transaction mutex has unexpected ACL entries.");
+            }
+            foreach (SecurityIdentifier required in
+                profile.FullControlIdentities)
+            {
+                bool found = false;
+                foreach (AuthorizationRule authorizationRule in rules)
+                {
+                    var rule = authorizationRule as MutexAccessRule;
+                    var identity = rule == null
+                        ? null
+                        : rule.IdentityReference as SecurityIdentifier;
+                    if (identity != null && identity.Equals(required))
+                    {
+                        if (found ||
+                            rule.AccessControlType != AccessControlType.Allow ||
+                            rule.MutexRights != MutexRights.FullControl ||
+                            rule.IsInherited)
+                        {
+                            throw new UnauthorizedAccessException(
+                                "Installer transaction mutex ACL is invalid.");
+                        }
+                        found = true;
+                    }
+                }
+                if (!found)
+                {
+                    throw new UnauthorizedAccessException(
+                        "Installer transaction mutex is missing a required ACL.");
+                }
+            }
+        }
+    }
+
     internal sealed class FileTransactionJournalStore
-        : ITransactionJournalStore, ITransactionExecutionLeaseProvider
+        : ITransactionJournalStore, ITransactionExecutionLeaseProvider,
+          IDisposable
     {
         internal const string ProductionMutexName =
             @"Global\SBMS.Installer.TransactionJournal.v1";
@@ -308,7 +445,9 @@ namespace SBMSSetup
             TimeSpan.FromSeconds(30);
 
         private readonly AtomicTransactionJournalStore inner;
+        private readonly IAtomicJournalFileSystem journalFileSystem;
         private readonly IInstallerJournalAclPolicy aclPolicy;
+        private readonly IInstallerTransactionMutexFactory mutexFactory;
         private readonly string mutexName;
         private readonly TimeSpan mutexTimeout;
         private readonly string commonApplicationDataPath;
@@ -321,7 +460,10 @@ namespace SBMSSetup
                 new WindowsInstallerJournalAclPolicy(),
                 ProductionMutexName,
                 ProductionMutexTimeout,
-                null)
+                null,
+                null,
+                new SecureInstallerTransactionMutexFactory(
+                    WindowsJournalSecurityProfile.Production()))
         {
         }
 
@@ -331,6 +473,25 @@ namespace SBMSSetup
             string mutexName,
             TimeSpan mutexTimeout,
             ITerminalRotationFaultInjector rotationFaultInjector)
+            : this(
+                programDataPathProvider,
+                aclPolicy,
+                mutexName,
+                mutexTimeout,
+                rotationFaultInjector,
+                null,
+                new UnsecuredInstallerTransactionMutexFactory())
+        {
+        }
+
+        internal FileTransactionJournalStore(
+            IInstallerProgramDataPathProvider programDataPathProvider,
+            IInstallerJournalAclPolicy aclPolicy,
+            string mutexName,
+            TimeSpan mutexTimeout,
+            ITerminalRotationFaultInjector rotationFaultInjector,
+            IAtomicJournalFileSystem journalFileSystem,
+            IInstallerTransactionMutexFactory mutexFactory)
         {
             if (programDataPathProvider == null)
             {
@@ -339,6 +500,10 @@ namespace SBMSSetup
             if (aclPolicy == null)
             {
                 throw new ArgumentNullException("aclPolicy");
+            }
+            if (mutexFactory == null)
+            {
+                throw new ArgumentNullException("mutexFactory");
             }
             if (String.IsNullOrWhiteSpace(mutexName))
             {
@@ -372,14 +537,48 @@ namespace SBMSSetup
                 installerStateRoot);
 
             this.aclPolicy = aclPolicy;
+            this.mutexFactory = mutexFactory;
             this.mutexName = mutexName;
             this.mutexTimeout = mutexTimeout;
             transactionsDirectory = Path.Combine(
                 installerStateRoot,
                 "transactions");
+            IAtomicJournalFileSystem selectedFileSystem = journalFileSystem;
+            WindowsInstallerJournalAclPolicy windowsPolicy =
+                aclPolicy as WindowsInstallerJournalAclPolicy;
+            if (windowsPolicy != null)
+            {
+                WindowsHandleRelativeJournalFileSystem nativeFileSystem =
+                    selectedFileSystem as
+                        WindowsHandleRelativeJournalFileSystem;
+                if (nativeFileSystem == null)
+                {
+                    if (selectedFileSystem != null)
+                    {
+                        throw new InvalidOperationException(
+                            "Production journal policy requires native " +
+                            "handle-relative storage.");
+                    }
+                    nativeFileSystem =
+                        new WindowsHandleRelativeJournalFileSystem(
+                            commonApplicationDataPath,
+                            WindowsJournalSecurityProfile.Production(),
+                            null);
+                }
+                windowsPolicy.Attach(nativeFileSystem);
+                selectedFileSystem = nativeFileSystem;
+            }
+            if (selectedFileSystem == null)
+            {
+                selectedFileSystem = new PathAtomicJournalFileSystem(
+                    installerStateRoot);
+            }
+            this.journalFileSystem = selectedFileSystem;
             inner = new AtomicTransactionJournalStore(
                 Path.Combine(installerStateRoot, "journal.json"),
-                rotationFaultInjector);
+                selectedFileSystem,
+                rotationFaultInjector,
+                null);
         }
 
         internal string InstallerStateRoot
@@ -428,7 +627,7 @@ namespace SBMSSetup
 
         public IDisposable AcquireTransactionLease()
         {
-            var mutex = new Mutex(false, mutexName);
+            Mutex mutex = mutexFactory.OpenOrCreate(mutexName);
             bool acquired = false;
             try
             {
@@ -488,7 +687,7 @@ namespace SBMSSetup
             bool createRootIfMissing,
             Func<T> action)
         {
-            using (var mutex = new Mutex(false, mutexName))
+            using (Mutex mutex = mutexFactory.OpenOrCreate(mutexName))
             {
                 bool acquired = false;
                 try
@@ -531,6 +730,15 @@ namespace SBMSSetup
                         mutex.ReleaseMutex();
                     }
                 }
+            }
+        }
+
+        public void Dispose()
+        {
+            IDisposable disposable = journalFileSystem as IDisposable;
+            if (disposable != null)
+            {
+                disposable.Dispose();
             }
         }
 
