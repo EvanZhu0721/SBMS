@@ -16,6 +16,11 @@ namespace SBMSSetup
     internal interface IProtectedPayloadNativeTreeSession : IDisposable
     {
         void DemandNamespaceExclusionHeld();
+        // Exact validation may also admit the single physical projection
+        // authorized by the checkpoint's active intent when the native
+        // object carries an intent-bound durable ownership marker. The
+        // following Apply call must then replay idempotently and return that
+        // same projection; arbitrary physical drift remains invalid.
         void ValidateCheckpoint(
             PayloadBuildWorkspaceCheckpoint checkpoint);
         PayloadBuildPhysicalResult ApplyBuildStepExact(

@@ -11,6 +11,12 @@ using Microsoft.Win32.SafeHandles;
 
 namespace SBMSSetup
 {
+    internal interface IWindowsIsolatedTempPayloadNativeTreeTestSeam
+    {
+        void BeforeOwnershipReplayFlush(PayloadBuildStepKind step);
+        void AfterSealMarkerFlushed();
+    }
+
     // This adapter is deliberately limited to a random, isolated child of
     // %TEMP%. Its lease excludes only cooperating adapters in this process.
     // It is native-I/O evidence, not a production Program Files namespace
@@ -30,18 +36,21 @@ namespace SBMSSetup
         private readonly string rootFileId;
         private readonly NamespaceLeaseEntry leaseEntry;
         private readonly object namespaceLease;
+        private readonly IWindowsIsolatedTempPayloadNativeTreeTestSeam testSeam;
         private SafeFileHandle rootHandle;
         private bool disposed;
 
         private WindowsIsolatedTempProtectedPayloadNativeTree(
             string rootPath,
             SafeFileHandle handle,
-            NativeIdentity identity)
+            NativeIdentity identity,
+            IWindowsIsolatedTempPayloadNativeTreeTestSeam seam)
         {
             canonicalRootPath = rootPath;
             rootHandle = handle;
             volumeSerialNumber = identity.VolumeSerialNumber;
             rootFileId = identity.FileId;
+            testSeam = seam;
             lock (LeaseMapGuard)
             {
                 NamespaceLeaseEntry entry;
@@ -59,6 +68,14 @@ namespace SBMSSetup
         internal static WindowsIsolatedTempProtectedPayloadNativeTree
             CreateForIsolatedTests(string isolatedRootPath)
         {
+            return CreateForIsolatedTests(isolatedRootPath, null);
+        }
+
+        internal static WindowsIsolatedTempProtectedPayloadNativeTree
+            CreateForIsolatedTests(
+                string isolatedRootPath,
+                IWindowsIsolatedTempPayloadNativeTreeTestSeam seam)
+        {
             string root = RequireIsolatedTempRoot(isolatedRootPath);
             Directory.CreateDirectory(root);
             SafeFileHandle handle = null;
@@ -70,7 +87,8 @@ namespace SBMSSetup
                 return new WindowsIsolatedTempProtectedPayloadNativeTree(
                     root,
                     handle,
-                    identity);
+                    identity,
+                    seam);
             }
             catch
             {
@@ -251,6 +269,8 @@ namespace SBMSSetup
 
         private sealed class Session : IProtectedPayloadNativeTreeSession
         {
+            private const string OwnershipMarkerDomain =
+                "SBMS.Payload.NativeOwnership.v1";
             private WindowsIsolatedTempProtectedPayloadNativeTree owner;
 
             internal Session(
@@ -387,20 +407,50 @@ namespace SBMSSetup
                     checkpoint.Committed.Backup);
                 PayloadPartialTreeObservation partial =
                     checkpoint.ActivePartialTree;
+                if (partial != null &&
+                    IsActiveIntent(
+                        checkpoint,
+                        PayloadBuildStepKind.SealCandidate))
+                {
+                    ValidateSealPhysicalShape(checkpoint);
+                    return;
+                }
                 if (partial == null)
                 {
+                    if (IsActiveIntent(
+                            checkpoint,
+                            PayloadBuildStepKind.CreateRoot))
+                    {
+                        RequireCreateRootAheadOrAbsent(checkpoint);
+                    }
                     return;
                 }
                 PayloadPartialTreeObservation observed =
                     ObservePartial(partial.BuildId, partial.LeafName);
-                if (!String.Equals(
+                if (String.Equals(
                         observed.InvariantDigest,
                         partial.InvariantDigest,
                         StringComparison.Ordinal))
                 {
-                    throw new InvalidDataException(
-                        "Isolated native payload tree differs from checkpoint.");
+                    return;
                 }
+                if (!partial.Exists &&
+                    IsActiveIntent(
+                        checkpoint,
+                        PayloadBuildStepKind.CreateRoot))
+                {
+                    RequireCreateRootAheadOrAbsent(checkpoint);
+                    return;
+                }
+                if (IsActiveIntent(
+                        checkpoint,
+                        PayloadBuildStepKind.CreateEntry) &&
+                    IsExactCreateEntryAhead(checkpoint, observed))
+                {
+                    return;
+                }
+                throw new InvalidDataException(
+                    "Isolated native payload tree differs from checkpoint.");
             }
 
             private void ValidateNamespaceChildren(
@@ -421,6 +471,20 @@ namespace SBMSSetup
                 {
                     allowed.Add(
                         checkpoint.ActivePartialTree.LeafName);
+                    if (IsActiveIntent(
+                            checkpoint,
+                            PayloadBuildStepKind.SealCandidate))
+                    {
+                        allowed.Add(PayloadNamespaceNames.ForSlot(
+                            PayloadDirectorySlot.Candidate,
+                            checkpoint.TransactionId));
+                    }
+                }
+                else if (IsActiveIntent(
+                    checkpoint,
+                    PayloadBuildStepKind.CreateRoot))
+                {
+                    allowed.Add(checkpoint.ActiveBuild.BuildLeafName);
                 }
                 foreach (NativeDirectoryEntry child in
                     NativeIo.Enumerate(owner.rootHandle))
@@ -431,6 +495,79 @@ namespace SBMSSetup
                         throw new InvalidDataException(
                             "The isolated payload namespace contains an " +
                             "unknown root entry.");
+                    }
+                }
+            }
+
+            private void ValidateSealPhysicalShape(
+                PayloadBuildWorkspaceCheckpoint checkpoint)
+            {
+                PayloadPartialTreeObservation partial =
+                    checkpoint.ActivePartialTree;
+                string destinationName = PayloadNamespaceNames.ForSlot(
+                    PayloadDirectorySlot.Candidate,
+                    checkpoint.TransactionId);
+                byte[] marker = CreateOwnershipMarker(
+                    checkpoint,
+                    "SealCandidate",
+                    destinationName,
+                    -1,
+                    true);
+                SafeFileHandle source = null;
+                SafeFileHandle destination = null;
+                try
+                {
+                    source = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        partial.LeafName,
+                        true,
+                        false);
+                    destination = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        destinationName,
+                        true,
+                        false);
+                    if ((source == null) == (destination == null))
+                    {
+                        throw new InvalidDataException(
+                            "Payload seal requires exactly one of source " +
+                            "or destination.");
+                    }
+                    SafeFileHandle actual =
+                        source == null ? destination : source;
+                    NativeIo.RequireIdentity(
+                        actual,
+                        partial.VolumeSerialNumber,
+                        partial.RootFileId,
+                        "Payload seal directory identity changed.");
+                    PayloadPartialTreeObservation observed =
+                        ObservePartialHandle(partial, actual);
+                    if (!String.Equals(
+                            observed.InvariantDigest,
+                            partial.InvariantDigest,
+                            StringComparison.Ordinal))
+                    {
+                        throw new InvalidDataException(
+                            "Payload seal content differs from checkpoint.");
+                    }
+                    if (source != null)
+                    {
+                        NativeIo.RequireOptionalSealMarker(source, marker);
+                    }
+                    else
+                    {
+                        NativeIo.RequireSealMarker(destination, marker);
+                    }
+                }
+                finally
+                {
+                    if (source != null)
+                    {
+                        source.Dispose();
+                    }
+                    if (destination != null)
+                    {
+                        destination.Dispose();
                     }
                 }
             }
@@ -506,18 +643,46 @@ namespace SBMSSetup
             {
                 PayloadPartialTreeObservation partial =
                     checkpoint.ActivePartialTree;
-                using (SafeFileHandle handle =
-                    NativeIo.CreateRelativeExclusive(
+                byte[] marker = CreateOwnershipMarker(
+                    checkpoint,
+                    "CreateRoot",
+                    partial.LeafName,
+                    -1,
+                    true);
+                SafeFileHandle handle = NativeIo.TryOpenRelative(
                     owner.rootHandle,
                     partial.LeafName,
                     true,
-                    true))
+                    true);
+                bool createdNew = handle == null;
+                if (handle == null)
+                {
+                    handle = NativeIo.CreateRelativeExclusive(
+                        owner.rootHandle,
+                        partial.LeafName,
+                        true,
+                        true,
+                        marker);
+                }
+                using (handle)
                 {
                     NativeIo.RequireDirectory(
                         handle,
                         Path.Combine(
                             owner.canonicalRootPath,
                             partial.LeafName));
+                    NativeIo.RequireOwnershipMarker(handle, marker);
+                    if (NativeIo.Enumerate(handle).Count != 0)
+                    {
+                        throw new InvalidDataException(
+                            "Owned payload build root is not empty.");
+                    }
+                    if (!createdNew && owner.testSeam != null)
+                    {
+                        owner.testSeam.BeforeOwnershipReplayFlush(
+                            PayloadBuildStepKind.CreateRoot);
+                    }
+                    NativeIo.Flush(handle);
                 }
             }
 
@@ -528,6 +693,12 @@ namespace SBMSSetup
                     checkpoint.ActiveBuild.ActiveIntent;
                 PayloadBuildEntryCheckpoint entry =
                     checkpoint.ActiveBuild.Entries[intent.EntryOrdinal];
+                byte[] marker = CreateOwnershipMarker(
+                    checkpoint,
+                    "CreateEntry",
+                    entry.RelativePath,
+                    entry.Ordinal,
+                    entry.IsDirectory);
                 using (SafeFileHandle build = OpenBuild(checkpoint))
                 {
                     string parentPath =
@@ -539,18 +710,43 @@ namespace SBMSSetup
                     try
                     {
                         string name = Path.GetFileName(entry.RelativePath);
-                        using (SafeFileHandle created =
-                            NativeIo.CreateRelativeExclusive(
-                            parent,
-                            name,
-                            entry.IsDirectory,
-                            true))
+                        SafeFileHandle created =
+                            NativeIo.TryOpenRelative(
+                                parent,
+                                name,
+                                entry.IsDirectory,
+                                true);
+                        bool createdNew = created == null;
+                        if (created == null)
+                        {
+                            created = NativeIo.CreateRelativeExclusive(
+                                parent,
+                                name,
+                                entry.IsDirectory,
+                                true,
+                                marker);
+                        }
+                        using (created)
                         {
                             NativeIo.RequireType(created, entry.IsDirectory);
                             if (!entry.IsDirectory)
                             {
                                 NativeIo.RequireSingleLinkFile(created);
+                                NativeIo.RequireEmptyFile(created);
                             }
+                            NativeIo.RequireOwnershipMarker(created, marker);
+                            if (entry.IsDirectory &&
+                                NativeIo.Enumerate(created).Count != 0)
+                            {
+                                throw new InvalidDataException(
+                                    "Owned payload directory is not empty.");
+                            }
+                            if (!createdNew && owner.testSeam != null)
+                            {
+                                owner.testSeam.BeforeOwnershipReplayFlush(
+                                    PayloadBuildStepKind.CreateEntry);
+                            }
+                            NativeIo.Flush(created);
                         }
                     }
                     finally
@@ -560,6 +756,209 @@ namespace SBMSSetup
                             parent.Dispose();
                         }
                     }
+                }
+            }
+
+            private void RequireCreateRootAheadOrAbsent(
+                PayloadBuildWorkspaceCheckpoint checkpoint)
+            {
+                string leaf = checkpoint.ActiveBuild.BuildLeafName;
+                using (SafeFileHandle build = NativeIo.TryOpenRelative(
+                    owner.rootHandle,
+                    leaf,
+                    true,
+                    false))
+                {
+                    if (build == null)
+                    {
+                        return;
+                    }
+                    NativeIo.RequireOwnershipMarker(
+                        build,
+                        CreateOwnershipMarker(
+                            checkpoint,
+                            "CreateRoot",
+                            leaf,
+                            -1,
+                            true));
+                    if (NativeIo.Enumerate(build).Count != 0)
+                    {
+                        throw new InvalidDataException(
+                            "Physical-ahead payload build root is not empty.");
+                    }
+                }
+            }
+
+            private bool IsExactCreateEntryAhead(
+                PayloadBuildWorkspaceCheckpoint checkpoint,
+                PayloadPartialTreeObservation observed)
+            {
+                PayloadPartialTreeObservation expected =
+                    checkpoint.ActivePartialTree;
+                PayloadBuildStepIntent intent =
+                    checkpoint.ActiveBuild.ActiveIntent;
+                PayloadBuildEntryCheckpoint entry =
+                    checkpoint.ActiveBuild.Entries[intent.EntryOrdinal];
+                if (!observed.Exists ||
+                    observed.VolumeSerialNumber !=
+                        expected.VolumeSerialNumber ||
+                    !String.Equals(
+                        observed.RootFileId,
+                        expected.RootFileId,
+                        StringComparison.Ordinal) ||
+                    observed.Entries.Count != expected.Entries.Count + 1)
+                {
+                    return false;
+                }
+                foreach (PayloadTreeEntryCheckpoint prior in
+                    expected.Entries)
+                {
+                    PayloadTreeEntryCheckpoint current =
+                        FindObservedEntry(
+                            observed.Entries,
+                            prior.RelativePath);
+                    if (current == null ||
+                        !String.Equals(
+                            current.InvariantDigest,
+                            prior.InvariantDigest,
+                            StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+                }
+                PayloadTreeEntryCheckpoint added =
+                    FindObservedEntry(
+                        observed.Entries,
+                        entry.RelativePath);
+                if (added == null ||
+                    added.IsDirectory != entry.IsDirectory ||
+                    added.Length != 0 ||
+                    (!entry.IsDirectory &&
+                        !String.Equals(
+                            added.Sha256,
+                            "e3b0c44298fc1c149afbf4c8996fb924" +
+                                "27ae41e4649b934ca495991b7852b855",
+                            StringComparison.Ordinal)) ||
+                    (entry.IsDirectory &&
+                        !String.IsNullOrEmpty(added.Sha256)))
+                {
+                    return false;
+                }
+                using (SafeFileHandle build = OpenBuild(checkpoint))
+                using (SafeFileHandle addedHandle = OpenEntry(
+                    build,
+                    entry.RelativePath,
+                    entry.IsDirectory,
+                    false,
+                    false))
+                {
+                    NativeIo.RequireOwnershipMarker(
+                        addedHandle,
+                        CreateOwnershipMarker(
+                            checkpoint,
+                            "CreateEntry",
+                            entry.RelativePath,
+                            entry.Ordinal,
+                            entry.IsDirectory));
+                    if (!entry.IsDirectory)
+                    {
+                        NativeIo.RequireSingleLinkFile(addedHandle);
+                    }
+                    else if (NativeIo.Enumerate(addedHandle).Count != 0)
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            private static PayloadTreeEntryCheckpoint FindObservedEntry(
+                IList<PayloadTreeEntryCheckpoint> entries,
+                string relativePath)
+            {
+                foreach (PayloadTreeEntryCheckpoint entry in entries)
+                {
+                    if (String.Equals(
+                        entry.RelativePath,
+                        relativePath,
+                        StringComparison.Ordinal))
+                    {
+                        return entry;
+                    }
+                }
+                return null;
+            }
+
+            private static bool IsActiveIntent(
+                PayloadBuildWorkspaceCheckpoint checkpoint,
+                PayloadBuildStepKind kind)
+            {
+                return checkpoint.ActiveBuild != null &&
+                    checkpoint.ActiveBuild.ActiveIntent != null &&
+                    checkpoint.ActiveBuild.ActiveIntent.Kind == kind;
+            }
+
+            private static byte[] CreateOwnershipMarker(
+                PayloadBuildWorkspaceCheckpoint checkpoint,
+                string operation,
+                string relativePath,
+                int ordinal,
+                bool directory)
+            {
+                PayloadCandidateBuildJournal build =
+                    checkpoint.ActiveBuild;
+                PayloadBuildStepIntent intent =
+                    build == null ? null : build.ActiveIntent;
+                if (intent == null)
+                {
+                    throw new InvalidOperationException(
+                        "Payload ownership marker requires an active intent.");
+                }
+                var body = new List<byte>();
+                AppendMarkerField(body, OwnershipMarkerDomain);
+                AppendMarkerField(body, operation);
+                AppendMarkerField(body, checkpoint.TransactionId);
+                AppendMarkerField(body, build.BuildId);
+                AppendMarkerField(body, intent.IntentId);
+                AppendMarkerField(
+                    body,
+                    intent.JournalRevision.ToString(
+                        CultureInfo.InvariantCulture));
+                AppendMarkerField(body, build.InvariantDigest);
+                AppendMarkerField(body, intent.InvariantDigest);
+                AppendMarkerField(
+                    body,
+                    checkpoint.NamespaceRoot.InvariantDigest);
+                AppendMarkerField(
+                    body,
+                    intent.ObservedPartialTreeInvariantDigest);
+                AppendMarkerField(
+                    body,
+                    ordinal.ToString(CultureInfo.InvariantCulture));
+                AppendMarkerField(body, relativePath);
+                AppendMarkerField(
+                    body,
+                    directory ? "directory" : "file");
+                using (SHA256 hash = SHA256.Create())
+                {
+                    body.AddRange(hash.ComputeHash(body.ToArray()));
+                }
+                return body.ToArray();
+            }
+
+            private static void AppendMarkerField(
+                IList<byte> output,
+                string value)
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(value ?? String.Empty);
+                byte[] length = BitConverter.GetBytes(bytes.Length);
+                foreach (byte item in length)
+                {
+                    output.Add(item);
+                }
+                foreach (byte item in bytes)
+                {
+                    output.Add(item);
                 }
             }
 
@@ -689,23 +1088,67 @@ namespace SBMSSetup
                 string destinationName = PayloadNamespaceNames.ForSlot(
                     PayloadDirectorySlot.Candidate,
                     checkpoint.TransactionId);
-                SafeFileHandle source = NativeIo.TryOpenRelative(
-                    owner.rootHandle,
-                    sourceName,
-                    true,
-                    false);
-                if (source != null)
+                byte[] marker = CreateOwnershipMarker(
+                    checkpoint,
+                    "SealCandidate",
+                    destinationName,
+                    -1,
+                    true);
+                SafeFileHandle source = null;
+                SafeFileHandle destination = null;
+                try
                 {
-                    using (source)
+                    source = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        sourceName,
+                        true,
+                        true);
+                    destination = NativeIo.TryOpenRelative(
+                        owner.rootHandle,
+                        destinationName,
+                        true,
+                        false);
+                    if ((source == null) == (destination == null))
+                    {
+                        throw new InvalidDataException(
+                            "Payload seal requires exactly one of source or " +
+                            "destination.");
+                    }
+                    if (source != null)
                     {
                         NativeIo.RequireIdentity(
                             source,
                             checkpoint.ActivePartialTree.VolumeSerialNumber,
                             checkpoint.ActivePartialTree.RootFileId,
                             "Payload seal source identity changed.");
+                        NativeIo.PrepareSealMarker(source, marker);
+                        if (owner.testSeam != null)
+                        {
+                            owner.testSeam.AfterSealMarkerFlushed();
+                        }
                         NativeIo.RenameSameParent(
                             source,
                             destinationName);
+                    }
+                    else
+                    {
+                        NativeIo.RequireIdentity(
+                            destination,
+                            checkpoint.ActivePartialTree.VolumeSerialNumber,
+                            checkpoint.ActivePartialTree.RootFileId,
+                            "Payload seal destination identity changed.");
+                        NativeIo.RequireSealMarker(destination, marker);
+                    }
+                }
+                finally
+                {
+                    if (source != null)
+                    {
+                        source.Dispose();
+                    }
+                    if (destination != null)
+                    {
+                        destination.Dispose();
                     }
                 }
                 using (SafeFileHandle candidate = NativeIo.OpenRelative(
@@ -720,6 +1163,7 @@ namespace SBMSSetup
                         checkpoint.ActivePartialTree.VolumeSerialNumber,
                         checkpoint.ActivePartialTree.RootFileId,
                         "Payload candidate rename changed identity.");
+                    NativeIo.RequireSealMarker(candidate, marker);
                     List<PayloadTreeEntryCheckpoint> entries =
                         ObserveEntries(candidate);
                     TargetPayloadManifest manifest = plan.Manifest;
@@ -807,6 +1251,23 @@ namespace SBMSSetup
                         Entries = ObserveEntries(build)
                     };
                 }
+            }
+
+            private PayloadPartialTreeObservation ObservePartialHandle(
+                PayloadPartialTreeObservation expected,
+                SafeFileHandle handle)
+            {
+                NativeIdentity identity = NativeIo.Identity(handle);
+                return new PayloadPartialTreeObservation
+                {
+                    SchemaVersion = 1,
+                    BuildId = expected.BuildId,
+                    LeafName = expected.LeafName,
+                    Exists = true,
+                    VolumeSerialNumber = identity.VolumeSerialNumber,
+                    RootFileId = identity.FileId,
+                    Entries = ObserveEntries(handle)
+                };
             }
 
             private List<PayloadTreeEntryCheckpoint> ObserveEntries(
@@ -1024,9 +1485,15 @@ namespace SBMSSetup
 
         private static class NativeIo
         {
+            private const string OwnershipEaName =
+                "SBMS.Payload.Owner.v1";
+            private const string SealEaName =
+                "SBMS.Payload.Seal.v1";
             private const uint FileReadData = 0x0001;
             private const uint FileWriteData = 0x0002;
             private const uint FileAppendData = 0x0004;
+            private const uint FileReadEa = 0x0008;
+            private const uint FileWriteEa = 0x0010;
             private const uint FileTraverse = 0x0020;
             private const uint FileReadAttributes = 0x0080;
             private const uint FileWriteAttributes = 0x0100;
@@ -1050,6 +1517,10 @@ namespace SBMSSetup
             private const uint FileAttributeDirectory = 0x00000010;
             private const int StatusNoMoreFiles =
                 unchecked((int)0x80000006);
+            private const int StatusNonexistentEaEntry =
+                unchecked((int)0xC0000051);
+            private const int StatusNoEasOnFile =
+                unchecked((int)0xC0000052);
             private const int ErrorFileNotFound = 2;
             private const int ErrorPathNotFound = 3;
 
@@ -1095,7 +1566,8 @@ namespace SBMSSetup
                 bool write)
             {
                 ValidateName(name);
-                uint access = FileReadData | FileReadAttributes |
+                uint access = FileReadData | FileReadEa |
+                    FileReadAttributes |
                     ReadControl | Synchronize;
                 if (directory)
                 {
@@ -1104,7 +1576,7 @@ namespace SBMSSetup
                 if (write)
                 {
                     access |= FileWriteData | FileAppendData |
-                        FileWriteAttributes;
+                        FileWriteEa | FileWriteAttributes;
                 }
                 uint options = FileSynchronousIoNonAlert |
                     FileOpenReparsePoint |
@@ -1116,7 +1588,8 @@ namespace SBMSSetup
                     name,
                     access,
                     create ? FileOpenIf : FileOpen,
-                    options);
+                    options,
+                    null);
                 try
                 {
                     RequireType(handle, directory);
@@ -1129,17 +1602,23 @@ namespace SBMSSetup
                 }
             }
 
-            // This first isolated-temp slice has no durable native ownership
-            // marker yet. Creation is therefore fail-closed: an existing
-            // deterministic name is never accepted as replay evidence.
             internal static SafeFileHandle CreateRelativeExclusive(
                 SafeFileHandle root,
                 string name,
                 bool directory,
-                bool write)
+                bool write,
+                byte[] ownershipMarker)
             {
                 ValidateName(name);
-                uint access = FileReadData | FileReadAttributes |
+                if (ownershipMarker == null ||
+                    ownershipMarker.Length == 0)
+                {
+                    throw new ArgumentException(
+                        "An ownership marker is required.",
+                        "ownershipMarker");
+                }
+                uint access = FileReadData | FileReadEa | FileWriteEa |
+                    FileReadAttributes |
                     ReadControl | Synchronize |
                     (directory
                         ? FileTraverse | DeleteAccess
@@ -1158,7 +1637,10 @@ namespace SBMSSetup
                     FileOpenReparsePoint |
                     (directory
                         ? FileDirectoryFile
-                        : FileNonDirectoryFile));
+                        : FileNonDirectoryFile),
+                    BuildExtendedAttribute(
+                        OwnershipEaName,
+                        ownershipMarker));
                 try
                 {
                     RequireType(handle, directory);
@@ -1168,6 +1650,77 @@ namespace SBMSSetup
                 {
                     handle.Dispose();
                     throw;
+                }
+            }
+
+            internal static void RequireOwnershipMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(
+                    handle,
+                    OwnershipEaName);
+                if (!BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload native ownership marker does not match " +
+                        "the active durable intent.");
+                }
+            }
+
+            internal static void RequireOptionalSealMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(handle, SealEaName);
+                if (actual != null && !BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload seal marker belongs to a different " +
+                        "durable intent.");
+                }
+            }
+
+            internal static void RequireSealMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(handle, SealEaName);
+                if (!BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload seal marker does not match the active " +
+                        "durable intent.");
+                }
+            }
+
+            internal static void PrepareSealMarker(
+                SafeFileHandle handle,
+                byte[] expected)
+            {
+                byte[] actual = QueryExtendedAttribute(handle, SealEaName);
+                if (actual != null && !BytesEqual(actual, expected))
+                {
+                    throw new InvalidDataException(
+                        "Payload seal marker belongs to a different " +
+                        "durable intent.");
+                }
+                if (actual == null)
+                {
+                    SetExtendedAttribute(handle, SealEaName, expected);
+                }
+                RequireSealMarker(handle, expected);
+                Flush(handle);
+            }
+
+            internal static void Flush(SafeFileHandle handle)
+            {
+                IoStatusBlock io;
+                int status = NtFlushBuffersFile(handle, out io);
+                if (status < 0)
+                {
+                    throw new Win32Exception(
+                        unchecked((int)RtlNtStatusToDosError(status)));
                 }
             }
 
@@ -1424,6 +1977,26 @@ namespace SBMSSetup
                 }
             }
 
+            internal static void RequireEmptyFile(
+                SafeFileHandle handle)
+            {
+                FileStandardInfo standard;
+                if (!GetFileInformationByHandleEx(
+                    handle,
+                    1,
+                    out standard,
+                    Marshal.SizeOf(typeof(FileStandardInfo))))
+                {
+                    ThrowLastWin32(
+                        "Unable to inspect payload file length.");
+                }
+                if (standard.Directory || standard.EndOfFile != 0)
+                {
+                    throw new InvalidDataException(
+                        "New payload files must remain empty until rewrite.");
+                }
+            }
+
             internal static NativeIdentity Identity(
                 SafeFileHandle handle)
             {
@@ -1505,16 +2078,207 @@ namespace SBMSSetup
                 return text.ToString();
             }
 
+            private static byte[] BuildExtendedAttribute(
+                string attributeName,
+                byte[] value)
+            {
+                byte[] name = Encoding.ASCII.GetBytes(attributeName);
+                if (name.Length > Byte.MaxValue ||
+                    value.Length > UInt16.MaxValue)
+                {
+                    throw new InvalidOperationException(
+                        "Payload ownership marker exceeds NTFS EA limits.");
+                }
+                var result = new byte[
+                    checked(8 + name.Length + 1 + value.Length)];
+                result[4] = 0;
+                result[5] = checked((byte)name.Length);
+                Buffer.BlockCopy(
+                    BitConverter.GetBytes(checked((ushort)value.Length)),
+                    0,
+                    result,
+                    6,
+                    2);
+                Buffer.BlockCopy(name, 0, result, 8, name.Length);
+                Buffer.BlockCopy(
+                    value,
+                    0,
+                    result,
+                    8 + name.Length + 1,
+                    value.Length);
+                return result;
+            }
+
+            private static void SetExtendedAttribute(
+                SafeFileHandle handle,
+                string attributeName,
+                byte[] value)
+            {
+                byte[] buffer = BuildExtendedAttribute(
+                    attributeName,
+                    value);
+                GCHandle pinned = GCHandle.Alloc(
+                    buffer,
+                    GCHandleType.Pinned);
+                try
+                {
+                    IoStatusBlock io;
+                    int status = NtSetEaFile(
+                        handle,
+                        out io,
+                        pinned.AddrOfPinnedObject(),
+                        unchecked((uint)buffer.Length));
+                    if (status < 0)
+                    {
+                        throw new Win32Exception(
+                            unchecked((int)RtlNtStatusToDosError(status)));
+                    }
+                }
+                finally
+                {
+                    pinned.Free();
+                }
+            }
+
+            private static byte[] QueryExtendedAttribute(
+                SafeFileHandle handle,
+                string expectedName)
+            {
+                IntPtr output = Marshal.AllocHGlobal(65536);
+                try
+                {
+                    IoStatusBlock io;
+                    int status = NtQueryEaFile(
+                        handle,
+                        out io,
+                        output,
+                        65536,
+                        false,
+                        IntPtr.Zero,
+                        0,
+                        IntPtr.Zero,
+                        true);
+                    if (status == StatusNoEasOnFile)
+                    {
+                        return null;
+                    }
+                    if (status < 0)
+                    {
+                        throw new Win32Exception(
+                            unchecked((int)RtlNtStatusToDosError(status)));
+                    }
+                    int available =
+                        checked((int)io.Information.ToInt64());
+                    if (available <= 0 || available > 65536)
+                    {
+                        throw new InvalidDataException(
+                            "Payload ownership EA response is malformed.");
+                    }
+                    byte[] found = null;
+                    int offset = 0;
+                    while (offset < available)
+                    {
+                        int remaining = available - offset;
+                        if (remaining < 9)
+                        {
+                            throw new InvalidDataException(
+                                "Payload EA response was truncated.");
+                        }
+                        int next = Marshal.ReadInt32(output, offset);
+                        int nameLength = Marshal.ReadByte(
+                            output,
+                            offset + 5);
+                        int valueLength = unchecked((ushort)
+                            Marshal.ReadInt16(output, offset + 6));
+                        int required = checked(
+                            8 + nameLength + 1 + valueLength);
+                        int recordLength =
+                            next == 0 ? remaining : next;
+                        if (required > recordLength ||
+                            (next != 0 &&
+                                (next < required ||
+                                 (next & 3) != 0 ||
+                                 next > remaining)) ||
+                            Marshal.ReadByte(
+                                output,
+                                offset + 8 + nameLength) != 0)
+                        {
+                            throw new InvalidDataException(
+                                "Payload EA response was malformed.");
+                        }
+                        var returnedName = new byte[nameLength];
+                        Marshal.Copy(
+                            IntPtr.Add(output, offset + 8),
+                            returnedName,
+                            0,
+                            returnedName.Length);
+                        if (String.Equals(
+                                Encoding.ASCII.GetString(returnedName),
+                                expectedName,
+                                StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (found != null)
+                            {
+                                throw new InvalidDataException(
+                                    "Payload EA response contains duplicate " +
+                                    "marker names.");
+                            }
+                            found = new byte[valueLength];
+                            Marshal.Copy(
+                                IntPtr.Add(
+                                    output,
+                                    offset + 8 + nameLength + 1),
+                                found,
+                                0,
+                                found.Length);
+                        }
+                        if (next == 0)
+                        {
+                            if (required != remaining)
+                            {
+                                throw new InvalidDataException(
+                                    "Payload EA response has trailing data.");
+                            }
+                            break;
+                        }
+                        offset += next;
+                    }
+                    return found;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(output);
+                }
+            }
+
+            private static bool BytesEqual(byte[] first, byte[] second)
+            {
+                if (first == null || second == null ||
+                    first.Length != second.Length)
+                {
+                    return false;
+                }
+                int difference = 0;
+                for (int index = 0; index < first.Length; ++index)
+                {
+                    difference |= first[index] ^ second[index];
+                }
+                return difference == 0;
+            }
+
             private static SafeFileHandle OpenNative(
                 SafeFileHandle root,
                 string name,
                 uint access,
                 uint disposition,
-                uint options)
+                uint options,
+                byte[] extendedAttributes)
             {
                 IntPtr nameBuffer = IntPtr.Zero;
                 IntPtr unicodeBuffer = IntPtr.Zero;
                 bool rootAddRef = false;
+                GCHandle eaPin = new GCHandle();
+                bool eaPinned = false;
                 try
                 {
                     root.DangerousAddRef(ref rootAddRef);
@@ -1543,6 +2307,18 @@ namespace SBMSSetup
                         SecurityDescriptor = IntPtr.Zero,
                         SecurityQualityOfService = IntPtr.Zero
                     };
+                    IntPtr eaBuffer = IntPtr.Zero;
+                    uint eaLength = 0;
+                    if (extendedAttributes != null)
+                    {
+                        eaPin = GCHandle.Alloc(
+                            extendedAttributes,
+                            GCHandleType.Pinned);
+                        eaPinned = true;
+                        eaBuffer = eaPin.AddrOfPinnedObject();
+                        eaLength =
+                            checked((uint)extendedAttributes.Length);
+                    }
                     IoStatusBlock io;
                     SafeFileHandle handle;
                     int status = NtCreateFile(
@@ -1555,8 +2331,8 @@ namespace SBMSSetup
                         ShareRead | ShareWrite | ShareDelete,
                         disposition,
                         options,
-                        IntPtr.Zero,
-                        0);
+                        eaBuffer,
+                        eaLength);
                     if (status < 0)
                     {
                         if (handle != null)
@@ -1570,6 +2346,10 @@ namespace SBMSSetup
                 }
                 finally
                 {
+                    if (eaPinned)
+                    {
+                        eaPin.Free();
+                    }
                     if (unicodeBuffer != IntPtr.Zero)
                     {
                         Marshal.FreeHGlobal(unicodeBuffer);
@@ -1718,6 +2498,30 @@ namespace SBMSSetup
                 IntPtr fileInformation,
                 uint length,
                 int fileInformationClass);
+
+            [DllImport("ntdll.dll")]
+            private static extern int NtQueryEaFile(
+                SafeFileHandle fileHandle,
+                out IoStatusBlock ioStatusBlock,
+                IntPtr buffer,
+                uint length,
+                [MarshalAs(UnmanagedType.U1)] bool returnSingleEntry,
+                IntPtr eaList,
+                uint eaListLength,
+                IntPtr eaIndex,
+                [MarshalAs(UnmanagedType.U1)] bool restartScan);
+
+            [DllImport("ntdll.dll")]
+            private static extern int NtSetEaFile(
+                SafeFileHandle fileHandle,
+                out IoStatusBlock ioStatusBlock,
+                IntPtr buffer,
+                uint length);
+
+            [DllImport("ntdll.dll")]
+            private static extern int NtFlushBuffersFile(
+                SafeFileHandle fileHandle,
+                out IoStatusBlock ioStatusBlock);
 
             [DllImport("ntdll.dll")]
             private static extern int NtQueryDirectoryFile(
