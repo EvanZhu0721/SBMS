@@ -580,6 +580,10 @@ namespace SBMSSetup
                     null);
                 after.Revision = before.Revision + 1;
                 new PayloadCleanupReceipt(
+                    Authority(
+                        InstallOperation.FreshInstall,
+                        null,
+                        before.Candidate),
                     PayloadCleanupKind.Candidate,
                     new PayloadNamespaceState(before),
                     new PayloadNamespaceState(after),

@@ -1351,18 +1351,21 @@ namespace SBMSSetup
 
     internal sealed class PayloadCleanupReceipt
     {
+        private readonly PayloadRecoveryAuthority authority;
         internal readonly PayloadCleanupKind Kind;
         internal readonly PayloadNamespaceState Before;
         internal readonly PayloadNamespaceState After;
         internal readonly bool Complete;
 
         internal PayloadCleanupReceipt(
+            PayloadRecoveryAuthority authority,
             PayloadCleanupKind kind,
             PayloadNamespaceState before,
             PayloadNamespaceState after,
             bool complete)
         {
             if (!Enum.IsDefined(typeof(PayloadCleanupKind), kind) ||
+                authority == null ||
                 before == null ||
                 after == null)
             {
@@ -1370,14 +1373,21 @@ namespace SBMSSetup
                     "Payload cleanup receipt is incomplete.");
             }
             PayloadReceiptValidation.ValidateCleanup(
+                authority,
                 kind,
                 before,
                 after,
                 complete);
+            this.authority = authority.DeepClone();
             Kind = kind;
             Before = before;
             After = after;
             Complete = complete;
+        }
+
+        internal PayloadRecoveryAuthority Authority
+        {
+            get { return authority.DeepClone(); }
         }
     }
 
@@ -1578,7 +1588,20 @@ namespace SBMSSetup
                      second == PayloadNamespaceShape.BackupOnly &&
                      authority.Baseline != null &&
                      authority.Baseline.Matches(
-                        firstCheckpoint.Backup));
+                        firstCheckpoint.Backup)) ||
+                    (authority.Operation ==
+                        InstallOperation.Uninstall &&
+                     authority.BaselineState ==
+                        BaselinePayloadState.Present &&
+                     first == PayloadNamespaceShape.CurrentOnly &&
+                     second == PayloadNamespaceShape.BackupOnly &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(
+                        firstCheckpoint.Current) &&
+                     SameDirectoryAfterRename(
+                        firstCheckpoint.Current,
+                        secondCheckpoint.Backup,
+                        PayloadDirectorySlot.Backup));
             }
             else
             {
@@ -1589,15 +1612,18 @@ namespace SBMSSetup
                         authority.Operation ==
                             InstallOperation.FreshInstall &&
                         authority.Target != null &&
-                        ((first ==
-                            PayloadNamespaceShape.CandidateOnly &&
-                          authority.Target.Matches(
-                            firstCheckpoint.Candidate)) ||
-                         (first ==
-                            PayloadNamespaceShape.CurrentOnly &&
-                          authority.Target.Matches(
-                            firstCheckpoint.Current))) &&
-                        second == PayloadNamespaceShape.Empty;
+                        ((((first ==
+                                PayloadNamespaceShape.CandidateOnly &&
+                             authority.Target.Matches(
+                                firstCheckpoint.Candidate)) ||
+                            (first ==
+                                PayloadNamespaceShape.CurrentOnly &&
+                             authority.Target.Matches(
+                                firstCheckpoint.Current))) &&
+                           second == PayloadNamespaceShape.Empty) ||
+                         (unchanged &&
+                          first == PayloadNamespaceShape.Empty &&
+                          second == PayloadNamespaceShape.Empty));
                 }
                 else
                 {
@@ -1640,8 +1666,10 @@ namespace SBMSSetup
                             authority.Target.Matches(
                                 firstCheckpoint.Current)) ||
                            (first == PayloadNamespaceShape.BackupOnly &&
-                            authority.Operation ==
-                                InstallOperation.Uninstall)) &&
+                            (authority.Operation ==
+                                InstallOperation.Uninstall ||
+                             IsReplacementOperation(
+                                authority.Operation)))) &&
                           SameDirectoryAfterRename(
                             firstCheckpoint.Backup,
                             secondCheckpoint.Current,
@@ -1656,12 +1684,22 @@ namespace SBMSSetup
         }
 
         internal static void ValidateCleanup(
+            PayloadRecoveryAuthority authority,
             PayloadCleanupKind kind,
             PayloadNamespaceState before,
             PayloadNamespaceState after,
             bool complete)
         {
+            if (authority == null)
+            {
+                throw new ArgumentNullException("authority");
+            }
+            authority.Validate();
             if (!String.Equals(
+                    authority.TransactionId,
+                    before.TransactionId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
                 before.TransactionId,
                 after.TransactionId,
                 StringComparison.Ordinal))
@@ -1669,15 +1707,32 @@ namespace SBMSSetup
                 throw new InvalidOperationException(
                     "Payload cleanup receipt crosses transactions.");
             }
+            bool unchanged = String.Equals(
+                before.InvariantDigest,
+                after.InvariantDigest,
+                StringComparison.Ordinal);
             if (!complete)
             {
-                if (!String.Equals(
-                    before.InvariantDigest,
-                    after.InvariantDigest,
-                    StringComparison.Ordinal))
+                if (!unchanged ||
+                    !CleanupStateAuthorized(
+                        authority,
+                        kind,
+                        before.Checkpoint))
                 {
                     throw new InvalidOperationException(
-                        "Incomplete cleanup cannot report a mutated namespace.");
+                        "Incomplete cleanup is mutated or unauthorized.");
+                }
+                return;
+            }
+            if (unchanged)
+            {
+                if (!CleanupTerminalAuthorized(
+                    authority,
+                    kind,
+                    before.Checkpoint))
+                {
+                    throw new InvalidOperationException(
+                        "Completed cleanup terminal state is unauthorized.");
                 }
                 return;
             }
@@ -1686,18 +1741,37 @@ namespace SBMSSetup
             if (kind == PayloadCleanupKind.Candidate)
             {
                 valid =
-                    (before.Shape ==
+                    (authority.Operation ==
+                        InstallOperation.FreshInstall &&
+                     before.Shape ==
                         PayloadNamespaceShape.CandidateOnly &&
+                     authority.Target != null &&
+                     authority.Target.Matches(
+                        before.Checkpoint.Candidate) &&
                      after.Shape == PayloadNamespaceShape.Empty) ||
-                    (before.Shape ==
+                    (IsReplacementOperation(authority.Operation) &&
+                     before.Shape ==
                         PayloadNamespaceShape.CurrentAndCandidate &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(
+                        before.Checkpoint.Current) &&
+                     authority.Target != null &&
+                     authority.Target.Matches(
+                        before.Checkpoint.Candidate) &&
                      after.Shape ==
                         PayloadNamespaceShape.CurrentOnly &&
                      SameDirectoryUnchanged(
                         before.Checkpoint.Current,
                         after.Checkpoint.Current)) ||
-                    (before.Shape ==
+                    (IsReplacementOperation(authority.Operation) &&
+                     before.Shape ==
                         PayloadNamespaceShape.CandidateAndBackup &&
+                     authority.Target != null &&
+                     authority.Target.Matches(
+                        before.Checkpoint.Candidate) &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(
+                        before.Checkpoint.Backup) &&
                      after.Shape == PayloadNamespaceShape.BackupOnly &&
                      SameDirectoryUnchanged(
                         before.Checkpoint.Backup,
@@ -1706,15 +1780,27 @@ namespace SBMSSetup
             else
             {
                 valid =
-                    (before.Shape ==
+                    (IsReplacementOperation(authority.Operation) &&
+                     before.Shape ==
                         PayloadNamespaceShape.CurrentAndBackup &&
+                     authority.Target != null &&
+                     authority.Target.Matches(
+                        before.Checkpoint.Current) &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(
+                        before.Checkpoint.Backup) &&
                      after.Shape ==
                         PayloadNamespaceShape.CurrentOnly &&
                      SameDirectoryUnchanged(
                         before.Checkpoint.Current,
                         after.Checkpoint.Current)) ||
-                    (before.Shape ==
+                    (authority.Operation ==
+                        InstallOperation.Uninstall &&
+                     before.Shape ==
                         PayloadNamespaceShape.BackupOnly &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(
+                        before.Checkpoint.Backup) &&
                      after.Shape == PayloadNamespaceShape.Empty);
             }
             if (!valid)
@@ -1722,6 +1808,89 @@ namespace SBMSSetup
                 throw new InvalidOperationException(
                     "Payload cleanup receipt has an illegal namespace transition.");
             }
+        }
+
+        private static bool CleanupStateAuthorized(
+            PayloadRecoveryAuthority authority,
+            PayloadCleanupKind kind,
+            PayloadNamespaceCheckpoint state)
+        {
+            if (kind == PayloadCleanupKind.Candidate)
+            {
+                return
+                    (authority.Operation ==
+                        InstallOperation.FreshInstall &&
+                     state.Shape == PayloadNamespaceShape.CandidateOnly &&
+                     authority.Target != null &&
+                     authority.Target.Matches(state.Candidate)) ||
+                    (IsReplacementOperation(authority.Operation) &&
+                     state.Shape ==
+                        PayloadNamespaceShape.CurrentAndCandidate &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(state.Current) &&
+                     authority.Target != null &&
+                     authority.Target.Matches(state.Candidate)) ||
+                    (IsReplacementOperation(authority.Operation) &&
+                     state.Shape ==
+                        PayloadNamespaceShape.CandidateAndBackup &&
+                     authority.Target != null &&
+                     authority.Target.Matches(state.Candidate) &&
+                     authority.Baseline != null &&
+                     authority.Baseline.Matches(state.Backup)) ||
+                    CleanupTerminalAuthorized(authority, kind, state);
+            }
+            return
+                (IsReplacementOperation(authority.Operation) &&
+                 state.Shape == PayloadNamespaceShape.CurrentAndBackup &&
+                 authority.Target != null &&
+                 authority.Target.Matches(state.Current) &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(state.Backup)) ||
+                (authority.Operation == InstallOperation.Uninstall &&
+                 state.Shape == PayloadNamespaceShape.BackupOnly &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(state.Backup)) ||
+                CleanupTerminalAuthorized(authority, kind, state);
+        }
+
+        private static bool CleanupTerminalAuthorized(
+            PayloadRecoveryAuthority authority,
+            PayloadCleanupKind kind,
+            PayloadNamespaceCheckpoint state)
+        {
+            if (kind == PayloadCleanupKind.CommittedBackup)
+            {
+                return
+                    (IsReplacementOperation(authority.Operation) &&
+                     state.Shape == PayloadNamespaceShape.CurrentOnly &&
+                     authority.Target != null &&
+                     authority.Target.Matches(state.Current)) ||
+                    (authority.Operation == InstallOperation.Uninstall &&
+                     state.Shape == PayloadNamespaceShape.Empty);
+            }
+            return
+                (authority.Operation == InstallOperation.FreshInstall &&
+                 state.Shape == PayloadNamespaceShape.Empty) ||
+                (IsReplacementOperation(authority.Operation) &&
+                 state.Shape == PayloadNamespaceShape.CurrentOnly &&
+                 ((authority.Baseline != null &&
+                   authority.Baseline.Matches(state.Current)) ||
+                  (authority.Target != null &&
+                   authority.Target.Matches(state.Current)))) ||
+                (IsReplacementOperation(authority.Operation) &&
+                 state.Shape == PayloadNamespaceShape.BackupOnly &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(state.Backup)) ||
+                (IsReplacementOperation(authority.Operation) &&
+                 state.Shape == PayloadNamespaceShape.CurrentAndBackup &&
+                 authority.Target != null &&
+                 authority.Target.Matches(state.Current) &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(state.Backup)) ||
+                (authority.Operation == InstallOperation.Uninstall &&
+                 state.Shape == PayloadNamespaceShape.CurrentOnly &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(state.Current));
         }
 
         private static void RequireForwardRevision(
