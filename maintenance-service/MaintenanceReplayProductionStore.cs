@@ -5,6 +5,11 @@ using System.Threading;
 
 namespace SBMSSetup
 {
+    internal interface IMaintenanceReplayPostAcquireFaultSeam
+    {
+        void AfterSharedLeaseAcquired();
+    }
+
     internal sealed class MaintenanceReplayProductionStore
         : IMaintenanceReplayAtomicStore,
           IInstallerJournalChildLifetime
@@ -14,8 +19,12 @@ namespace SBMSSetup
         private readonly Func<IDisposable> acquireSharedLease;
         private readonly object lifetimeGate;
         private readonly Action validateOwnerActive;
+        private readonly Action<Exception> poisonOwnerAcquisition;
+        private readonly IMaintenanceReplayPostAcquireFaultSeam
+            postAcquireFaultSeam;
         private int leaseThreadId;
         private bool disposed;
+        private bool poisoned;
 
         internal MaintenanceReplayProductionStore(
             IAtomicJournalFileSystem fileSystem,
@@ -26,7 +35,9 @@ namespace SBMSSetup
                 acquireSharedLease,
                 rootAuthorityInvariantDigest,
                 new object(),
-                delegate { })
+                delegate { },
+                delegate(Exception ignored) { },
+                null)
         {
         }
 
@@ -35,12 +46,16 @@ namespace SBMSSetup
             Func<IDisposable> acquireSharedLease,
             string rootAuthorityInvariantDigest,
             object sharedLifetimeGate,
-            Action validateOwnerActive)
+            Action validateOwnerActive,
+            Action<Exception> poisonOwnerOnAcquisitionFailure,
+            IMaintenanceReplayPostAcquireFaultSeam
+                sharedLeaseAcquiredFaultSeam)
         {
             if (fileSystem == null ||
                 acquireSharedLease == null ||
                 sharedLifetimeGate == null ||
-                validateOwnerActive == null)
+                validateOwnerActive == null ||
+                poisonOwnerOnAcquisitionFailure == null)
             {
                 throw new ArgumentNullException(
                     "Maintenance replay composition is incomplete.");
@@ -52,6 +67,10 @@ namespace SBMSSetup
             this.acquireSharedLease = acquireSharedLease;
             lifetimeGate = sharedLifetimeGate;
             this.validateOwnerActive = validateOwnerActive;
+            poisonOwnerAcquisition =
+                poisonOwnerOnAcquisitionFailure;
+            postAcquireFaultSeam =
+                sharedLeaseAcquiredFaultSeam;
             RootAuthorityInvariantDigest =
                 rootAuthorityInvariantDigest;
         }
@@ -69,6 +88,11 @@ namespace SBMSSetup
                     throw new ObjectDisposedException(
                         "MaintenanceReplayProductionStore");
                 }
+                if (poisoned)
+                {
+                    throw new InvalidOperationException(
+                        "Maintenance replay acquisition is poisoned.");
+                }
                 if (leaseThreadId != 0)
                 {
                     throw new InvalidOperationException(
@@ -85,16 +109,94 @@ namespace SBMSSetup
                     throw new InvalidOperationException(
                         "Shared transaction lease was not acquired.");
                 }
+                if (postAcquireFaultSeam != null)
+                {
+                    postAcquireFaultSeam.AfterSharedLeaseAcquired();
+                }
                 return new Lease(this, threadId, shared);
             }
-            catch
+            catch (Exception acquisitionFailure)
             {
-                if (shared != null) shared.Dispose();
-                lock (lifetimeGate)
+                if (shared == null)
                 {
-                    leaseThreadId = 0;
+                    InstallerTransactionLeaseReleaseException typed =
+                        acquisitionFailure as
+                            InstallerTransactionLeaseReleaseException;
+                    if (typed == null ||
+                        typed.Outcome ==
+                            InstallerTransactionLeaseReleaseOutcome.Confirmed)
+                    {
+                        ClearAcquisitionReservation();
+                    }
+                    else
+                    {
+                        Exception uncertain =
+                            RequireUncertainAcquisitionFailure(typed);
+                        PoisonAcquisition(uncertain);
+                        throw uncertain;
+                    }
+                }
+                else
+                {
+                    try
+                    {
+                        shared.Dispose();
+                        ClearAcquisitionReservation();
+                    }
+                    catch (InstallerTransactionLeaseReleaseException failure)
+                    {
+                        if (failure.Outcome ==
+                            InstallerTransactionLeaseReleaseOutcome.Confirmed)
+                        {
+                            ClearAcquisitionReservation();
+                        }
+                        else
+                        {
+                            Exception uncertain =
+                                RequireUncertainAcquisitionFailure(failure);
+                            PoisonAcquisition(uncertain);
+                            throw uncertain;
+                        }
+                    }
+                    catch (Exception cleanupFailure)
+                    {
+                        PoisonAcquisition(cleanupFailure);
+                        throw;
+                    }
                 }
                 throw;
+            }
+        }
+
+        private Exception RequireUncertainAcquisitionFailure(
+            InstallerTransactionLeaseReleaseException failure)
+        {
+            if (failure.Outcome ==
+                InstallerTransactionLeaseReleaseOutcome.Uncertain)
+            {
+                return failure;
+            }
+            return new InstallerTransactionLeaseReleaseException(
+                InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                "Rejected replay acquisition cleanup cannot return a " +
+                "lease for owner retry.",
+                failure);
+        }
+
+        private void PoisonAcquisition(Exception failure)
+        {
+            lock (lifetimeGate)
+            {
+                poisoned = true;
+            }
+            poisonOwnerAcquisition(failure);
+        }
+
+        private void ClearAcquisitionReservation()
+        {
+            lock (lifetimeGate)
+            {
+                leaseThreadId = 0;
             }
         }
 
@@ -240,16 +342,34 @@ namespace SBMSSetup
 
             public void Dispose()
             {
-                DemandThread();
-                disposed = true;
-                try { shared.Dispose(); }
-                finally
+                if (disposed)
                 {
-                    lock (owner.lifetimeGate)
-                    {
-                        owner.leaseThreadId = 0;
-                    }
+                    return;
                 }
+                DemandThread();
+                try
+                {
+                    shared.Dispose();
+                }
+                catch (InstallerTransactionLeaseReleaseException failure)
+                {
+                    if (failure.Outcome ==
+                        InstallerTransactionLeaseReleaseOutcome.Confirmed)
+                    {
+                        CompleteDispose();
+                    }
+                    throw;
+                }
+                CompleteDispose();
+            }
+
+            private void CompleteDispose()
+            {
+                lock (owner.lifetimeGate)
+                {
+                    owner.leaseThreadId = 0;
+                }
+                disposed = true;
             }
 
             private string ResolvePrimary(string key)

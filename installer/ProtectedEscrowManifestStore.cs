@@ -26,11 +26,21 @@ namespace SBMSSetup
         private Thread ownerThread;
         private long nextLeaseId;
         private bool poisoned;
+        private readonly IInstallerTransactionLeaseFaultSeam faultSeam;
 
         internal InstanceTransactionLeaseCoordinator(
             IInstallerTransactionMutexFactory mutexFactory,
             string mutexName,
             TimeSpan timeout)
+            : this(mutexFactory, mutexName, timeout, null)
+        {
+        }
+
+        internal InstanceTransactionLeaseCoordinator(
+            IInstallerTransactionMutexFactory mutexFactory,
+            string mutexName,
+            TimeSpan timeout,
+            IInstallerTransactionLeaseFaultSeam releaseFaultSeam)
         {
             if (mutexFactory == null)
             {
@@ -50,6 +60,7 @@ namespace SBMSSetup
             this.mutexFactory = mutexFactory;
             this.mutexName = mutexName;
             this.timeout = timeout;
+            faultSeam = releaseFaultSeam;
         }
 
         public IDisposable Acquire()
@@ -74,6 +85,11 @@ namespace SBMSSetup
             Mutex candidate = mutexFactory.OpenOrCreate(mutexName);
             bool acquired = false;
             bool abandoned = false;
+            bool ownershipInstalled = false;
+            bool leaseIdAllocated = false;
+            bool leaseIdRecorded = false;
+            bool leaseIdExhausted = false;
+            long installedLeaseId = 0;
             try
             {
                 try
@@ -113,8 +129,30 @@ namespace SBMSSetup
                     }
                     ownedMutex = candidate;
                     ownerThread = currentThread;
-                    long leaseId = checked(++nextLeaseId);
+                    ownershipInstalled = true;
+                    if (faultSeam != null)
+                    {
+                        faultSeam.BeforeLeaseIdAllocated(
+                            ref nextLeaseId);
+                    }
+                    long leaseId;
+                    try
+                    {
+                        leaseId = checked(++nextLeaseId);
+                    }
+                    catch (OverflowException)
+                    {
+                        leaseIdExhausted = true;
+                        throw;
+                    }
+                    installedLeaseId = leaseId;
+                    leaseIdAllocated = true;
                     leaseIds.Push(leaseId);
+                    leaseIdRecorded = true;
+                    if (faultSeam != null)
+                    {
+                        faultSeam.AfterOwnershipRecorded();
+                    }
                     return new Lease(this, leaseId, currentThread);
                 }
             }
@@ -122,10 +160,100 @@ namespace SBMSSetup
             {
                 if (acquired)
                 {
-                    candidate.ReleaseMutex();
+                    try
+                    {
+                        ReleaseMutexAndCleanup(
+                            candidate,
+                            "Transaction mutex acquisition cleanup");
+                    }
+                    catch (
+                        InstallerTransactionLeaseReleaseException failure)
+                    {
+                        if (failure.Outcome ==
+                            InstallerTransactionLeaseReleaseOutcome.Confirmed &&
+                            ownershipInstalled)
+                        {
+                            RollBackInstalledOwnership(
+                                candidate,
+                                currentThread,
+                                installedLeaseId,
+                                leaseIdAllocated,
+                                leaseIdRecorded,
+                                leaseIdExhausted);
+                        }
+                        throw;
+                    }
+                    if (ownershipInstalled)
+                    {
+                        RollBackInstalledOwnership(
+                            candidate,
+                            currentThread,
+                            installedLeaseId,
+                            leaseIdAllocated,
+                            leaseIdRecorded,
+                            leaseIdExhausted);
+                    }
                 }
-                candidate.Dispose();
+                else
+                {
+                    try
+                    {
+                        candidate.Dispose();
+                    }
+                    catch (Exception failure)
+                    {
+                        throw new InstallerTransactionLeaseReleaseException(
+                            InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                            "Unacquired transaction mutex handle cleanup failed.",
+                            failure);
+                    }
+                }
                 throw;
+            }
+        }
+
+        private void RollBackInstalledOwnership(
+            Mutex candidate,
+            Thread installedOwner,
+            long installedLeaseId,
+            bool leaseIdAllocated,
+            bool leaseIdRecorded,
+            bool poisonAfterRollback)
+        {
+            lock (sync)
+            {
+                bool exactOwner =
+                    Object.ReferenceEquals(ownedMutex, candidate) &&
+                    Object.ReferenceEquals(ownerThread, installedOwner);
+                bool correspondingLeasePresent =
+                    leaseIdAllocated &&
+                    leaseIds.Count != 0 &&
+                    leaseIds.Peek() == installedLeaseId;
+                bool exactLease =
+                    leaseIdRecorded
+                        ? correspondingLeasePresent
+                        : leaseIds.Count == 0 ||
+                            (leaseIds.Count == 1 &&
+                             correspondingLeasePresent);
+                if (!exactOwner || !exactLease)
+                {
+                    poisoned = true;
+                    throw new InstallerTransactionLeaseReleaseException(
+                        InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                        "Installed transaction ownership could not be " +
+                        "rolled back exactly.",
+                        null);
+                }
+                if (correspondingLeasePresent)
+                {
+                    leaseIds.Pop();
+                }
+                ownedMutex = null;
+                ownerThread = null;
+                if (poisonAfterRollback)
+                {
+                    poisoned = true;
+                }
             }
         }
 
@@ -167,15 +295,25 @@ namespace SBMSSetup
             Mutex release = null;
             lock (sync)
             {
+                if (poisoned)
+                {
+                    throw new InstallerTransactionLeaseReleaseException(
+                        InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                        "The transaction lease coordinator has uncertain ownership.",
+                        null);
+                }
                 if (ownedMutex == null ||
                     !Object.ReferenceEquals(ownerThread, thread) ||
                     !Object.ReferenceEquals(Thread.CurrentThread, thread) ||
                     leaseIds.Count == 0 ||
                     leaseIds.Peek() != leaseId)
                 {
-                    throw new InvalidOperationException(
+                    throw new InstallerTransactionLeaseReleaseException(
+                        InstallerTransactionLeaseReleaseOutcome.
+                            RejectedBeforeMutation,
                         "Transaction leases must be released on the owning " +
-                        "thread in reverse acquisition order.");
+                        "thread in reverse acquisition order.",
+                        null);
                 }
                 leaseIds.Pop();
                 if (leaseIds.Count == 0)
@@ -187,8 +325,55 @@ namespace SBMSSetup
             }
             if (release != null)
             {
-                release.ReleaseMutex();
-                release.Dispose();
+                ReleaseMutexAndCleanup(
+                    release,
+                    "Transaction mutex lease release");
+            }
+        }
+
+        private void ReleaseMutexAndCleanup(
+            Mutex release,
+            string operation)
+        {
+            try
+            {
+                if (faultSeam != null)
+                {
+                    faultSeam.ReleaseMutex(release);
+                }
+                else
+                {
+                    release.ReleaseMutex();
+                }
+            }
+            catch (Exception failure)
+            {
+                lock (sync)
+                {
+                    poisoned = true;
+                }
+                throw new InstallerTransactionLeaseReleaseException(
+                    InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                    operation + " outcome is uncertain.",
+                    failure);
+            }
+            try
+            {
+                if (faultSeam != null)
+                {
+                    faultSeam.CleanupReleasedHandle(release);
+                }
+                else
+                {
+                    release.Dispose();
+                }
+            }
+            catch (Exception failure)
+            {
+                throw new InstallerTransactionLeaseReleaseException(
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                    operation + " completed but handle cleanup failed.",
+                    failure);
             }
         }
 
@@ -215,7 +400,19 @@ namespace SBMSSetup
                 {
                     return;
                 }
-                current.Release(leaseId, thread);
+                try
+                {
+                    current.Release(leaseId, thread);
+                }
+                catch (InstallerTransactionLeaseReleaseException failure)
+                {
+                    if (failure.Outcome ==
+                        InstallerTransactionLeaseReleaseOutcome.Confirmed)
+                    {
+                        owner = null;
+                    }
+                    throw;
+                }
                 owner = null;
             }
         }

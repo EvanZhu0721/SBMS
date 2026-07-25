@@ -22,6 +22,24 @@ namespace SBMSSetup
         internal IMaintenanceReplayAtomicStore
             CreateMaintenanceReplayStore()
         {
+            return CreateMaintenanceReplayStoreCore(null);
+        }
+
+        internal IMaintenanceReplayAtomicStore
+            CreateMaintenanceReplayStoreForFaultTesting(
+                IMaintenanceReplayPostAcquireFaultSeam faultSeam)
+        {
+            if (faultSeam == null)
+            {
+                throw new ArgumentNullException("faultSeam");
+            }
+            return CreateMaintenanceReplayStoreCore(faultSeam);
+        }
+
+        private IMaintenanceReplayAtomicStore
+            CreateMaintenanceReplayStoreCore(
+                IMaintenanceReplayPostAcquireFaultSeam faultSeam)
+        {
             lock (lifetimeGate)
             {
                 ThrowIfDisposed();
@@ -33,7 +51,9 @@ namespace SBMSSetup
                             AcquireTransactionLeaseForMaintenanceReplay,
                             ComputeMaintenanceReplayRootAuthority(),
                             lifetimeGate,
-                            ThrowIfDisposed);
+                            ThrowIfDisposed,
+                            PoisonFromMaintenanceReplayAcquisition,
+                            faultSeam);
                     RegisterChildLifetime(
                         maintenanceReplayStore);
                 }

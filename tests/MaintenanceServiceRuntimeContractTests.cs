@@ -146,6 +146,310 @@ namespace SBMSSetup
         }
     }
 
+    internal sealed class ThrowingReleaseLeaseSource
+    {
+        private readonly InstallerTransactionLeaseReleaseOutcome outcome;
+        private readonly bool throwUnknown;
+        private Thread ownerThread;
+        internal int AcquireCalls;
+        internal int ReleaseAttempts;
+        internal bool UnderlyingHeld;
+
+        internal ThrowingReleaseLeaseSource(
+            InstallerTransactionLeaseReleaseOutcome releaseOutcome,
+            bool useUnknownException)
+        {
+            outcome = releaseOutcome;
+            throwUnknown = useUnknownException;
+        }
+
+        internal IDisposable Acquire()
+        {
+            if (UnderlyingHeld)
+            {
+                throw new InvalidOperationException(
+                    "Test exclusion primitive is already held.");
+            }
+            AcquireCalls++;
+            UnderlyingHeld = true;
+            ownerThread = Thread.CurrentThread;
+            return new ThrowingLease(this);
+        }
+
+        internal bool IsHeldByCurrentThread()
+        {
+            return UnderlyingHeld &&
+                Object.ReferenceEquals(
+                    ownerThread,
+                    Thread.CurrentThread);
+        }
+
+        private sealed class ThrowingLease
+            : IDisposable
+        {
+            private readonly ThrowingReleaseLeaseSource owner;
+            private bool disposed;
+            private bool failedOnce;
+
+            internal ThrowingLease(
+                ThrowingReleaseLeaseSource owner)
+            {
+                this.owner = owner;
+            }
+
+            public void Dispose()
+            {
+                if (disposed)
+                {
+                    return;
+                }
+                if (!Object.ReferenceEquals(
+                        owner.ownerThread,
+                        Thread.CurrentThread))
+                {
+                    throw new InvalidOperationException(
+                        "Test lease is thread-affine.");
+                }
+                owner.ReleaseAttempts++;
+                if (failedOnce &&
+                    owner.outcome ==
+                        InstallerTransactionLeaseReleaseOutcome.
+                            RejectedBeforeMutation)
+                {
+                    owner.UnderlyingHeld = false;
+                    owner.ownerThread = null;
+                    disposed = true;
+                    return;
+                }
+                failedOnce = true;
+                if (owner.outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed)
+                {
+                    owner.UnderlyingHeld = false;
+                    owner.ownerThread = null;
+                    disposed = true;
+                }
+                if (owner.throwUnknown)
+                {
+                    throw new IOException(
+                        "Injected unknown transaction lease release failure.");
+                }
+                throw new InstallerTransactionLeaseReleaseException(
+                    owner.outcome,
+                    "Injected typed transaction lease release failure.",
+                    null);
+            }
+        }
+    }
+
+    internal sealed class CoordinatorReleaseFaultSeam
+        : IInstallerTransactionLeaseFaultSeam
+    {
+        internal bool FailAfterOwnershipRecorded;
+        internal bool ExhaustNextLeaseId;
+        internal bool FailRelease;
+        internal bool FailCleanup;
+        internal int LeaseIdAllocationCalls;
+        internal int OwnershipRecordedCalls;
+        internal int ReleaseCalls;
+        internal int CleanupCalls;
+
+        public void AfterOwnershipRecorded()
+        {
+            OwnershipRecordedCalls++;
+            if (FailAfterOwnershipRecorded)
+            {
+                FailAfterOwnershipRecorded = false;
+                throw new IOException(
+                    "Injected post-ownership-recorded failure.");
+            }
+        }
+
+        public void BeforeLeaseIdAllocated(ref long nextLeaseId)
+        {
+            LeaseIdAllocationCalls++;
+            if (ExhaustNextLeaseId)
+            {
+                ExhaustNextLeaseId = false;
+                nextLeaseId = Int64.MaxValue;
+            }
+        }
+
+        public void ReleaseMutex(Mutex mutex)
+        {
+            ReleaseCalls++;
+            if (FailRelease)
+            {
+                FailRelease = false;
+                throw new IOException(
+                    "Injected real coordinator ReleaseMutex failure.");
+            }
+            mutex.ReleaseMutex();
+        }
+
+        public void CleanupReleasedHandle(Mutex mutex)
+        {
+            CleanupCalls++;
+            if (FailCleanup)
+            {
+                FailCleanup = false;
+                throw new IOException(
+                    "Injected released-handle cleanup failure.");
+            }
+            mutex.Dispose();
+        }
+    }
+
+    internal sealed class CountingInstallerTransactionMutexFactory
+        : IInstallerTransactionMutexFactory
+    {
+        internal int OpenCalls;
+
+        public Mutex OpenOrCreate(string name)
+        {
+            OpenCalls++;
+            return new Mutex(false, name);
+        }
+    }
+
+    internal sealed class MaintenanceReplayPostAcquireFaultSeam
+        : IMaintenanceReplayPostAcquireFaultSeam
+    {
+        internal int Calls;
+
+        public void AfterSharedLeaseAcquired()
+        {
+            Calls++;
+            throw new IOException(
+                "Injected post-shared-acquire failure.");
+        }
+    }
+
+    internal sealed class CountingLeaseSource
+    {
+        private Thread ownerThread;
+        internal int AcquireCalls;
+        internal int ReleaseCalls;
+        internal bool Held;
+
+        internal IDisposable Acquire()
+        {
+            if (Held)
+            {
+                throw new InvalidOperationException(
+                    "Counting lease is already held.");
+            }
+            AcquireCalls++;
+            Held = true;
+            ownerThread = Thread.CurrentThread;
+            return new Lease(this);
+        }
+
+        internal bool IsHeldByCurrentThread()
+        {
+            return Held &&
+                Object.ReferenceEquals(ownerThread, Thread.CurrentThread);
+        }
+
+        private sealed class Lease : IDisposable
+        {
+            private readonly CountingLeaseSource owner;
+            private bool disposed;
+
+            internal Lease(CountingLeaseSource owner)
+            {
+                this.owner = owner;
+            }
+
+            public void Dispose()
+            {
+                if (disposed) return;
+                owner.ReleaseCalls++;
+                owner.Held = false;
+                owner.ownerThread = null;
+                disposed = true;
+            }
+        }
+    }
+
+    internal sealed class ConcurrentReleaseLeaseSource
+    {
+        internal readonly ManualResetEvent ReleaseEntered =
+            new ManualResetEvent(false);
+        internal readonly ManualResetEvent AllowRelease =
+            new ManualResetEvent(false);
+        internal int ReleaseCalls;
+        internal bool Held;
+        private Thread ownerThread;
+
+        internal IDisposable Acquire()
+        {
+            Held = true;
+            ownerThread = Thread.CurrentThread;
+            return new BarrierLease(this);
+        }
+
+        internal bool IsHeldByCurrentThread()
+        {
+            return Held &&
+                Object.ReferenceEquals(ownerThread, Thread.CurrentThread);
+        }
+
+        private sealed class BarrierLease : IDisposable
+        {
+            private readonly ConcurrentReleaseLeaseSource owner;
+            private bool disposed;
+
+            internal BarrierLease(
+                ConcurrentReleaseLeaseSource owner)
+            {
+                this.owner = owner;
+            }
+
+            public void Dispose()
+            {
+                if (disposed) return;
+                owner.ReleaseCalls++;
+                owner.ReleaseEntered.Set();
+                if (!owner.AllowRelease.WaitOne(
+                        TimeSpan.FromSeconds(5)))
+                {
+                    throw new TimeoutException(
+                        "Concurrent release barrier timed out.");
+                }
+                owner.Held = false;
+                owner.ownerThread = null;
+                disposed = true;
+            }
+        }
+    }
+
+    internal sealed class ThrowingAcquireLeaseSource
+    {
+        private readonly InstallerTransactionLeaseReleaseOutcome outcome;
+        internal int AcquireCalls;
+
+        internal ThrowingAcquireLeaseSource(
+            InstallerTransactionLeaseReleaseOutcome outcome)
+        {
+            this.outcome = outcome;
+        }
+
+        internal IDisposable Acquire()
+        {
+            AcquireCalls++;
+            throw new InstallerTransactionLeaseReleaseException(
+                outcome,
+                "Injected typed lease acquisition cleanup failure.",
+                null);
+        }
+
+        internal bool IsHeldByCurrentThread()
+        {
+            return false;
+        }
+    }
+
     internal sealed class LeaseProbe
     {
         private readonly Func<IDisposable> acquire;
@@ -413,6 +717,12 @@ namespace SBMSSetup
             Run("replay read failures do not downgrade to backup", ReplayReadFailuresDoNotFallback);
             Run("production-shaped replay uses native root and shared lease", ProductionReplayUsesNativeRoot);
             Run("replay lifecycle gate closes create and acquire races", ReplayLifecycleGateClosesRaces);
+            Run("throwing lease release obeys typed outcomes", ThrowingLeaseReleaseIsFailClosed);
+            Run("real coordinator release seam emits typed outcomes", RealCoordinatorReleaseSeamIsTyped);
+            Run("coordinator rolls back post-ownership acquisition faults", CoordinatorPostOwnershipFaultRollsBack);
+            Run("typed acquisition cleanup settles parent and replay", TypedAcquisitionCleanupSettlesLifetimes);
+            Run("replay settles post-shared-acquire faults", ReplayPostSharedAcquireFaultsSettle);
+            Run("lifetime lease serializes concurrent dispose", LifetimeLeaseSerializesConcurrentDispose);
             Run("fake lease is thread-affine and non-reentrant", FakeLeaseIsStrict);
             Console.WriteLine(
                 failures == 0
@@ -1364,6 +1674,752 @@ namespace SBMSSetup
                 null,
                 fileSystem,
                 new UnsecuredInstallerTransactionMutexFactory());
+        }
+
+        private static FileTransactionJournalStore
+            NewThrowingReleaseJournal(
+                string root,
+                LifecycleBarrierFileSystem fileSystem,
+                ThrowingReleaseLeaseSource leaseSource)
+        {
+            return new FileTransactionJournalStore(
+                new TestProgramDataPathProvider(root),
+                new NoOpInstallerJournalAclPolicy(),
+                @"Local\SBMS.Maintenance.Release." +
+                    Guid.NewGuid().ToString("N"),
+                TimeSpan.FromSeconds(2),
+                null,
+                fileSystem,
+                new UnsecuredInstallerTransactionMutexFactory(),
+                leaseSource.Acquire,
+                leaseSource.IsHeldByCurrentThread);
+        }
+
+        private static void ThrowingLeaseReleaseIsFailClosed()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "SBMS-maintenance-release-" +
+                    Guid.NewGuid().ToString("N"));
+            var uncertainSource =
+                new ThrowingReleaseLeaseSource(
+                    InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                    false);
+            var uncertainFileSystem =
+                new LifecycleBarrierFileSystem();
+            FileTransactionJournalStore uncertainJournal =
+                NewThrowingReleaseJournal(
+                    root,
+                    uncertainFileSystem,
+                    uncertainSource);
+            IMaintenanceReplayAtomicStore uncertainStore =
+                uncertainJournal.CreateMaintenanceReplayStore();
+            IMaintenanceReplayStoreLease uncertainLease =
+                uncertainStore.AcquireExclusiveLease();
+            RejectIo(uncertainLease.Dispose);
+            Assert(
+                uncertainJournal.IsPoisoned &&
+                uncertainSource.AcquireCalls == 1 &&
+                uncertainSource.ReleaseAttempts == 1 &&
+                uncertainSource.UnderlyingHeld &&
+                !uncertainFileSystem.Disposed,
+                "Uncertain release did not poison and retain ownership.");
+            RejectInvalid(
+                uncertainLease.Dispose,
+                "permanently");
+            RejectInvalid(
+                uncertainLease.Dispose,
+                "permanently");
+            Assert(
+                uncertainSource.ReleaseAttempts == 1 &&
+                uncertainJournal.IsPoisoned,
+                "Uncertain release was retried, double-released, or underflowed.");
+            RejectInvalid(
+                uncertainJournal.Dispose,
+                "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.CreateMaintenanceReplayStore();
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainStore.AcquireExclusiveLease();
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.AcquireTransactionLease();
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.Load();
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.Save(null);
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.CreateProtectedEscrowManifestStore(
+                    TransactionId);
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.
+                    CreateProtectedPayloadWorkspaceCheckpointStore(
+                        TransactionId,
+                        Digest('f'));
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                uncertainJournal.
+                    CreateDurableProtectedPayloadBuildWorkspaceModel(
+                        TransactionId,
+                        Digest('f'),
+                        null);
+            }, "poison");
+            Assert(
+                !uncertainFileSystem.Disposed &&
+                uncertainSource.AcquireCalls == 1,
+                "Poisoned journal released storage or reacquired exclusion.");
+
+            var rejectedSource =
+                new ThrowingReleaseLeaseSource(
+                    InstallerTransactionLeaseReleaseOutcome.
+                        RejectedBeforeMutation,
+                    false);
+            var rejectedFileSystem =
+                new LifecycleBarrierFileSystem();
+            FileTransactionJournalStore rejectedJournal =
+                NewThrowingReleaseJournal(
+                    root + "-rejected",
+                    rejectedFileSystem,
+                    rejectedSource);
+            IMaintenanceReplayAtomicStore rejectedStore =
+                rejectedJournal.CreateMaintenanceReplayStore();
+            IMaintenanceReplayStoreLease rejectedLease =
+                rejectedStore.AcquireExclusiveLease();
+            RejectIo(rejectedLease.Dispose);
+            Assert(
+                !rejectedJournal.IsPoisoned &&
+                rejectedSource.UnderlyingHeld &&
+                rejectedSource.ReleaseAttempts == 1,
+                "Rejected-before-mutation release changed ownership.");
+            RejectInvalid(
+                rejectedJournal.Dispose,
+                "active");
+            rejectedLease.Dispose();
+            rejectedLease.Dispose();
+            Assert(
+                !rejectedSource.UnderlyingHeld &&
+                rejectedSource.ReleaseAttempts == 2,
+                "Rejected release did not permit one safe owner retry.");
+            rejectedJournal.Dispose();
+            Assert(
+                rejectedFileSystem.Disposed,
+                "Retried rejected release did not permit parent disposal.");
+
+            var confirmedSource =
+                new ThrowingReleaseLeaseSource(
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                    false);
+            var confirmedFileSystem =
+                new LifecycleBarrierFileSystem();
+            FileTransactionJournalStore confirmedJournal =
+                NewThrowingReleaseJournal(
+                    root + "-confirmed",
+                    confirmedFileSystem,
+                    confirmedSource);
+            IMaintenanceReplayStoreLease confirmedLease =
+                confirmedJournal.CreateMaintenanceReplayStore().
+                    AcquireExclusiveLease();
+            RejectIo(confirmedLease.Dispose);
+            confirmedLease.Dispose();
+            Assert(
+                !confirmedJournal.IsPoisoned &&
+                !confirmedSource.UnderlyingHeld &&
+                confirmedSource.ReleaseAttempts == 1,
+                "Confirmed release did not close exactly one reservation.");
+            confirmedJournal.Dispose();
+            Assert(
+                confirmedFileSystem.Disposed,
+                "Confirmed release incorrectly blocked parent disposal.");
+
+            var unknownSource =
+                new ThrowingReleaseLeaseSource(
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                    true);
+            var unknownFileSystem =
+                new LifecycleBarrierFileSystem();
+            FileTransactionJournalStore unknownJournal =
+                NewThrowingReleaseJournal(
+                    root + "-unknown",
+                    unknownFileSystem,
+                    unknownSource);
+            IMaintenanceReplayStoreLease unknownLease =
+                unknownJournal.CreateMaintenanceReplayStore().
+                    AcquireExclusiveLease();
+            RejectIo(unknownLease.Dispose);
+            RejectInvalid(
+                unknownLease.Dispose,
+                "permanently");
+            Assert(
+                unknownJournal.IsPoisoned &&
+                unknownSource.ReleaseAttempts == 1 &&
+                !unknownFileSystem.Disposed,
+                "Unknown release exception was not classified Uncertain.");
+        }
+
+        private static void RealCoordinatorReleaseSeamIsTyped()
+        {
+            var releaseSeam =
+                new CoordinatorReleaseFaultSeam
+                {
+                    FailRelease = true
+                };
+            var uncertainCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    new UnsecuredInstallerTransactionMutexFactory(),
+                    @"Local\SBMS.Maintenance.Coordinator." +
+                        Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(2),
+                    releaseSeam);
+            IDisposable uncertainLease =
+                uncertainCoordinator.Acquire();
+            InstallerTransactionLeaseReleaseException uncertain =
+                CaptureReleaseFailure(uncertainLease.Dispose);
+            Assert(
+                uncertain.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Uncertain &&
+                releaseSeam.ReleaseCalls == 1 &&
+                releaseSeam.CleanupCalls == 0,
+                "Real coordinator did not classify ReleaseMutex failure as Uncertain.");
+            RejectInvalid(delegate
+            {
+                uncertainCoordinator.Acquire();
+            }, "poison");
+
+            var cleanupSeam =
+                new CoordinatorReleaseFaultSeam
+                {
+                    FailCleanup = true
+                };
+            var confirmedCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    new UnsecuredInstallerTransactionMutexFactory(),
+                    @"Local\SBMS.Maintenance.Coordinator." +
+                        Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(2),
+                    cleanupSeam);
+            IDisposable confirmedLease =
+                confirmedCoordinator.Acquire();
+            InstallerTransactionLeaseReleaseException confirmed =
+                CaptureReleaseFailure(confirmedLease.Dispose);
+            Assert(
+                confirmed.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed &&
+                cleanupSeam.ReleaseCalls == 1 &&
+                cleanupSeam.CleanupCalls == 1,
+                "Real coordinator did not classify post-release cleanup as Confirmed.");
+            using (IDisposable recovered =
+                confirmedCoordinator.Acquire())
+            {
+            }
+            Assert(
+                cleanupSeam.ReleaseCalls == 2 &&
+                cleanupSeam.CleanupCalls == 2,
+                "Confirmed coordinator release did not remain acquirable.");
+        }
+
+        private static InstallerTransactionLeaseReleaseException
+            CaptureReleaseFailure(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (InstallerTransactionLeaseReleaseException failure)
+            {
+                return failure;
+            }
+            throw new InvalidOperationException(
+                "Expected a typed transaction lease release failure.");
+        }
+
+        private static void CoordinatorPostOwnershipFaultRollsBack()
+        {
+            var recoveredSeam =
+                new CoordinatorReleaseFaultSeam
+                {
+                    FailAfterOwnershipRecorded = true
+                };
+            var recoveredCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    new UnsecuredInstallerTransactionMutexFactory(),
+                    @"Local\SBMS.Maintenance.PostOwnership." +
+                        Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(2),
+                    recoveredSeam);
+            RejectIo(delegate
+            {
+                recoveredCoordinator.Acquire();
+            });
+            using (IDisposable recovered =
+                recoveredCoordinator.Acquire())
+            {
+            }
+            Assert(
+                recoveredSeam.OwnershipRecordedCalls == 2 &&
+                recoveredSeam.ReleaseCalls == 2 &&
+                recoveredSeam.CleanupCalls == 2,
+                "Successful acquisition cleanup left false nested ownership.");
+
+            var confirmedSeam =
+                new CoordinatorReleaseFaultSeam
+                {
+                    FailAfterOwnershipRecorded = true,
+                    FailCleanup = true
+                };
+            var confirmedCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    new UnsecuredInstallerTransactionMutexFactory(),
+                    @"Local\SBMS.Maintenance.PostOwnership." +
+                        Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(2),
+                    confirmedSeam);
+            InstallerTransactionLeaseReleaseException confirmed =
+                CaptureReleaseFailure(delegate
+                {
+                    confirmedCoordinator.Acquire();
+                });
+            Assert(
+                confirmed.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                "Post-ownership cleanup error was not classified Confirmed.");
+            using (IDisposable recovered =
+                confirmedCoordinator.Acquire())
+            {
+            }
+            Assert(
+                confirmedSeam.OwnershipRecordedCalls == 2 &&
+                confirmedSeam.ReleaseCalls == 2 &&
+                confirmedSeam.CleanupCalls == 2,
+                "Confirmed acquisition cleanup did not roll back installed ownership.");
+
+            var uncertainSeam =
+                new CoordinatorReleaseFaultSeam
+                {
+                    FailAfterOwnershipRecorded = true,
+                    FailRelease = true
+                };
+            var uncertainCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    new UnsecuredInstallerTransactionMutexFactory(),
+                    @"Local\SBMS.Maintenance.PostOwnership." +
+                        Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(2),
+                    uncertainSeam);
+            InstallerTransactionLeaseReleaseException uncertain =
+                CaptureReleaseFailure(delegate
+                {
+                    uncertainCoordinator.Acquire();
+                });
+            Assert(
+                uncertain.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Uncertain &&
+                uncertainSeam.ReleaseCalls == 1 &&
+                uncertainSeam.CleanupCalls == 0,
+                "Uncertain acquisition cleanup did not retain poisoned ownership.");
+            RejectInvalid(delegate
+            {
+                uncertainCoordinator.Acquire();
+            }, "poison");
+
+            var exhaustedFactory =
+                new CountingInstallerTransactionMutexFactory();
+            var exhaustedSeam =
+                new CoordinatorReleaseFaultSeam
+                {
+                    ExhaustNextLeaseId = true
+                };
+            var exhaustedCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    exhaustedFactory,
+                    @"Local\SBMS.Maintenance.PostOwnership." +
+                        Guid.NewGuid().ToString("N"),
+                    TimeSpan.FromSeconds(2),
+                    exhaustedSeam);
+            Exception exhausted = null;
+            try
+            {
+                exhaustedCoordinator.Acquire();
+            }
+            catch (Exception failure)
+            {
+                exhausted = failure;
+            }
+            Assert(
+                exhausted is OverflowException &&
+                exhaustedFactory.OpenCalls == 1 &&
+                exhaustedSeam.LeaseIdAllocationCalls == 1 &&
+                exhaustedSeam.ReleaseCalls == 1 &&
+                exhaustedSeam.CleanupCalls == 1,
+                "Lease id exhaustion did not clean up its installed mutex once.");
+            RejectInvalid(delegate
+            {
+                exhaustedCoordinator.Acquire();
+            }, "poison");
+            RejectInvalid(delegate
+            {
+                exhaustedCoordinator.Acquire();
+            }, "poison");
+            Assert(
+                exhaustedFactory.OpenCalls == 1 &&
+                exhaustedSeam.LeaseIdAllocationCalls == 1 &&
+                exhaustedSeam.ReleaseCalls == 1 &&
+                exhaustedSeam.CleanupCalls == 1,
+                "Poisoned lease id exhaustion touched the mutex again.");
+        }
+
+        private static void TypedAcquisitionCleanupSettlesLifetimes()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "SBMS-maintenance-acquire-cleanup-" +
+                    Guid.NewGuid().ToString("N"));
+            var parentSource = new ThrowingAcquireLeaseSource(
+                InstallerTransactionLeaseReleaseOutcome.Uncertain);
+            var parentFileSystem =
+                new LifecycleBarrierFileSystem();
+            var parentJournal = NewAcquisitionFailureJournal(
+                root,
+                parentFileSystem,
+                parentSource);
+            InstallerTransactionLeaseReleaseException parentFailure =
+                CaptureReleaseFailure(delegate
+                {
+                    parentJournal.AcquireTransactionLease();
+                });
+            Assert(
+                parentFailure.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Uncertain &&
+                parentJournal.IsPoisoned &&
+                parentSource.AcquireCalls == 1,
+                "Uncertain inner Acquire did not poison and retain the parent reservation.");
+            RejectInvalid(parentJournal.Dispose, "poison");
+
+            var confirmedSource = new ThrowingAcquireLeaseSource(
+                InstallerTransactionLeaseReleaseOutcome.Confirmed);
+            var confirmedFileSystem =
+                new LifecycleBarrierFileSystem();
+            var confirmedJournal = NewAcquisitionFailureJournal(
+                root + "-confirmed",
+                confirmedFileSystem,
+                confirmedSource);
+            IMaintenanceReplayAtomicStore confirmedStore =
+                confirmedJournal.CreateMaintenanceReplayStore();
+            InstallerTransactionLeaseReleaseException confirmedFailure =
+                CaptureReleaseFailure(delegate
+                {
+                    confirmedStore.AcquireExclusiveLease();
+                });
+            Assert(
+                confirmedFailure.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Confirmed &&
+                !confirmedJournal.IsPoisoned,
+                "Confirmed replay acquisition cleanup retained a reservation.");
+            confirmedJournal.Dispose();
+            Assert(
+                confirmedFileSystem.Disposed,
+                "Confirmed replay acquisition cleanup left child lifetime active.");
+
+            var rejectedSource = new ThrowingAcquireLeaseSource(
+                InstallerTransactionLeaseReleaseOutcome.
+                    RejectedBeforeMutation);
+            var rejectedFileSystem =
+                new LifecycleBarrierFileSystem();
+            var rejectedJournal = NewAcquisitionFailureJournal(
+                root + "-rejected",
+                rejectedFileSystem,
+                rejectedSource);
+            IMaintenanceReplayAtomicStore rejectedStore =
+                rejectedJournal.CreateMaintenanceReplayStore();
+            InstallerTransactionLeaseReleaseException rejectedFailure =
+                CaptureReleaseFailure(delegate
+                {
+                    rejectedStore.AcquireExclusiveLease();
+                });
+            Assert(
+                rejectedFailure.Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.Uncertain &&
+                rejectedJournal.IsPoisoned &&
+                !rejectedFileSystem.Disposed,
+                "Rejected replay acquisition was not upgraded to Uncertain.");
+            RejectInvalid(rejectedJournal.Dispose, "poison");
+        }
+
+        private static void ReplayPostSharedAcquireFaultsSettle()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "SBMS-maintenance-post-shared-" +
+                    Guid.NewGuid().ToString("N"));
+
+            var cleanSource = new CountingLeaseSource();
+            var cleanFileSystem = new LifecycleBarrierFileSystem();
+            var cleanJournal = NewPostAcquireJournal(
+                root,
+                cleanFileSystem,
+                cleanSource.Acquire,
+                cleanSource.IsHeldByCurrentThread);
+            var cleanSeam =
+                new MaintenanceReplayPostAcquireFaultSeam();
+            IMaintenanceReplayAtomicStore cleanStore =
+                cleanJournal.CreateMaintenanceReplayStoreForFaultTesting(
+                    cleanSeam);
+            RejectIo(delegate
+            {
+                cleanStore.AcquireExclusiveLease();
+            });
+            Assert(
+                cleanSeam.Calls == 1 &&
+                cleanSource.AcquireCalls == 1 &&
+                cleanSource.ReleaseCalls == 1 &&
+                !cleanSource.Held &&
+                !cleanJournal.IsPoisoned,
+                "Successful post-shared cleanup retained a child or parent reservation.");
+            cleanJournal.Dispose();
+            Assert(
+                cleanFileSystem.Disposed,
+                "Successful post-shared cleanup blocked parent disposal.");
+
+            AssertPostSharedTypedCleanup(
+                root + "-confirmed",
+                InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                false,
+                false);
+            AssertPostSharedTypedCleanup(
+                root + "-rejected",
+                InstallerTransactionLeaseReleaseOutcome.
+                    RejectedBeforeMutation,
+                false,
+                true);
+            AssertPostSharedTypedCleanup(
+                root + "-uncertain",
+                InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                false,
+                true);
+            AssertPostSharedTypedCleanup(
+                root + "-unknown",
+                InstallerTransactionLeaseReleaseOutcome.Confirmed,
+                true,
+                true);
+        }
+
+        private static void AssertPostSharedTypedCleanup(
+            string root,
+            InstallerTransactionLeaseReleaseOutcome outcome,
+            bool throwUnknown,
+            bool expectPoison)
+        {
+            var source =
+                new ThrowingReleaseLeaseSource(
+                    outcome,
+                    throwUnknown);
+            var fileSystem = new LifecycleBarrierFileSystem();
+            var journal = NewPostAcquireJournal(
+                root,
+                fileSystem,
+                source.Acquire,
+                source.IsHeldByCurrentThread);
+            var seam =
+                new MaintenanceReplayPostAcquireFaultSeam();
+            IMaintenanceReplayAtomicStore store =
+                journal.CreateMaintenanceReplayStoreForFaultTesting(
+                    seam);
+            Exception observed = null;
+            try
+            {
+                store.AcquireExclusiveLease();
+            }
+            catch (Exception failure)
+            {
+                observed = failure;
+            }
+            if (outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.
+                        RejectedBeforeMutation &&
+                !throwUnknown)
+            {
+                var typed =
+                    observed as
+                        InstallerTransactionLeaseReleaseException;
+                Assert(
+                    typed != null &&
+                    typed.Outcome ==
+                        InstallerTransactionLeaseReleaseOutcome.Uncertain,
+                    "Rejected post-shared cleanup was not upgraded to Uncertain.");
+            }
+            else
+            {
+                Assert(
+                    observed is IOException,
+                    "Confirmed or unknown cleanup did not preserve the authoritative failure.");
+            }
+            Assert(
+                seam.Calls == 1 &&
+                source.AcquireCalls == 1 &&
+                source.ReleaseAttempts == 1 &&
+                journal.IsPoisoned == expectPoison,
+                "Post-shared cleanup settlement or release count was incorrect.");
+            if (expectPoison)
+            {
+                Assert(
+                    ((MaintenanceReplayProductionStore)store).
+                        HasActiveLease &&
+                    !fileSystem.Disposed,
+                    "Poisoned post-shared cleanup released child reservation or storage.");
+                RejectInvalid(delegate
+                {
+                    store.AcquireExclusiveLease();
+                }, "poison");
+                RejectInvalid(journal.Dispose, "poison");
+                Assert(
+                    source.ReleaseAttempts == 1 &&
+                    !fileSystem.Disposed,
+                    "Poisoned post-shared cleanup retried or double-released.");
+            }
+            else
+            {
+                journal.Dispose();
+                Assert(
+                    fileSystem.Disposed &&
+                    !source.UnderlyingHeld,
+                    "Confirmed post-shared cleanup retained parent lifetime.");
+            }
+        }
+
+        private static FileTransactionJournalStore NewPostAcquireJournal(
+            string root,
+            LifecycleBarrierFileSystem fileSystem,
+            Func<IDisposable> acquire,
+            Func<bool> demandHeld)
+        {
+            return new FileTransactionJournalStore(
+                new TestProgramDataPathProvider(root),
+                new NoOpInstallerJournalAclPolicy(),
+                @"Local\SBMS.Maintenance.PostShared." +
+                    Guid.NewGuid().ToString("N"),
+                TimeSpan.FromSeconds(2),
+                null,
+                fileSystem,
+                new UnsecuredInstallerTransactionMutexFactory(),
+                acquire,
+                demandHeld);
+        }
+
+        private static FileTransactionJournalStore
+            NewAcquisitionFailureJournal(
+                string root,
+                LifecycleBarrierFileSystem fileSystem,
+                ThrowingAcquireLeaseSource source)
+        {
+            return new FileTransactionJournalStore(
+                new TestProgramDataPathProvider(root),
+                new NoOpInstallerJournalAclPolicy(),
+                @"Local\SBMS.Maintenance.AcquireFailure." +
+                    Guid.NewGuid().ToString("N"),
+                TimeSpan.FromSeconds(2),
+                null,
+                fileSystem,
+                new UnsecuredInstallerTransactionMutexFactory(),
+                source.Acquire,
+                source.IsHeldByCurrentThread);
+        }
+
+        private static void LifetimeLeaseSerializesConcurrentDispose()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "SBMS-maintenance-concurrent-release-" +
+                    Guid.NewGuid().ToString("N"));
+            var fileSystem = new LifecycleBarrierFileSystem();
+            var source = new ConcurrentReleaseLeaseSource();
+            var journal = new FileTransactionJournalStore(
+                new TestProgramDataPathProvider(root),
+                new NoOpInstallerJournalAclPolicy(),
+                @"Local\SBMS.Maintenance.Concurrent." +
+                    Guid.NewGuid().ToString("N"),
+                TimeSpan.FromSeconds(2),
+                null,
+                fileSystem,
+                new UnsecuredInstallerTransactionMutexFactory(),
+                source.Acquire,
+                source.IsHeldByCurrentThread);
+            IDisposable lease = null;
+            Exception ownerFailure = null;
+            Exception competitorFailure = null;
+            var acquired = new ManualResetEvent(false);
+            var startDispose = new ManualResetEvent(false);
+            var owner = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    lease = journal.AcquireTransactionLease();
+                    acquired.Set();
+                    if (!startDispose.WaitOne(
+                            TimeSpan.FromSeconds(5)))
+                    {
+                        throw new TimeoutException(
+                            "Owner dispose start barrier timed out.");
+                    }
+                    lease.Dispose();
+                }
+                catch (Exception failure)
+                {
+                    ownerFailure = failure;
+                }
+            }));
+            owner.Start();
+            Assert(
+                acquired.WaitOne(TimeSpan.FromSeconds(2)),
+                "Owner did not acquire the lifetime-bound lease.");
+            startDispose.Set();
+            Assert(
+                source.ReleaseEntered.WaitOne(
+                    TimeSpan.FromSeconds(2)),
+                "Owner did not enter the inner release barrier.");
+            var competitor = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    lease.Dispose();
+                }
+                catch (Exception failure)
+                {
+                    competitorFailure = failure;
+                }
+            }));
+            competitor.Start();
+            Assert(
+                competitor.Join(2000),
+                "Concurrent Dispose did not terminate deterministically.");
+            source.AllowRelease.Set();
+            Assert(
+                owner.Join(2000) &&
+                ownerFailure == null &&
+                competitorFailure is
+                    InstallerTransactionLeaseReleaseException &&
+                ((InstallerTransactionLeaseReleaseException)
+                    competitorFailure).Outcome ==
+                    InstallerTransactionLeaseReleaseOutcome.
+                        RejectedBeforeMutation &&
+                source.ReleaseCalls == 1 &&
+                !journal.IsPoisoned,
+                "Concurrent Dispose double-released, underflowed, or poisoned.");
+            journal.Dispose();
+            Assert(
+                fileSystem.Disposed,
+                "Concurrent Dispose left the parent lifetime active.");
         }
 
         private static void AssertBidirectionalLeaseExclusion(

@@ -5,6 +5,7 @@ using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 
 namespace SBMSSetup
 {
@@ -481,6 +482,40 @@ namespace SBMSSetup
         bool IsLeaseHeldByCurrentThread { get; }
         bool HasActiveLease { get; }
         void DisposeFromParent();
+    }
+
+    internal enum InstallerTransactionLeaseReleaseOutcome
+    {
+        RejectedBeforeMutation,
+        Confirmed,
+        Uncertain
+    }
+
+    internal sealed class InstallerTransactionLeaseReleaseException
+        : IOException
+    {
+        internal InstallerTransactionLeaseReleaseException(
+            InstallerTransactionLeaseReleaseOutcome outcome,
+            string message,
+            Exception innerException)
+            : base(message, innerException)
+        {
+            Outcome = outcome;
+        }
+
+        internal InstallerTransactionLeaseReleaseOutcome Outcome
+        {
+            get;
+            private set;
+        }
+    }
+
+    internal interface IInstallerTransactionLeaseFaultSeam
+    {
+        void AfterOwnershipRecorded();
+        void BeforeLeaseIdAllocated(ref long nextLeaseId);
+        void ReleaseMutex(Mutex mutex);
+        void CleanupReleasedHandle(Mutex mutex);
     }
 
     internal sealed class AtomicTransactionJournalStore :

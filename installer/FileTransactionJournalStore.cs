@@ -450,6 +450,8 @@ namespace SBMSSetup
         private readonly IInstallerJournalAclPolicy aclPolicy;
         private readonly InstanceTransactionLeaseCoordinator
             transactionLeaseCoordinator;
+        private readonly Func<IDisposable> acquireTransactionLease;
+        private readonly Func<bool> isTransactionLeaseHeldByCurrentThread;
         private readonly string commonApplicationDataPath;
         private readonly string installerStateRoot;
         private readonly string transactionsDirectory;
@@ -459,6 +461,9 @@ namespace SBMSSetup
         private int activeTransactionLeaseCount;
         private bool disposing;
         private bool disposed;
+        private bool poisoned;
+        private Exception poisonFailure;
+        private LifetimeBoundTransactionLease poisonedLease;
 
         internal FileTransactionJournalStore()
             : this(
@@ -548,6 +553,14 @@ namespace SBMSSetup
                     mutexFactory,
                     mutexName,
                     mutexTimeout);
+            acquireTransactionLease =
+                transactionLeaseCoordinator.Acquire;
+            isTransactionLeaseHeldByCurrentThread =
+                delegate
+                {
+                    return transactionLeaseCoordinator.
+                        IsHeldByCurrentThread;
+                };
             transactionLeaseIdentity = mutexName;
             transactionsDirectory = Path.Combine(
                 installerStateRoot,
@@ -590,6 +603,37 @@ namespace SBMSSetup
                 null);
         }
 
+        internal FileTransactionJournalStore(
+            IInstallerProgramDataPathProvider programDataPathProvider,
+            IInstallerJournalAclPolicy aclPolicy,
+            string mutexName,
+            TimeSpan mutexTimeout,
+            ITerminalRotationFaultInjector rotationFaultInjector,
+            IAtomicJournalFileSystem journalFileSystem,
+            IInstallerTransactionMutexFactory mutexFactory,
+            Func<IDisposable> transactionLeaseAcquireOverride,
+            Func<bool> transactionLeaseHeldByCurrentThreadOverride)
+            : this(
+                programDataPathProvider,
+                aclPolicy,
+                mutexName,
+                mutexTimeout,
+                rotationFaultInjector,
+                journalFileSystem,
+                mutexFactory)
+        {
+            if (transactionLeaseAcquireOverride == null ||
+                transactionLeaseHeldByCurrentThreadOverride == null)
+            {
+                throw new ArgumentNullException(
+                    "Transaction lease test composition is incomplete.");
+            }
+            acquireTransactionLease =
+                transactionLeaseAcquireOverride;
+            isTransactionLeaseHeldByCurrentThread =
+                transactionLeaseHeldByCurrentThreadOverride;
+        }
+
         internal string InstallerStateRoot
         {
             get { return installerStateRoot; }
@@ -603,6 +647,17 @@ namespace SBMSSetup
         internal string TransactionsDirectory
         {
             get { return transactionsDirectory; }
+        }
+
+        internal bool IsPoisoned
+        {
+            get
+            {
+                lock (lifetimeGate)
+                {
+                    return poisoned;
+                }
+            }
         }
 
         public bool RequiresPrimaryRepair
@@ -655,26 +710,9 @@ namespace SBMSSetup
             return AcquireReservedTransactionLease(true);
         }
 
-        private IDisposable AcquireTransactionLeaseCore(
-            bool prepareAndVerifyRoot)
+        private IDisposable AcquireTransactionLeaseCore()
         {
-            IDisposable lease = transactionLeaseCoordinator.Acquire();
-            try
-            {
-                if (prepareAndVerifyRoot)
-                {
-                    aclPolicy.PrepareAndVerify(
-                        commonApplicationDataPath,
-                        installerStateRoot,
-                        false);
-                }
-                return lease;
-            }
-            catch
-            {
-                lease.Dispose();
-                throw;
-            }
+            return acquireTransactionLease();
         }
 
         private IDisposable AcquireTransactionLeaseForMaintenanceReplay()
@@ -682,7 +720,7 @@ namespace SBMSSetup
             lock (lifetimeGate)
             {
                 ThrowIfDisposed();
-                if (transactionLeaseCoordinator.IsHeldByCurrentThread)
+                if (isTransactionLeaseHeldByCurrentThread())
                 {
                     throw new InvalidOperationException(
                         "Maintenance replay cannot nest inside a journal lease.");
@@ -711,16 +749,82 @@ namespace SBMSSetup
         private IDisposable AcquireReservedTransactionLease(
             bool prepareAndVerifyRoot)
         {
+            LifetimeBoundTransactionLease lease = null;
             try
             {
-                return new LifetimeBoundTransactionLease(
+                lease = new LifetimeBoundTransactionLease(
                     this,
-                    AcquireTransactionLeaseCore(
-                        prepareAndVerifyRoot));
+                    AcquireTransactionLeaseCore());
+                if (prepareAndVerifyRoot)
+                {
+                    aclPolicy.PrepareAndVerify(
+                        commonApplicationDataPath,
+                        installerStateRoot,
+                        false);
+                }
+                return lease;
             }
-            catch
+            catch (Exception acquisitionFailure)
             {
-                ReleaseTransactionLeaseReservation();
+                if (lease == null)
+                {
+                    InstallerTransactionLeaseReleaseException typed =
+                        acquisitionFailure as
+                            InstallerTransactionLeaseReleaseException;
+                    if (typed == null ||
+                        typed.Outcome ==
+                            InstallerTransactionLeaseReleaseOutcome.Confirmed)
+                    {
+                        ReleaseTransactionLeaseReservation();
+                    }
+                    else
+                    {
+                        Exception uncertain = typed;
+                        if (typed.Outcome ==
+                            InstallerTransactionLeaseReleaseOutcome.
+                                RejectedBeforeMutation)
+                        {
+                            uncertain =
+                                new InstallerTransactionLeaseReleaseException(
+                                    InstallerTransactionLeaseReleaseOutcome.
+                                        Uncertain,
+                                    "Rejected acquisition cleanup cannot " +
+                                    "return a lease for owner retry.",
+                                    typed);
+                        }
+                        MarkTransactionLeaseAcquisitionPoisoned(
+                            uncertain);
+                        throw uncertain;
+                    }
+                }
+                else
+                {
+                    // A throwing release poisons and retains the reservation.
+                    // Its failure replaces the acquisition failure because
+                    // exclusion ownership is now the authoritative hazard.
+                    try
+                    {
+                        lease.Dispose();
+                    }
+                    catch (InstallerTransactionLeaseReleaseException failure)
+                    {
+                        if (failure.Outcome ==
+                            InstallerTransactionLeaseReleaseOutcome.
+                                RejectedBeforeMutation)
+                        {
+                            var uncertain =
+                                new InstallerTransactionLeaseReleaseException(
+                                    InstallerTransactionLeaseReleaseOutcome.
+                                        Uncertain,
+                                    "Rejected cleanup cannot be returned to " +
+                                    "an owner for retry.",
+                                    failure);
+                            lease.PoisonWithoutRetry(uncertain);
+                            throw uncertain;
+                        }
+                        throw;
+                    }
+                }
                 throw;
             }
         }
@@ -735,6 +839,81 @@ namespace SBMSSetup
                         "Transaction lease lifetime accounting underflowed.");
                 }
                 activeTransactionLeaseCount--;
+            }
+        }
+
+        private void MarkTransactionLeasePoisoned(
+            LifetimeBoundTransactionLease lease,
+            Exception failure)
+        {
+            lock (lifetimeGate)
+            {
+                if (lease == null || failure == null)
+                {
+                    throw new ArgumentNullException(
+                        "Lease poison evidence is incomplete.");
+                }
+                if (poisoned &&
+                    !Object.ReferenceEquals(poisonedLease, lease))
+                {
+                    throw new InvalidOperationException(
+                        "Another transaction lease already poisoned the journal.",
+                        poisonFailure);
+                }
+                poisoned = true;
+                poisonedLease = lease;
+                poisonFailure = failure;
+            }
+        }
+
+        private void MarkTransactionLeaseAcquisitionPoisoned(
+            Exception failure)
+        {
+            lock (lifetimeGate)
+            {
+                if (failure == null)
+                {
+                    throw new ArgumentNullException("failure");
+                }
+                if (!poisoned)
+                {
+                    poisoned = true;
+                    poisonedLease = null;
+                    poisonFailure = failure;
+                }
+            }
+        }
+
+        internal void PoisonFromMaintenanceReplayAcquisition(
+            Exception failure)
+        {
+            MarkTransactionLeaseAcquisitionPoisoned(failure);
+        }
+
+        private void CompleteTransactionLeaseRelease(
+            LifetimeBoundTransactionLease lease)
+        {
+            lock (lifetimeGate)
+            {
+                if (activeTransactionLeaseCount <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "Transaction lease lifetime accounting underflowed.");
+                }
+                if (poisoned &&
+                    !Object.ReferenceEquals(poisonedLease, lease))
+                {
+                    throw new InvalidOperationException(
+                        "A foreign lease cannot recover the poisoned journal.",
+                        poisonFailure);
+                }
+                activeTransactionLeaseCount--;
+                if (Object.ReferenceEquals(poisonedLease, lease))
+                {
+                    poisoned = false;
+                    poisonedLease = null;
+                    poisonFailure = null;
+                }
             }
         }
 
@@ -762,11 +941,16 @@ namespace SBMSSetup
             CreateProtectedEscrowManifestStore(
                 string transactionId)
         {
-            return new ProtectedEscrowManifestStore(
-                journalFileSystem,
-                transactionLeaseCoordinator,
-                new AnchoredEscrowContentVerifier(journalFileSystem),
-                transactionId);
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                return new ProtectedEscrowManifestStore(
+                    journalFileSystem,
+                    transactionLeaseCoordinator,
+                    new AnchoredEscrowContentVerifier(
+                        journalFileSystem),
+                    transactionId);
+            }
         }
 
         internal IProtectedPayloadWorkspaceCheckpointStore
@@ -774,11 +958,15 @@ namespace SBMSSetup
                 string transactionId,
                 string recoveryAuthorityInvariantDigest)
         {
-            return new ProtectedPayloadWorkspaceCheckpointStore(
-                journalFileSystem,
-                transactionLeaseCoordinator,
-                transactionId,
-                recoveryAuthorityInvariantDigest);
+            lock (lifetimeGate)
+            {
+                ThrowIfDisposed();
+                return new ProtectedPayloadWorkspaceCheckpointStore(
+                    journalFileSystem,
+                    transactionLeaseCoordinator,
+                    transactionId,
+                    recoveryAuthorityInvariantDigest);
+            }
         }
 
         internal IProtectedPayloadBuildWorkspaceModel
@@ -787,18 +975,22 @@ namespace SBMSSetup
                 string recoveryAuthorityInvariantDigest,
                 IProtectedPayloadNativeTree nativeTree)
         {
-            if (nativeTree == null)
+            lock (lifetimeGate)
             {
-                throw new ArgumentNullException("nativeTree");
+                ThrowIfDisposed();
+                if (nativeTree == null)
+                {
+                    throw new ArgumentNullException("nativeTree");
+                }
+                // A successful factory call transfers nativeTree ownership to
+                // the returned model. The model must not outlive this store.
+                return new DurableProtectedPayloadBuildWorkspaceModel(
+                    CreateProtectedPayloadWorkspaceCheckpointStore(
+                        transactionId,
+                        recoveryAuthorityInvariantDigest),
+                    transactionLeaseCoordinator,
+                    nativeTree);
             }
-            // A successful factory call transfers nativeTree ownership to the
-            // returned model. The model must not outlive this journal store.
-            return new DurableProtectedPayloadBuildWorkspaceModel(
-                CreateProtectedPayloadWorkspaceCheckpointStore(
-                    transactionId,
-                    recoveryAuthorityInvariantDigest),
-                transactionLeaseCoordinator,
-                nativeTree);
         }
 
         private T WithExclusiveStoreLock<T>(
@@ -832,6 +1024,12 @@ namespace SBMSSetup
                 if (disposed)
                 {
                     return;
+                }
+                if (poisoned)
+                {
+                    throw new InvalidOperationException(
+                        "Cannot dispose a poisoned installer journal as successful.",
+                        poisonFailure);
                 }
                 if (disposing)
                 {
@@ -875,12 +1073,29 @@ namespace SBMSSetup
                 throw new ObjectDisposedException(
                     "FileTransactionJournalStore");
             }
+            if (poisoned)
+            {
+                throw new InvalidOperationException(
+                    "File transaction journal is poisoned by an unproven lease release.",
+                    poisonFailure);
+            }
         }
 
         private sealed class LifetimeBoundTransactionLease : IDisposable
         {
+            private enum ReleaseState
+            {
+                Active,
+                Releasing,
+                Released,
+                Poisoned
+            }
+
+            private readonly object releaseGate = new object();
+            private readonly Thread leaseOwnerThread;
             private FileTransactionJournalStore owner;
             private IDisposable innerLease;
+            private ReleaseState releaseState;
 
             internal LifetimeBoundTransactionLease(
                 FileTransactionJournalStore owner,
@@ -888,20 +1103,140 @@ namespace SBMSSetup
             {
                 this.owner = owner;
                 this.innerLease = innerLease;
+                leaseOwnerThread = Thread.CurrentThread;
+                releaseState = ReleaseState.Active;
+            }
+
+            internal void PoisonWithoutRetry(Exception failure)
+            {
+                lock (releaseGate)
+                {
+                    if (owner == null ||
+                        innerLease == null ||
+                        releaseState == ReleaseState.Released)
+                    {
+                        throw new InvalidOperationException(
+                            "A completed lease cannot be poisoned.");
+                    }
+                    releaseState = ReleaseState.Poisoned;
+                    owner.MarkTransactionLeasePoisoned(
+                        this,
+                        failure);
+                    Monitor.PulseAll(releaseGate);
+                }
             }
 
             public void Dispose()
             {
-                FileTransactionJournalStore releaseOwner = owner;
-                IDisposable releaseLease = innerLease;
-                if (releaseOwner == null || releaseLease == null)
+                FileTransactionJournalStore releaseOwner;
+                IDisposable releaseLease;
+                lock (releaseGate)
                 {
-                    return;
+                    if (releaseState == ReleaseState.Released)
+                    {
+                        return;
+                    }
+                    if (releaseState == ReleaseState.Poisoned)
+                    {
+                        throw PermanentPoisonFailure();
+                    }
+                    if (!Object.ReferenceEquals(
+                            leaseOwnerThread,
+                            Thread.CurrentThread))
+                    {
+                        throw new InstallerTransactionLeaseReleaseException(
+                            InstallerTransactionLeaseReleaseOutcome.
+                                RejectedBeforeMutation,
+                            "Transaction lease disposal is restricted to " +
+                            "its acquiring thread.",
+                            null);
+                    }
+                    if (releaseState == ReleaseState.Releasing)
+                    {
+                        throw new InstallerTransactionLeaseReleaseException(
+                            InstallerTransactionLeaseReleaseOutcome.
+                                RejectedBeforeMutation,
+                            "Transaction lease release is already in progress.",
+                            null);
+                    }
+                    releaseState = ReleaseState.Releasing;
+                    releaseOwner = owner;
+                    releaseLease = innerLease;
                 }
-                releaseLease.Dispose();
-                innerLease = null;
-                owner = null;
-                releaseOwner.ReleaseTransactionLeaseReservation();
+                try
+                {
+                    releaseLease.Dispose();
+                }
+                catch (InstallerTransactionLeaseReleaseException failure)
+                {
+                    if (failure.Outcome ==
+                        InstallerTransactionLeaseReleaseOutcome.
+                            RejectedBeforeMutation)
+                    {
+                        ResetActive();
+                        throw;
+                    }
+                    if (failure.Outcome ==
+                        InstallerTransactionLeaseReleaseOutcome.
+                            Confirmed)
+                    {
+                        releaseOwner.
+                            CompleteTransactionLeaseRelease(this);
+                        MarkReleased();
+                        throw;
+                    }
+                    MarkPoisoned(releaseOwner, failure);
+                    throw;
+                }
+                catch (Exception failure)
+                {
+                    MarkPoisoned(releaseOwner, failure);
+                    throw;
+                }
+                releaseOwner.CompleteTransactionLeaseRelease(this);
+                MarkReleased();
+            }
+
+            private void ResetActive()
+            {
+                lock (releaseGate)
+                {
+                    releaseState = ReleaseState.Active;
+                    Monitor.PulseAll(releaseGate);
+                }
+            }
+
+            private void MarkReleased()
+            {
+                lock (releaseGate)
+                {
+                    innerLease = null;
+                    owner = null;
+                    releaseState = ReleaseState.Released;
+                    Monitor.PulseAll(releaseGate);
+                }
+            }
+
+            private void MarkPoisoned(
+                FileTransactionJournalStore releaseOwner,
+                Exception failure)
+            {
+                lock (releaseGate)
+                {
+                    releaseOwner.MarkTransactionLeasePoisoned(
+                        this,
+                        failure);
+                    releaseState = ReleaseState.Poisoned;
+                    Monitor.PulseAll(releaseGate);
+                }
+            }
+
+            private InvalidOperationException PermanentPoisonFailure()
+            {
+                return new InvalidOperationException(
+                    "Transaction lease release remains uncertain; " +
+                    "the journal is permanently fail-closed.",
+                    owner == null ? null : owner.poisonFailure);
             }
         }
 
