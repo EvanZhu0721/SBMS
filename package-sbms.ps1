@@ -218,6 +218,7 @@ $sourceFiles = @(
     "test-sbms-start-gate.ps1",
     "test-sbms-supervisors.ps1",
     "test-sbms-installer-transaction.ps1",
+    "test-sbms-protected-payload-namespace-owner-contracts.ps1",
     "build-sbms-device-host.ps1",
     "build-sbms-driver.ps1",
     "build-sbms-gui.ps1",

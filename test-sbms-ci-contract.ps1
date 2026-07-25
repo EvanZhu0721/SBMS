@@ -79,6 +79,7 @@ Assert-True ($runner.Contains("'test-sbms-protected-payload-store-contracts.ps1'
 Assert-True ($runner.Contains("'test-sbms-protected-payload-recovery-planner.ps1'")) 'Hosted contract suite must execute the protected payload recovery crash matrix.'
 Assert-True ($runner.Contains("'test-sbms-protected-payload-transaction-executor.ps1'")) 'Hosted contract suite must execute the protected payload transaction executor crash matrix.'
 Assert-True ($runner.Contains("'test-sbms-protected-payload-build-contracts.ps1'")) 'Hosted contract suite must execute the protected payload build workspace contract.'
+Assert-True ($runner.Contains("'test-sbms-protected-payload-namespace-owner-contracts.ps1'")) 'Hosted contract suite must execute the payload namespace owner and broker contract.'
 $contractsBlock = [regex]::Match(
     $runner,
     '(?s)\$contracts\s*=\s*@\((?<body>.*?)\)\s*\r?\n')
@@ -95,6 +96,7 @@ Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payloa
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-recovery-planner.ps1') -PathType Leaf) 'Protected payload recovery planner contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-transaction-executor.ps1') -PathType Leaf) 'Protected payload transaction executor contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-build-contracts.ps1') -PathType Leaf) 'Protected payload build workspace contract script is missing.'
+Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-namespace-owner-contracts.ps1') -PathType Leaf) 'Payload namespace owner contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-protected-payload-build-state-machine.ps1') -PathType Leaf) 'Protected payload build state-machine contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-durable-protected-payload-workspace-model.ps1') -PathType Leaf) 'Durable protected payload workspace-model contract script is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $Root 'test-sbms-windows-isolated-temp-protected-payload-native-tree.ps1') -PathType Leaf) 'Windows isolated-temp protected payload native-tree contract script is missing.'
@@ -126,6 +128,15 @@ $workspaceCheckpointStoreReferences = [regex]::Matches(
     $setupBuild,
     '\$ProtectedPayloadWorkspaceCheckpointStoreSource')
 Assert-True ($workspaceCheckpointStoreReferences.Count -eq 2) 'Setup must define and pass the protected payload workspace checkpoint store source to the compiler.'
+$namespaceOwnerContractReferences = [regex]::Matches(
+    $setupBuild,
+    '\$ProtectedPayloadNamespaceOwnerContractsSource')
+Assert-True ($namespaceOwnerContractReferences.Count -eq 2) 'Setup must define and pass the payload namespace owner contract source to the compiler.'
+$brokerContractReferences = [regex]::Matches(
+    $setupBuild,
+    '\$ProtectedPayloadBrokerContractsSource')
+Assert-True ($brokerContractReferences.Count -eq 2) 'Setup must define and pass the payload broker contract source to the compiler.'
+Assert-True ($package.Contains('"test-sbms-protected-payload-namespace-owner-contracts.ps1"')) 'Package source mirror must include the payload namespace owner contract wrapper.'
 Assert-True (-not $package.Contains('Sort-Object LastWriteTime')) 'Package must not select signing material by timestamp.'
 Assert-True (-not $package.Contains('-Filter "SBMSIndirectDisplay.cer"')) 'Development package must not discover an implicit certificate.'
 

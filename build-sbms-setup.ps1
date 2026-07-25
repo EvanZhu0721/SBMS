@@ -57,6 +57,8 @@ $FileTransactionJournalStoreSource = Join-Path $Root 'installer\FileTransactionJ
 $ProtectedEscrowManifestStoreSource = Join-Path $Root 'installer\ProtectedEscrowManifestStore.cs'
 $ProtectedPayloadStoreContractsSource = Join-Path $Root 'installer\ProtectedPayloadStoreContracts.cs'
 $ProtectedPayloadBuildContractsSource = Join-Path $Root 'installer\ProtectedPayloadBuildContracts.cs'
+$ProtectedPayloadNamespaceOwnerContractsSource = Join-Path $Root 'installer\ProtectedPayloadNamespaceOwnerContracts.cs'
+$ProtectedPayloadBrokerContractsSource = Join-Path $Root 'installer\ProtectedPayloadBrokerContracts.cs'
 $ProtectedPayloadBuildStateMachineSource = Join-Path $Root 'installer\ProtectedPayloadBuildStateMachine.cs'
 $ProtectedPayloadWorkspaceCheckpointStoreSource = Join-Path $Root 'installer\ProtectedPayloadWorkspaceCheckpointStore.cs'
 $DurableProtectedPayloadBuildWorkspaceModelSource = Join-Path $Root 'installer\DurableProtectedPayloadBuildWorkspaceModel.cs'
@@ -93,7 +95,7 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsHandleRelativeJournalSource $ProtectedEscrowManifestStoreSource $ProtectedPayloadStoreContractsSource $ProtectedPayloadBuildContractsSource $ProtectedPayloadBuildStateMachineSource $ProtectedPayloadWorkspaceCheckpointStoreSource $DurableProtectedPayloadBuildWorkspaceModelSource $ProtectedPayloadRecoveryPlannerSource $ProtectedPayloadTransactionExecutorSource $FileTransactionJournalStoreSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $WindowsTransactionPlatformSource $WindowsMutationExecutionSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
+& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsHandleRelativeJournalSource $ProtectedEscrowManifestStoreSource $ProtectedPayloadStoreContractsSource $ProtectedPayloadBuildContractsSource $ProtectedPayloadNamespaceOwnerContractsSource $ProtectedPayloadBrokerContractsSource $ProtectedPayloadBuildStateMachineSource $ProtectedPayloadWorkspaceCheckpointStoreSource $DurableProtectedPayloadBuildWorkspaceModelSource $ProtectedPayloadRecoveryPlannerSource $ProtectedPayloadTransactionExecutorSource $FileTransactionJournalStoreSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $WindowsTransactionPlatformSource $WindowsMutationExecutionSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
