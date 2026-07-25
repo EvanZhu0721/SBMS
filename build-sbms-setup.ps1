@@ -57,6 +57,7 @@ $FileTransactionJournalStoreSource = Join-Path $Root 'installer\FileTransactionJ
 $ProtectedEscrowManifestStoreSource = Join-Path $Root 'installer\ProtectedEscrowManifestStore.cs'
 $ProtectedPayloadStoreContractsSource = Join-Path $Root 'installer\ProtectedPayloadStoreContracts.cs'
 $ProtectedPayloadBuildContractsSource = Join-Path $Root 'installer\ProtectedPayloadBuildContracts.cs'
+$ProtectedPayloadBuildStateMachineSource = Join-Path $Root 'installer\ProtectedPayloadBuildStateMachine.cs'
 $ProtectedPayloadRecoveryPlannerSource = Join-Path $Root 'installer\ProtectedPayloadRecoveryPlanner.cs'
 $ProtectedPayloadTransactionExecutorSource = Join-Path $Root 'installer\ProtectedPayloadTransactionExecutor.cs'
 $WindowsHandleRelativeJournalSource = Join-Path $Root 'installer\WindowsHandleRelativeJournalFileSystem.cs'
@@ -90,7 +91,7 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsHandleRelativeJournalSource $ProtectedEscrowManifestStoreSource $ProtectedPayloadStoreContractsSource $ProtectedPayloadBuildContractsSource $ProtectedPayloadRecoveryPlannerSource $ProtectedPayloadTransactionExecutorSource $FileTransactionJournalStoreSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $WindowsTransactionPlatformSource $WindowsMutationExecutionSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
+& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsHandleRelativeJournalSource $ProtectedEscrowManifestStoreSource $ProtectedPayloadStoreContractsSource $ProtectedPayloadBuildContractsSource $ProtectedPayloadBuildStateMachineSource $ProtectedPayloadRecoveryPlannerSource $ProtectedPayloadTransactionExecutorSource $FileTransactionJournalStoreSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $WindowsTransactionPlatformSource $WindowsMutationExecutionSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }

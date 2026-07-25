@@ -880,8 +880,29 @@ namespace SBMSSetup
             PayloadBuildWorkspaceCheckpoint afterCheckpoint =
                 beforeCheckpoint.DeepClone();
             afterCheckpoint.Revision++;
+            PayloadQuarantineCheckpoint quarantine =
+                beforeCheckpoint.Quarantines[0];
+            PayloadQuarantineAbsenceObservation completionObservation =
+                Absence(beforeCheckpoint);
             afterCheckpoint.PendingPurges.Clear();
             afterCheckpoint.Quarantines.Clear();
+            afterCheckpoint.CompletedPurges.Add(
+                new PayloadCompletedPurgeCheckpoint
+                {
+                    SchemaVersion = 1,
+                    PurgeId = PurgeId,
+                    QuarantineId = QuarantineId,
+                    TransactionId = TransactionId,
+                    RecoveryAuthorityInvariantDigest =
+                        Authority().InvariantDigest,
+                    NamespaceRootInvariantDigest =
+                        NamespaceRoot().InvariantDigest,
+                    Quarantine = quarantine.DeepClone(),
+                    AbsenceObservation =
+                        completionObservation.DeepClone(),
+                    CompletedAtWorkspaceRevision =
+                        afterCheckpoint.Revision
+                });
             var receipt = new PayloadPurgeReceipt(
                 Authority(),
                 new PayloadBuildWorkspaceState(beforeCheckpoint),
@@ -889,7 +910,7 @@ namespace SBMSSetup
                 PayloadPurgeTransitionKind.Complete,
                 PurgeId,
                 QuarantineId,
-                null);
+                completionObservation);
             Equal(true, receipt.Complete);
         }
 
@@ -1220,7 +1241,9 @@ namespace SBMSSetup
                 PartialTreeInvariantDigest =
                     PresentObservation().InvariantDigest,
                 Reason = PayloadQuarantineReason.HashMismatch,
-                SourceLeafName = ".SBMS.build." + BuildId
+                SourceLeafName = ".SBMS.build." + BuildId,
+                TargetManifestInvariantDigest = HashA,
+                SourceReceiptInvariantDigest = HashB
             };
         }
 
@@ -1254,7 +1277,7 @@ namespace SBMSSetup
         {
             var checkpoint = new PayloadBuildWorkspaceCheckpoint
             {
-                SchemaVersion = 1,
+                SchemaVersion = 2,
                 Revision = 11,
                 TransactionId = TransactionId,
                 RecoveryAuthorityInvariantDigest =

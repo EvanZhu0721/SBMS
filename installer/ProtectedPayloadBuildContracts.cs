@@ -948,10 +948,18 @@ namespace SBMSSetup
         [DataMember(Order = 13, IsRequired = true)]
         internal string SourceLeafName;
 
+        [DataMember(Order = 14, IsRequired = true)]
+        internal string TargetManifestInvariantDigest;
+
+        [DataMember(Order = 15, IsRequired = true)]
+        internal string SourceReceiptInvariantDigest;
+
         internal void Validate()
         {
             if (SchemaVersion != 1 ||
                 VolumeSerialNumber == 0 ||
+                TargetManifestInvariantDigest == null ||
+                SourceReceiptInvariantDigest == null ||
                 !Enum.IsDefined(
                     typeof(PayloadQuarantineSourceKind),
                     SourceKind) ||
@@ -994,13 +1002,21 @@ namespace SBMSSetup
                 PayloadPartialTreeObservation.RequireOwnedLeaf(
                     SourceLeafName,
                     ".SBMS.build." + SourceBuildId);
+                PayloadContractValidation.RequireSha256(
+                    TargetManifestInvariantDigest,
+                    "Payload quarantine target manifest digest");
+                PayloadContractValidation.RequireSha256(
+                    SourceReceiptInvariantDigest,
+                    "Payload quarantine source receipt digest");
             }
             else
             {
-                if (!String.IsNullOrEmpty(SourceBuildId))
+                if (!String.IsNullOrEmpty(SourceBuildId) ||
+                    TargetManifestInvariantDigest.Length != 0 ||
+                    SourceReceiptInvariantDigest.Length != 0)
                 {
                     throw new InvalidOperationException(
-                        "Committed payload quarantine has a build ID.");
+                        "Committed payload quarantine has build-source identity.");
                 }
                 PayloadDirectorySlot sourceSlot =
                     SourceKind ==
@@ -1050,7 +1066,9 @@ namespace SBMSSetup
                         RootFileId,
                         PartialTreeInvariantDigest,
                         Reason.ToString(),
-                        SourceLeafName
+                        SourceLeafName,
+                        TargetManifestInvariantDigest,
+                        SourceReceiptInvariantDigest
                     });
             }
         }
@@ -1074,7 +1092,11 @@ namespace SBMSSetup
                 PartialTreeInvariantDigest =
                     PartialTreeInvariantDigest,
                 Reason = Reason,
-                SourceLeafName = SourceLeafName
+                SourceLeafName = SourceLeafName,
+                TargetManifestInvariantDigest =
+                    TargetManifestInvariantDigest,
+                SourceReceiptInvariantDigest =
+                    SourceReceiptInvariantDigest
             };
         }
     }
@@ -1232,6 +1254,164 @@ namespace SBMSSetup
     }
 
     [DataContract]
+    internal sealed class PayloadCompletedPurgeCheckpoint
+    {
+        [DataMember(Order = 1, IsRequired = true)]
+        internal int SchemaVersion;
+
+        [DataMember(Order = 2, IsRequired = true)]
+        internal string PurgeId;
+
+        [DataMember(Order = 3, IsRequired = true)]
+        internal string QuarantineId;
+
+        [DataMember(Order = 4, IsRequired = true)]
+        internal string TransactionId;
+
+        [DataMember(Order = 5, IsRequired = true)]
+        internal string RecoveryAuthorityInvariantDigest;
+
+        [DataMember(Order = 6, IsRequired = true)]
+        internal string NamespaceRootInvariantDigest;
+
+        [DataMember(Order = 7, IsRequired = true)]
+        internal PayloadQuarantineCheckpoint Quarantine;
+
+        [DataMember(Order = 8, IsRequired = true)]
+        internal PayloadQuarantineAbsenceObservation AbsenceObservation;
+
+        [DataMember(Order = 9, IsRequired = true)]
+        internal long CompletedAtWorkspaceRevision;
+
+        internal void Validate()
+        {
+            if (SchemaVersion != 1 ||
+                CompletedAtWorkspaceRevision < 1 ||
+                Quarantine == null ||
+                AbsenceObservation == null)
+            {
+                throw new InvalidOperationException(
+                    "Completed payload purge checkpoint is incomplete.");
+            }
+            PayloadContractValidation.RequireCanonicalTransactionId(
+                PurgeId,
+                "Completed payload purge ID");
+            PayloadContractValidation.RequireCanonicalTransactionId(
+                QuarantineId,
+                "Completed payload purge quarantine ID");
+            PayloadContractValidation.RequireCanonicalTransactionId(
+                TransactionId,
+                "Completed payload purge transaction ID");
+            PayloadContractValidation.RequireSha256(
+                RecoveryAuthorityInvariantDigest,
+                "Completed payload purge authority digest");
+            PayloadContractValidation.RequireSha256(
+                NamespaceRootInvariantDigest,
+                "Completed payload purge namespace-root digest");
+            Quarantine.Validate();
+            AbsenceObservation.Validate();
+            if (AbsenceObservation.Exists ||
+                !String.Equals(
+                    Quarantine.QuarantineId,
+                    QuarantineId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    Quarantine.TransactionId,
+                    TransactionId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    Quarantine.RecoveryAuthorityInvariantDigest,
+                    RecoveryAuthorityInvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    Quarantine.NamespaceRootInvariantDigest,
+                    NamespaceRootInvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    AbsenceObservation.QuarantineId,
+                    QuarantineId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    AbsenceObservation.TransactionId,
+                    TransactionId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    AbsenceObservation.RecoveryAuthorityInvariantDigest,
+                    RecoveryAuthorityInvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    AbsenceObservation.NamespaceRootInvariantDigest,
+                    NamespaceRootInvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    AbsenceObservation.QuarantineLeafName,
+                    Quarantine.QuarantineLeafName,
+                    StringComparison.OrdinalIgnoreCase) ||
+                AbsenceObservation.VolumeSerialNumber !=
+                    Quarantine.VolumeSerialNumber ||
+                !String.Equals(
+                    AbsenceObservation.RootFileId,
+                    Quarantine.RootFileId,
+                    StringComparison.Ordinal) ||
+                AbsenceObservation.ObservedAtWorkspaceRevision !=
+                    CompletedAtWorkspaceRevision - 1)
+            {
+                throw new InvalidOperationException(
+                    "Completed payload purge evidence is not self-consistent.");
+            }
+        }
+
+        internal string InvariantDigest
+        {
+            get
+            {
+                Validate();
+                return PayloadContractValidation.ComputeDigest(
+                    "SBMS.PayloadCompletedPurgeCheckpoint.v1",
+                    new[]
+                    {
+                        SchemaVersion.ToString(
+                            CultureInfo.InvariantCulture),
+                        PurgeId,
+                        QuarantineId,
+                        TransactionId,
+                        RecoveryAuthorityInvariantDigest,
+                        NamespaceRootInvariantDigest,
+                        Quarantine.InvariantDigest,
+                        AbsenceObservation.InvariantDigest,
+                        CompletedAtWorkspaceRevision.ToString(
+                            CultureInfo.InvariantCulture)
+                    });
+            }
+        }
+
+        internal PayloadCompletedPurgeCheckpoint DeepClone()
+        {
+            return new PayloadCompletedPurgeCheckpoint
+            {
+                SchemaVersion = SchemaVersion,
+                PurgeId = PurgeId,
+                QuarantineId = QuarantineId,
+                TransactionId = TransactionId,
+                RecoveryAuthorityInvariantDigest =
+                    RecoveryAuthorityInvariantDigest,
+                NamespaceRootInvariantDigest =
+                    NamespaceRootInvariantDigest,
+                Quarantine =
+                    Quarantine == null
+                        ? null
+                        : Quarantine.DeepClone(),
+                AbsenceObservation =
+                    AbsenceObservation == null
+                        ? null
+                        : AbsenceObservation.DeepClone(),
+                CompletedAtWorkspaceRevision =
+                    CompletedAtWorkspaceRevision
+            };
+        }
+    }
+
+    [DataContract]
     internal sealed class PayloadBuildWorkspaceCheckpoint
     {
         [DataMember(Order = 1, IsRequired = true)]
@@ -1264,20 +1444,26 @@ namespace SBMSSetup
         [DataMember(Order = 10, IsRequired = true)]
         internal List<PayloadPurgeCheckpoint> PendingPurges;
 
+        [DataMember(Order = 11, IsRequired = true)]
+        internal List<PayloadCompletedPurgeCheckpoint> CompletedPurges;
+
         internal PayloadBuildWorkspaceCheckpoint()
         {
             Quarantines = new List<PayloadQuarantineCheckpoint>();
             PendingPurges = new List<PayloadPurgeCheckpoint>();
+            CompletedPurges =
+                new List<PayloadCompletedPurgeCheckpoint>();
         }
 
         internal void Validate()
         {
-            if (SchemaVersion != 1 ||
+            if (SchemaVersion != 2 ||
                 Revision < 0 ||
                 NamespaceRoot == null ||
                 Committed == null ||
                 Quarantines == null ||
-                PendingPurges == null)
+                PendingPurges == null ||
+                CompletedPurges == null)
             {
                 throw new InvalidOperationException(
                     "Payload build workspace checkpoint is incomplete.");
@@ -1484,6 +1670,47 @@ namespace SBMSSetup
                 }
                 previous = purge.PurgeId;
             }
+
+            var completedQuarantines = new HashSet<string>(
+                StringComparer.Ordinal);
+            previous = null;
+            foreach (PayloadCompletedPurgeCheckpoint completed in
+                CompletedPurges)
+            {
+                if (completed == null)
+                {
+                    throw new InvalidOperationException(
+                        "Payload workspace contains a null completed purge.");
+                }
+                completed.Validate();
+                if (!String.Equals(
+                        completed.TransactionId,
+                        TransactionId,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        completed.RecoveryAuthorityInvariantDigest,
+                        RecoveryAuthorityInvariantDigest,
+                        StringComparison.Ordinal) ||
+                    !String.Equals(
+                        completed.NamespaceRootInvariantDigest,
+                        NamespaceRoot.InvariantDigest,
+                        StringComparison.Ordinal) ||
+                    completed.CompletedAtWorkspaceRevision > Revision ||
+                    purgeIds.Contains(completed.PurgeId) ||
+                    quarantineIds.ContainsKey(completed.QuarantineId) ||
+                    !purgeIds.Add(completed.PurgeId) ||
+                    !completedQuarantines.Add(
+                        completed.QuarantineId) ||
+                    (previous != null &&
+                        StringComparer.Ordinal.Compare(
+                            previous,
+                            completed.PurgeId) >= 0))
+                {
+                    throw new InvalidOperationException(
+                        "Completed payload purge bindings are invalid.");
+                }
+                previous = completed.PurgeId;
+            }
         }
 
         internal string InvariantDigest
@@ -1519,6 +1746,13 @@ namespace SBMSSetup
                 foreach (PayloadPurgeCheckpoint purge in PendingPurges)
                 {
                     fields.Add(purge.InvariantDigest);
+                }
+                fields.Add(CompletedPurges.Count.ToString(
+                    CultureInfo.InvariantCulture));
+                foreach (PayloadCompletedPurgeCheckpoint completed in
+                    CompletedPurges)
+                {
+                    fields.Add(completed.InvariantDigest);
                 }
                 return PayloadContractValidation.ComputeDigest(
                     "SBMS.PayloadBuildWorkspaceCheckpoint.v1",
@@ -1569,6 +1803,17 @@ namespace SBMSSetup
                 {
                     clone.PendingPurges.Add(
                         purge == null ? null : purge.DeepClone());
+                }
+            }
+            if (CompletedPurges != null)
+            {
+                foreach (PayloadCompletedPurgeCheckpoint completed in
+                    CompletedPurges)
+                {
+                    clone.CompletedPurges.Add(
+                        completed == null
+                            ? null
+                            : completed.DeepClone());
                 }
             }
             return clone;
@@ -2032,7 +2277,10 @@ namespace SBMSSetup
                     StringComparison.Ordinal) ||
                 !SamePurgeSet(
                     before.PendingPurges,
-                    after.PendingPurges))
+                    after.PendingPurges) ||
+                !SameCompletedPurgeSet(
+                    before.CompletedPurges,
+                    after.CompletedPurges))
             {
                 throw new InvalidOperationException(
                     "Payload quarantine receipt changed unrelated workspace state.");
@@ -2062,6 +2310,14 @@ namespace SBMSSetup
                 !String.Equals(
                     added.PartialTreeInvariantDigest,
                     before.ActivePartialTree.InvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    added.TargetManifestInvariantDigest,
+                    before.ActiveBuild.TargetManifestInvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    added.SourceReceiptInvariantDigest,
+                    before.ActiveBuild.SourceReceiptInvariantDigest,
                     StringComparison.Ordinal))
             {
                 throw new InvalidOperationException(
@@ -2176,6 +2432,15 @@ namespace SBMSSetup
                 PurgeDigests(second));
         }
 
+        internal static bool SameCompletedPurgeSet(
+            IList<PayloadCompletedPurgeCheckpoint> first,
+            IList<PayloadCompletedPurgeCheckpoint> second)
+        {
+            return SameDigestSet(
+                CompletedPurgeDigests(first),
+                CompletedPurgeDigests(second));
+        }
+
         private static Dictionary<string, string> QuarantineDigests(
             IList<PayloadQuarantineCheckpoint> source)
         {
@@ -2194,6 +2459,18 @@ namespace SBMSSetup
             var result = new Dictionary<string, string>(
                 StringComparer.Ordinal);
             foreach (PayloadPurgeCheckpoint item in source)
+            {
+                result.Add(item.PurgeId, item.InvariantDigest);
+            }
+            return result;
+        }
+
+        private static Dictionary<string, string> CompletedPurgeDigests(
+            IList<PayloadCompletedPurgeCheckpoint> source)
+        {
+            var result = new Dictionary<string, string>(
+                StringComparer.Ordinal);
+            foreach (PayloadCompletedPurgeCheckpoint item in source)
             {
                 result.Add(item.PurgeId, item.InvariantDigest);
             }
@@ -2338,6 +2615,9 @@ namespace SBMSSetup
             if (kind == PayloadPurgeTransitionKind.Arm)
             {
                 if (observation != null ||
+                    !SameCompletedPurges(
+                        before.CompletedPurges,
+                        after.CompletedPurges) ||
                     !PayloadQuarantineReceipt.SameQuarantineSet(
                         before.Quarantines,
                         after.Quarantines))
@@ -2380,6 +2660,9 @@ namespace SBMSSetup
                     FindPurge(after.PendingPurges, purgeId);
                 if (after.PendingPurges.Count !=
                         before.PendingPurges.Count ||
+                    !SameCompletedPurges(
+                        before.CompletedPurges,
+                        after.CompletedPurges) ||
                     !PayloadQuarantineReceipt.SameQuarantineSet(
                         before.Quarantines,
                         after.Quarantines) ||
@@ -2402,7 +2685,49 @@ namespace SBMSSetup
                 return;
             }
 
-            if (observation != null ||
+            if (observation == null)
+            {
+                throw new InvalidOperationException(
+                    "Payload purge completion lacks fresh absence evidence.");
+            }
+            observation.Validate();
+            RequireAbsenceBinding(
+                observation,
+                before,
+                quarantine);
+            PayloadCompletedPurgeCheckpoint completed =
+                FindCompletedPurge(after.CompletedPurges, purgeId);
+            if (after.CompletedPurges.Count !=
+                    before.CompletedPurges.Count + 1 ||
+                !SameCompletedPurgesExcept(
+                    before.CompletedPurges,
+                    after.CompletedPurges,
+                    purgeId) ||
+                !String.Equals(
+                    completed.QuarantineId,
+                    quarantineId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    completed.TransactionId,
+                    before.TransactionId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    completed.RecoveryAuthorityInvariantDigest,
+                    before.RecoveryAuthorityInvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    completed.NamespaceRootInvariantDigest,
+                    before.NamespaceRoot.InvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    completed.Quarantine.InvariantDigest,
+                    quarantine.InvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    completed.AbsenceObservation.InvariantDigest,
+                    observation.InvariantDigest,
+                    StringComparison.Ordinal) ||
+                completed.CompletedAtWorkspaceRevision != after.Revision ||
                 after.Quarantines.Count != before.Quarantines.Count - 1 ||
                 after.PendingPurges.Count !=
                     before.PendingPurges.Count - 1 ||
@@ -2555,6 +2880,25 @@ namespace SBMSSetup
                 "Payload purge checkpoint is missing.");
         }
 
+        private static PayloadCompletedPurgeCheckpoint
+            FindCompletedPurge(
+                IList<PayloadCompletedPurgeCheckpoint> source,
+                string purgeId)
+        {
+            foreach (PayloadCompletedPurgeCheckpoint item in source)
+            {
+                if (String.Equals(
+                        item.PurgeId,
+                        purgeId,
+                        StringComparison.Ordinal))
+                {
+                    return item;
+                }
+            }
+            throw new InvalidOperationException(
+                "Completed payload purge checkpoint is missing.");
+        }
+
         private static PayloadPurgeCheckpoint RequireOneAddedPurge(
             IList<PayloadPurgeCheckpoint> before,
             IList<PayloadPurgeCheckpoint> after,
@@ -2596,6 +2940,27 @@ namespace SBMSSetup
                 excludedId);
         }
 
+        private static bool SameCompletedPurges(
+            IList<PayloadCompletedPurgeCheckpoint> before,
+            IList<PayloadCompletedPurgeCheckpoint> after)
+        {
+            return SameExcept(
+                CompletedPurgeMap(before),
+                CompletedPurgeMap(after),
+                String.Empty);
+        }
+
+        private static bool SameCompletedPurgesExcept(
+            IList<PayloadCompletedPurgeCheckpoint> before,
+            IList<PayloadCompletedPurgeCheckpoint> after,
+            string excludedId)
+        {
+            return SameExcept(
+                CompletedPurgeMap(before),
+                CompletedPurgeMap(after),
+                excludedId);
+        }
+
         private static Dictionary<string, string> QuarantineMap(
             IList<PayloadQuarantineCheckpoint> source)
         {
@@ -2614,6 +2979,18 @@ namespace SBMSSetup
             var result = new Dictionary<string, string>(
                 StringComparer.Ordinal);
             foreach (PayloadPurgeCheckpoint item in source)
+            {
+                result.Add(item.PurgeId, item.InvariantDigest);
+            }
+            return result;
+        }
+
+        private static Dictionary<string, string> CompletedPurgeMap(
+            IList<PayloadCompletedPurgeCheckpoint> source)
+        {
+            var result = new Dictionary<string, string>(
+                StringComparer.Ordinal);
+            foreach (PayloadCompletedPurgeCheckpoint item in source)
             {
                 result.Add(item.PurgeId, item.InvariantDigest);
             }
