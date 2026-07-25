@@ -73,6 +73,7 @@ Assert-True ($runner.Contains('status --porcelain --untracked-files=all')) 'CI s
 Assert-True ($runner.Contains('summary.json') -and $runner.Contains('summary.md')) 'Machine and human summaries are required.'
 Assert-True ($runner.Contains('RedirectStandardOutput') -and $runner.Contains('RedirectStandardError')) 'Test stdout/stderr must be retained.'
 Assert-True ($runner.Contains("'test-sbms-installer-transaction.ps1'")) 'Hosted contract suite must execute the transactional installer fault matrix.'
+Assert-True ($runner.Contains("'test-sbms-escrow-manifest-model.ps1'")) 'Hosted contract suite must execute the escrow manifest v2 model contract.'
 Assert-True ($runner.Contains("'test-sbms-file-transaction-journal-store.ps1'")) 'Hosted contract suite must execute the production journal store contract.'
 Assert-True ($runner.Contains("'test-sbms-windows-transaction-platform.ps1'")) 'Hosted contract suite must execute the Windows transaction platform contract.'
 Assert-True ($runner.Contains("'test-sbms-windows-mutation-execution.ps1'")) 'Hosted contract suite must execute the Windows mutation execution outcome matrix.'

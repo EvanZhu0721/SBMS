@@ -514,22 +514,48 @@ namespace SBMSSetup
         RetainedAfterCleanupFailure
     }
 
+    internal enum BaselinePayloadState
+    {
+        Absent,
+        Present
+    }
+
+    internal enum EscrowContentKind
+    {
+        BaselinePayload,
+        TargetPayload,
+        Configuration
+    }
+
     [DataContract]
     internal sealed class EscrowContentEntry
     {
-        [DataMember(Order = 1)]
+        [DataMember(Order = 1, IsRequired = true)]
         internal string RelativePath;
 
-        [DataMember(Order = 2)]
+        [DataMember(Order = 2, IsRequired = true)]
+        internal EscrowContentKind Kind;
+
+        [DataMember(Order = 3, IsRequired = true)]
         internal long Length;
 
-        [DataMember(Order = 3)]
+        [DataMember(Order = 4, IsRequired = true)]
         internal string Sha256;
+
+        internal string StorageRelativePath
+        {
+            get
+            {
+                return EscrowManifestValidation.ContentRoot(Kind) +
+                    "\\" + RelativePath;
+            }
+        }
 
         internal void Validate()
         {
             if (Length < 0 ||
-                String.IsNullOrWhiteSpace(Sha256))
+                !EscrowManifestValidation.IsSha256(Sha256) ||
+                !Enum.IsDefined(typeof(EscrowContentKind), Kind))
             {
                 throw new InvalidOperationException(
                     "Escrow content entry is unsafe or incomplete.");
@@ -543,28 +569,40 @@ namespace SBMSSetup
     [DataContract]
     internal sealed class EscrowManifest
     {
-        [DataMember(Order = 1)]
+        [DataMember(Order = 1, IsRequired = true)]
         internal int SchemaVersion;
 
-        [DataMember(Order = 2)]
+        [DataMember(Order = 2, IsRequired = true)]
+        internal int Revision;
+
+        [DataMember(Order = 3, IsRequired = true)]
         internal string TransactionId;
 
-        [DataMember(Order = 3)]
+        [DataMember(Order = 4, IsRequired = true)]
+        internal InstallOperation Operation;
+
+        [DataMember(Order = 5, IsRequired = true)]
         internal string BaselineEvidenceDigest;
 
-        [DataMember(Order = 4)]
+        [DataMember(Order = 6, IsRequired = true)]
+        internal BaselinePayloadState BaselinePayloadState;
+
+        [DataMember(Order = 7, IsRequired = true)]
+        internal ReleaseIdentity Target;
+
+        [DataMember(Order = 8, IsRequired = true)]
         internal List<EscrowContentEntry> Content;
 
-        [DataMember(Order = 5)]
+        [DataMember(Order = 9, IsRequired = true)]
         internal bool Sealed;
 
-        [DataMember(Order = 6)]
+        [DataMember(Order = 10, IsRequired = true)]
         internal string SealedUtc;
 
-        [DataMember(Order = 7)]
+        [DataMember(Order = 11, IsRequired = true)]
         internal EscrowRetentionState RetentionState;
 
-        [DataMember(Order = 8)]
+        [DataMember(Order = 12, IsRequired = true)]
         internal string FinalizationEvidence;
 
         internal EscrowManifest()
@@ -575,14 +613,54 @@ namespace SBMSSetup
         internal void Validate()
         {
             Guid parsed;
-            if (SchemaVersion != 1 ||
+            if (SchemaVersion != 2 ||
+                Revision <= 0 ||
                 !Guid.TryParseExact(TransactionId, "N", out parsed) ||
-                String.IsNullOrWhiteSpace(BaselineEvidenceDigest) ||
+                !String.Equals(
+                    TransactionId,
+                    parsed.ToString("N"),
+                    StringComparison.Ordinal) ||
+                !EscrowManifestValidation.IsSha256(BaselineEvidenceDigest) ||
+                !Enum.IsDefined(typeof(InstallOperation), Operation) ||
+                !Enum.IsDefined(
+                    typeof(BaselinePayloadState),
+                    BaselinePayloadState) ||
+                !Enum.IsDefined(
+                    typeof(EscrowRetentionState),
+                    RetentionState) ||
                 Content == null)
             {
                 throw new InvalidOperationException(
                     "Escrow manifest identity is incomplete.");
             }
+            if (Operation == InstallOperation.Uninstall)
+            {
+                if (Target != null)
+                {
+                    throw new InvalidOperationException(
+                        "Uninstall escrow cannot carry a target release.");
+                }
+            }
+            else
+            {
+                if (Target == null)
+                {
+                    throw new InvalidOperationException(
+                        "Install escrow target release is missing.");
+                }
+                Target.Validate();
+            }
+            bool operationRequiresBaseline =
+                Operation != InstallOperation.FreshInstall;
+            if ((BaselinePayloadState == BaselinePayloadState.Present) !=
+                operationRequiresBaseline)
+            {
+                throw new InvalidOperationException(
+                    "Escrow operation disagrees with baseline payload state.");
+            }
+            var uniqueContent = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            bool hasBaselinePayload = false;
             foreach (EscrowContentEntry entry in Content)
             {
                 if (entry == null)
@@ -591,18 +669,133 @@ namespace SBMSSetup
                         "Escrow manifest contains a null content entry.");
                 }
                 entry.Validate();
+                string contentIdentity =
+                    entry.Kind.ToString() + "\0" + entry.RelativePath;
+                if (!uniqueContent.Add(contentIdentity))
+                {
+                    throw new InvalidOperationException(
+                        "Escrow manifest contains duplicate content.");
+                }
+                if (entry.Kind == EscrowContentKind.BaselinePayload)
+                {
+                    hasBaselinePayload = true;
+                }
+                if (entry.Kind == EscrowContentKind.TargetPayload)
+                {
+                    throw new InvalidOperationException(
+                        "Sealed rollback escrow cannot contain target payload.");
+                }
             }
-            if (Sealed && String.IsNullOrWhiteSpace(SealedUtc))
+            if ((BaselinePayloadState == BaselinePayloadState.Present) !=
+                hasBaselinePayload)
             {
                 throw new InvalidOperationException(
-                    "Sealed escrow has no durable seal timestamp.");
+                    "Baseline payload state disagrees with escrow content.");
             }
-            if (!Sealed &&
-                RetentionState != EscrowRetentionState.Building)
+            if (Sealed)
+            {
+                if (!EscrowManifestValidation.IsUtcTimestamp(SealedUtc) ||
+                    RetentionState == EscrowRetentionState.Building)
+                {
+                    throw new InvalidOperationException(
+                        "Sealed escrow retention state or timestamp is invalid.");
+                }
+                bool requiresFinalizationEvidence =
+                    RetentionState == EscrowRetentionState.Finalized ||
+                    RetentionState ==
+                        EscrowRetentionState.RetainedAfterCleanupFailure;
+                if (requiresFinalizationEvidence !=
+                    !String.IsNullOrWhiteSpace(FinalizationEvidence) ||
+                    (!requiresFinalizationEvidence &&
+                     !String.IsNullOrEmpty(FinalizationEvidence)) ||
+                    !EscrowManifestValidation.IsSafeOptionalEvidence(
+                        FinalizationEvidence))
+                {
+                    throw new InvalidOperationException(
+                        "Escrow finalization evidence is inconsistent.");
+                }
+            }
+            else if (RetentionState != EscrowRetentionState.Building ||
+                     !String.IsNullOrEmpty(SealedUtc) ||
+                     !String.IsNullOrEmpty(FinalizationEvidence))
             {
                 throw new InvalidOperationException(
                     "Unsealed escrow cannot enter retention lifecycle.");
             }
+        }
+    }
+
+    internal static class EscrowManifestValidation
+    {
+        internal static string ContentRoot(EscrowContentKind kind)
+        {
+            switch (kind)
+            {
+                case EscrowContentKind.BaselinePayload:
+                    return @"baseline\payload";
+                case EscrowContentKind.TargetPayload:
+                    return @"target\payload";
+                case EscrowContentKind.Configuration:
+                    return @"baseline\configuration";
+                default:
+                    throw new InvalidOperationException(
+                        "Escrow content kind has no storage namespace.");
+            }
+        }
+
+        internal static bool IsSha256(string value)
+        {
+            if (String.IsNullOrEmpty(value) || value.Length != 64)
+            {
+                return false;
+            }
+            for (int index = 0; index < value.Length; ++index)
+            {
+                char character = value[index];
+                if (!((character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f')))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        internal static bool IsUtcTimestamp(string value)
+        {
+            if (String.IsNullOrWhiteSpace(value) ||
+                !value.EndsWith("Z", StringComparison.Ordinal))
+            {
+                return false;
+            }
+            DateTimeOffset parsed;
+            return DateTimeOffset.TryParseExact(
+                       value,
+                       "o",
+                       CultureInfo.InvariantCulture,
+                       DateTimeStyles.RoundtripKind,
+                       out parsed) &&
+                   parsed.Offset == TimeSpan.Zero;
+        }
+
+        internal static bool IsSafeOptionalEvidence(string value)
+        {
+            if (String.IsNullOrEmpty(value))
+            {
+                return true;
+            }
+            if (value.Length > 512)
+            {
+                return false;
+            }
+            foreach (char character in value)
+            {
+                if (Char.IsControl(character))
+                {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
