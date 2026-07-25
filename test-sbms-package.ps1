@@ -79,6 +79,7 @@ try {
         Assert-True ($Manifest.components.installer.productVersion -ceq $ExpectedVersion) 'Installer version drifted.'
         Assert-True ($Manifest.components.recoveryBroker.artifactName -ceq 'SBMSRecoveryBroker.exe') 'Recovery broker component is absent.'
         Assert-True ($Manifest.components.recoveryBroker.productVersion -ceq $ExpectedVersion) 'Recovery broker version drifted.'
+        Assert-True (@($Manifest.components.PSObject.Properties.Name) -notcontains 'maintenanceService') 'Offline baseline must not be declared as a release component.'
         Assert-True ($Manifest.components.driver.productVersion -ceq $ExpectedVersion) 'Driver version drifted.'
         Assert-True ($Manifest.package.version -ceq $ExpectedVersion) 'Package version drifted.'
         Assert-True ($Manifest.package.fileName -ceq $ExpectedZipName) 'Package filename drifted.'
@@ -90,6 +91,8 @@ try {
     Invoke-Test 'Every manifest artifact hash matches the packaged payload' {
         Assert-True (Test-Path -LiteralPath (Join-Path $ReleaseDir 'SBMSRecoveryBroker.exe') -PathType Leaf) 'Packaged recovery broker is missing.'
         Assert-True (@($Manifest.artifacts | Where-Object { $_.path -ceq 'SBMSRecoveryBroker.exe' }).Count -eq 1) 'Recovery broker artifact record is missing.'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $ReleaseDir 'SBMSMaintenanceService.exe'))) 'Offline baseline must not enter the installable release root.'
+        Assert-True (@($Manifest.artifacts | Where-Object { $_.path -ceq 'SBMSMaintenanceService.exe' }).Count -eq 0) 'Offline baseline must not be a release payload artifact.'
         Assert-True (@($Manifest.artifacts).Count -gt 0) 'Release manifest has no artifacts.'
         foreach ($artifact in @($Manifest.artifacts)) {
             $artifactPath = Join-Path $ReleaseDir ([string]$artifact.path).Replace('/', '\')

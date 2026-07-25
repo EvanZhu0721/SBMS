@@ -160,6 +160,7 @@ function Assert-SBMSBuiltArtifactVersions {
         @{ Path = (Join-Path $Root 'SBMSNative.exe'); Name = 'Native' },
         @{ Path = (Join-Path $Root 'SBMSDeviceHost.exe'); Name = 'DeviceHost' },
         @{ Path = (Join-Path $Root 'SBMSRecoveryBroker.exe'); Name = 'RecoveryBroker' },
+        @{ Path = (Join-Path $Root 'SBMSMaintenanceService.exe'); Name = 'MaintenanceService' },
         @{
             Path = (Join-Path $Root 'Windows-driver-samples\video\IndirectDisplay\x64\Release\SBMSIndirectDisplay\SBMSIndirectDisplay.dll')
             Name = 'Driver'
@@ -195,6 +196,7 @@ function Assert-SBMSBuiltArtifactVersions {
 & (Join-Path $Root "build-sbms-device-host.ps1")
 & (Join-Path $Root "build-sbms-native.ps1")
 & (Join-Path $Root "build-sbms-recovery-broker.ps1")
+& (Join-Path $Root "build-sbms-maintenance-service.ps1")
 & (Join-Path $Root "build-sbms-gui.ps1")
 & (Join-Path $Root "build-sbms-setup.ps1")
 & (Join-Path $Root "build-sbms-driver.ps1")
@@ -219,11 +221,13 @@ $sourceFiles = @(
     "test-sbms-supervisors.ps1",
     "test-sbms-installer-transaction.ps1",
     "test-sbms-protected-payload-namespace-owner-contracts.ps1",
+    "test-sbms-maintenance-service-contracts.ps1",
     "build-sbms-device-host.ps1",
     "build-sbms-driver.ps1",
     "build-sbms-gui.ps1",
     "build-sbms-native.ps1",
     "build-sbms-recovery-broker.ps1",
+    "build-sbms-maintenance-service.ps1",
     "build-sbms-setup.ps1",
     "install-sbms-driver.ps1",
     "run-sbms-native.ps1",
@@ -240,6 +244,7 @@ $sourceDirs = @(
     "device-host",
     "native-output-demo",
     "recovery-broker",
+    "maintenance-service",
     "tests",
     "driver-stable",
     "Windows-driver-samples\video\IndirectDisplay",

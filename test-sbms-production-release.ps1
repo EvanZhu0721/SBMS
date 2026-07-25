@@ -72,6 +72,12 @@ Invoke-Test 'Production release builds, signs, and packages the recovery broker'
     Assert-True ($productionSource -match '(?s)foreach \(\$name in @\(.+?''SBMSRecoveryBroker\.exe''') 'Recovery broker is absent from the production payload.'
 }
 
+Invoke-Test 'Production release excludes the offline maintenance baseline' {
+    Assert-True ($productionSource -notmatch "build-sbms-maintenance-service\.ps1") 'Production release must not build the offline maintenance baseline.'
+    Assert-True ($productionSource -notmatch 'SBMSMaintenanceService\.exe') 'Production release must not sign or package the offline maintenance baseline.'
+    Assert-True ($productionSource -notmatch 'New-Service|sc\.exe|Start-Service') 'Production packaging must not register or start the maintenance service.'
+}
+
 Invoke-Test 'Production payload uses a signed CatalogVersion 2.0 boundary' {
     Assert-True ($productionSource -match 'New-FileCatalog.+CatalogVersion 2\.0') 'CatalogVersion 2.0 generation is missing.'
     $catalogStage = $productionSource.Substring(

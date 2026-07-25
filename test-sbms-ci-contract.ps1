@@ -28,7 +28,13 @@ $hardwareHarness = Read-Utf8 'test-sbms-hardware.ps1'
 $nativeBuild = Read-Utf8 'build-sbms-native.ps1'
 $hostBuild = Read-Utf8 'build-sbms-device-host.ps1'
 $setupBuild = Read-Utf8 'build-sbms-setup.ps1'
+$maintenanceBuild = Read-Utf8 'build-sbms-maintenance-service.ps1'
 $package = Read-Utf8 'package-sbms.ps1'
+$productionPackage = Read-Utf8 'package-sbms-production.ps1'
+$setupRuntime = Read-Utf8 'installer/SBMSSetup.cs'
+$releaseVerifier = Read-Utf8 'installer/ReleaseIntegrityVerifier.cs'
+$maintenanceHost = Read-Utf8 'maintenance-service/SBMSMaintenanceService.cs'
+$maintenanceContracts = Read-Utf8 'maintenance-service/MaintenanceServiceRuntimeContracts.cs'
 
 Assert-True ($windowsCi.Contains('runs-on: windows-2022')) 'Hosted CI must pin windows-2022.'
 Assert-True ($windowsCi.Contains('permissions:') -and $windowsCi.Contains('contents: read')) 'CI permissions must be read-only.'
@@ -80,6 +86,7 @@ Assert-True ($runner.Contains("'test-sbms-protected-payload-recovery-planner.ps1
 Assert-True ($runner.Contains("'test-sbms-protected-payload-transaction-executor.ps1'")) 'Hosted contract suite must execute the protected payload transaction executor crash matrix.'
 Assert-True ($runner.Contains("'test-sbms-protected-payload-build-contracts.ps1'")) 'Hosted contract suite must execute the protected payload build workspace contract.'
 Assert-True ($runner.Contains("'test-sbms-protected-payload-namespace-owner-contracts.ps1'")) 'Hosted contract suite must execute the payload namespace owner and broker contract.'
+Assert-True ($runner.Contains("'test-sbms-maintenance-service-contracts.ps1'")) 'Hosted contract suite must execute the maintenance service offline runtime contract.'
 $contractsBlock = [regex]::Match(
     $runner,
     '(?s)\$contracts\s*=\s*@\((?<body>.*?)\)\s*\r?\n')
@@ -136,6 +143,26 @@ $brokerContractReferences = [regex]::Matches(
     $setupBuild,
     '\$ProtectedPayloadBrokerContractsSource')
 Assert-True ($brokerContractReferences.Count -eq 2) 'Setup must define and pass the payload broker contract source to the compiler.'
+$maintenanceContractReferences = [regex]::Matches(
+    $setupBuild,
+    '\$MaintenanceServiceRuntimeContractsSource')
+Assert-True ($maintenanceContractReferences.Count -eq 2) 'Setup build must compile the maintenance service pure runtime contracts.'
+Assert-True ($maintenanceBuild.Contains('/platform:x64')) 'Maintenance service must compile explicitly as x64.'
+Assert-True ($maintenanceBuild.Contains('/reference:System.ServiceProcess.dll')) 'Maintenance service host must use ServiceBase.'
+Assert-True ($maintenanceBuild.Contains('SBMSMaintenanceService.exe')) 'Maintenance service build output is missing.'
+Assert-True ($package.Contains('"build-sbms-maintenance-service.ps1"') -and $package.Contains('"maintenance-service"')) 'Developer package must build and mirror maintenance service sources.'
+$developerReleaseFiles = [regex]::Match(
+    $package,
+    '(?s)\$releaseFiles\s*=\s*@\((?<body>.*?)\)\s*\r?\n')
+Assert-True ($developerReleaseFiles.Success -and -not $developerReleaseFiles.Groups['body'].Value.Contains('"SBMSMaintenanceService.exe"')) 'Developer release payload must exclude the offline maintenance service executable.'
+Assert-True (-not $productionPackage.Contains('build-sbms-maintenance-service.ps1') -and -not $productionPackage.Contains('SBMSMaintenanceService.exe')) 'Production package must not build, sign, or copy the offline maintenance service.'
+Assert-True (-not $releaseVerifier.Contains("'SBMSMaintenanceService.exe'")) 'Release verifier must not whitelist the offline maintenance service.'
+Assert-True (-not $setupRuntime.Contains('RequireFile("SBMSMaintenanceService.exe")') -and -not $setupRuntime.Contains('CopyPayload("SBMSMaintenanceService.exe"')) 'Current root-payload installer must not install the stable maintenance host.'
+Assert-True (-not $maintenanceHost.Contains('--console') -and -not $maintenanceHost.Contains('--contract-self-test')) 'Shipped maintenance host must not expose interactive or self-test modes.'
+Assert-True ($maintenanceHost.Contains('args.Length != 0') -and $maintenanceHost.Contains('ServiceBase.Run')) 'Shipped maintenance host must accept only zero-argument SCM startup.'
+Assert-True ($maintenanceHost.Contains('OnShutdown') -and $maintenanceHost.Contains('StopRuntime')) 'SCM shutdown must use the bounded lifecycle stop path.'
+Assert-True ($maintenanceContracts.Contains('IMaintenanceCommandAuthorizer') -and $maintenanceContracts.Contains('MaintenanceAuthorizationEvidence')) 'Dispatcher authorization must consume injected trusted evidence.'
+Assert-True (-not $maintenanceContracts.Contains('new Fake') -and -not $maintenanceHost.Contains('new Fake')) 'Production maintenance sources must not contain test fakes.'
 Assert-True ($package.Contains('"test-sbms-protected-payload-namespace-owner-contracts.ps1"')) 'Package source mirror must include the payload namespace owner contract wrapper.'
 Assert-True (-not $package.Contains('Sort-Object LastWriteTime')) 'Package must not select signing material by timestamp.'
 Assert-True (-not $package.Contains('-Filter "SBMSIndirectDisplay.cer"')) 'Development package must not discover an implicit certificate.'
