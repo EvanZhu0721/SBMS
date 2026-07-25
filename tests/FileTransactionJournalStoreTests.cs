@@ -74,13 +74,30 @@ namespace SBMSSetup
         {
             internal string HeldPath;
             internal string AttackerPath;
+            internal bool SwapBlocked;
 
             public void AfterTrustedInstallerRootOpened(string expectedPath)
             {
                 HeldPath = expectedPath + "-held";
                 AttackerPath = expectedPath;
-                Directory.Move(expectedPath, HeldPath);
-                Directory.CreateDirectory(AttackerPath);
+                try
+                {
+                    Directory.Move(expectedPath, HeldPath);
+                    Directory.CreateDirectory(AttackerPath);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    SwapBlocked = true;
+                }
+                catch (IOException failure)
+                {
+                    int error = failure.HResult & 0xFFFF;
+                    if (error != 5 && error != 32 && error != 33)
+                    {
+                        throw;
+                    }
+                    SwapBlocked = true;
+                }
             }
 
             public void AfterBackupPublished()
@@ -90,6 +107,11 @@ namespace SBMSSetup
             public void BeforePublishedFileIdVerification(
                 string destinationRelativePath)
             {
+            }
+
+            public int BeforeNativeIo(string operation, int attempt)
+            {
+                return 0;
             }
         }
 
@@ -107,6 +129,11 @@ namespace SBMSSetup
             public void BeforePublishedFileIdVerification(
                 string destinationRelativePath)
             {
+            }
+
+            public int BeforeNativeIo(string operation, int attempt)
+            {
+                return 0;
             }
         }
 
@@ -140,6 +167,40 @@ namespace SBMSSetup
                         "simulated persistent post-rename verification failure");
                 }
             }
+
+            public int BeforeNativeIo(string operation, int attempt)
+            {
+                return 0;
+            }
+        }
+
+        private sealed class PersistentNativeIoFaultSeam
+            : IWindowsJournalIoTestSeam
+        {
+            internal int RenameAttempts;
+
+            public void AfterTrustedInstallerRootOpened(string expectedPath)
+            {
+            }
+
+            public void AfterBackupPublished()
+            {
+            }
+
+            public void BeforePublishedFileIdVerification(
+                string destinationRelativePath)
+            {
+            }
+
+            public int BeforeNativeIo(string operation, int attempt)
+            {
+                if (operation == "rename")
+                {
+                    RenameAttempts = attempt;
+                    return 32;
+                }
+                return 0;
+            }
         }
 
         private static int passed;
@@ -162,6 +223,8 @@ namespace SBMSSetup
             Run("attached native policy clears feature gate", TestAttachedNativePolicy);
             Run("native rooted IO lifecycle stays below temp root", TestNativeIoLifecycle);
             Run("native rooted IO rejects hardlinked leaf", TestNativeHardlink);
+            Run("single-link guard deterministically rejects multi-link leaf", TestDeterministicLinkCountGuard);
+            Run("persistent native sharing violation is bounded", TestPersistentNativeRetry);
             Run("native rooted IO rejects parent directory reparse", TestNativeParentReparse);
             Run("native rooted IO rejects final directory reparse", TestNativeFinalReparse);
             Run("native rooted IO survives directory path swap", TestNativeDirectorySwap);
@@ -315,12 +378,78 @@ namespace SBMSSetup
                 File.WriteAllBytes(source, new byte[] { 1 });
                 if (!CreateHardLink(link, source, IntPtr.Zero))
                 {
+                    int error = System.Runtime.InteropServices.Marshal.
+                        GetLastWin32Error();
+                    if (error == 1 || error == 5 || error == 50 ||
+                        error == 1314)
+                    {
+                        Console.WriteLine(
+                            "CAPABILITY hardlink fixture unavailable error=" +
+                            error);
+                        return;
+                    }
                     throw new InvalidOperationException(
-                        "Unable to create isolated hardlink fixture.");
+                        "Unable to create isolated hardlink fixture. error=" +
+                        error);
                 }
                 AssertThrows<InvalidDataException>(
                     delegate { fileSystem.FileExists("journal.json"); },
                     "Native journal IO accepted a multi-link leaf.");
+            }
+            finally
+            {
+                fileSystem.Dispose();
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestDeterministicLinkCountGuard()
+        {
+            AssertThrows<InvalidDataException>(
+                delegate
+                {
+                    WindowsHandleRelativeJournalFileSystem.
+                        VerifySingleLinkLeaf(false, 2);
+                },
+                "Deterministic multi-link metadata bypassed the leaf guard.");
+            WindowsHandleRelativeJournalFileSystem.VerifySingleLinkLeaf(
+                false,
+                1);
+        }
+
+        private static void TestPersistentNativeRetry()
+        {
+            string root = NewRoot();
+            var seam = new PersistentNativeIoFaultSeam();
+            var fileSystem = new WindowsHandleRelativeJournalFileSystem(
+                root,
+                CurrentSecurityProfile(),
+                seam);
+            try
+            {
+                fileSystem.PrepareAndVerify(true);
+                WriteBytes(
+                    fileSystem.CreateNewFile("journal.json.new"),
+                    new byte[] { 1 });
+                DateTime started = DateTime.UtcNow;
+                AssertThrows<IOException>(
+                    delegate
+                    {
+                        fileSystem.PublishNewFile(
+                            "journal.json.new",
+                            "journal.json");
+                    },
+                    "Persistent sharing violation did not fail.");
+                TimeSpan elapsed = DateTime.UtcNow - started;
+                Assert(
+                    seam.RenameAttempts > 1,
+                    "Transient sharing violation was not retried.");
+                Assert(
+                    elapsed < TimeSpan.FromSeconds(5),
+                    "Persistent sharing violation exceeded the retry bound.");
+                Assert(
+                    fileSystem.FileExists("journal.json.new"),
+                    "Failed rename lost the candidate.");
             }
             finally
             {
@@ -343,12 +472,23 @@ namespace SBMSSetup
                 WriteBytes(
                     fileSystem.CreateNewFile("journal.json"),
                     new byte[] { 1 });
-                Assert(
-                    File.Exists(Path.Combine(seam.HeldPath, "journal.json")),
-                    "Rooted IO did not remain on the opened directory object.");
-                Assert(
-                    !File.Exists(Path.Combine(seam.AttackerPath, "journal.json")),
-                    "Rooted IO followed the swapped path.");
+                if (seam.SwapBlocked)
+                {
+                    Assert(
+                        File.Exists(
+                            Path.Combine(seam.AttackerPath, "journal.json")),
+                        "Blocked directory swap lost rooted IO.");
+                }
+                else
+                {
+                    Assert(
+                        File.Exists(Path.Combine(seam.HeldPath, "journal.json")),
+                        "Rooted IO did not remain on the opened directory object.");
+                    Assert(
+                        !File.Exists(
+                            Path.Combine(seam.AttackerPath, "journal.json")),
+                        "Rooted IO followed the swapped path.");
+                }
             }
             finally
             {

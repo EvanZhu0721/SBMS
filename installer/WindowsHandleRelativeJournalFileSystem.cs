@@ -1,9 +1,11 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace SBMSSetup
@@ -13,6 +15,7 @@ namespace SBMSSetup
         void AfterTrustedInstallerRootOpened(string expectedPath);
         void AfterBackupPublished();
         void BeforePublishedFileIdVerification(string destinationRelativePath);
+        int BeforeNativeIo(string operation, int attempt);
     }
 
     internal sealed class WindowsJournalSecurityProfile
@@ -87,6 +90,10 @@ namespace SBMSSetup
         private const int StatusNoMoreFiles = unchecked((int)0x80000006);
         private const int ErrorFileNotFound = 2;
         private const int ErrorPathNotFound = 3;
+        private const int ErrorSharingViolation = 32;
+        private const int ErrorLockViolation = 33;
+        private const int NativeRetryDeadlineMilliseconds = 2000;
+        private const int NativeRetryDelayMilliseconds = 25;
 
         private readonly string commonRootPath;
         private readonly string installerRootPath;
@@ -316,13 +323,32 @@ namespace SBMSSetup
                 {
                     DeleteFile = true
                 };
-                if (!SetFileInformationByHandle(
-                    leaf,
-                    4,
-                    ref disposition,
-                    Marshal.SizeOf(typeof(FileDispositionInfo))))
+                int attempt = 0;
+                Stopwatch deadline = Stopwatch.StartNew();
+                while (true)
                 {
-                    ThrowLastWin32("Unable to delete journal leaf.");
+                    ++attempt;
+                    int injected = GetInjectedNativeError("delete", attempt);
+                    bool deleted = injected == 0 &&
+                        SetFileInformationByHandle(
+                            leaf,
+                            4,
+                            ref disposition,
+                            Marshal.SizeOf(typeof(FileDispositionInfo)));
+                    if (deleted)
+                    {
+                        break;
+                    }
+                    int error = injected != 0
+                        ? injected
+                        : Marshal.GetLastWin32Error();
+                    if (!ShouldRetryNativeIo(error, deadline))
+                    {
+                        throw new Win32Exception(
+                            error,
+                            "Unable to delete journal leaf.");
+                    }
+                    Thread.Sleep(NativeRetryDelayMilliseconds);
                 }
             }
         }
@@ -687,7 +713,7 @@ namespace SBMSSetup
             }
         }
 
-        private static SafeFileHandle OpenRelative(
+        private SafeFileHandle OpenRelative(
             SafeFileHandle root,
             string name,
             uint access,
@@ -730,30 +756,45 @@ namespace SBMSSetup
                     SecurityDescriptor = descriptor,
                     SecurityQualityOfService = IntPtr.Zero
                 };
-                IoStatusBlock ioStatus;
-                SafeFileHandle handle;
-                int status = NtCreateFile(
-                    out handle,
-                    access,
-                    ref attributes,
-                    out ioStatus,
-                    IntPtr.Zero,
-                    0x00000080,
-                    ShareRead | ShareWrite | ShareDelete,
-                    disposition,
-                    options,
-                    IntPtr.Zero,
-                    0);
-                if (status < 0)
+                int attempt = 0;
+                Stopwatch deadline = Stopwatch.StartNew();
+                while (true)
                 {
+                    ++attempt;
+                    IoStatusBlock ioStatus;
+                    SafeFileHandle handle = null;
+                    int injected = GetInjectedNativeError("open", attempt);
+                    int status = injected == 0
+                        ? NtCreateFile(
+                            out handle,
+                            access,
+                            ref attributes,
+                            out ioStatus,
+                            IntPtr.Zero,
+                            0x00000080,
+                            ShareRead | ShareWrite | ShareDelete,
+                            disposition,
+                            options,
+                            IntPtr.Zero,
+                            0)
+                        : -1;
+                    if (status >= 0)
+                    {
+                        return handle;
+                    }
                     if (handle != null)
                     {
                         handle.Dispose();
                     }
-                    throw new Win32Exception(
-                        unchecked((int)RtlNtStatusToDosError(status)));
+                    int error = injected != 0
+                        ? injected
+                        : unchecked((int)RtlNtStatusToDosError(status));
+                    if (!ShouldRetryNativeIo(error, deadline))
+                    {
+                        throw new Win32Exception(error);
+                    }
+                    Thread.Sleep(NativeRetryDelayMilliseconds);
                 }
-                return handle;
             }
             finally
             {
@@ -1027,7 +1068,16 @@ namespace SBMSSetup
             {
                 ThrowLastWin32("Unable to inspect journal leaf link count.");
             }
-            if (standard.Directory || standard.NumberOfLinks != 1)
+            VerifySingleLinkLeaf(
+                standard.Directory,
+                standard.NumberOfLinks);
+        }
+
+        internal static void VerifySingleLinkLeaf(
+            bool isDirectory,
+            uint numberOfLinks)
+        {
+            if (isDirectory || numberOfLinks != 1)
             {
                 throw new InvalidDataException(
                     "Installer journal leaves must be single-link regular files.");
@@ -1056,7 +1106,7 @@ namespace SBMSSetup
             return result;
         }
 
-        private static void RenameRelative(
+        private void RenameRelative(
             SafeFileHandle source,
             SafeFileHandle destinationRoot,
             string destinationName,
@@ -1086,25 +1136,58 @@ namespace SBMSSetup
                     0,
                     IntPtr.Add(buffer, nameOffset),
                     nameBytes.Length);
-                IoStatusBlock ioStatus;
-                int status = NtSetInformationFile(
-                    source,
-                    out ioStatus,
-                    buffer,
-                    unchecked((uint)(nameOffset + nameBytes.Length)),
-                    10);
-                if (status < 0)
+                int attempt = 0;
+                Stopwatch deadline = Stopwatch.StartNew();
+                while (true)
                 {
-                    throw new IOException(
-                        "Unable to publish journal leaf.",
-                        new Win32Exception(
-                            unchecked((int)RtlNtStatusToDosError(status))));
+                    ++attempt;
+                    IoStatusBlock ioStatus;
+                    int injected = GetInjectedNativeError("rename", attempt);
+                    int status = injected == 0
+                        ? NtSetInformationFile(
+                            source,
+                            out ioStatus,
+                            buffer,
+                            unchecked((uint)(nameOffset + nameBytes.Length)),
+                            10)
+                        : -1;
+                    if (status >= 0)
+                    {
+                        break;
+                    }
+                    int error = injected != 0
+                        ? injected
+                        : unchecked((int)RtlNtStatusToDosError(status));
+                    if (!ShouldRetryNativeIo(error, deadline))
+                    {
+                        throw new IOException(
+                            "Unable to publish journal leaf.",
+                            new Win32Exception(error));
+                    }
+                    Thread.Sleep(NativeRetryDelayMilliseconds);
                 }
             }
             finally
             {
                 Marshal.FreeHGlobal(buffer);
             }
+        }
+
+        private int GetInjectedNativeError(string operation, int attempt)
+        {
+            return testSeam == null
+                ? 0
+                : testSeam.BeforeNativeIo(operation, attempt);
+        }
+
+        private static bool ShouldRetryNativeIo(
+            int error,
+            Stopwatch deadline)
+        {
+            return (error == ErrorSharingViolation ||
+                    error == ErrorLockViolation) &&
+                deadline.ElapsedMilliseconds <
+                    NativeRetryDeadlineMilliseconds;
         }
 
         private string ResolveDisplayPath(string relativePath)
