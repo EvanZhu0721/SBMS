@@ -551,6 +551,130 @@ namespace SBMSSetup
         }
     }
 
+    internal sealed class SequenceImpersonationRunner
+        : IMaintenanceClientImpersonationRunner
+    {
+        internal readonly List<string> Events;
+        internal int ImpersonateCalls;
+        internal int RevertCalls;
+        internal bool IsImpersonating;
+        internal Exception ImpersonateFailure;
+        internal Exception RevertFailure;
+
+        internal SequenceImpersonationRunner(List<string> events)
+        {
+            Events = events;
+        }
+
+        public void Impersonate()
+        {
+            ImpersonateCalls++;
+            Events.Add("impersonate");
+            if (ImpersonateFailure != null)
+            {
+                throw ImpersonateFailure;
+            }
+            IsImpersonating = true;
+        }
+
+        public void Revert()
+        {
+            RevertCalls++;
+            Events.Add("revert");
+            IsImpersonating = false;
+            if (RevertFailure != null)
+            {
+                throw RevertFailure;
+            }
+        }
+    }
+
+    internal sealed class SequenceTokenCapture
+        : IMaintenanceClientTokenCapture
+    {
+        private readonly SequenceImpersonationRunner impersonation;
+        internal readonly List<string> Events;
+        internal MaintenanceClientTokenEvidence Evidence;
+        internal Exception Failure;
+        internal int Calls;
+
+        internal SequenceTokenCapture(
+            SequenceImpersonationRunner impersonation,
+            List<string> events)
+        {
+            this.impersonation = impersonation;
+            Events = events;
+        }
+
+        public MaintenanceClientTokenEvidence Capture()
+        {
+            Calls++;
+            if (!impersonation.IsImpersonating)
+            {
+                throw new InvalidOperationException(
+                    "Token capture ran outside impersonation.");
+            }
+            Events.Add("capture");
+            if (Failure != null)
+            {
+                throw Failure;
+            }
+            return Evidence;
+        }
+    }
+
+    internal sealed class SequencePolicyAuthorizer
+        : IMaintenanceClientPolicyAuthorizer
+    {
+        private readonly IMaintenanceClientPolicyAuthorizer inner;
+        internal readonly List<string> Events;
+        internal int Calls;
+
+        internal SequencePolicyAuthorizer(
+            IMaintenanceClientPolicyAuthorizer inner,
+            List<string> events)
+        {
+            this.inner = inner;
+            Events = events;
+        }
+
+        public MaintenanceAuthorizationEvidence Authorize(
+            MaintenanceClientTokenEvidence evidence,
+            CancellationToken cancellation)
+        {
+            Calls++;
+            Events.Add("authorize");
+            return inner.Authorize(evidence, cancellation);
+        }
+    }
+
+    internal sealed class SequencePreauthorizedDispatcher
+        : IMaintenancePreauthorizedCommandDispatcher
+    {
+        internal readonly List<string> Events;
+        internal int Calls;
+
+        internal SequencePreauthorizedDispatcher(List<string> events)
+        {
+            Events = events;
+        }
+
+        public PayloadBrokerResponse Dispatch(
+            PayloadBrokerCommand command,
+            MaintenanceAuthorizationEvidence authorization,
+            CancellationToken cancellation)
+        {
+            Calls++;
+            Events.Add("dispatch");
+            if (authorization == null)
+            {
+                throw new InvalidOperationException(
+                    "Dispatcher did not receive authorization evidence.");
+            }
+            return null;
+        }
+    }
+
     internal sealed class FakeAuthorizer
         : IMaintenanceCommandAuthorizer
     {
@@ -706,6 +830,9 @@ namespace SBMSSetup
         {
             Run("identity reuses fixed contracts", IdentityReusesContracts);
             Run("security descriptor is exact", SecurityDescriptorIsExact);
+            Run("client token evidence is immutable", ClientTokenEvidenceIsImmutable);
+            Run("production client policy is exact", ProductionClientPolicyIsExact);
+            Run("client capture sequencing is fail closed", ClientCaptureSequencingIsFailClosed);
             Run("lifecycle is bounded and terminal", LifecycleIsTerminal);
             Run("dispatcher is serialized and non-reentrant", DispatcherIsSafe);
             Run("dispatcher cancellation interrupts wait", DispatcherCancelsWait);
@@ -820,6 +947,716 @@ namespace SBMSSetup
                 unchecked((int)0xC0000000),
                 AceFlags.None,
                 "Pipe Administrators");
+        }
+
+        private static void ClientTokenEvidenceIsImmutable()
+        {
+            var source =
+                new List<MaintenanceClientTokenGroupEvidence>
+                {
+                    new MaintenanceClientTokenGroupEvidence(
+                        "S-1-5-32-544",
+                        MaintenanceTokenGroupAttributes.Enabled)
+                };
+            MaintenanceClientTokenGroupEvidence original = source[0];
+            var evidence =
+                new MaintenanceClientTokenEvidence(
+                    "S-1-5-18",
+                    source,
+                    true,
+                    MaintenanceTokenElevationType.Full,
+                    0x3000,
+                    false,
+                    false,
+                    MaintenanceClientTokenType.Impersonation,
+                    MaintenanceClientImpersonationLevel.Impersonation,
+                    1234);
+            source.Clear();
+
+            Assert(
+                evidence.UserSid == "S-1-5-18" &&
+                evidence.Groups.Count == 1 &&
+                evidence.Groups[0].Sid == "S-1-5-32-544" &&
+                !Object.ReferenceEquals(original, evidence.Groups[0]) &&
+                evidence.IsElevated &&
+                evidence.ElevationType ==
+                    MaintenanceTokenElevationType.Full &&
+                evidence.IntegrityRid == 0x3000 &&
+                !evidence.IsAppContainer &&
+                !evidence.IsRestricted &&
+                evidence.TokenType ==
+                    MaintenanceClientTokenType.Impersonation &&
+                evidence.ImpersonationLevel ==
+                    MaintenanceClientImpersonationLevel.Impersonation &&
+                evidence.AuthenticationId == 1234,
+                "Token evidence did not retain its immutable snapshot.");
+            try
+            {
+                evidence.Groups.Add(
+                    new MaintenanceClientTokenGroupEvidence(
+                        "S-1-5-11",
+                        MaintenanceTokenGroupAttributes.Enabled));
+            }
+            catch (NotSupportedException)
+            {
+                return;
+            }
+            throw new InvalidOperationException(
+                "Token evidence exposed a mutable group collection.");
+        }
+
+        private static void ProductionClientPolicyIsExact()
+        {
+            const string userSid = "S-1-5-21-1-2-3-1001";
+            const string administratorsSid = "S-1-5-32-544";
+            string serviceSid =
+                ProtectedRootSecurityCompiler.DeriveServiceSid(
+                    MaintenanceServiceIdentity.ServiceName);
+            var policy =
+                new MaintenanceProductionClientPolicyAuthorizer();
+
+            AllowClient(
+                policy,
+                ClientToken(
+                    "S-1-5-18",
+                    null,
+                    false,
+                    MaintenanceTokenElevationType.Limited,
+                    0x4000,
+                    false,
+                    false));
+            AllowClient(
+                policy,
+                ClientToken(
+                    userSid,
+                    Group(serviceSid, true, false),
+                    false,
+                    MaintenanceTokenElevationType.Limited,
+                    0x3000,
+                    false,
+                    false));
+            AllowClient(
+                policy,
+                ClientToken(
+                    serviceSid,
+                    null,
+                    false,
+                    MaintenanceTokenElevationType.Limited,
+                    0x3000,
+                    false,
+                    false));
+            AllowClient(
+                policy,
+                ClientToken(
+                    userSid,
+                    Group(administratorsSid, true, false),
+                    true,
+                    MaintenanceTokenElevationType.Full,
+                    0x3000,
+                    false,
+                    false));
+            AllowClient(
+                policy,
+                ClientToken(
+                    userSid,
+                    Group(administratorsSid, true, false),
+                    true,
+                    MaintenanceTokenElevationType.Default,
+                    0x3000,
+                    false,
+                    false,
+                    MaintenanceClientTokenType.Impersonation,
+                    MaintenanceClientImpersonationLevel.Impersonation,
+                    Int64.MaxValue));
+
+            RejectClient(policy, ClientToken(
+                userSid, null, false,
+                MaintenanceTokenElevationType.Default,
+                0x2000, false, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group(administratorsSid, true, false), false,
+                MaintenanceTokenElevationType.Limited,
+                0x3000, false, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group(administratorsSid, true, true), true,
+                MaintenanceTokenElevationType.Full,
+                0x3000, false, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group(administratorsSid, true, false), true,
+                MaintenanceTokenElevationType.Full,
+                0x2000, false, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group("S-1-5-80-1", true, false), false,
+                MaintenanceTokenElevationType.Limited,
+                0x3000, false, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group(serviceSid, true, true), false,
+                MaintenanceTokenElevationType.Limited,
+                0x3000, false, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group(serviceSid, false, false), false,
+                MaintenanceTokenElevationType.Limited,
+                0x3000, false, false));
+            RejectClient(policy, ClientToken(
+                serviceSid, null, false,
+                MaintenanceTokenElevationType.Limited,
+                0x2000, false, false));
+            RejectClient(policy, ClientToken(
+                "S-1-5-18", null, false,
+                MaintenanceTokenElevationType.Default,
+                0x3000, false, false));
+            RejectClient(policy, ClientToken(
+                "S-1-5-18", null, false,
+                MaintenanceTokenElevationType.Default,
+                0x4000, false, true));
+            RejectClient(policy, ClientToken(
+                serviceSid, null, false,
+                MaintenanceTokenElevationType.Limited,
+                0x3000, true, false));
+            RejectClient(policy, ClientToken(
+                userSid, Group(administratorsSid, true, false), true,
+                MaintenanceTokenElevationType.Full,
+                0x3000, false, true));
+            RejectClient(policy, ClientToken(
+                userSid, Group(administratorsSid, true, false), true,
+                MaintenanceTokenElevationType.Full,
+                0x3000, true, false));
+            RejectClient(policy, ClientToken(
+                "S-1-5-18", null, false,
+                MaintenanceTokenElevationType.Default,
+                0x4000, false, false,
+                MaintenanceClientTokenType.Primary,
+                MaintenanceClientImpersonationLevel.Impersonation,
+                0));
+            RejectClient(policy, ClientToken(
+                "S-1-5-18", null, false,
+                MaintenanceTokenElevationType.Default,
+                0x4000, false, false,
+                MaintenanceClientTokenType.Impersonation,
+                MaintenanceClientImpersonationLevel.Identification,
+                0));
+            RejectClient(policy, ClientToken(
+                "S-1-5-18", null, false,
+                MaintenanceTokenElevationType.Default,
+                0x4000, false, false,
+                MaintenanceClientTokenType.Impersonation,
+                MaintenanceClientImpersonationLevel.Anonymous,
+                0));
+            RejectClient(policy, ClientToken(
+                userSid, Group(administratorsSid, false, false), true,
+                MaintenanceTokenElevationType.Full,
+                0x3000, false, false));
+            RejectUnauthorized(
+                delegate
+                {
+                    policy.Authorize(null, CancellationToken.None);
+                });
+            RejectArgumentOutOfRange(
+                delegate
+                {
+                    ClientToken(
+                        userSid, null, false,
+                        (MaintenanceTokenElevationType)99,
+                        0x3000, false, false);
+                });
+            RejectArgumentOutOfRange(
+                delegate
+                {
+                    ClientToken(
+                        userSid, null, false,
+                        MaintenanceTokenElevationType.Full,
+                        0x3000, false, false,
+                        (MaintenanceClientTokenType)99,
+                        MaintenanceClientImpersonationLevel.Impersonation,
+                        0);
+                });
+            RejectArgumentOutOfRange(
+                delegate
+                {
+                    ClientToken(
+                        userSid, null, false,
+                        MaintenanceTokenElevationType.Full,
+                        0x3000, false, false,
+                        MaintenanceClientTokenType.Impersonation,
+                        (MaintenanceClientImpersonationLevel)99,
+                        0);
+                });
+            RejectArgumentOutOfRange(
+                delegate
+                {
+                    ClientToken(
+                        userSid, null, false,
+                        MaintenanceTokenElevationType.Full,
+                        -1, false, false);
+                });
+            RejectArgumentOutOfRange(
+                delegate
+                {
+                    ClientToken(
+                        userSid, null, false,
+                        MaintenanceTokenElevationType.Full,
+                        0x6000, false, false);
+                });
+            RejectArgument(
+                delegate
+                {
+                    new MaintenanceClientTokenEvidence(
+                        userSid,
+                        new[]
+                        {
+                            Group(
+                                administratorsSid,
+                                true,
+                                false),
+                            Group(
+                                administratorsSid.ToLowerInvariant(),
+                                false,
+                                true)
+                        },
+                        true,
+                        MaintenanceTokenElevationType.Full,
+                        0x3000,
+                        false,
+                        false,
+                        MaintenanceClientTokenType.Impersonation,
+                        MaintenanceClientImpersonationLevel.Impersonation,
+                        0);
+                });
+            RejectArgument(
+                delegate
+                {
+                    new MaintenanceClientTokenEvidence(
+                        userSid,
+                        new[]
+                        {
+                            Group(
+                                serviceSid,
+                                true,
+                                false),
+                            Group(
+                                serviceSid,
+                                true,
+                                false)
+                        },
+                        false,
+                        MaintenanceTokenElevationType.Limited,
+                        0x3000,
+                        false,
+                        false,
+                        MaintenanceClientTokenType.Impersonation,
+                        MaintenanceClientImpersonationLevel.Impersonation,
+                        0);
+                });
+        }
+
+        private static void ClientCaptureSequencingIsFailClosed()
+        {
+            var successEvents = new List<string>();
+            var successImpersonation =
+                new SequenceImpersonationRunner(successEvents);
+            var successCapture =
+                new SequenceTokenCapture(
+                    successImpersonation,
+                    successEvents);
+            successCapture.Evidence = ClientToken(
+                "S-1-5-18",
+                null,
+                false,
+                MaintenanceTokenElevationType.Default,
+                0x4000,
+                false,
+                false);
+            var successTerminator = new FakeTerminator();
+            var successPolicy =
+                new SequencePolicyAuthorizer(
+                    new MaintenanceProductionClientPolicyAuthorizer(),
+                    successEvents);
+            var successDispatcher =
+                new SequencePreauthorizedDispatcher(successEvents);
+            var successSequencer =
+                new MaintenanceClientRequestSequencer(
+                    new MaintenanceClientCaptureRunner(
+                        successImpersonation,
+                        successCapture,
+                        successTerminator),
+                    successPolicy,
+                    successDispatcher);
+            successSequencer.Execute(
+                delegate
+                {
+                    successEvents.Add("parse");
+                    Assert(
+                        successImpersonation.RevertCalls == 1,
+                        "Command parsing ran before successful revert.");
+                    return Command();
+                },
+                CancellationToken.None);
+            AssertSequence(
+                successEvents,
+                "impersonate",
+                "capture",
+                "revert",
+                "authorize",
+                "parse",
+                "dispatch");
+            Assert(
+                successImpersonation.ImpersonateCalls == 1 &&
+                successImpersonation.RevertCalls == 1 &&
+                successPolicy.Calls == 1 &&
+                successDispatcher.Calls == 1 &&
+                successTerminator.Calls == 0,
+                "Successful capture sequencing call counts are wrong.");
+
+            VerifyCaptureFailure(
+                new IOException("query failure"),
+                false);
+            VerifyCaptureFailure(null, true);
+            VerifyImpersonateFailure();
+            VerifyRevertFailure(false);
+            VerifyRevertFailure(true);
+            VerifyTerminatorSentinel();
+        }
+
+        private static MaintenanceClientTokenGroupEvidence Group(
+            string sid,
+            bool enabled,
+            bool denyOnly)
+        {
+            MaintenanceTokenGroupAttributes attributes =
+                MaintenanceTokenGroupAttributes.None;
+            if (enabled)
+            {
+                attributes |= MaintenanceTokenGroupAttributes.Enabled;
+            }
+            if (denyOnly)
+            {
+                attributes |=
+                    MaintenanceTokenGroupAttributes.UseForDenyOnly;
+            }
+            return new MaintenanceClientTokenGroupEvidence(
+                sid,
+                attributes);
+        }
+
+        private static MaintenanceClientTokenEvidence ClientToken(
+            string userSid,
+            MaintenanceClientTokenGroupEvidence group,
+            bool elevated,
+            MaintenanceTokenElevationType elevationType,
+            int integrityRid,
+            bool appContainer,
+            bool restricted)
+        {
+            return ClientToken(
+                userSid,
+                group,
+                elevated,
+                elevationType,
+                integrityRid,
+                appContainer,
+                restricted,
+                MaintenanceClientTokenType.Impersonation,
+                MaintenanceClientImpersonationLevel.Impersonation,
+                0);
+        }
+
+        private static MaintenanceClientTokenEvidence ClientToken(
+            string userSid,
+            MaintenanceClientTokenGroupEvidence group,
+            bool elevated,
+            MaintenanceTokenElevationType elevationType,
+            int integrityRid,
+            bool appContainer,
+            bool restricted,
+            MaintenanceClientTokenType tokenType,
+            MaintenanceClientImpersonationLevel impersonationLevel,
+            long authenticationId)
+        {
+            IEnumerable<MaintenanceClientTokenGroupEvidence> groups =
+                group == null
+                    ? new MaintenanceClientTokenGroupEvidence[0]
+                    : new[] { group };
+            return new MaintenanceClientTokenEvidence(
+                userSid,
+                groups,
+                elevated,
+                elevationType,
+                integrityRid,
+                appContainer,
+                restricted,
+                tokenType,
+                impersonationLevel,
+                authenticationId);
+        }
+
+        private static void AllowClient(
+            IMaintenanceClientPolicyAuthorizer policy,
+            MaintenanceClientTokenEvidence evidence)
+        {
+            Assert(
+                policy.Authorize(
+                    evidence,
+                    CancellationToken.None) != null,
+                "Expected client token authorization.");
+        }
+
+        private static void RejectClient(
+            IMaintenanceClientPolicyAuthorizer policy,
+            MaintenanceClientTokenEvidence evidence)
+        {
+            RejectUnauthorized(
+                delegate
+                {
+                    policy.Authorize(
+                        evidence,
+                        CancellationToken.None);
+                });
+        }
+
+        private static void VerifyCaptureFailure(
+            Exception captureFailure,
+            bool returnNull)
+        {
+            var events = new List<string>();
+            var impersonation =
+                new SequenceImpersonationRunner(events);
+            var capture =
+                new SequenceTokenCapture(impersonation, events);
+            capture.Failure = captureFailure;
+            capture.Evidence = returnNull
+                ? null
+                : ClientToken(
+                    "S-1-5-18",
+                    null,
+                    false,
+                    MaintenanceTokenElevationType.Default,
+                    0x4000,
+                    false,
+                    false);
+            var terminator = new FakeTerminator();
+            var policy =
+                new SequencePolicyAuthorizer(
+                    new MaintenanceProductionClientPolicyAuthorizer(),
+                    events);
+            var dispatcher =
+                new SequencePreauthorizedDispatcher(events);
+            var sequencer =
+                new MaintenanceClientRequestSequencer(
+                    new MaintenanceClientCaptureRunner(
+                        impersonation,
+                        capture,
+                        terminator),
+                    policy,
+                    dispatcher);
+            RejectUnauthorized(
+                delegate
+                {
+                    sequencer.Execute(
+                        delegate
+                        {
+                            events.Add("parse");
+                            return Command();
+                        },
+                        CancellationToken.None);
+                });
+            Assert(
+                impersonation.RevertCalls == 1 &&
+                policy.Calls == 0 &&
+                dispatcher.Calls == 0 &&
+                !events.Contains("parse") &&
+                terminator.Calls == 0,
+                "Capture/query failure did not deny after one revert.");
+        }
+
+        private static void VerifyImpersonateFailure()
+        {
+            var events = new List<string>();
+            var impersonation =
+                new SequenceImpersonationRunner(events);
+            impersonation.ImpersonateFailure =
+                new IOException("impersonation failure");
+            var capture =
+                new SequenceTokenCapture(impersonation, events);
+            var terminator = new FakeTerminator();
+            var policy =
+                new SequencePolicyAuthorizer(
+                    new MaintenanceProductionClientPolicyAuthorizer(),
+                    events);
+            var dispatcher =
+                new SequencePreauthorizedDispatcher(events);
+            var sequencer =
+                new MaintenanceClientRequestSequencer(
+                    new MaintenanceClientCaptureRunner(
+                        impersonation,
+                        capture,
+                        terminator),
+                    policy,
+                    dispatcher);
+            RejectUnauthorized(
+                delegate
+                {
+                    sequencer.Execute(
+                        delegate
+                        {
+                            events.Add("parse");
+                            return Command();
+                        },
+                        CancellationToken.None);
+                });
+            Assert(
+                impersonation.ImpersonateCalls == 1 &&
+                impersonation.RevertCalls == 0 &&
+                capture.Calls == 0 &&
+                policy.Calls == 0 &&
+                dispatcher.Calls == 0 &&
+                !events.Contains("parse") &&
+                terminator.Calls == 0,
+                "Impersonation setup failure armed a revert.");
+        }
+
+        private static void VerifyRevertFailure(
+            bool captureAlsoFails)
+        {
+            var events = new List<string>();
+            var impersonation =
+                new SequenceImpersonationRunner(events);
+            impersonation.RevertFailure =
+                new IOException("revert failure");
+            var capture =
+                new SequenceTokenCapture(impersonation, events);
+            capture.Evidence = ClientToken(
+                "S-1-5-18",
+                null,
+                false,
+                MaintenanceTokenElevationType.Default,
+                0x4000,
+                false,
+                false);
+            if (captureAlsoFails)
+            {
+                capture.Failure =
+                    new IOException("capture failure");
+            }
+            var terminator = new FakeTerminator();
+            terminator.OnTerminate =
+                delegate { events.Add("terminate"); };
+            var policy =
+                new SequencePolicyAuthorizer(
+                    new MaintenanceProductionClientPolicyAuthorizer(),
+                    events);
+            var dispatcher =
+                new SequencePreauthorizedDispatcher(events);
+            var sequencer =
+                new MaintenanceClientRequestSequencer(
+                    new MaintenanceClientCaptureRunner(
+                        impersonation,
+                        capture,
+                        terminator),
+                    policy,
+                    dispatcher);
+            RejectInvalid(
+                delegate
+                {
+                    sequencer.Execute(
+                        delegate
+                        {
+                            events.Add("parse");
+                            return Command();
+                        },
+                        CancellationToken.None);
+                },
+                "terminator returned");
+            Assert(
+                impersonation.RevertCalls == 1 &&
+                terminator.Calls == 1 &&
+                policy.Calls == 0 &&
+                dispatcher.Calls == 0 &&
+                !events.Contains("parse") &&
+                events[events.Count - 1] == "terminate",
+                "Revert failure did not terminate before continuation.");
+        }
+
+        private static void VerifyTerminatorSentinel()
+        {
+            var events = new List<string>();
+            var impersonation =
+                new SequenceImpersonationRunner(events);
+            impersonation.RevertFailure =
+                new IOException("revert failure");
+            var capture =
+                new SequenceTokenCapture(impersonation, events);
+            capture.Evidence = ClientToken(
+                "S-1-5-18",
+                null,
+                false,
+                MaintenanceTokenElevationType.Default,
+                0x4000,
+                false,
+                false);
+            var sentinel =
+                new ApplicationException("terminator sentinel");
+            var terminator = new FakeTerminator();
+            terminator.OnTerminate =
+                delegate
+                {
+                    events.Add("terminate");
+                    throw sentinel;
+                };
+            var policy =
+                new SequencePolicyAuthorizer(
+                    new MaintenanceProductionClientPolicyAuthorizer(),
+                    events);
+            var dispatcher =
+                new SequencePreauthorizedDispatcher(events);
+            var sequencer =
+                new MaintenanceClientRequestSequencer(
+                    new MaintenanceClientCaptureRunner(
+                        impersonation,
+                        capture,
+                        terminator),
+                    policy,
+                    dispatcher);
+            try
+            {
+                sequencer.Execute(
+                    delegate
+                    {
+                        events.Add("parse");
+                        return Command();
+                    },
+                    CancellationToken.None);
+            }
+            catch (ApplicationException exception)
+            {
+                Assert(
+                    Object.ReferenceEquals(exception, sentinel) &&
+                    impersonation.RevertCalls == 1 &&
+                    terminator.Calls == 1 &&
+                    policy.Calls == 0 &&
+                    dispatcher.Calls == 0 &&
+                    !events.Contains("parse"),
+                    "Terminator sentinel did not stop continuation.");
+                return;
+            }
+            throw new InvalidOperationException(
+                "Expected terminator sentinel.");
+        }
+
+        private static void AssertSequence(
+            IList<string> actual,
+            params string[] expected)
+        {
+            Assert(
+                actual.Count == expected.Length,
+                "Sequence length mismatch: " +
+                String.Join(",", actual));
+            for (int index = 0; index < expected.Length; ++index)
+            {
+                Assert(
+                    actual[index] == expected[index],
+                    "Sequence mismatch at " + index + ": " +
+                    String.Join(",", actual));
+            }
         }
 
         private static SecurityIdentifier WellKnownSid(
@@ -2802,6 +3639,34 @@ namespace SBMSSetup
             }
             throw new InvalidOperationException(
                 "Expected authorization rejection.");
+        }
+
+        private static void RejectArgumentOutOfRange(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return;
+            }
+            throw new InvalidOperationException(
+                "Expected ArgumentOutOfRangeException.");
+        }
+
+        private static void RejectArgument(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch (ArgumentException)
+            {
+                return;
+            }
+            throw new InvalidOperationException(
+                "Expected ArgumentException.");
         }
 
         private static void RejectTimeout(Action action)

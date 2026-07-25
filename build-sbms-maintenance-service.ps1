@@ -32,6 +32,7 @@ $sources = @(
     (Join-Path $Root 'installer\ProtectedPayloadNamespaceOwnerContracts.cs'),
     (Join-Path $Root 'installer\ProtectedPayloadBrokerContracts.cs'),
     (Join-Path $Root 'maintenance-service\MaintenanceServiceRuntimeContracts.cs'),
+    (Join-Path $Root 'maintenance-service\MaintenanceClientAuthorization.cs'),
     (Join-Path $Root 'maintenance-service\MaintenanceReplayProductionStore.cs'),
     (Join-Path $Root 'maintenance-service\SBMSMaintenanceService.cs'),
     $versionSource

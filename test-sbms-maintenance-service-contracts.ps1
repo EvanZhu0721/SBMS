@@ -39,6 +39,7 @@ try {
         (Join-Path $root 'installer\ProtectedPayloadNamespaceOwnerContracts.cs'),
         (Join-Path $root 'installer\ProtectedPayloadBrokerContracts.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceServiceRuntimeContracts.cs'),
+        (Join-Path $root 'maintenance-service\MaintenanceClientAuthorization.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceReplayProductionStore.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceReplayFileTransactionJournalFactory.cs'),
         (Join-Path $root 'tests\MaintenanceServiceRuntimeContractTests.cs')
