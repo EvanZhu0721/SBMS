@@ -167,6 +167,36 @@ namespace SBMSSetup
                 Equal(first.ContentSetSha256, second.ComputeContentSetSha256());
                 Equal(first.InvariantDigest, second.InvariantDigest);
             });
+            Run("manifest semantic tree matches directory checkpoint", delegate
+            {
+                TargetPayloadManifest manifest = CreateManifest();
+                PayloadDirectoryCheckpoint directory = Directory(
+                    PayloadDirectorySlot.Candidate,
+                    FileIdA);
+                Equal(
+                    directory.SemanticTreeSha256,
+                    manifest.ComputeExpectedSemanticTreeSha256());
+            });
+            Run("manifest semantic tree binds file path", delegate
+            {
+                TargetPayloadManifest first = CreateManifest();
+                TargetPayloadManifest second = first.DeepClone();
+                second.Content[1].RelativePath = @"runtime\SBMS.dll";
+                second.ContentSetSha256 = second.ComputeContentSetSha256();
+                NotEqual(
+                    first.ComputeExpectedSemanticTreeSha256(),
+                    second.ComputeExpectedSemanticTreeSha256());
+            });
+            Run("manifest semantic tree binds file content", delegate
+            {
+                TargetPayloadManifest first = CreateManifest();
+                TargetPayloadManifest second = first.DeepClone();
+                second.Content[1].Sha256 = HashA;
+                second.ContentSetSha256 = second.ComputeContentSetSha256();
+                NotEqual(
+                    first.ComputeExpectedSemanticTreeSha256(),
+                    second.ComputeExpectedSemanticTreeSha256());
+            });
             Run("trusted receipt does not expose mutable authority", delegate
             {
                 var receipt =
@@ -382,13 +412,25 @@ namespace SBMSSetup
             });
             Reject("candidate receipt requires a candidate slot", delegate
             {
+                PayloadDirectoryCheckpoint target = Directory(
+                    PayloadDirectorySlot.Current,
+                    FileIdA);
                 new PayloadCandidateReceipt(
+                    Authority(
+                        InstallOperation.FreshInstall,
+                        null,
+                        target),
+                    CreateManifest(),
+                    new PayloadNamespaceState(
+                        Namespace(
+                            PayloadNamespaceShape.Empty,
+                            null,
+                            null,
+                            null)),
                     new PayloadNamespaceState(
                         Namespace(
                             PayloadNamespaceShape.CurrentOnly,
-                            Directory(
-                                PayloadDirectorySlot.Current,
-                                FileIdA),
+                            target,
                             null,
                             null)));
             });

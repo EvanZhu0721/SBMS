@@ -390,6 +390,57 @@ namespace SBMSSetup
                 fields);
         }
 
+        internal string ComputeExpectedSemanticTreeSha256()
+        {
+            Validate();
+            var entries = new Dictionary<string, TargetPayloadEntry>(
+                StringComparer.OrdinalIgnoreCase);
+            var directories = new HashSet<string>(
+                StringComparer.OrdinalIgnoreCase);
+            foreach (TargetPayloadEntry entry in Content)
+            {
+                entries.Add(entry.RelativePath, entry);
+                int separator = entry.RelativePath.LastIndexOf('\\');
+                while (separator > 0)
+                {
+                    string directory =
+                        entry.RelativePath.Substring(0, separator);
+                    directories.Add(directory);
+                    separator = directory.LastIndexOf('\\');
+                }
+            }
+            var paths = new List<string>();
+            paths.AddRange(entries.Keys);
+            paths.AddRange(directories);
+            paths.Sort(StringComparer.Ordinal);
+
+            var fields = new List<string>
+            {
+                paths.Count.ToString(CultureInfo.InvariantCulture)
+            };
+            foreach (string path in paths)
+            {
+                TargetPayloadEntry file;
+                bool isDirectory = !entries.TryGetValue(path, out file);
+                fields.Add(PayloadContractValidation.ComputeDigest(
+                    "SBMS.PayloadTreeEntrySemantic.v1",
+                    new[]
+                    {
+                        path,
+                        isDirectory.ToString(
+                            CultureInfo.InvariantCulture),
+                        isDirectory
+                            ? "0"
+                            : file.Length.ToString(
+                                CultureInfo.InvariantCulture),
+                        isDirectory ? String.Empty : file.Sha256
+                    }));
+            }
+            return PayloadContractValidation.ComputeDigest(
+                "SBMS.PayloadSemanticTree.v1",
+                fields);
+        }
+
         internal string InvariantDigest
         {
             get
@@ -555,6 +606,26 @@ namespace SBMSSetup
                 TotalBytes == directory.TotalBytes;
         }
 
+        internal string InvariantDigest
+        {
+            get
+            {
+                Validate();
+                return PayloadContractValidation.ComputeDigest(
+                    "SBMS.PayloadContentAuthority.v1",
+                    new[]
+                    {
+                        Release.Version,
+                        Release.PackageFingerprint,
+                        ContentSetSha256,
+                        ManifestInvariantDigest,
+                        SemanticTreeSha256,
+                        FileCount.ToString(CultureInfo.InvariantCulture),
+                        TotalBytes.ToString(CultureInfo.InvariantCulture)
+                    });
+            }
+        }
+
         internal PayloadContentAuthority DeepClone()
         {
             return new PayloadContentAuthority
@@ -630,6 +701,31 @@ namespace SBMSSetup
             if (Target != null)
             {
                 Target.Validate();
+            }
+        }
+
+        internal string InvariantDigest
+        {
+            get
+            {
+                Validate();
+                return PayloadContractValidation.ComputeDigest(
+                    "SBMS.PayloadRecoveryAuthority.v1",
+                    new[]
+                    {
+                        SchemaVersion.ToString(
+                            CultureInfo.InvariantCulture),
+                        TransactionId,
+                        Operation.ToString(),
+                        BaselineState.ToString(),
+                        Baseline == null
+                            ? String.Empty
+                            : Baseline.InvariantDigest,
+                        Target == null
+                            ? String.Empty
+                            : Target.InvariantDigest,
+                        SealedEscrowManifestSha256
+                    });
             }
         }
 
@@ -1249,30 +1345,56 @@ namespace SBMSSetup
 
     internal sealed class PayloadCandidateReceipt
     {
+        private readonly PayloadRecoveryAuthority authority;
+        private readonly TargetPayloadManifest manifest;
+        internal readonly PayloadNamespaceState Before;
+        internal readonly PayloadNamespaceState After;
         internal readonly PayloadNamespaceState State;
         internal readonly string TransactionId;
         internal readonly string CandidateInvariantDigest;
 
-        internal PayloadCandidateReceipt(PayloadNamespaceState state)
+        internal PayloadCandidateReceipt(
+            PayloadRecoveryAuthority authority,
+            TargetPayloadManifest manifest,
+            PayloadNamespaceState before,
+            PayloadNamespaceState after)
         {
-            if (state == null)
+            if (authority == null ||
+                manifest == null ||
+                before == null ||
+                after == null)
             {
-                throw new ArgumentNullException("state");
+                throw new ArgumentNullException(
+                    authority == null
+                        ? "authority"
+                        : (manifest == null
+                            ? "manifest"
+                            : (before == null ? "before" : "after")));
             }
-            PayloadNamespaceCheckpoint checkpoint = state.Checkpoint;
-            if (checkpoint.Candidate == null ||
-                (checkpoint.Shape !=
-                    PayloadNamespaceShape.CandidateOnly &&
-                 checkpoint.Shape !=
-                    PayloadNamespaceShape.CurrentAndCandidate))
-            {
-                throw new InvalidOperationException(
-                    "Candidate receipt does not identify a staged candidate.");
-            }
-            State = state;
+            PayloadReceiptValidation.ValidateStage(
+                authority,
+                manifest,
+                before,
+                after);
+            this.authority = authority.DeepClone();
+            this.manifest = manifest.DeepClone();
+            Before = before;
+            After = after;
+            State = after;
+            PayloadNamespaceCheckpoint checkpoint = after.Checkpoint;
             TransactionId = checkpoint.TransactionId;
             CandidateInvariantDigest =
                 checkpoint.Candidate.InvariantDigest;
+        }
+
+        internal PayloadRecoveryAuthority Authority
+        {
+            get { return authority.DeepClone(); }
+        }
+
+        internal TargetPayloadManifest Manifest
+        {
+            get { return manifest.DeepClone(); }
         }
     }
 
@@ -1393,6 +1515,105 @@ namespace SBMSSetup
 
     internal static class PayloadReceiptValidation
     {
+        internal static void ValidateStage(
+            PayloadRecoveryAuthority authority,
+            TargetPayloadManifest manifest,
+            PayloadNamespaceState before,
+            PayloadNamespaceState after)
+        {
+            authority.Validate();
+            manifest.Validate();
+            long manifestBytes = 0;
+            foreach (TargetPayloadEntry entry in manifest.Content)
+            {
+                manifestBytes = checked(manifestBytes + entry.Length);
+            }
+            if (authority.Operation == InstallOperation.Uninstall ||
+                authority.Target == null ||
+                !String.Equals(
+                    authority.TransactionId,
+                    manifest.TransactionId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    authority.Target.ManifestInvariantDigest,
+                    manifest.InvariantDigest,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    authority.Target.Release.Version,
+                    manifest.Target.Version,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    authority.Target.Release.PackageFingerprint,
+                    manifest.Target.PackageFingerprint,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    authority.Target.ContentSetSha256,
+                    manifest.ContentSetSha256,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    authority.Target.SemanticTreeSha256,
+                    manifest.ComputeExpectedSemanticTreeSha256(),
+                    StringComparison.Ordinal) ||
+                authority.Target.FileCount != manifest.Content.Count ||
+                authority.Target.TotalBytes != manifestBytes ||
+                !String.Equals(
+                    authority.TransactionId,
+                    before.TransactionId,
+                    StringComparison.Ordinal) ||
+                !String.Equals(
+                    before.TransactionId,
+                    after.TransactionId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Payload stage receipt is not bound to its authority.");
+            }
+
+            bool unchanged = String.Equals(
+                before.InvariantDigest,
+                after.InvariantDigest,
+                StringComparison.Ordinal);
+            PayloadNamespaceCheckpoint first = before.Checkpoint;
+            PayloadNamespaceCheckpoint second = after.Checkpoint;
+            bool replacement = IsReplacementOperation(
+                authority.Operation);
+            bool valid =
+                (authority.Operation == InstallOperation.FreshInstall &&
+                 before.Shape == PayloadNamespaceShape.Empty &&
+                 after.Shape == PayloadNamespaceShape.CandidateOnly &&
+                 authority.Target.Matches(second.Candidate)) ||
+                (replacement &&
+                 before.Shape == PayloadNamespaceShape.CurrentOnly &&
+                 after.Shape ==
+                    PayloadNamespaceShape.CurrentAndCandidate &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(first.Current) &&
+                 authority.Target.Matches(second.Candidate) &&
+                 SameDirectoryUnchanged(
+                    first.Current,
+                    second.Current)) ||
+                (unchanged &&
+                 authority.Operation == InstallOperation.FreshInstall &&
+                 before.Shape == PayloadNamespaceShape.CandidateOnly &&
+                 authority.Target.Matches(first.Candidate)) ||
+                (unchanged &&
+                 replacement &&
+                 before.Shape ==
+                    PayloadNamespaceShape.CurrentAndCandidate &&
+                 authority.Baseline != null &&
+                 authority.Baseline.Matches(first.Current) &&
+                 authority.Target.Matches(first.Candidate));
+            if (!valid)
+            {
+                throw new InvalidOperationException(
+                    "Payload stage receipt has an illegal namespace transition.");
+            }
+            if (!unchanged)
+            {
+                RequireForwardRevision(before, after);
+            }
+        }
+
         internal static void ValidatePromotion(
             PayloadRecoveryAuthority authority,
             PayloadNamespaceState before,

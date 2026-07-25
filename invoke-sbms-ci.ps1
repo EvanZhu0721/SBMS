@@ -43,6 +43,7 @@ $contracts = @(
     'test-sbms-protected-escrow-manifest-store.ps1',
     'test-sbms-protected-payload-store-contracts.ps1',
     'test-sbms-protected-payload-recovery-planner.ps1',
+    'test-sbms-protected-payload-transaction-executor.ps1',
     'test-sbms-file-transaction-journal-store.ps1',
     'test-sbms-windows-transaction-platform.ps1',
     'test-sbms-windows-mutation-execution.ps1',

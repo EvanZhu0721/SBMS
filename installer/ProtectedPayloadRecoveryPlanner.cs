@@ -56,6 +56,130 @@ namespace SBMSSetup
                     : exactSource.DeepClone();
             }
         }
+
+        internal void ValidateApplied(PayloadNamespaceState after)
+        {
+            if (IsTerminal || after == null)
+            {
+                throw new InvalidOperationException(
+                    "Payload namespace mutation result is incomplete.");
+            }
+            PayloadNamespaceCheckpoint expected = Observed.Checkpoint;
+            PayloadDirectoryCheckpoint source = Source(expected, Kind);
+            if (source == null ||
+                !String.Equals(
+                    source.InvariantDigest,
+                    exactSource.InvariantDigest,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Payload namespace mutation source drifted.");
+            }
+            switch (Kind)
+            {
+                case PayloadNamespaceMutationKind.RenameCurrentToBackup:
+                    expected.Current = null;
+                    expected.Backup = Rename(
+                        source,
+                        PayloadDirectorySlot.Backup);
+                    break;
+                case PayloadNamespaceMutationKind.RenameCandidateToCurrent:
+                    expected.Candidate = null;
+                    expected.Current = Rename(
+                        source,
+                        PayloadDirectorySlot.Current);
+                    break;
+                case PayloadNamespaceMutationKind.RenameBackupToCurrent:
+                    expected.Backup = null;
+                    expected.Current = Rename(
+                        source,
+                        PayloadDirectorySlot.Current);
+                    break;
+                case PayloadNamespaceMutationKind.DeleteCurrent:
+                    expected.Current = null;
+                    break;
+                case PayloadNamespaceMutationKind.DeleteCandidate:
+                    expected.Candidate = null;
+                    break;
+                case PayloadNamespaceMutationKind.DeleteBackup:
+                    expected.Backup = null;
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        "Payload namespace mutation kind is invalid.");
+            }
+            expected.Revision = checked(expected.Revision + 1);
+            expected.Shape = Shape(expected);
+            PayloadNamespaceState exact =
+                new PayloadNamespaceState(expected);
+            if (!String.Equals(
+                exact.InvariantDigest,
+                after.InvariantDigest,
+                StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "Payload namespace backend applied more or less than one exact mutation.");
+            }
+        }
+
+        private static PayloadDirectoryCheckpoint Source(
+            PayloadNamespaceCheckpoint state,
+            PayloadNamespaceMutationKind kind)
+        {
+            switch (kind)
+            {
+                case PayloadNamespaceMutationKind.RenameCurrentToBackup:
+                case PayloadNamespaceMutationKind.DeleteCurrent:
+                    return state.Current;
+                case PayloadNamespaceMutationKind.RenameCandidateToCurrent:
+                case PayloadNamespaceMutationKind.DeleteCandidate:
+                    return state.Candidate;
+                case PayloadNamespaceMutationKind.RenameBackupToCurrent:
+                case PayloadNamespaceMutationKind.DeleteBackup:
+                    return state.Backup;
+                default:
+                    return null;
+            }
+        }
+
+        private static PayloadDirectoryCheckpoint Rename(
+            PayloadDirectoryCheckpoint source,
+            PayloadDirectorySlot destination)
+        {
+            PayloadDirectoryCheckpoint result = source.DeepClone();
+            result.Slot = destination;
+            return result;
+        }
+
+        private static PayloadNamespaceShape Shape(
+            PayloadNamespaceCheckpoint state)
+        {
+            if (state.Current != null && state.Candidate != null)
+            {
+                return PayloadNamespaceShape.CurrentAndCandidate;
+            }
+            if (state.Current != null && state.Backup != null)
+            {
+                return PayloadNamespaceShape.CurrentAndBackup;
+            }
+            if (state.Candidate != null && state.Backup != null)
+            {
+                return PayloadNamespaceShape.CandidateAndBackup;
+            }
+            if (state.Current != null)
+            {
+                return PayloadNamespaceShape.CurrentOnly;
+            }
+            if (state.Candidate != null)
+            {
+                return PayloadNamespaceShape.CandidateOnly;
+            }
+            if (state.Backup != null)
+            {
+                return PayloadNamespaceShape.BackupOnly;
+            }
+            return PayloadNamespaceShape.Empty;
+        }
     }
 
     internal static class ProtectedPayloadRecoveryPlanner
