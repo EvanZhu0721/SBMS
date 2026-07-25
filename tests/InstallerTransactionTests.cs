@@ -23,10 +23,20 @@ namespace SBMSSetup
             : IAtomicJournalFileSystem
         {
             private readonly IAtomicJournalFileSystem inner;
+            private readonly bool failCandidateCleanup;
+            private bool candidatePublished;
 
             internal PostRenameVerificationFaultFileSystem(string root)
+                : this(root, false)
+            {
+            }
+
+            internal PostRenameVerificationFaultFileSystem(
+                string root,
+                bool failCandidateCleanup)
             {
                 inner = new PathAtomicJournalFileSystem(root);
+                this.failCandidateCleanup = failCandidateCleanup;
             }
 
             public string GetDisplayPath(string relativePath)
@@ -36,6 +46,12 @@ namespace SBMSSetup
 
             public bool FileExists(string relativePath)
             {
+                if (failCandidateCleanup &&
+                    candidatePublished &&
+                    relativePath.EndsWith(".new", StringComparison.Ordinal))
+                {
+                    throw new IOException("simulated candidate cleanup failure");
+                }
                 return inner.FileExists(relativePath);
             }
 
@@ -61,6 +77,7 @@ namespace SBMSSetup
                 inner.PublishNewFile(
                     sourceRelativePath,
                     destinationRelativePath);
+                candidatePublished = true;
                 throw new JournalFilePublicationException(
                     true,
                     new IOException(
@@ -76,6 +93,7 @@ namespace SBMSSetup
                     sourceRelativePath,
                     destinationRelativePath,
                     backupRelativePath);
+                candidatePublished = true;
                 throw new JournalFilePublicationException(
                     true,
                     new IOException(
@@ -84,6 +102,164 @@ namespace SBMSSetup
 
             public void DeleteFile(string relativePath)
             {
+                inner.DeleteFile(relativePath);
+            }
+        }
+
+        private sealed class PrimaryReadFailureFileSystem
+            : IAtomicJournalFileSystem
+        {
+            private readonly IAtomicJournalFileSystem inner;
+            private readonly string primaryFileName;
+
+            internal PrimaryReadFailureFileSystem(
+                string root,
+                string primaryFileName)
+            {
+                inner = new PathAtomicJournalFileSystem(root);
+                this.primaryFileName = primaryFileName;
+            }
+
+            public string GetDisplayPath(string relativePath)
+            {
+                return inner.GetDisplayPath(relativePath);
+            }
+
+            public bool FileExists(string relativePath)
+            {
+                return inner.FileExists(relativePath);
+            }
+
+            public void EnsureDirectory(string relativePath)
+            {
+                inner.EnsureDirectory(relativePath);
+            }
+
+            public Stream CreateNewFile(string relativePath)
+            {
+                return inner.CreateNewFile(relativePath);
+            }
+
+            public Stream OpenReadFile(string relativePath)
+            {
+                if (String.Equals(
+                    relativePath,
+                    primaryFileName,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException(
+                        "simulated transient primary read failure");
+                }
+                return inner.OpenReadFile(relativePath);
+            }
+
+            public void PublishNewFile(
+                string sourceRelativePath,
+                string destinationRelativePath)
+            {
+                inner.PublishNewFile(
+                    sourceRelativePath,
+                    destinationRelativePath);
+            }
+
+            public void ReplaceFile(
+                string sourceRelativePath,
+                string destinationRelativePath,
+                string backupRelativePath)
+            {
+                inner.ReplaceFile(
+                    sourceRelativePath,
+                    destinationRelativePath,
+                    backupRelativePath);
+            }
+
+            public void DeleteFile(string relativePath)
+            {
+                inner.DeleteFile(relativePath);
+            }
+        }
+
+        private sealed class CleanupOnlyFaultFileSystem
+            : IAtomicJournalFileSystem
+        {
+            private readonly IAtomicJournalFileSystem inner;
+            private readonly bool failProbe;
+            private bool candidatePublished;
+
+            internal CleanupOnlyFaultFileSystem(
+                string root,
+                bool failProbe)
+            {
+                inner = new PathAtomicJournalFileSystem(root);
+                this.failProbe = failProbe;
+            }
+
+            public string GetDisplayPath(string relativePath)
+            {
+                return inner.GetDisplayPath(relativePath);
+            }
+
+            public bool FileExists(string relativePath)
+            {
+                if (candidatePublished &&
+                    relativePath.EndsWith(".new", StringComparison.Ordinal))
+                {
+                    if (failProbe)
+                    {
+                        throw new IOException(
+                            "simulated cleanup-only candidate probe failure");
+                    }
+                    return true;
+                }
+                return inner.FileExists(relativePath);
+            }
+
+            public void EnsureDirectory(string relativePath)
+            {
+                inner.EnsureDirectory(relativePath);
+            }
+
+            public Stream CreateNewFile(string relativePath)
+            {
+                return inner.CreateNewFile(relativePath);
+            }
+
+            public Stream OpenReadFile(string relativePath)
+            {
+                return inner.OpenReadFile(relativePath);
+            }
+
+            public void PublishNewFile(
+                string sourceRelativePath,
+                string destinationRelativePath)
+            {
+                inner.PublishNewFile(
+                    sourceRelativePath,
+                    destinationRelativePath);
+                candidatePublished = true;
+            }
+
+            public void ReplaceFile(
+                string sourceRelativePath,
+                string destinationRelativePath,
+                string backupRelativePath)
+            {
+                inner.ReplaceFile(
+                    sourceRelativePath,
+                    destinationRelativePath,
+                    backupRelativePath);
+                candidatePublished = true;
+            }
+
+            public void DeleteFile(string relativePath)
+            {
+                if (candidatePublished &&
+                    !failProbe &&
+                    relativePath.EndsWith(".new", StringComparison.Ordinal))
+                {
+                    throw new IOException(
+                        "simulated cleanup-only candidate delete failure");
+                }
                 inner.DeleteFile(relativePath);
             }
         }
@@ -421,6 +597,7 @@ namespace SBMSSetup
 
             public string FinalizeCommitted(TransactionJournal journal)
             {
+                ++FinalizeCommittedCallCount;
                 if (FailFinalizeCount > 0)
                 {
                     --FailFinalizeCount;
@@ -429,6 +606,8 @@ namespace SBMSSetup
                 machine.Escrow = EmptyEscrow();
                 return "fake-finalization-readback";
             }
+
+            internal int FinalizeCommittedCallCount;
 
             public bool EquivalentForRollback(
                 MachineSnapshot expected,
@@ -563,6 +742,11 @@ namespace SBMSSetup
             Run("crash recovery uses journal context and escrow", TestContextCrashRecovery);
             Run("platform receives a detached transaction context", TestDetachedContext);
             Run("journal revision and torn backup are durable", TestJournalRevisionBackup);
+            Run("journal backup fallback distinguishes corruption from IO failure", TestJournalReadClassification);
+            Run("degraded journal blocks recovery before platform finalization", TestDegradedJournalRecoveryGuard);
+            Run("atomic byte publisher preserves exact primary and backup bytes", TestAtomicDocumentBytePublisher);
+            Run("atomic byte publisher classifies cleanup-only failure as committed", TestAtomicDocumentCleanupFailure);
+            Run("atomic byte publisher preserves committed failure over cleanup failure", TestAtomicDocumentPriorFailureCleanupFailure);
             Run("failed save preserves the caller durable revision", TestSaveRevisionIsolation);
             Run("committed rename synchronizes caller before verification failure", TestCommittedRenameRevisionSynchronization);
             Run("journal and structured snapshot validation fail closed", TestStrictValidation);
@@ -1125,6 +1309,327 @@ namespace SBMSSetup
                 TransactionJournal backup = store.Load();
                 Assert(backup.Revision == 1,
                     "Torn primary did not return prior durable revision.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestJournalReadClassification()
+        {
+            string root = NewRoot();
+            try
+            {
+                AtomicTransactionJournalStore durable = Store(root);
+                TransactionJournal journal = NewJournal(
+                    InstallOperation.Upgrade,
+                    Snapshot(MachineFor(InstallOperation.Upgrade)),
+                    Release("2.0.0", "two"));
+                durable.Save(journal);
+                journal.Status = TransactionStatus.Applying;
+                journal.Intents.Add(new CompensationIntent
+                {
+                    Sequence = 0,
+                    Mutation = InstallerMutation.CreateEscrow,
+                    Status = CompensationIntentStatus.Prepared
+                });
+                journal.AddStage(
+                    "MutationPrepared",
+                    InstallerMutation.CreateEscrow,
+                    "Prepared",
+                    null,
+                    "");
+                durable.Save(journal);
+                long authoritativeRevision = journal.Revision;
+
+                var unavailable = new AtomicTransactionJournalStore(
+                    durable.JournalPath,
+                    new PrimaryReadFailureFileSystem(
+                        root,
+                        Path.GetFileName(durable.JournalPath)),
+                    null,
+                    null);
+                Exception loadFailure = Capture(
+                    delegate { unavailable.Load(); });
+                Assert(
+                    loadFailure is IOException,
+                    "Primary IO failure was misclassified as document corruption.");
+                Exception saveFailure = Capture(
+                    delegate { unavailable.Save(journal); });
+                Assert(
+                    saveFailure is IOException,
+                    "Save continued from backup after primary IO failure.");
+                Equal(
+                    authoritativeRevision,
+                    durable.Load().Revision,
+                    "Primary IO failure changed durable journal state.");
+
+                File.WriteAllText(
+                    durable.JournalPath,
+                    "{\"schemaVersion\":");
+                TransactionJournal degraded = durable.Load();
+                Assert(
+                    degraded.Revision == authoritativeRevision - 1,
+                    "Deterministically corrupt primary did not load backup.");
+                Assert(
+                    ((ITransactionJournalRepairState)durable)
+                        .RequiresPrimaryRepair,
+                    "Backup fallback did not expose primary repair state.");
+                Exception degradedSave = Capture(
+                    delegate { durable.Save(degraded); });
+                Assert(
+                    degradedSave is AtomicDocumentFormatException,
+                    "Ordinary Save advanced from degraded backup state.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestDegradedJournalRecoveryGuard()
+        {
+            string root = NewRoot();
+            try
+            {
+                var store = Store(root);
+                var machine = new FakeMachine();
+                var first = new FakePlatform(machine, store)
+                {
+                    FailFinalizeCount = 1
+                };
+                AssertAnyThrows(
+                    delegate
+                    {
+                        new InstallerTransactionEngine(first, store).Execute(
+                            Request(
+                                InstallOperationRequest.Auto,
+                                Release("1.0.0", "one")));
+                    },
+                    "Finalization failure setup did not escape.");
+
+                File.WriteAllText(
+                    store.JournalPath,
+                    "{\"schemaVersion\":");
+                var resumed = new FakePlatform(machine, store);
+                Exception recoveryFailure = Capture(
+                    delegate
+                    {
+                        new InstallerTransactionEngine(
+                            resumed,
+                            store).RecoverPending();
+                    });
+                Assert(
+                    recoveryFailure is InvalidOperationException &&
+                    recoveryFailure.Message.IndexOf(
+                        "primary repair",
+                        StringComparison.OrdinalIgnoreCase) >= 0,
+                    "Degraded recovery did not require explicit primary repair.");
+                Assert(
+                    resumed.FinalizeCommittedCallCount == 0,
+                    "Degraded recovery invoked committed finalization.");
+                Assert(
+                    ((ITransactionJournalRepairState)store)
+                        .RequiresPrimaryRepair,
+                    "Engine recovery cleared the degraded journal state.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestAtomicDocumentBytePublisher()
+        {
+            string root = NewRoot();
+            try
+            {
+                var publisher = new AtomicDocumentBytePublisher(
+                    new PathAtomicJournalFileSystem(root),
+                    "document.bin");
+                byte[] first = new byte[] { 0, 1, 2, 255, 13, 10 };
+                AtomicDocumentReadResult published = publisher.Publish(
+                    first,
+                    false,
+                    null,
+                    null,
+                    null);
+                Equal(
+                    "de6c83f562fd0a7ca52b97d2b8b80ea93bb6363d2db5e0ed014bacd95e794ce7",
+                    published.Sha256,
+                    "Atomic byte publisher returned the wrong SHA-256.");
+                AssertBytesEqual(
+                    first,
+                    publisher.ReadPrimary().Bytes,
+                    "Atomic byte publisher changed primary bytes.");
+
+                byte[] second = new byte[] { 9, 8, 7, 0, 6 };
+                publisher.Publish(second, true, null, null, null);
+                AssertBytesEqual(
+                    second,
+                    publisher.ReadPrimary().Bytes,
+                    "Atomic byte publisher did not replace the primary.");
+                AssertBytesEqual(
+                    first,
+                    publisher.ReadBackup().Bytes,
+                    "Atomic byte publisher did not retain exact backup bytes.");
+                Assert(
+                    !File.Exists(Path.Combine(root, "document.bin.new")),
+                    "Atomic byte publisher left a candidate behind.");
+
+                byte[] oversized = new byte[
+                    AtomicDocumentBytePublisher.MaximumDocumentBytes + 1];
+                AssertAnyThrows(
+                    delegate
+                    {
+                        publisher.Publish(
+                            oversized,
+                            true,
+                            null,
+                            null,
+                            null);
+                    },
+                    "Atomic byte publisher accepted an oversized document.");
+                AssertBytesEqual(
+                    second,
+                    publisher.ReadPrimary().Bytes,
+                    "Oversized document attempt changed the primary.");
+                File.WriteAllBytes(
+                    Path.Combine(root, "oversized.bin"),
+                    oversized);
+                var oversizedReader = new AtomicDocumentBytePublisher(
+                    new PathAtomicJournalFileSystem(root),
+                    "oversized.bin");
+                AssertAnyThrows(
+                    delegate { oversizedReader.ReadPrimary(); },
+                    "Atomic byte publisher performed an unbounded read.");
+
+                AssertAnyThrows(
+                    delegate
+                    {
+                        new AtomicDocumentBytePublisher(
+                            new PathAtomicJournalFileSystem(root),
+                            @"transactions\..\escape.bin");
+                    },
+                    "Atomic byte publisher accepted a parent path segment.");
+                string nestedDirectory =
+                    Path.Combine(root, "transactions", "abc");
+                Directory.CreateDirectory(nestedDirectory);
+                var nested = new AtomicDocumentBytePublisher(
+                    new PathAtomicJournalFileSystem(root),
+                    @"transactions\abc\manifest.json");
+                nested.Publish(first, false, null, null, null);
+                AssertBytesEqual(
+                    first,
+                    nested.ReadPrimary().Bytes,
+                    "Canonical nested document path was not supported.");
+            }
+            finally
+            {
+                DeleteRoot(root);
+            }
+        }
+
+        private static void TestAtomicDocumentCleanupFailure()
+        {
+            foreach (bool failProbe in new[] { true, false })
+            {
+                string root = NewRoot();
+                try
+                {
+                    var publisher = new AtomicDocumentBytePublisher(
+                        new CleanupOnlyFaultFileSystem(root, failProbe),
+                        "document.bin");
+                    Exception observed = Capture(
+                        delegate
+                        {
+                            publisher.Publish(
+                                new byte[] { 1, 2, 3 },
+                                false,
+                                null,
+                                null,
+                                null);
+                        });
+                    JournalFilePublicationException publication =
+                        observed as JournalFilePublicationException;
+                    Assert(
+                        publication != null &&
+                        publication.CandidatePublished &&
+                        publication.InnerException is IOException,
+                        "Cleanup-only failure lost committed publication state.");
+                    AssertBytesEqual(
+                        new byte[] { 1, 2, 3 },
+                        File.ReadAllBytes(
+                            Path.Combine(root, "document.bin")),
+                        "Cleanup-only failure changed the committed primary.");
+
+                    string journalRoot = Path.Combine(root, "journal");
+                    Directory.CreateDirectory(journalRoot);
+                    var store = new AtomicTransactionJournalStore(
+                        Path.Combine(journalRoot, "active.json"),
+                        new CleanupOnlyFaultFileSystem(
+                            journalRoot,
+                            failProbe),
+                        null,
+                        null);
+                    TransactionJournal journal = NewJournal(
+                        InstallOperation.FreshInstall,
+                        Snapshot(new FakeMachine()),
+                        Release("1.0.0", "one"));
+                    JournalFilePublicationException storeFailure =
+                        Capture(
+                            delegate { store.Save(journal); })
+                        as JournalFilePublicationException;
+                    Assert(
+                        storeFailure != null &&
+                        storeFailure.CandidatePublished,
+                        "Journal caller lost cleanup-only committed state.");
+                    Equal(
+                        1L,
+                        journal.Revision,
+                        "Journal caller did not synchronize the committed revision.");
+                    TransactionJournal durable =
+                        new AtomicTransactionJournalStore(
+                            Path.Combine(journalRoot, "active.json")).Load();
+                    Equal(
+                        journal.Revision,
+                        durable.Revision,
+                        "Cleanup-only failure did not leave the synchronized revision durable.");
+                }
+                finally
+                {
+                    DeleteRoot(root);
+                }
+            }
+        }
+
+        private static void TestAtomicDocumentPriorFailureCleanupFailure()
+        {
+            string root = NewRoot();
+            try
+            {
+                var publisher = new AtomicDocumentBytePublisher(
+                    new PostRenameVerificationFaultFileSystem(root, true),
+                    "document.bin");
+                Exception observed = Capture(
+                    delegate
+                    {
+                        publisher.Publish(
+                            new byte[] { 1, 2, 3 },
+                            false,
+                            null,
+                            null,
+                            null);
+                    });
+                JournalFilePublicationException publication =
+                    observed as JournalFilePublicationException;
+                Assert(
+                    publication != null && publication.CandidatePublished,
+                    "Candidate cleanup failure hid the earlier committed failure.");
+                Assert(
+                    File.Exists(Path.Combine(root, "document.bin")),
+                    "Committed primary was not retained.");
             }
             finally
             {
@@ -2133,6 +2638,38 @@ namespace SBMSSetup
             {
                 throw new InvalidOperationException(
                     message + " expected=" + expected + " actual=" + actual);
+            }
+        }
+
+        private static void AssertBytesEqual(
+            byte[] expected,
+            byte[] actual,
+            string message)
+        {
+            if (expected == null || actual == null ||
+                expected.Length != actual.Length)
+            {
+                throw new InvalidOperationException(message);
+            }
+            for (int index = 0; index < expected.Length; ++index)
+            {
+                if (expected[index] != actual[index])
+                {
+                    throw new InvalidOperationException(message);
+                }
+            }
+        }
+
+        private static Exception Capture(Action action)
+        {
+            try
+            {
+                action();
+                return null;
+            }
+            catch (Exception failure)
+            {
+                return failure;
             }
         }
 

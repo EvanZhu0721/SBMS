@@ -289,6 +289,7 @@ namespace SBMSSetup
         private bool RecoverPendingUnderLease()
         {
             TransactionJournal journal = journalStore.Load();
+            ThrowIfPrimaryRepairRequired();
             if (journal == null ||
                 journal.Status == TransactionStatus.RolledBack)
             {
@@ -311,10 +312,23 @@ namespace SBMSSetup
             return true;
         }
 
+        private void ThrowIfPrimaryRepairRequired()
+        {
+            ITransactionJournalRepairState repairState =
+                journalStore as ITransactionJournalRepairState;
+            if (repairState != null && repairState.RequiresPrimaryRepair)
+            {
+                throw new InvalidOperationException(
+                    "The active transaction journal requires explicit primary " +
+                    "repair before installer platform state may advance.");
+            }
+        }
+
         private void RollBack(
             TransactionJournal journal,
             Exception transactionFailure)
         {
+            ThrowIfPrimaryRepairRequired();
             try
             {
                 MachineSnapshot observed = platform.InspectForRecovery();
@@ -468,6 +482,7 @@ namespace SBMSSetup
         private TransactionJournal FinalizeCommitted(
             TransactionJournal journal)
         {
+            ThrowIfPrimaryRepairRequired();
             try
             {
                 string evidence = platform.FinalizeCommitted(journal);

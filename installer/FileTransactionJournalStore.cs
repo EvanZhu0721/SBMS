@@ -437,6 +437,7 @@ namespace SBMSSetup
 
     internal sealed class FileTransactionJournalStore
         : ITransactionJournalStore, ITransactionExecutionLeaseProvider,
+          ITransactionJournalRepairState,
           IDisposable
     {
         internal const string ProductionMutexName =
@@ -447,9 +448,8 @@ namespace SBMSSetup
         private readonly AtomicTransactionJournalStore inner;
         private readonly IAtomicJournalFileSystem journalFileSystem;
         private readonly IInstallerJournalAclPolicy aclPolicy;
-        private readonly IInstallerTransactionMutexFactory mutexFactory;
-        private readonly string mutexName;
-        private readonly TimeSpan mutexTimeout;
+        private readonly InstanceTransactionLeaseCoordinator
+            transactionLeaseCoordinator;
         private readonly string commonApplicationDataPath;
         private readonly string installerStateRoot;
         private readonly string transactionsDirectory;
@@ -537,9 +537,11 @@ namespace SBMSSetup
                 installerStateRoot);
 
             this.aclPolicy = aclPolicy;
-            this.mutexFactory = mutexFactory;
-            this.mutexName = mutexName;
-            this.mutexTimeout = mutexTimeout;
+            transactionLeaseCoordinator =
+                new InstanceTransactionLeaseCoordinator(
+                    mutexFactory,
+                    mutexName,
+                    mutexTimeout);
             transactionsDirectory = Path.Combine(
                 installerStateRoot,
                 "transactions");
@@ -596,6 +598,11 @@ namespace SBMSSetup
             get { return transactionsDirectory; }
         }
 
+        public bool RequiresPrimaryRepair
+        {
+            get { return inner.RequiresPrimaryRepair; }
+        }
+
         public void Save(TransactionJournal journal)
         {
             WithExclusiveStoreLock(
@@ -627,109 +634,54 @@ namespace SBMSSetup
 
         public IDisposable AcquireTransactionLease()
         {
-            Mutex mutex = mutexFactory.OpenOrCreate(mutexName);
-            bool acquired = false;
+            IDisposable lease = transactionLeaseCoordinator.Acquire();
             try
             {
-                try
-                {
-                    acquired = mutex.WaitOne(mutexTimeout);
-                }
-                catch (AbandonedMutexException)
-                {
-                    acquired = true;
-                }
-                if (!acquired)
-                {
-                    throw new TimeoutException(
-                        "Timed out waiting for the installer transaction lease.");
-                }
                 aclPolicy.PrepareAndVerify(
                     commonApplicationDataPath,
                     installerStateRoot,
                     false);
-                return new TransactionMutexLease(mutex);
+                return lease;
             }
             catch
             {
-                if (acquired)
-                {
-                    mutex.ReleaseMutex();
-                }
-                mutex.Dispose();
+                lease.Dispose();
                 throw;
             }
         }
 
-        private sealed class TransactionMutexLease : IDisposable
+        internal IProtectedEscrowManifestStore
+            CreateProtectedEscrowManifestStore(
+                string transactionId)
         {
-            private Mutex mutex;
-
-            internal TransactionMutexLease(Mutex mutex)
-            {
-                this.mutex = mutex;
-            }
-
-            public void Dispose()
-            {
-                Mutex owned = mutex;
-                if (owned == null)
-                {
-                    return;
-                }
-                mutex = null;
-                owned.ReleaseMutex();
-                owned.Dispose();
-            }
+            return new ProtectedEscrowManifestStore(
+                journalFileSystem,
+                transactionLeaseCoordinator,
+                new AnchoredEscrowContentVerifier(journalFileSystem),
+                transactionId);
         }
 
         private T WithExclusiveStoreLock<T>(
             bool createRootIfMissing,
             Func<T> action)
         {
-            using (Mutex mutex = mutexFactory.OpenOrCreate(mutexName))
+            using (IDisposable lease =
+                transactionLeaseCoordinator.Acquire())
             {
-                bool acquired = false;
-                try
-                {
-                    try
-                    {
-                        acquired = mutex.WaitOne(mutexTimeout);
-                    }
-                    catch (AbandonedMutexException)
-                    {
-                        // The abandoned owner cannot have left an in-memory
-                        // critical section active. Atomic readback below still
-                        // validates the durable primary/backup state.
-                        acquired = true;
-                    }
-                    if (!acquired)
-                    {
-                        throw new TimeoutException(
-                            "Timed out waiting for the installer journal lock.");
-                    }
-                    aclPolicy.PrepareAndVerify(
-                        commonApplicationDataPath,
-                        installerStateRoot,
-                        createRootIfMissing);
-                    T result = action();
-                    // This catches a path exchange after an atomic swap for
-                    // diagnostics/tests, but is not a trusted production
-                    // boundary. WindowsInstallerJournalAclPolicy remains
-                    // feature-gated until the IO itself is handle-relative.
-                    aclPolicy.PrepareAndVerify(
-                        commonApplicationDataPath,
-                        installerStateRoot,
-                        false);
-                    return result;
-                }
-                finally
-                {
-                    if (acquired)
-                    {
-                        mutex.ReleaseMutex();
-                    }
-                }
+                aclPolicy.PrepareAndVerify(
+                    commonApplicationDataPath,
+                    installerStateRoot,
+                    createRootIfMissing);
+                T result = action();
+                // This catches a path exchange after an atomic swap for
+                // diagnostics/tests, but is not a trusted production
+                // boundary. WindowsInstallerJournalAclPolicy remains
+                // feature-gated until the IO itself is handle-relative.
+                aclPolicy.PrepareAndVerify(
+                    commonApplicationDataPath,
+                    installerStateRoot,
+                    false);
+                return result;
             }
         }
 

@@ -13,9 +13,10 @@ if (-not $csc) {
 }
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
-    'SBMS-file-transaction-journal-store-' + [guid]::NewGuid().ToString('N')
+    'SBMS-protected-escrow-manifest-store-' +
+        [guid]::NewGuid().ToString('N')
 )
-$output = Join-Path $testRoot 'FileTransactionJournalStoreTests.exe'
+$output = Join-Path $testRoot 'ProtectedEscrowManifestStoreTests.exe'
 [void](New-Item -ItemType Directory -Path $testRoot)
 
 try {
@@ -25,11 +26,11 @@ try {
         (Join-Path $root 'installer\WindowsHandleRelativeJournalFileSystem.cs'),
         (Join-Path $root 'installer\ProtectedEscrowManifestStore.cs'),
         (Join-Path $root 'installer\FileTransactionJournalStore.cs'),
-        (Join-Path $root 'tests\FileTransactionJournalStoreTests.cs')
+        (Join-Path $root 'tests\ProtectedEscrowManifestStoreTests.cs')
     )
     foreach ($sourcePath in $sourcePaths) {
         if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-            throw "Missing file transaction journal source: $sourcePath"
+            throw "Missing protected escrow manifest source: $sourcePath"
         }
     }
 
@@ -44,13 +45,13 @@ try {
     & $csc @compilerArgs
     $compileExitCode = $LASTEXITCODE
     if ($compileExitCode -ne 0) {
-        throw "File transaction journal test compilation failed with exit code $compileExitCode."
+        throw "Protected escrow manifest test compilation failed with exit code $compileExitCode."
     }
 
     & $output
     $testExitCode = $LASTEXITCODE
     if ($testExitCode -ne 0) {
-        throw "File transaction journal tests failed with exit code $testExitCode."
+        throw "Protected escrow manifest tests failed with exit code $testExitCode."
     }
 } finally {
     if (Test-Path -LiteralPath $testRoot) {

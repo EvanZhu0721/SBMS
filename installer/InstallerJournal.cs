@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.Serialization;
 using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -130,6 +131,304 @@ namespace SBMSSetup
         }
     }
 
+    internal sealed class AtomicDocumentReadResult
+    {
+        internal AtomicDocumentReadResult(byte[] bytes, string sha256)
+        {
+            Bytes = bytes;
+            Sha256 = sha256;
+        }
+
+        internal byte[] Bytes { get; private set; }
+        internal string Sha256 { get; private set; }
+    }
+
+    internal sealed class AtomicDocumentFormatException : IOException
+    {
+        internal AtomicDocumentFormatException(
+            string message,
+            Exception innerException)
+            : base(message, innerException)
+        {
+        }
+    }
+
+    // Publishes one exact byte document through fixed primary/.bak/.new names.
+    // Domain validation, revision policy and recovery semantics remain with the
+    // caller; this type owns only durable byte IO and atomic naming.
+    internal sealed class AtomicDocumentBytePublisher
+    {
+        internal const int MaximumDocumentBytes = 16 * 1024 * 1024;
+
+        private readonly IAtomicJournalFileSystem fileSystem;
+        private readonly string primaryFileName;
+        private readonly string backupFileName;
+        private readonly string candidateFileName;
+
+        internal AtomicDocumentBytePublisher(
+            IAtomicJournalFileSystem fileSystem,
+            string primaryFileName)
+        {
+            if (fileSystem == null)
+            {
+                throw new ArgumentNullException("fileSystem");
+            }
+            if (String.IsNullOrWhiteSpace(primaryFileName))
+            {
+                throw new ArgumentException(
+                    "Atomic document primary name is required.",
+                    "primaryFileName");
+            }
+            ValidateRelativeDocumentPath(primaryFileName);
+            this.fileSystem = fileSystem;
+            this.primaryFileName = primaryFileName;
+            backupFileName = primaryFileName + ".bak";
+            candidateFileName = primaryFileName + ".new";
+        }
+
+        internal bool PrimaryExists
+        {
+            get { return fileSystem.FileExists(primaryFileName); }
+        }
+
+        internal bool BackupExists
+        {
+            get { return fileSystem.FileExists(backupFileName); }
+        }
+
+        internal AtomicDocumentReadResult ReadPrimary()
+        {
+            return ReadExact(primaryFileName);
+        }
+
+        internal AtomicDocumentReadResult ReadBackup()
+        {
+            return ReadExact(backupFileName);
+        }
+
+        internal AtomicDocumentReadResult Publish(
+            byte[] bytes,
+            bool replacePrimary,
+            Action afterCandidateFlushed,
+            Action afterPrimaryPublished,
+            Action beforePrimaryReadback)
+        {
+            if (bytes == null)
+            {
+                throw new ArgumentNullException("bytes");
+            }
+            if (bytes.Length > MaximumDocumentBytes)
+            {
+                throw new InvalidDataException(
+                    "Atomic document exceeds the maximum supported size.");
+            }
+            fileSystem.EnsureDirectory(String.Empty);
+            if (fileSystem.FileExists(candidateFileName))
+            {
+                fileSystem.DeleteFile(candidateFileName);
+            }
+            Exception activeFailure = null;
+            bool candidatePublished = false;
+            try
+            {
+                WriteExact(candidateFileName, bytes);
+                if (afterCandidateFlushed != null)
+                {
+                    afterCandidateFlushed();
+                }
+                if (replacePrimary)
+                {
+                    fileSystem.ReplaceFile(
+                        candidateFileName,
+                        primaryFileName,
+                        backupFileName);
+                }
+                else
+                {
+                    if (fileSystem.FileExists(primaryFileName))
+                    {
+                        fileSystem.DeleteFile(primaryFileName);
+                    }
+                    fileSystem.PublishNewFile(
+                        candidateFileName,
+                        primaryFileName);
+                }
+                candidatePublished = true;
+                if (afterPrimaryPublished != null)
+                {
+                    afterPrimaryPublished();
+                }
+                if (beforePrimaryReadback != null)
+                {
+                    beforePrimaryReadback();
+                }
+                AtomicDocumentReadResult persisted = ReadPrimary();
+                string expectedSha256 = ComputeSha256(bytes);
+                if (!String.Equals(
+                    expectedSha256,
+                    persisted.Sha256,
+                    StringComparison.OrdinalIgnoreCase) ||
+                    !BytesEqual(bytes, persisted.Bytes))
+                {
+                    throw new InvalidDataException(
+                        "Published atomic document readback mismatch.");
+                }
+                return persisted;
+            }
+            catch (JournalFilePublicationException failure)
+            {
+                activeFailure = failure;
+                throw;
+            }
+            catch (Exception failure)
+            {
+                if (candidatePublished)
+                {
+                    var committedFailure =
+                        new JournalFilePublicationException(true, failure);
+                    activeFailure = committedFailure;
+                    throw committedFailure;
+                }
+                activeFailure = failure;
+                throw;
+            }
+            finally
+            {
+                try
+                {
+                    if (fileSystem.FileExists(candidateFileName))
+                    {
+                        fileSystem.DeleteFile(candidateFileName);
+                    }
+                }
+                catch (Exception cleanupFailure)
+                {
+                    // Never replace an earlier failure, especially a
+                    // CandidatePublished=true signal, with best-effort
+                    // candidate cleanup. With no earlier failure the cleanup
+                    // error remains authoritative. If publication and
+                    // readback already succeeded, retain that committed-state
+                    // classification for callers that must synchronize their
+                    // durable revision before retrying.
+                    if (activeFailure == null)
+                    {
+                        if (candidatePublished)
+                        {
+                            throw new JournalFilePublicationException(
+                                true,
+                                cleanupFailure);
+                        }
+                        throw;
+                    }
+                }
+            }
+        }
+
+        private void WriteExact(string relativePath, byte[] bytes)
+        {
+            using (Stream stream = fileSystem.CreateNewFile(relativePath))
+            {
+                stream.Write(bytes, 0, bytes.Length);
+                FileStream fileStream = stream as FileStream;
+                if (fileStream != null)
+                {
+                    fileStream.Flush(true);
+                }
+                else
+                {
+                    stream.Flush();
+                }
+            }
+        }
+
+        private AtomicDocumentReadResult ReadExact(string relativePath)
+        {
+            byte[] bytes;
+            using (Stream stream = fileSystem.OpenReadFile(relativePath))
+            using (var buffer = new MemoryStream())
+            {
+                var chunk = new byte[8192];
+                while (true)
+                {
+                    int read = stream.Read(chunk, 0, chunk.Length);
+                    if (read == 0)
+                    {
+                        break;
+                    }
+                    if (buffer.Length + read > MaximumDocumentBytes)
+                    {
+                        throw new AtomicDocumentFormatException(
+                            "Atomic document exceeds the maximum supported size.",
+                            null);
+                    }
+                    buffer.Write(chunk, 0, read);
+                }
+                bytes = buffer.ToArray();
+            }
+            return new AtomicDocumentReadResult(bytes, ComputeSha256(bytes));
+        }
+
+        private static void ValidateRelativeDocumentPath(string relativePath)
+        {
+            if (Path.IsPathRooted(relativePath) ||
+                relativePath.IndexOf('/') >= 0 ||
+                relativePath.EndsWith("\\", StringComparison.Ordinal))
+            {
+                throw new ArgumentException(
+                    "Atomic document path must be canonical and relative.",
+                    "primaryFileName");
+            }
+            string[] segments = relativePath.Split('\\');
+            foreach (string segment in segments)
+            {
+                if (String.IsNullOrEmpty(segment) ||
+                    segment == "." ||
+                    segment == ".." ||
+                    segment.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                    !String.Equals(
+                        segment,
+                        Path.GetFileName(segment),
+                        StringComparison.Ordinal))
+                {
+                    throw new ArgumentException(
+                        "Atomic document path must be canonical and relative.",
+                        "primaryFileName");
+                }
+            }
+        }
+
+        private static string ComputeSha256(byte[] bytes)
+        {
+            using (SHA256 algorithm = SHA256.Create())
+            {
+                byte[] digest = algorithm.ComputeHash(bytes);
+                var text = new StringBuilder(digest.Length * 2);
+                foreach (byte value in digest)
+                {
+                    text.Append(value.ToString("x2", CultureInfo.InvariantCulture));
+                }
+                return text.ToString();
+            }
+        }
+
+        private static bool BytesEqual(byte[] first, byte[] second)
+        {
+            if (first == null || second == null ||
+                first.Length != second.Length)
+            {
+                return false;
+            }
+            for (int index = 0; index < first.Length; ++index)
+            {
+                if (first[index] != second[index])
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
     internal enum TerminalRotationCrashPoint
     {
         ArchiveTempFlushed,
@@ -162,14 +461,22 @@ namespace SBMSSetup
         void PrepareForNewTransaction();
     }
 
+    internal interface ITransactionJournalRepairState
+    {
+        bool RequiresPrimaryRepair { get; }
+    }
+
     internal interface ITransactionExecutionLeaseProvider
     {
         IDisposable AcquireTransactionLease();
     }
 
-    internal sealed class AtomicTransactionJournalStore : ITransactionJournalStore
+    internal sealed class AtomicTransactionJournalStore :
+        ITransactionJournalStore,
+        ITransactionJournalRepairState
     {
         private readonly IAtomicJournalFileSystem fileSystem;
+        private readonly AtomicDocumentBytePublisher documentPublisher;
         private readonly string journalFileName;
         private readonly string backupFileName;
         private readonly string historyDirectoryName;
@@ -178,6 +485,7 @@ namespace SBMSSetup
         private readonly string historyDirectory;
         private readonly ITerminalRotationFaultInjector rotationFaultInjector;
         private readonly IJournalSaveFaultInjector saveFaultInjector;
+        private bool requiresPrimaryRepair;
 
         internal AtomicTransactionJournalStore(string journalPath)
             : this(journalPath, null, null)
@@ -227,6 +535,9 @@ namespace SBMSSetup
             historyDirectory = fileSystem.GetDisplayPath(historyDirectoryName);
             this.rotationFaultInjector = rotationFaultInjector;
             this.saveFaultInjector = saveFaultInjector;
+            documentPublisher = new AtomicDocumentBytePublisher(
+                fileSystem,
+                journalFileName);
         }
 
         internal string JournalPath
@@ -244,9 +555,15 @@ namespace SBMSSetup
             get { return historyDirectory; }
         }
 
+        public bool RequiresPrimaryRepair
+        {
+            get { return requiresPrimaryRepair; }
+        }
+
         public void PrepareForNewTransaction()
         {
             TransactionJournal existing = Load();
+            ThrowIfPrimaryRepairRequired();
             if (existing == null)
             {
                 return;
@@ -343,35 +660,26 @@ namespace SBMSSetup
                 "o",
                 CultureInfo.InvariantCulture);
             Validate(candidate, false);
-            fileSystem.EnsureDirectory(String.Empty);
-            string temporaryPath = journalFileName + ".new";
-            // The global transaction lease guarantees one writer. A fixed
-            // candidate name makes a power-loss remnant deterministic and
-            // safely cleanable before the next attempted save.
-            if (fileSystem.FileExists(temporaryPath))
-            {
-                fileSystem.DeleteFile(temporaryPath);
-            }
             TransactionJournal previous = null;
             bool primaryIsValid = false;
-            if (fileSystem.FileExists(journalFileName))
+            if (documentPublisher.PrimaryExists)
             {
-                try
-                {
-                    previous = ReadExact(journalFileName);
-                    primaryIsValid = true;
-                }
-                catch
-                {
-                    if (fileSystem.FileExists(backupFileName))
-                    {
-                        previous = ReadExact(backupFileName);
-                    }
-                }
+                // Save never advances from degraded backup state. Any primary
+                // read or format failure requires an explicit repair path.
+                previous = ReadDocument(documentPublisher.ReadPrimary());
+                primaryIsValid = true;
+                requiresPrimaryRepair = false;
             }
-            else if (fileSystem.FileExists(backupFileName))
+            else if (documentPublisher.BackupExists)
             {
-                previous = ReadExact(backupFileName);
+                requiresPrimaryRepair = true;
+                throw new InvalidDataException(
+                    "Active transaction journal is missing while a backup " +
+                    "exists; explicit repair is required before saving.");
+            }
+            else
+            {
+                requiresPrimaryRepair = false;
             }
             if (previous != null)
             {
@@ -401,32 +709,33 @@ namespace SBMSSetup
             bool primaryPublished = false;
             try
             {
-                WriteExact(temporaryPath, candidate);
-                InjectSaveFault(JournalSaveCrashPoint.CandidateFlushed);
-                if (primaryIsValid)
-                {
-                    fileSystem.ReplaceFile(
-                        temporaryPath,
-                        journalFileName,
-                        backupFileName);
-                }
-                else
-                {
-                    if (fileSystem.FileExists(journalFileName))
-                    {
-                        fileSystem.DeleteFile(journalFileName);
-                    }
-                    fileSystem.PublishNewFile(temporaryPath, journalFileName);
-                }
-                primaryPublished = true;
-                // Once the atomic publication API returns, this revision is
-                // the authoritative primary even if verification IO is
-                // temporarily unavailable. Keep the caller aligned so a
-                // later recovery save cannot present a stale revision.
-                CopyPersistedFields(candidate, journal);
-                InjectSaveFault(JournalSaveCrashPoint.PrimaryPublished);
-                InjectSaveFault(JournalSaveCrashPoint.PrimaryReadback);
-                TransactionJournal persisted = ReadExact(journalFileName);
+                byte[] candidateBytes = Serialize(candidate);
+                AtomicDocumentReadResult persistedDocument =
+                    documentPublisher.Publish(
+                        candidateBytes,
+                        primaryIsValid,
+                        delegate
+                        {
+                            InjectSaveFault(
+                                JournalSaveCrashPoint.CandidateFlushed);
+                        },
+                        delegate
+                        {
+                            primaryPublished = true;
+                            // Once the atomic publication API returns, this
+                            // revision is authoritative even if verification
+                            // IO is temporarily unavailable.
+                            CopyPersistedFields(candidate, journal);
+                            InjectSaveFault(
+                                JournalSaveCrashPoint.PrimaryPublished);
+                        },
+                        delegate
+                        {
+                            InjectSaveFault(
+                                JournalSaveCrashPoint.PrimaryReadback);
+                        });
+                TransactionJournal persisted =
+                    ReadDocument(persistedDocument);
                 ValidateReadback(candidate, persisted);
             }
             catch (JournalFilePublicationException publicationFailure)
@@ -435,6 +744,7 @@ namespace SBMSSetup
                 {
                     primaryPublished = true;
                     CopyPersistedFields(candidate, journal);
+                    TrySynchronizePublishedCandidate(candidate, journal);
                 }
                 throw;
             }
@@ -445,13 +755,6 @@ namespace SBMSSetup
                     TrySynchronizePublishedCandidate(candidate, journal);
                 }
                 throw;
-            }
-            finally
-            {
-                if (fileSystem.FileExists(temporaryPath))
-                {
-                    fileSystem.DeleteFile(temporaryPath);
-                }
             }
         }
 
@@ -469,8 +772,9 @@ namespace SBMSSetup
             catch
             {
                 // The caller retains the last known durable persistence fields.
-                // A later Save will resolve an invalid primary through the
-                // verified backup rather than inheriting an unverified revision.
+                // A later Load may expose a verified backup as degraded
+                // evidence, but Save and recovery remain blocked until the
+                // primary has been repaired explicitly.
             }
         }
 
@@ -497,25 +801,29 @@ namespace SBMSSetup
 
         public TransactionJournal Load()
         {
+            requiresPrimaryRepair = false;
             Exception primaryFailure = null;
-            if (fileSystem.FileExists(journalFileName))
+            if (documentPublisher.PrimaryExists)
             {
                 try
                 {
-                    return ReadExact(journalFileName);
+                    return ReadDocument(documentPublisher.ReadPrimary());
                 }
-                catch (Exception ex)
+                catch (AtomicDocumentFormatException ex)
                 {
                     primaryFailure = ex;
                 }
             }
-            if (fileSystem.FileExists(backupFileName))
+            if (documentPublisher.BackupExists)
             {
                 try
                 {
-                    return ReadExact(backupFileName);
+                    TransactionJournal backup =
+                        ReadDocument(documentPublisher.ReadBackup());
+                    requiresPrimaryRepair = true;
+                    return backup;
                 }
-                catch (Exception backupFailure)
+                catch (AtomicDocumentFormatException backupFailure)
                 {
                     throw new InvalidDataException(
                         "Both primary and backup transaction journals are invalid.",
@@ -531,12 +839,22 @@ namespace SBMSSetup
             return null;
         }
 
+        private void ThrowIfPrimaryRepairRequired()
+        {
+            if (requiresPrimaryRepair)
+            {
+                throw new InvalidOperationException(
+                    "The active transaction journal requires explicit primary " +
+                    "repair before installer state may advance.");
+            }
+        }
+
         private void WriteExact(string path, TransactionJournal journal)
         {
-            var serializer = new DataContractJsonSerializer(typeof(TransactionJournal));
+            byte[] bytes = Serialize(journal);
             using (Stream stream = fileSystem.CreateNewFile(path))
             {
-                serializer.WriteObject(stream, journal);
+                stream.Write(bytes, 0, bytes.Length);
                 FileStream fileStream = stream as FileStream;
                 if (fileStream != null)
                 {
@@ -551,9 +869,61 @@ namespace SBMSSetup
 
         private TransactionJournal ReadExact(string path)
         {
-            var serializer = new DataContractJsonSerializer(typeof(TransactionJournal));
-            TransactionJournal journal;
             using (Stream stream = fileSystem.OpenReadFile(path))
+            using (var buffer = new MemoryStream())
+            {
+                stream.CopyTo(buffer);
+                return DeserializeAndValidate(buffer.ToArray());
+            }
+        }
+
+        private TransactionJournal ReadDocument(
+            AtomicDocumentReadResult document)
+        {
+            if (document == null || document.Bytes == null)
+            {
+                throw new InvalidDataException(
+                    "Atomic document readback is missing.");
+            }
+            try
+            {
+                return DeserializeAndValidate(document.Bytes);
+            }
+            catch (AtomicDocumentFormatException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                if (failure is OutOfMemoryException ||
+                    failure is AccessViolationException ||
+                    failure is System.Threading.ThreadAbortException)
+                {
+                    throw;
+                }
+                throw new AtomicDocumentFormatException(
+                    "Transaction journal document is malformed or invalid.",
+                    failure);
+            }
+        }
+
+        private static byte[] Serialize(TransactionJournal journal)
+        {
+            var serializer =
+                new DataContractJsonSerializer(typeof(TransactionJournal));
+            using (var stream = new MemoryStream())
+            {
+                serializer.WriteObject(stream, journal);
+                return stream.ToArray();
+            }
+        }
+
+        private static TransactionJournal DeserializeAndValidate(byte[] bytes)
+        {
+            var serializer =
+                new DataContractJsonSerializer(typeof(TransactionJournal));
+            TransactionJournal journal;
+            using (var stream = new MemoryStream(bytes, false))
             {
                 journal = serializer.ReadObject(stream) as TransactionJournal;
             }
