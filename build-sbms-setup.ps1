@@ -59,6 +59,7 @@ $WindowsInventorySource = Join-Path $Root 'installer\WindowsInstallerInventory.c
 $OwnershipSource = Join-Path $Root 'installer\InstallerOwnership.cs'
 $AuditOnlySource = Join-Path $Root 'installer\InstallerAuditOnly.cs'
 $WindowsTransactionPlatformSource = Join-Path $Root 'installer\WindowsInstallerTransactionPlatform.cs'
+$WindowsMutationExecutionSource = Join-Path $Root 'installer\WindowsInstallerMutationExecution.cs'
 $VerifierSource = Join-Path $Root 'installer\ReleaseIntegrityVerifier.cs'
 $DriverVerifierSource = Join-Path $Root 'installer\DriverCatalogVerifier.cs'
 $Manifest = $GeneratedManifest
@@ -84,7 +85,7 @@ if (-not (Test-Path $Manifest)) {
     throw "Missing manifest: $Manifest"
 }
 
-& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsHandleRelativeJournalSource $FileTransactionJournalStoreSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $WindowsTransactionPlatformSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
+& $Csc /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:$Manifest /out:$Out /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Runtime.Serialization.dll /reference:System.Xml.dll /reference:System.Security.dll $Source $TransactionSource $TransactionModelsSource $TransactionEngineSource $TransactionJournalSource $WindowsHandleRelativeJournalSource $FileTransactionJournalStoreSource $WindowsInventorySource $OwnershipSource $AuditOnlySource $WindowsTransactionPlatformSource $WindowsMutationExecutionSource $VerifierSource $DriverVerifierSource $VersionSource $SigningSource
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
