@@ -122,12 +122,13 @@ Invoke-Test 'Production schema v4 diagnostics resolve release-root provenance' {
         [void](New-Item -ItemType Directory -Path $driver -Force)
 
         $engine = (Get-Process -Id $PID).Path
-        $engineVersion = (Get-Item -LiteralPath $engine).VersionInfo.ProductVersion
-        if ([string]::IsNullOrWhiteSpace([string]$engineVersion)) {
-            $engineVersion = (Get-Item -LiteralPath $engine).VersionInfo.FileVersion
-        }
-        Copy-Item -LiteralPath $engine -Destination (Join-Path $payload 'SBMS.exe')
+        $copiedEngine = Join-Path $payload 'SBMS.exe'
+        Copy-Item -LiteralPath $engine -Destination $copiedEngine
         Copy-Item -LiteralPath $engine -Destination (Join-Path $releaseRoot 'SBMSSetup.exe')
+        $engineVersion = (Get-Item -LiteralPath $copiedEngine).VersionInfo.ProductVersion
+        if ([string]::IsNullOrWhiteSpace([string]$engineVersion)) {
+            $engineVersion = (Get-Item -LiteralPath $copiedEngine).VersionInfo.FileVersion
+        }
         Copy-Item -LiteralPath (Join-Path $root 'diagnose-sbms.ps1') -Destination $payload
         Copy-Item -LiteralPath (Join-Path $root 'driver-identity.json') -Destination $payload
         [System.IO.File]::WriteAllText(
