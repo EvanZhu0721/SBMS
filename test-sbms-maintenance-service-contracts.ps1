@@ -43,6 +43,7 @@ try {
         (Join-Path $root 'maintenance-service\MaintenanceWindowsClientNative.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceReplayProductionStore.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceReplayFileTransactionJournalFactory.cs'),
+        (Join-Path $root 'tests\MaintenancePipeWireContractTests.cs'),
         (Join-Path $root 'tests\MaintenanceServiceRuntimeContractTests.cs')
     )
     $compilerArgs = @(

@@ -531,6 +531,130 @@ namespace SBMSSetup
         }
     }
 
+    internal static class PayloadBrokerCommandCodec
+    {
+        private static readonly UTF8Encoding StrictUtf8 =
+            new UTF8Encoding(false, true);
+
+        internal static byte[] SerializeCanonical(
+            PayloadBrokerCommand command)
+        {
+            if (command == null)
+            {
+                throw new ArgumentNullException("command");
+            }
+            command.Validate();
+            using (var stream = new MemoryStream())
+            {
+                NewSerializer().WriteObject(stream, command);
+                byte[] bytes = stream.ToArray();
+                RequirePayloadLength(bytes);
+                return bytes;
+            }
+        }
+
+        internal static PayloadBrokerCommand DeserializeAndValidate(
+            byte[] bytes)
+        {
+            RequirePayloadLength(bytes);
+            byte[] stableBytes = CopyBytes(bytes);
+            if (stableBytes.Length >= 3 &&
+                stableBytes[0] == 0xEF &&
+                stableBytes[1] == 0xBB &&
+                stableBytes[2] == 0xBF)
+            {
+                throw new InvalidOperationException(
+                    "Payload broker command must not contain a UTF-8 BOM.");
+            }
+            try
+            {
+                StrictUtf8.GetCharCount(stableBytes);
+            }
+            catch (DecoderFallbackException exception)
+            {
+                throw new InvalidOperationException(
+                    "Payload broker command is not strict UTF-8.",
+                    exception);
+            }
+
+            PayloadBrokerCommand command;
+            try
+            {
+                using (var stream =
+                    new MemoryStream(stableBytes, false))
+                {
+                    command =
+                        (PayloadBrokerCommand)NewSerializer().
+                            ReadObject(stream);
+                    if (stream.Position != stream.Length)
+                    {
+                        throw new InvalidOperationException(
+                            "Payload broker command has trailing data.");
+                    }
+                }
+                if (command == null)
+                {
+                    throw new InvalidOperationException(
+                        "Payload broker command decoded to null.");
+                }
+                command.Validate();
+            }
+            catch (InvalidOperationException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                throw new InvalidOperationException(
+                    "Payload broker command cannot be decoded.",
+                    exception);
+            }
+            PayloadBrokerResponseCodec.RequireExactBytes(
+                stableBytes,
+                SerializeCanonical(command),
+                "Payload broker command bytes are not canonical.");
+            return command;
+        }
+
+        private static void RequirePayloadLength(byte[] bytes)
+        {
+            if (bytes == null || bytes.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    "Payload broker command bytes are missing.");
+            }
+            if (bytes.Length >
+                MaintenancePipeFrameCodec.MaxRequestPayload)
+            {
+                throw new InvalidOperationException(
+                    "Payload broker command exceeds the request cap.");
+            }
+        }
+
+        private static byte[] CopyBytes(byte[] bytes)
+        {
+            var copy = new byte[bytes.Length];
+            Buffer.BlockCopy(
+                bytes,
+                0,
+                copy,
+                0,
+                bytes.Length);
+            return copy;
+        }
+
+        private static DataContractJsonSerializer NewSerializer()
+        {
+            return new DataContractJsonSerializer(
+                typeof(PayloadBrokerCommand),
+                new[]
+                {
+                    typeof(PayloadNamespaceOwnershipCasToken),
+                    typeof(PayloadWorkspaceCasToken)
+                });
+        }
+    }
+
     // This slice defines only the canonical replay entry and wire codec. It
     // does not claim persistence, write-before-ack, or recovery semantics.
     internal static class PayloadBrokerResponseCodec
@@ -625,6 +749,323 @@ namespace SBMSSetup
                     typeof(PayloadWorkspaceCasToken),
                     typeof(PayloadNamespaceOwnershipObservation)
                 });
+        }
+    }
+
+    internal enum MaintenancePipeFrameKind : ushort
+    {
+        Request = 1,
+        Response = 2,
+        Ack = 3
+    }
+
+    internal sealed class MaintenancePipeFrame
+    {
+        private readonly byte[] payload;
+
+        internal MaintenancePipeFrame(
+            MaintenancePipeFrameKind kind,
+            byte[] value)
+        {
+            if (value == null)
+            {
+                throw new ArgumentNullException("value");
+            }
+            Kind = kind;
+            payload = new byte[value.Length];
+            Buffer.BlockCopy(
+                value,
+                0,
+                payload,
+                0,
+                value.Length);
+        }
+
+        internal readonly MaintenancePipeFrameKind Kind;
+
+        internal int PayloadLength
+        {
+            get { return payload.Length; }
+        }
+
+        internal byte[] GetPayloadCopy()
+        {
+            var copy = new byte[payload.Length];
+            Buffer.BlockCopy(
+                payload,
+                0,
+                copy,
+                0,
+                payload.Length);
+            return copy;
+        }
+    }
+
+    internal static class MaintenancePipeFrameCodec
+    {
+        internal const int HeaderLength = 16;
+        internal const int MaxRequestPayload = 64 * 1024;
+        internal const int MaxResponsePayload = 1024 * 1024;
+        internal const int AckPayloadLength = 32;
+        private const ushort Version = 1;
+
+        internal static byte[] Encode(
+            MaintenancePipeFrameKind kind,
+            byte[] payload)
+        {
+            ValidatePayload(kind, payload);
+            int payloadLength = payload.Length;
+            var frame = new byte[HeaderLength + payloadLength];
+            frame[0] = (byte)'S';
+            frame[1] = (byte)'B';
+            frame[2] = (byte)'M';
+            frame[3] = (byte)'S';
+            WriteUInt16(frame, 4, Version);
+            WriteUInt16(frame, 6, (ushort)kind);
+            WriteUInt32(frame, 8, (uint)payloadLength);
+            WriteUInt32(frame, 12, 0);
+            Buffer.BlockCopy(
+                payload,
+                0,
+                frame,
+                HeaderLength,
+                payloadLength);
+            return frame;
+        }
+
+        internal static byte[] Encode(MaintenancePipeFrame frame)
+        {
+            if (frame == null)
+            {
+                throw new ArgumentNullException("frame");
+            }
+            return Encode(
+                frame.Kind,
+                frame.GetPayloadCopy());
+        }
+
+        internal static MaintenancePipeFrame Decode(byte[] frameBytes)
+        {
+            if (frameBytes == null ||
+                frameBytes.Length < HeaderLength)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame header is incomplete.");
+            }
+            if (frameBytes[0] != (byte)'S' ||
+                frameBytes[1] != (byte)'B' ||
+                frameBytes[2] != (byte)'M' ||
+                frameBytes[3] != (byte)'S')
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame magic is invalid.");
+            }
+            if (ReadUInt16(frameBytes, 4) != Version)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame version is unsupported.");
+            }
+            ushort rawKind = ReadUInt16(frameBytes, 6);
+            if (rawKind < (ushort)MaintenancePipeFrameKind.Request ||
+                rawKind > (ushort)MaintenancePipeFrameKind.Ack)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame kind is unsupported.");
+            }
+            if (ReadUInt32(frameBytes, 12) != 0)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame reserved field is nonzero.");
+            }
+            uint rawPayloadLength =
+                ReadUInt32(frameBytes, 8);
+            if (rawPayloadLength > Int32.MaxValue)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame payload length overflows Int32.");
+            }
+            var kind = (MaintenancePipeFrameKind)rawKind;
+            int payloadLength = (int)rawPayloadLength;
+            ValidatePayloadLength(kind, payloadLength);
+            long expectedLength =
+                (long)HeaderLength + payloadLength;
+            if (expectedLength != frameBytes.Length)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame length does not match its header.");
+            }
+            var payload = new byte[payloadLength];
+            Buffer.BlockCopy(
+                frameBytes,
+                HeaderLength,
+                payload,
+                0,
+                payloadLength);
+            return new MaintenancePipeFrame(kind, payload);
+        }
+
+        internal static byte[] EncodeAck(
+            byte[] canonicalResponsePayload)
+        {
+            byte[] stablePayload =
+                CopyResponsePayload(canonicalResponsePayload);
+            using (SHA256 algorithm = SHA256.Create())
+            {
+                return Encode(
+                    MaintenancePipeFrameKind.Ack,
+                    algorithm.ComputeHash(stablePayload));
+            }
+        }
+
+        internal static void DecodeAckAndVerify(
+            byte[] ackFrameBytes,
+            byte[] canonicalResponsePayload)
+        {
+            MaintenancePipeFrame frame = Decode(ackFrameBytes);
+            if (frame.Kind != MaintenancePipeFrameKind.Ack)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe acknowledgement kind is invalid.");
+            }
+            byte[] stablePayload =
+                CopyResponsePayload(canonicalResponsePayload);
+            byte[] expected;
+            using (SHA256 algorithm = SHA256.Create())
+            {
+                expected = algorithm.ComputeHash(stablePayload);
+            }
+            byte[] actual = frame.GetPayloadCopy();
+            if (!FixedTimeEquals(actual, expected))
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe acknowledgement digest differs.");
+            }
+        }
+
+        private static byte[] CopyResponsePayload(byte[] payload)
+        {
+            if (payload == null ||
+                payload.Length == 0 ||
+                payload.Length > MaxResponsePayload)
+            {
+                throw new InvalidOperationException(
+                    "Canonical response payload length is invalid.");
+            }
+            var copy = new byte[payload.Length];
+            Buffer.BlockCopy(
+                payload,
+                0,
+                copy,
+                0,
+                payload.Length);
+            return copy;
+        }
+
+        private static void ValidatePayload(
+            MaintenancePipeFrameKind kind,
+            byte[] payload)
+        {
+            if (payload == null)
+            {
+                throw new InvalidOperationException(
+                    "Maintenance pipe frame payload is missing.");
+            }
+            ValidatePayloadLength(kind, payload.Length);
+        }
+
+        private static void ValidatePayloadLength(
+            MaintenancePipeFrameKind kind,
+            int payloadLength)
+        {
+            if (kind == MaintenancePipeFrameKind.Request)
+            {
+                if (payloadLength == 0 ||
+                    payloadLength > MaxRequestPayload)
+                {
+                    throw new InvalidOperationException(
+                        "Maintenance pipe request payload length is invalid.");
+                }
+                return;
+            }
+            if (kind == MaintenancePipeFrameKind.Response)
+            {
+                if (payloadLength == 0 ||
+                    payloadLength > MaxResponsePayload)
+                {
+                    throw new InvalidOperationException(
+                        "Maintenance pipe response payload length is invalid.");
+                }
+                return;
+            }
+            if (kind == MaintenancePipeFrameKind.Ack)
+            {
+                if (payloadLength != AckPayloadLength)
+                {
+                    throw new InvalidOperationException(
+                        "Maintenance pipe acknowledgement payload length is invalid.");
+                }
+                return;
+            }
+            throw new InvalidOperationException(
+                "Maintenance pipe frame kind is unsupported.");
+        }
+
+        private static bool FixedTimeEquals(
+            byte[] first,
+            byte[] second)
+        {
+            if (first == null ||
+                second == null ||
+                first.Length != second.Length)
+            {
+                return false;
+            }
+            int difference = 0;
+            for (int index = 0; index < first.Length; ++index)
+            {
+                difference |= first[index] ^ second[index];
+            }
+            return difference == 0;
+        }
+
+        private static ushort ReadUInt16(
+            byte[] value,
+            int offset)
+        {
+            return (ushort)(
+                value[offset] |
+                (value[offset + 1] << 8));
+        }
+
+        private static uint ReadUInt32(
+            byte[] value,
+            int offset)
+        {
+            return
+                (uint)value[offset] |
+                ((uint)value[offset + 1] << 8) |
+                ((uint)value[offset + 2] << 16) |
+                ((uint)value[offset + 3] << 24);
+        }
+
+        private static void WriteUInt16(
+            byte[] value,
+            int offset,
+            ushort item)
+        {
+            value[offset] = (byte)item;
+            value[offset + 1] = (byte)(item >> 8);
+        }
+
+        private static void WriteUInt32(
+            byte[] value,
+            int offset,
+            uint item)
+        {
+            value[offset] = (byte)item;
+            value[offset + 1] = (byte)(item >> 8);
+            value[offset + 2] = (byte)(item >> 16);
+            value[offset + 3] = (byte)(item >> 24);
         }
     }
 

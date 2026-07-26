@@ -1363,6 +1363,9 @@ namespace SBMSSetup
             }
             Run("identity reuses fixed contracts", IdentityReusesContracts);
             Run("security descriptor is exact", SecurityDescriptorIsExact);
+            Run(
+                "maintenance pipe wire codec is strict",
+                MaintenancePipeWireContractTests.Run);
             Run("client token evidence is immutable", ClientTokenEvidenceIsImmutable);
             Run("production client policy is exact", ProductionClientPolicyIsExact);
             Run("client capture sequencing is fail closed", ClientCaptureSequencingIsFailClosed);
