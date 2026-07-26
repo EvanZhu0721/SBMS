@@ -1412,6 +1412,9 @@ namespace SBMSSetup
 
         private static void SecurityDescriptorIsExact()
         {
+            const int fileCreatePipeInstance = 0x00000004;
+            const int genericWrite =
+                unchecked((int)0x40000000);
             const string expectedSid =
                 "S-1-5-80-2298780130-3752148843-3872957159-3129965176-2730309495";
             ProtectedRootSecurityMaterial material =
@@ -1482,9 +1485,22 @@ namespace SBMSSetup
                 2,
                 WellKnownSid(
                     WellKnownSidType.BuiltinAdministratorsSid),
-                unchecked((int)0xC0000000),
+                0x00000003,
                 AceFlags.None,
                 "Pipe Administrators");
+            var pipeAdministratorsAce =
+                pipeDescriptor.DiscretionaryAcl[2] as CommonAce;
+            Assert(
+                MaintenancePipeSecurityContract.ClientDesiredAccess ==
+                    0x00000003 &&
+                pipeAdministratorsAce != null &&
+                (pipeAdministratorsAce.AccessMask &
+                    fileCreatePipeInstance) == 0 &&
+                (pipeAdministratorsAce.AccessMask &
+                    genericWrite) == 0,
+                "Pipe Administrators must receive only FILE_READ_DATA " +
+                "and FILE_WRITE_DATA, without create-instance or " +
+                "generic-write authority.");
         }
 
         private static void ClientTokenEvidenceIsImmutable()

@@ -316,6 +316,10 @@ namespace SBMSSetup
     {
         internal const string Endpoint =
             @"\\.\pipe\SBMS.Maintenance.v1";
+        internal const int FileReadData = 0x00000001;
+        internal const int FileWriteData = 0x00000002;
+        internal const int ClientDesiredAccess =
+            FileReadData | FileWriteData;
 
         internal readonly string ServiceSid;
         internal readonly string Sddl;
@@ -338,7 +342,11 @@ namespace SBMSSetup
                 "O:SYD:P" +
                 "(A;;GA;;;" + serviceSid + ")" +
                 "(A;;GA;;;SY)" +
-                "(A;;GRGW;;;BA)");
+                "(A;;0x" +
+                ClientDesiredAccess.ToString(
+                    "X8",
+                    CultureInfo.InvariantCulture) +
+                ";;;BA)");
         }
     }
 
