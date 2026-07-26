@@ -23,6 +23,23 @@ namespace
 constexpr UINT kWidth = 1920;
 constexpr UINT kHeight = 1080;
 constexpr UINT kRefreshRate = 60;
+constexpr UINT kStride = kWidth * 4;
+constexpr wchar_t kFrameMapping[] = L"Global\\SBMSFrame-v1";
+constexpr wchar_t kFrameEvent[] = L"Global\\SBMSFrameReady-v1";
+
+struct alignas(8) FrameHeader
+{
+    UINT magic;
+    UINT width;
+    UINT height;
+    UINT stride;
+    volatile LONG64 sequence;
+};
+
+constexpr UINT kFrameMagic = 0x53424d53;
+constexpr UINT kFrameError = 0x45525221;
+constexpr SIZE_T kFrameBytes = sizeof(FrameHeader) + static_cast<SIZE_T>(kStride) * kHeight;
+static_assert(sizeof(FrameHeader) == 24);
 
 // One permanent monitor identity. Changing either value makes Windows treat the
 // virtual monitor as new hardware and loses its saved desktop placement.
@@ -45,10 +62,97 @@ struct Drain
 {
     IDDCX_SWAPCHAIN swapChain{};
     ID3D11Device* d3dDevice{};
+    ID3D11DeviceContext* d3dContext{};
+    ID3D11Texture2D* staging{};
     HANDLE frameAvailable{};
+    HANDLE frameMapping{};
+    HANDLE frameEvent{};
+    FrameHeader* frame{};
     HANDLE stop{};
     HANDLE thread{};
+    volatile LONG ownership{};
 };
+
+void PublishError(Drain* drain, UINT stage, HRESULT result, UINT detail = 0)
+{
+    InterlockedIncrement64(&drain->frame->sequence);
+    drain->frame->magic = kFrameError;
+    drain->frame->width = stage;
+    drain->frame->height = static_cast<UINT>(result);
+    drain->frame->stride = detail;
+    MemoryBarrier();
+    InterlockedIncrement64(&drain->frame->sequence);
+    SetEvent(drain->frameEvent);
+}
+
+bool PublishFrame(Drain* drain, IDXGIResource* surface)
+{
+    ID3D11Texture2D* source = nullptr;
+    HRESULT result = surface->QueryInterface(IID_PPV_ARGS(&source));
+    if (FAILED(result))
+    {
+        PublishError(drain, 1, result);
+        return false;
+    }
+
+    if (drain->staging == nullptr)
+    {
+        D3D11_TEXTURE2D_DESC description{};
+        source->GetDesc(&description);
+        if (description.Width != kWidth ||
+            description.Height != kHeight ||
+            description.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+        {
+            PublishError(
+                drain,
+                2,
+                E_INVALIDARG,
+                static_cast<UINT>(description.Format));
+            source->Release();
+            return false;
+        }
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        description.MiscFlags = 0;
+        result = drain->d3dDevice->CreateTexture2D(&description, nullptr, &drain->staging);
+        if (FAILED(result))
+        {
+            PublishError(drain, 3, result);
+        }
+    }
+    if (SUCCEEDED(result))
+    {
+        drain->d3dContext->CopyResource(drain->staging, source);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        result = drain->d3dContext->Map(drain->staging, 0, D3D11_MAP_READ, 0, &mapped);
+        if (SUCCEEDED(result))
+        {
+            InterlockedIncrement64(&drain->frame->sequence);
+            drain->frame->magic = kFrameMagic;
+            drain->frame->width = kWidth;
+            drain->frame->height = kHeight;
+            drain->frame->stride = kStride;
+            BYTE* destination = reinterpret_cast<BYTE*>(drain->frame + 1);
+            const BYTE* sourceRow = static_cast<const BYTE*>(mapped.pData);
+            for (UINT row = 0; row < kHeight; ++row)
+            {
+                memcpy(destination + static_cast<SIZE_T>(row) * kStride, sourceRow, kStride);
+                sourceRow += mapped.RowPitch;
+            }
+            MemoryBarrier();
+            InterlockedIncrement64(&drain->frame->sequence);
+            SetEvent(drain->frameEvent);
+            drain->d3dContext->Unmap(drain->staging, 0);
+        }
+        else
+        {
+            PublishError(drain, 4, result);
+        }
+    }
+    source->Release();
+    return SUCCEEDED(result);
+}
 
 struct DeviceState
 {
@@ -97,12 +201,30 @@ IDDCX_TARGET_MODE TargetMode()
     return mode;
 }
 
+void DestroyDrain(Drain* drain)
+{
+    if (drain->thread != nullptr) CloseHandle(drain->thread);
+    if (drain->stop != nullptr) CloseHandle(drain->stop);
+    if (drain->frame != nullptr) UnmapViewOfFile(drain->frame);
+    if (drain->frameEvent != nullptr) CloseHandle(drain->frameEvent);
+    if (drain->frameMapping != nullptr) CloseHandle(drain->frameMapping);
+    if (drain->staging != nullptr) drain->staging->Release();
+    if (drain->d3dContext != nullptr) drain->d3dContext->Release();
+    if (drain->d3dDevice != nullptr) drain->d3dDevice->Release();
+    delete drain;
+}
+
 DWORD WINAPI DrainFrames(void* argument)
 {
     auto* drain = static_cast<Drain*>(argument);
 
     for (;;)
     {
+        if (WaitForSingleObject(drain->stop, 0) == WAIT_OBJECT_0)
+        {
+            break;
+        }
+
         IDARG_OUT_RELEASEANDACQUIREBUFFER buffer{};
         const HRESULT result =
             IddCxSwapChainReleaseAndAcquireBuffer(drain->swapChain, &buffer);
@@ -123,10 +245,9 @@ DWORD WINAPI DrainFrames(void* argument)
             break;
         }
 
-        // This first driver deliberately transports no pixels. Acquiring and
-        // releasing every surface is still mandatory or DWM will stall.
         if (buffer.MetaData.pSurface != nullptr)
         {
+            PublishFrame(drain, buffer.MetaData.pSurface);
             buffer.MetaData.pSurface->Release();
         }
 
@@ -138,6 +259,10 @@ DWORD WINAPI DrainFrames(void* argument)
 
     WdfObjectDelete(drain->swapChain);
     drain->swapChain = nullptr;
+    if (InterlockedCompareExchange(&drain->ownership, 2, 0) == 1)
+    {
+        DestroyDrain(drain);
+    }
     return 0;
 }
 
@@ -153,18 +278,17 @@ void StopDrain(MonitorState* monitor)
     SetEvent(drain->stop);
     if (drain->thread != nullptr)
     {
-        WaitForSingleObject(drain->thread, INFINITE);
-        CloseHandle(drain->thread);
+        if (WaitForSingleObject(drain->thread, 5000) != WAIT_OBJECT_0)
+        {
+            // Either the worker observes state 1 and destroys itself, or it
+            // already published state 2 and cleanup remains here.
+            if (InterlockedCompareExchange(&drain->ownership, 1, 0) != 2)
+            {
+                return;
+            }
+        }
     }
-    if (drain->stop != nullptr)
-    {
-        CloseHandle(drain->stop);
-    }
-    if (drain->d3dDevice != nullptr)
-    {
-        drain->d3dDevice->Release();
-    }
-    delete drain;
+    DestroyDrain(drain);
 }
 
 bool StartDrain(
@@ -209,13 +333,13 @@ bool StartDrain(
         result = IddCxSwapChainSetDevice(swapChain, &setDevice);
     }
 
-    if (d3dContext != nullptr) d3dContext->Release();
     if (dxgiDevice != nullptr) dxgiDevice->Release();
     if (adapter != nullptr) adapter->Release();
     if (factory != nullptr) factory->Release();
 
     if (FAILED(result))
     {
+        if (d3dContext != nullptr) d3dContext->Release();
         if (d3dDevice != nullptr) d3dDevice->Release();
         return false;
     }
@@ -229,15 +353,28 @@ bool StartDrain(
 
     drain->swapChain = swapChain;
     drain->d3dDevice = d3dDevice;
+    drain->d3dContext = d3dContext;
     drain->frameAvailable = frameAvailable;
-    drain->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (drain->stop != nullptr)
+    drain->frameMapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, kFrameMapping);
+    if (drain->frameMapping != nullptr)
     {
+        drain->frame = static_cast<FrameHeader*>(
+            MapViewOfFile(drain->frameMapping, FILE_MAP_WRITE, 0, 0, kFrameBytes));
+    }
+    drain->frameEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, kFrameEvent);
+    drain->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (drain->frame != nullptr && drain->frameEvent != nullptr && drain->stop != nullptr)
+    {
+        drain->frame->sequence = 0;
         drain->thread = CreateThread(nullptr, 0, DrainFrames, drain, 0, nullptr);
     }
-    if (drain->stop == nullptr || drain->thread == nullptr)
+    if (drain->thread == nullptr)
     {
         if (drain->stop != nullptr) CloseHandle(drain->stop);
+        if (drain->frame != nullptr) UnmapViewOfFile(drain->frame);
+        if (drain->frameEvent != nullptr) CloseHandle(drain->frameEvent);
+        if (drain->frameMapping != nullptr) CloseHandle(drain->frameMapping);
+        d3dContext->Release();
         d3dDevice->Release();
         delete drain;
         return false;
