@@ -1,6 +1,9 @@
 using System;
+using System.ComponentModel;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Threading;
@@ -551,6 +554,84 @@ namespace SBMSSetup
         }
     }
 
+    internal sealed class CountingPipeSafeHandle
+        : SafeHandle
+    {
+        internal CountingPipeSafeHandle()
+            : base(IntPtr.Zero, true)
+        {
+            SetHandle(new IntPtr(44));
+        }
+
+        internal int ReleaseCalls;
+
+        public override bool IsInvalid
+        {
+            get { return handle == IntPtr.Zero; }
+        }
+
+        protected override bool ReleaseHandle()
+        {
+            ReleaseCalls++;
+            handle = IntPtr.Zero;
+            return true;
+        }
+    }
+
+    internal sealed class FakeNamedPipeClientNative
+        : IMaintenanceNamedPipeClientNative
+    {
+        internal bool FailAcquire;
+        internal bool FailRevert;
+        internal int ThreadId = 1;
+        internal int AcquireCalls;
+        internal int RevertCalls;
+
+        public int GetCurrentThreadId()
+        {
+            return ThreadId;
+        }
+
+        public void AcquireClient(
+            IntPtr borrowedPipeHandle,
+            ref bool armed,
+            out int error)
+        {
+            AcquireCalls++;
+            if (FailAcquire)
+            {
+                error = 5;
+                return;
+            }
+            armed = true;
+            error = 0;
+        }
+
+        public bool RevertToSelf(out int error)
+        {
+            RevertCalls++;
+            error = FailRevert ? 5 : 0;
+            return !FailRevert;
+        }
+    }
+
+    internal sealed class DelegateTokenCapture
+        : IMaintenanceClientTokenCapture
+    {
+        private readonly Func<MaintenanceClientTokenEvidence> action;
+
+        internal DelegateTokenCapture(
+            Func<MaintenanceClientTokenEvidence> action)
+        {
+            this.action = action;
+        }
+
+        public MaintenanceClientTokenEvidence Capture()
+        {
+            return action();
+        }
+    }
+
     internal sealed class SequenceImpersonationRunner
         : IMaintenanceClientImpersonationRunner
     {
@@ -566,26 +647,57 @@ namespace SBMSSetup
             Events = events;
         }
 
-        public void Impersonate()
+        public MaintenanceClientTokenEvidence CaptureScoped(
+            IMaintenanceClientTokenCapture capture,
+            IMaintenanceProcessTerminator terminator)
         {
             ImpersonateCalls++;
             Events.Add("impersonate");
             if (ImpersonateFailure != null)
             {
-                throw ImpersonateFailure;
+                throw new UnauthorizedAccessException(
+                    "Scoped impersonation setup failed.",
+                    ImpersonateFailure);
             }
             IsImpersonating = true;
-        }
-
-        public void Revert()
-        {
-            RevertCalls++;
-            Events.Add("revert");
-            IsImpersonating = false;
-            if (RevertFailure != null)
+            MaintenanceClientTokenEvidence evidence = null;
+            Exception captureFailure = null;
+            try
             {
-                throw RevertFailure;
+                evidence = capture.Capture();
+                if (evidence == null)
+                {
+                    captureFailure =
+                        new UnauthorizedAccessException(
+                            "Scoped capture returned no evidence.");
+                }
             }
+            catch (Exception failure)
+            {
+                captureFailure = failure;
+            }
+            finally
+            {
+                RevertCalls++;
+                Events.Add("revert");
+                IsImpersonating = false;
+                if (RevertFailure != null)
+                {
+                    terminator.Terminate(
+                        "Scoped capture revert failed.");
+                    throw new InvalidOperationException(
+                        "Maintenance process terminator returned after " +
+                        "scoped capture revert failure.",
+                        RevertFailure);
+                }
+            }
+            if (captureFailure != null)
+            {
+                throw new UnauthorizedAccessException(
+                    "Scoped token capture failed.",
+                    captureFailure);
+            }
+            return evidence;
         }
     }
 
@@ -672,6 +784,411 @@ namespace SBMSSetup
                     "Dispatcher did not receive authorization evidence.");
             }
             return null;
+        }
+    }
+
+    internal sealed class FakeWindowsTokenNative
+        : IMaintenanceWindowsTokenNative
+    {
+        internal readonly Dictionary<
+            MaintenanceTokenInformationClass,
+            byte[]> Payloads =
+                new Dictionary<
+                    MaintenanceTokenInformationClass,
+                    byte[]>();
+        internal MaintenanceTokenInformationClass? ProbeFailure;
+        internal MaintenanceTokenInformationClass? QueryFailure;
+        internal MaintenanceTokenInformationClass? SizeRace;
+        internal MaintenanceTokenInformationClass? ResizeOnce;
+        internal MaintenanceTokenInformationClass? InvalidReturnedLength;
+        internal MaintenanceTokenInformationClass? ProbeUnexpectedSuccess;
+        internal MaintenanceTokenInformationClass? InvalidProbeLength;
+        internal MaintenanceTokenInformationClass? OversizedProbe;
+        internal bool FailOpen;
+        internal bool TokenRestricted;
+        internal bool InvalidSidPointer;
+        internal int? SidPointerOffsetOverride;
+        internal int? StatisticsDriftOffset;
+        internal int OpenCalls;
+        internal int ReleaseCalls;
+        internal int InformationCalls;
+
+        internal FakeWindowsTokenNative()
+        {
+            Payloads[MaintenanceTokenInformationClass.User] =
+                SidPayload("S-1-5-18");
+            Payloads[MaintenanceTokenInformationClass.Groups] =
+                GroupsPayload(
+                    new[] { "S-1-5-32-544" },
+                    new[] { (uint)MaintenanceTokenGroupAttributes.Enabled });
+            Payloads[MaintenanceTokenInformationClass.Elevation] =
+                Int32Payload(0);
+            Payloads[MaintenanceTokenInformationClass.ElevationType] =
+                Int32Payload(1);
+            Payloads[MaintenanceTokenInformationClass.IntegrityLevel] =
+                SidPayload("S-1-16-16384");
+            Payloads[MaintenanceTokenInformationClass.IsAppContainer] =
+                Int32Payload(0);
+            Payloads[MaintenanceTokenInformationClass.HasRestrictions] =
+                Int32Payload(0);
+            Payloads[MaintenanceTokenInformationClass.Type] =
+                Int32Payload(2);
+            Payloads[
+                MaintenanceTokenInformationClass.ImpersonationLevel] =
+                    Int32Payload(2);
+            byte[] statistics =
+                new byte[Marshal.SizeOf(
+                    typeof(MaintenanceNativeTokenStatistics))];
+            WriteInt64(statistics, 0, 11);
+            WriteInt64(statistics, 8, 0x0102030405060708L);
+            WriteInt32(
+                statistics,
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "TokenType")),
+                2);
+            WriteInt32(
+                statistics,
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "ImpersonationLevel")),
+                2);
+            WriteInt32(
+                statistics,
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "GroupCount")),
+                1);
+            WriteInt64(
+                statistics,
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "ModifiedId")),
+                22);
+            Payloads[MaintenanceTokenInformationClass.Statistics] =
+                statistics;
+        }
+
+        public MaintenanceSafeTokenHandle
+            OpenCurrentThreadTokenForQuery()
+        {
+            OpenCalls++;
+            if (FailOpen)
+            {
+                throw new IOException("open token failure");
+            }
+            return new MaintenanceSafeTokenHandle(
+                new IntPtr(99),
+                false,
+                delegate { ReleaseCalls++; });
+        }
+
+        public bool GetTokenInformation(
+            MaintenanceSafeTokenHandle token,
+            MaintenanceTokenInformationClass informationClass,
+            IntPtr buffer,
+            int bufferLength,
+            out int returnLength,
+            out int error)
+        {
+            InformationCalls++;
+            byte[] payload = Payloads[informationClass];
+            if (buffer == IntPtr.Zero)
+            {
+                if (ProbeUnexpectedSuccess == informationClass)
+                {
+                    returnLength = payload.Length;
+                    error = 0;
+                    return true;
+                }
+                if (ProbeFailure == informationClass)
+                {
+                    returnLength = 0;
+                    error = 5;
+                    return false;
+                }
+                returnLength =
+                    InvalidProbeLength == informationClass
+                        ? 0
+                        : OversizedProbe == informationClass
+                            ? (1024 * 1024) + 1
+                            : payload.Length;
+                error = 122;
+                return false;
+            }
+            if (SizeRace == informationClass)
+            {
+                returnLength = checked(bufferLength + 8);
+                error = 122;
+                return false;
+            }
+            int queryNumber = InformationCallsFor(informationClass);
+            if (ResizeOnce == informationClass &&
+                queryNumber == 1)
+            {
+                returnLength = checked(bufferLength + 8);
+                error = 122;
+                return false;
+            }
+            if (QueryFailure == informationClass)
+            {
+                returnLength = payload.Length;
+                error = 5;
+                return false;
+            }
+            if (informationClass ==
+                    MaintenanceTokenInformationClass.Statistics &&
+                StatisticsDriftOffset.HasValue)
+            {
+                payload = (byte[])payload.Clone();
+                if ((queryNumber & 1) == 0)
+                {
+                    WriteInt32(
+                        payload,
+                        StatisticsDriftOffset.Value,
+                        checked(
+                            BitConverter.ToInt32(
+                                payload,
+                                StatisticsDriftOffset.Value) + 1));
+                }
+            }
+            Marshal.Copy(
+                payload,
+                0,
+                buffer,
+                Math.Min(bufferLength, payload.Length));
+            PatchSidPointers(
+                informationClass,
+                buffer,
+                payload);
+            returnLength =
+                InvalidReturnedLength == informationClass
+                    ? checked(bufferLength + 1)
+                    : payload.Length;
+            error = 0;
+            return true;
+        }
+
+        public byte[] CopySid(
+            IntPtr sid,
+            IntPtr containingBuffer,
+            int containingLength)
+        {
+            return new MaintenanceWindowsTokenNative().CopySid(
+                sid,
+                containingBuffer,
+                containingLength);
+        }
+
+        public bool IsTokenRestricted(
+            MaintenanceSafeTokenHandle token)
+        {
+            return TokenRestricted;
+        }
+
+        internal static byte[] Int32Payload(int value)
+        {
+            return BitConverter.GetBytes(value);
+        }
+
+        internal static byte[] SidPayload(string sid)
+        {
+            byte[] sidBytes = SidBytes(sid);
+            int fixedHeaderLength =
+                Marshal.SizeOf(
+                    typeof(MaintenanceNativeSidAndAttributes));
+            byte[] payload =
+                new byte[fixedHeaderLength + sidBytes.Length];
+            Buffer.BlockCopy(
+                sidBytes,
+                0,
+                payload,
+                fixedHeaderLength,
+                sidBytes.Length);
+            return payload;
+        }
+
+        internal static byte[] GroupsPayload(
+            string[] sids,
+            uint[] attributes)
+        {
+            int offset =
+                ((sizeof(uint) + IntPtr.Size - 1) / IntPtr.Size) *
+                IntPtr.Size;
+            int entrySize =
+                ((IntPtr.Size + sizeof(uint) + IntPtr.Size - 1) /
+                    IntPtr.Size) * IntPtr.Size;
+            var sidCopies = new List<byte[]>();
+            int sidBytesLength = 0;
+            foreach (string sid in sids)
+            {
+                byte[] copy = SidBytes(sid);
+                sidCopies.Add(copy);
+                sidBytesLength += copy.Length;
+            }
+            byte[] payload = new byte[
+                offset + (sids.Length * entrySize) +
+                sidBytesLength];
+            WriteInt32(payload, 0, sids.Length);
+            int sidOffset = offset + (sids.Length * entrySize);
+            for (int index = 0; index < sids.Length; ++index)
+            {
+                int entry = offset + (index * entrySize);
+                WriteInt32(
+                    payload,
+                    entry + IntPtr.Size,
+                    unchecked((int)attributes[index]));
+                Buffer.BlockCopy(
+                    sidCopies[index],
+                    0,
+                    payload,
+                    sidOffset,
+                    sidCopies[index].Length);
+                sidOffset += sidCopies[index].Length;
+            }
+            return payload;
+        }
+
+        private readonly Dictionary<
+            MaintenanceTokenInformationClass,
+            int> queryCalls =
+                new Dictionary<
+                    MaintenanceTokenInformationClass,
+                    int>();
+
+        private int InformationCallsFor(
+            MaintenanceTokenInformationClass informationClass)
+        {
+            int count;
+            queryCalls.TryGetValue(informationClass, out count);
+            count++;
+            queryCalls[informationClass] = count;
+            return count;
+        }
+
+        internal int CompletedQueriesFor(
+            MaintenanceTokenInformationClass informationClass)
+        {
+            int count;
+            queryCalls.TryGetValue(informationClass, out count);
+            return count;
+        }
+
+        private void PatchSidPointers(
+            MaintenanceTokenInformationClass informationClass,
+            IntPtr buffer,
+            byte[] payload)
+        {
+            if (informationClass ==
+                    MaintenanceTokenInformationClass.User ||
+                informationClass ==
+                    MaintenanceTokenInformationClass.IntegrityLevel)
+            {
+                if (payload.Length < IntPtr.Size)
+                {
+                    return;
+                }
+                Marshal.WriteIntPtr(
+                    buffer,
+                    InvalidSidPointer
+                        ? Add(buffer, -1)
+                        : Add(
+                            buffer,
+                            SidPointerOffsetOverride.HasValue
+                                ? SidPointerOffsetOverride.Value
+                                : Marshal.SizeOf(
+                                    typeof(
+                                        MaintenanceNativeSidAndAttributes))));
+                return;
+            }
+            if (informationClass !=
+                MaintenanceTokenInformationClass.Groups)
+            {
+                return;
+            }
+            int count = BitConverter.ToInt32(payload, 0);
+            int offset =
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenGroups),
+                    "Groups"));
+            int stride =
+                Marshal.SizeOf(
+                    typeof(MaintenanceNativeSidAndAttributes));
+            long entriesEnd =
+                (long)offset + ((long)count * stride);
+            if (count < 0 || entriesEnd > payload.Length)
+            {
+                return;
+            }
+            int sidOffset = offset + (count * stride);
+            for (int index = 0; index < count; ++index)
+            {
+                Marshal.WriteIntPtr(
+                    buffer,
+                    offset + (index * stride),
+                    InvalidSidPointer
+                        ? Add(buffer, -1)
+                        : Add(buffer, sidOffset));
+                byte subAuthorities =
+                    Marshal.ReadByte(buffer, sidOffset + 1);
+                sidOffset += 8 + (subAuthorities * 4);
+            }
+        }
+
+        private static byte[] SidBytes(string sid)
+        {
+            var identifier = new SecurityIdentifier(sid);
+            byte[] bytes = new byte[identifier.BinaryLength];
+            identifier.GetBinaryForm(bytes, 0);
+            return bytes;
+        }
+
+        private static IntPtr Add(IntPtr value, int offset)
+        {
+            return new IntPtr(value.ToInt64() + offset);
+        }
+
+        private static void WritePointer(
+            byte[] destination,
+            int offset,
+            IntPtr value)
+        {
+            byte[] bytes =
+                IntPtr.Size == 8
+                    ? BitConverter.GetBytes(value.ToInt64())
+                    : BitConverter.GetBytes(value.ToInt32());
+            Buffer.BlockCopy(
+                bytes,
+                0,
+                destination,
+                offset,
+                bytes.Length);
+        }
+
+        private static void WriteInt32(
+            byte[] destination,
+            int offset,
+            int value)
+        {
+            Buffer.BlockCopy(
+                BitConverter.GetBytes(value),
+                0,
+                destination,
+                offset,
+                sizeof(int));
+        }
+
+        private static void WriteInt64(
+            byte[] destination,
+            int offset,
+            long value)
+        {
+            Buffer.BlockCopy(
+                BitConverter.GetBytes(value),
+                0,
+                destination,
+                offset,
+                sizeof(long));
         }
     }
 
@@ -821,18 +1338,39 @@ namespace SBMSSetup
         private static int failures;
         private static int mutationCount;
         private static int reconcileCount;
+        private const int CorEFailFast =
+            unchecked((int)0x80131623);
+        private const int CorEUnhandledException =
+            unchecked((int)0xE0434352);
+        private const int FailStopUiSetupFailed = 96;
+        private const uint SemFailCriticalErrors = 0x0001;
+        private const uint SemNoGpFaultErrorBox = 0x0002;
+        private const uint WerFaultReportingNoUi = 32;
         private static readonly string TransactionId =
             "11111111111111111111111111111111";
         private static readonly string RequestId =
             "22222222222222222222222222222222";
 
-        private static int Main()
+        private static int Main(string[] args)
         {
+            if (args != null &&
+                args.Length == 3 &&
+                args[0] == "--native-failstop-child")
+            {
+                return RunNativeFailStopChild(
+                    args[1],
+                    args[2]);
+            }
             Run("identity reuses fixed contracts", IdentityReusesContracts);
             Run("security descriptor is exact", SecurityDescriptorIsExact);
             Run("client token evidence is immutable", ClientTokenEvidenceIsImmutable);
             Run("production client policy is exact", ProductionClientPolicyIsExact);
             Run("client capture sequencing is fail closed", ClientCaptureSequencingIsFailClosed);
+            Run("native scoped adapter is fail closed", NativeScopedAdapterIsFailClosed);
+            Run("production SID copy is bounded and deep", ProductionSidCopyIsBoundedAndDeep);
+            Run("windows token reader snapshots consistently", WindowsTokenReaderSnapshotsConsistently);
+            Run("windows token reader faults are bounded", WindowsTokenReaderFaultsAreBounded);
+            Run("process local thread token integration restores self", ProcessLocalThreadTokenIntegrationRestoresSelf);
             Run("lifecycle is bounded and terminal", LifecycleIsTerminal);
             Run("dispatcher is serialized and non-reentrant", DispatcherIsSafe);
             Run("dispatcher cancellation interrupts wait", DispatcherCancelsWait);
@@ -1315,6 +1853,1012 @@ namespace SBMSSetup
             VerifyRevertFailure(false);
             VerifyRevertFailure(true);
             VerifyTerminatorSentinel();
+        }
+
+        private static void WindowsTokenReaderSnapshotsConsistently()
+        {
+            Assert(
+                IntPtr.Size == 8 &&
+                Marshal.SizeOf(
+                    typeof(MaintenanceNativeLuid)) == 8 &&
+                Marshal.SizeOf(
+                    typeof(MaintenanceNativeSidAndAttributes)) == 16 &&
+                Marshal.SizeOf(
+                    typeof(MaintenanceNativeTokenStatistics)) == 56 &&
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "AuthenticationId")) == 8 &&
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "GroupCount")) == 40 &&
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "ModifiedId")) == 48 &&
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenGroups),
+                    "Groups")) == 8,
+                "x64 token native structure packing drifted.");
+            var native = new FakeWindowsTokenNative();
+            var reader =
+                new MaintenanceWindowsTokenSnapshotReader(native);
+            MaintenanceClientTokenEvidence evidence =
+                reader.Capture();
+            Assert(
+                evidence.UserSid == "S-1-5-18" &&
+                evidence.Groups.Count == 1 &&
+                evidence.Groups[0].Sid == "S-1-5-32-544" &&
+                evidence.Groups[0].Attributes ==
+                    MaintenanceTokenGroupAttributes.Enabled &&
+                !evidence.IsElevated &&
+                evidence.ElevationType ==
+                    MaintenanceTokenElevationType.Default &&
+                evidence.IntegrityRid == 0x4000 &&
+                !evidence.IsAppContainer &&
+                !evidence.IsRestricted &&
+                evidence.TokenType ==
+                    MaintenanceClientTokenType.Impersonation &&
+                evidence.ImpersonationLevel ==
+                    MaintenanceClientImpersonationLevel.Impersonation &&
+                evidence.AuthenticationId ==
+                    0x0102030405060708L &&
+                native.OpenCalls == 1 &&
+                native.ReleaseCalls == 1,
+                "Windows token snapshot did not preserve all fields.");
+
+            native.Payloads[
+                MaintenanceTokenInformationClass.Groups] =
+                    FakeWindowsTokenNative.GroupsPayload(
+                        new[] { "S-1-5-11" },
+                        new[] { (uint)0 });
+            Assert(
+                evidence.Groups[0].Sid == "S-1-5-32-544",
+                "Native snapshot retained mutable source storage.");
+
+            var restrictedNative = new FakeWindowsTokenNative();
+            restrictedNative.TokenRestricted = true;
+            Assert(
+                new MaintenanceWindowsTokenSnapshotReader(
+                    restrictedNative).Capture().IsRestricted,
+                "IsTokenRestricted was not merged into evidence.");
+            Assert(
+                restrictedNative.CompletedQueriesFor(
+                    MaintenanceTokenInformationClass.
+                        HasRestrictions) == 1,
+                "TokenHasRestrictions was short-circuited when " +
+                "IsTokenRestricted was true.");
+            var restrictionFlagNative =
+                new FakeWindowsTokenNative();
+            restrictionFlagNative.Payloads[
+                MaintenanceTokenInformationClass.HasRestrictions] =
+                    FakeWindowsTokenNative.Int32Payload(1);
+            Assert(
+                new MaintenanceWindowsTokenSnapshotReader(
+                    restrictionFlagNative).Capture().IsRestricted,
+                "TokenHasRestrictions was not merged into evidence.");
+        }
+
+        private static void NativeScopedAdapterIsFailClosed()
+        {
+            MaintenanceClientTokenEvidence evidence =
+                ClientToken(
+                    "S-1-5-18",
+                    null,
+                    false,
+                    MaintenanceTokenElevationType.Default,
+                    0x4000,
+                    false,
+                    false);
+
+            var successHandle = new CountingPipeSafeHandle();
+            var successNative = new FakeNamedPipeClientNative();
+            var successAdapter =
+                new MaintenanceNamedPipeClientImpersonationAdapter(
+                    successHandle,
+                    successNative);
+            MaintenanceClientTokenEvidence returned =
+                successAdapter.CaptureScoped(
+                    new DelegateTokenCapture(
+                        delegate { return evidence; }),
+                    new FakeTerminator());
+            successHandle.Dispose();
+            Assert(
+                Object.ReferenceEquals(returned, evidence) &&
+                successNative.AcquireCalls == 1 &&
+                successNative.RevertCalls == 1 &&
+                successHandle.ReleaseCalls == 1,
+                "Native scoped success did not acquire, revert, and " +
+                "release exactly once.");
+
+            var setupHandle = new CountingPipeSafeHandle();
+            var setupNative = new FakeNamedPipeClientNative();
+            setupNative.FailAcquire = true;
+            RejectUnauthorized(
+                delegate
+                {
+                    new MaintenanceNamedPipeClientImpersonationAdapter(
+                        setupHandle,
+                        setupNative).CaptureScoped(
+                            new DelegateTokenCapture(
+                                delegate { return evidence; }),
+                            new FakeTerminator());
+                });
+            setupHandle.Dispose();
+            Assert(
+                setupNative.AcquireCalls == 1 &&
+                setupNative.RevertCalls == 0 &&
+                setupHandle.ReleaseCalls == 1,
+                "Failed native setup fabricated a revert or leaked the " +
+                "SafeHandle lease.");
+
+            var captureHandle = new CountingPipeSafeHandle();
+            var captureNative = new FakeNamedPipeClientNative();
+            RejectUnauthorized(
+                delegate
+                {
+                    new MaintenanceNamedPipeClientImpersonationAdapter(
+                        captureHandle,
+                        captureNative).CaptureScoped(
+                            new DelegateTokenCapture(
+                                delegate
+                                {
+                                    throw new IOException(
+                                        "capture fault");
+                                }),
+                            new FakeTerminator());
+                });
+            captureHandle.Dispose();
+            Assert(
+                captureNative.AcquireCalls == 1 &&
+                captureNative.RevertCalls == 1 &&
+                captureHandle.ReleaseCalls == 1,
+                "Capture failure did not revert once and settle the " +
+                "SafeHandle lease.");
+
+            var reentrantHandle =
+                new CountingPipeSafeHandle();
+            var reentrantNative =
+                new FakeNamedPipeClientNative();
+            MaintenanceNamedPipeClientImpersonationAdapter
+                reentrantAdapter = null;
+            reentrantAdapter =
+                new MaintenanceNamedPipeClientImpersonationAdapter(
+                    reentrantHandle,
+                    reentrantNative);
+            RejectUnauthorized(
+                delegate
+                {
+                    reentrantAdapter.CaptureScoped(
+                        new DelegateTokenCapture(
+                            delegate
+                            {
+                                return reentrantAdapter.CaptureScoped(
+                                    new DelegateTokenCapture(
+                                        delegate
+                                        {
+                                            return evidence;
+                                        }),
+                                    new FakeTerminator());
+                            }),
+                        new FakeTerminator());
+                });
+            returned = reentrantAdapter.CaptureScoped(
+                new DelegateTokenCapture(
+                    delegate { return evidence; }),
+                new FakeTerminator());
+            reentrantHandle.Dispose();
+            Assert(
+                Object.ReferenceEquals(returned, evidence) &&
+                reentrantNative.AcquireCalls == 2 &&
+                reentrantNative.RevertCalls == 2 &&
+                reentrantHandle.ReleaseCalls == 1,
+                "Reentrant capture reached native code, cleared the " +
+                "outer identity, or poisoned a safely reverted adapter.");
+
+            foreach (string mode in new[]
+            {
+                "wrong-return",
+                "wrong-throw",
+                "revert-return",
+                "revert-throw"
+            })
+            {
+                AssertNativeFailStopChild(mode);
+            }
+        }
+
+        private static int RunNativeFailStopChild(
+            string mode,
+            string markerToken)
+        {
+            string uiGuardFailure;
+            bool uiGuardReady =
+                TryDisableFailStopUi(out uiGuardFailure);
+            string markerPath = Path.Combine(
+                Path.GetTempPath(),
+                markerToken);
+            if (!uiGuardReady)
+            {
+                WriteFailStopMarker(
+                    markerPath,
+                    "ui-guard-failed:" + uiGuardFailure);
+                return FailStopUiSetupFailed;
+            }
+            WriteFailStopMarker(
+                markerPath,
+                "child-enter:" + mode);
+            var handle = new CountingPipeSafeHandle();
+            var native = new FakeNamedPipeClientNative();
+            var terminator = new FakeTerminator();
+            bool terminatorThrows =
+                mode == "wrong-throw" ||
+                mode == "revert-throw";
+            terminator.OnTerminate =
+                delegate
+                {
+                    WriteFailStopMarker(
+                        markerPath,
+                        "terminator-enter:" +
+                        (terminatorThrows ? "throw" : "return"));
+                    if (terminatorThrows)
+                    {
+                        WriteFailStopMarker(
+                            markerPath,
+                            "terminator-throw");
+                        throw new ApplicationException(
+                            "terminator child sentinel");
+                    }
+                    WriteFailStopMarker(
+                        markerPath,
+                        "terminator-return");
+                };
+            if (mode == "revert-return" ||
+                mode == "revert-throw")
+            {
+                native.FailRevert = true;
+            }
+            var adapter =
+                new MaintenanceNamedPipeClientImpersonationAdapter(
+                    handle,
+                    native);
+            adapter.CaptureScoped(
+                new DelegateTokenCapture(
+                    delegate
+                    {
+                        WriteFailStopMarker(
+                            markerPath,
+                            "capture-enter:" + mode);
+                        if (mode == "wrong-return" ||
+                            mode == "wrong-throw")
+                        {
+                            native.ThreadId = 2;
+                        }
+                        return ClientToken(
+                            "S-1-5-18",
+                            null,
+                            false,
+                            MaintenanceTokenElevationType.Default,
+                            0x4000,
+                            false,
+                            false);
+                    }),
+                terminator);
+            WriteFailStopMarker(
+                markerPath,
+                "returned-after-failstop");
+            return 97;
+        }
+
+        private static bool TryDisableFailStopUi(
+            out string failure)
+        {
+            try
+            {
+                uint requiredErrorMode =
+                    SemFailCriticalErrors |
+                    SemNoGpFaultErrorBox;
+                FailStopUiNative.SetErrorMode(
+                    requiredErrorMode);
+                uint actualErrorMode =
+                    FailStopUiNative.GetErrorMode();
+                if ((actualErrorMode & requiredErrorMode) !=
+                    requiredErrorMode)
+                {
+                    failure =
+                        "SetErrorMode verification failed: actual=0x" +
+                        actualErrorMode.ToString("X");
+                    return false;
+                }
+                int werResult =
+                    FailStopUiNative.WerSetFlags(
+                        WerFaultReportingNoUi);
+                if (werResult != 0)
+                {
+                    failure =
+                        "WerSetFlags failed: hresult=0x" +
+                        werResult.ToString("X8");
+                    return false;
+                }
+                failure = null;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                failure =
+                    "UI guard exception: " +
+                    exception.GetType().FullName +
+                    " hresult=0x" +
+                    exception.HResult.ToString("X8");
+                return false;
+            }
+        }
+
+        private static class FailStopUiNative
+        {
+            [DllImport(
+                "kernel32.dll",
+                EntryPoint = "SetErrorMode")]
+            internal static extern uint SetErrorMode(
+                uint mode);
+
+            [DllImport(
+                "kernel32.dll",
+                EntryPoint = "GetErrorMode")]
+            internal static extern uint GetErrorMode();
+
+            [DllImport(
+                "kernel32.dll",
+                EntryPoint = "WerSetFlags")]
+            internal static extern int WerSetFlags(
+                uint flags);
+        }
+
+        private static void WriteFailStopMarker(
+            string markerPath,
+            string marker)
+        {
+            File.AppendAllText(
+                markerPath,
+                marker + Environment.NewLine);
+        }
+
+        private static void AssertNativeFailStopChild(
+            string mode)
+        {
+            string executable =
+                Environment.GetCommandLineArgs()[0];
+            string markerToken =
+                "SBMS-native-failstop-" +
+                Guid.NewGuid().ToString("N") +
+                ".marker";
+            string markerPath = Path.Combine(
+                Path.GetTempPath(),
+                markerToken);
+            var start =
+                new ProcessStartInfo();
+            start.FileName = executable;
+            start.Arguments =
+                "--native-failstop-child " + mode +
+                " " + markerToken;
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            start.ErrorDialog = false;
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            try
+            {
+                using (Process child = Process.Start(start))
+                {
+                    if (!child.WaitForExit(10000))
+                    {
+                        child.Kill();
+                        child.WaitForExit();
+                        throw new TimeoutException(
+                            "Native fail-stop child timed out: " +
+                            mode);
+                    }
+                    string output =
+                        child.StandardOutput.ReadToEnd() +
+                        child.StandardError.ReadToEnd();
+                    string[] markers = File.Exists(markerPath)
+                        ? File.ReadAllLines(markerPath)
+                        : new string[0];
+                    bool terminatorThrows =
+                        mode == "wrong-throw" ||
+                        mode == "revert-throw";
+                    Assert(
+                        Array.IndexOf(
+                            markers,
+                            "child-enter:" + mode) >= 0 &&
+                        Array.IndexOf(
+                            markers,
+                            "capture-enter:" + mode) >= 0 &&
+                        Array.IndexOf(
+                            markers,
+                            "terminator-enter:" +
+                            (terminatorThrows
+                                ? "throw"
+                                : "return")) >= 0 &&
+                        Array.IndexOf(
+                            markers,
+                            terminatorThrows
+                                ? "terminator-throw"
+                                : "terminator-return") >= 0 &&
+                        Array.IndexOf(
+                            markers,
+                            terminatorThrows
+                                ? "terminator-return"
+                                : "terminator-throw") < 0 &&
+                        Array.IndexOf(
+                            markers,
+                            "returned-after-failstop") < 0 &&
+                        Array.FindIndex(
+                            markers,
+                            delegate(string marker)
+                            {
+                                return marker.StartsWith(
+                                    "ui-guard-failed:",
+                                    StringComparison.Ordinal);
+                            }) < 0 &&
+                        child.ExitCode != FailStopUiSetupFailed &&
+                        child.ExitCode == CorEFailFast &&
+                        child.ExitCode != CorEUnhandledException,
+                        "Unsafe native child did not prove FailFast for " +
+                        mode + ": exit=" + child.ExitCode +
+                        " markers=" + String.Join(",", markers) +
+                        " output=" + output);
+                }
+            }
+            finally
+            {
+                if (File.Exists(markerPath))
+                {
+                    File.Delete(markerPath);
+                }
+            }
+        }
+
+        private static void ProductionSidCopyIsBoundedAndDeep()
+        {
+            byte[] sidBytes =
+                FakeWindowsTokenNative.SidPayload(
+                    "S-1-5-32-544");
+            int fixedHeaderLength =
+                Marshal.SizeOf(
+                    typeof(MaintenanceNativeSidAndAttributes));
+            // SidPayload contains the complete SID_AND_ATTRIBUTES prefix.
+            byte[] canonical =
+                new byte[sidBytes.Length - fixedHeaderLength];
+            Buffer.BlockCopy(
+                sidBytes,
+                fixedHeaderLength,
+                canonical,
+                0,
+                canonical.Length);
+            const int prefix = 16;
+            const int suffix = 16;
+            int total = checked(prefix + canonical.Length + suffix);
+            IntPtr allocation = Marshal.AllocHGlobal(total);
+            try
+            {
+                for (int index = 0; index < total; ++index)
+                {
+                    Marshal.WriteByte(allocation, index, 0xCC);
+                }
+                IntPtr sid = IntPtr.Add(allocation, prefix);
+                Marshal.Copy(canonical, 0, sid, canonical.Length);
+                var native = new MaintenanceWindowsTokenNative();
+                byte[] copy =
+                    native.CopySid(sid, allocation, total);
+                Assert(
+                    BytesEqual(copy, canonical),
+                    "Production CopySid changed valid SID bytes.");
+                Marshal.WriteByte(sid, 0, 2);
+                Assert(
+                    BytesEqual(copy, canonical),
+                    "Production CopySid did not return a deep copy.");
+
+                ExpectCopySidReject(
+                    native,
+                    IntPtr.Subtract(allocation, 1),
+                    allocation,
+                    total);
+                ExpectCopySidReject(
+                    native,
+                    IntPtr.Add(allocation, total),
+                    allocation,
+                    total);
+                ExpectCopySidReject(
+                    native,
+                    IntPtr.Add(allocation, total - 7),
+                    allocation,
+                    total);
+
+                Marshal.Copy(canonical, 0, sid, canonical.Length);
+                Marshal.WriteByte(sid, 0, 2);
+                ExpectCopySidReject(native, sid, allocation, total);
+                Marshal.WriteByte(sid, 0, 1);
+                Marshal.WriteByte(sid, 1, 16);
+                ExpectCopySidReject(native, sid, allocation, total);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(allocation);
+            }
+        }
+
+        private static void ExpectCopySidReject(
+            MaintenanceWindowsTokenNative native,
+            IntPtr sid,
+            IntPtr allocation,
+            int length)
+        {
+            RejectAny(
+                delegate
+                {
+                    native.CopySid(sid, allocation, length);
+                });
+        }
+
+        private static void WindowsTokenReaderFaultsAreBounded()
+        {
+            MaintenanceTokenInformationClass[] classes =
+            {
+                MaintenanceTokenInformationClass.Statistics,
+                MaintenanceTokenInformationClass.User,
+                MaintenanceTokenInformationClass.Groups,
+                MaintenanceTokenInformationClass.Elevation,
+                MaintenanceTokenInformationClass.ElevationType,
+                MaintenanceTokenInformationClass.IntegrityLevel,
+                MaintenanceTokenInformationClass.IsAppContainer,
+                MaintenanceTokenInformationClass.HasRestrictions,
+                MaintenanceTokenInformationClass.Type,
+                MaintenanceTokenInformationClass.ImpersonationLevel
+            };
+            foreach (MaintenanceTokenInformationClass informationClass
+                in classes)
+            {
+                var probe = new FakeWindowsTokenNative();
+                probe.ProbeFailure = informationClass;
+                RejectAny(
+                    delegate
+                    {
+                        new MaintenanceWindowsTokenSnapshotReader(
+                            probe).Capture();
+                    });
+                Assert(
+                    probe.ReleaseCalls == 1,
+                    informationClass +
+                    " probe failure leaked the token handle.");
+
+                var query = new FakeWindowsTokenNative();
+                query.QueryFailure = informationClass;
+                RejectAny(
+                    delegate
+                    {
+                        new MaintenanceWindowsTokenSnapshotReader(
+                            query).Capture();
+                    });
+                Assert(
+                    query.ReleaseCalls == 1,
+                    informationClass +
+                    " query failure leaked the token handle.");
+            }
+
+            MaintenanceTokenInformationClass[] exactClasses =
+            {
+                MaintenanceTokenInformationClass.Statistics,
+                MaintenanceTokenInformationClass.Elevation,
+                MaintenanceTokenInformationClass.ElevationType,
+                MaintenanceTokenInformationClass.IsAppContainer,
+                MaintenanceTokenInformationClass.Type,
+                MaintenanceTokenInformationClass.ImpersonationLevel
+            };
+            foreach (MaintenanceTokenInformationClass informationClass
+                in exactClasses)
+            {
+                var wrongExactLength =
+                    new FakeWindowsTokenNative();
+                byte[] original =
+                    wrongExactLength.Payloads[informationClass];
+                byte[] oversized = new byte[original.Length + 1];
+                Buffer.BlockCopy(
+                    original,
+                    0,
+                    oversized,
+                    0,
+                    original.Length);
+                wrongExactLength.Payloads[informationClass] =
+                    oversized;
+                RejectAny(
+                    delegate
+                    {
+                        new MaintenanceWindowsTokenSnapshotReader(
+                        wrongExactLength).Capture();
+                    });
+            }
+
+            var byteRestriction = new FakeWindowsTokenNative();
+            byteRestriction.Payloads[
+                MaintenanceTokenInformationClass.HasRestrictions] =
+                    new byte[] { 1 };
+            Assert(
+                new MaintenanceWindowsTokenSnapshotReader(
+                    byteRestriction).Capture().IsRestricted,
+                "One-byte Windows 11 TokenHasRestrictions was " +
+                "not accepted.");
+            foreach (int invalidLength in new[] { 2, 3, 5 })
+            {
+                var invalidRestriction =
+                    new FakeWindowsTokenNative();
+                invalidRestriction.Payloads[
+                    MaintenanceTokenInformationClass.
+                        HasRestrictions] =
+                            new byte[invalidLength];
+                RejectAny(
+                    delegate
+                    {
+                        new MaintenanceWindowsTokenSnapshotReader(
+                            invalidRestriction).Capture();
+                    });
+            }
+
+            var resize = new FakeWindowsTokenNative();
+            resize.ResizeOnce =
+                MaintenanceTokenInformationClass.User;
+            new MaintenanceWindowsTokenSnapshotReader(
+                resize).Capture();
+            var endlessResize = new FakeWindowsTokenNative();
+            endlessResize.SizeRace =
+                MaintenanceTokenInformationClass.User;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        endlessResize).Capture();
+                });
+
+            var invalidProbe = new FakeWindowsTokenNative();
+            invalidProbe.InvalidProbeLength =
+                MaintenanceTokenInformationClass.User;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        invalidProbe).Capture();
+                });
+            var unexpectedProbe = new FakeWindowsTokenNative();
+            unexpectedProbe.ProbeUnexpectedSuccess =
+                MaintenanceTokenInformationClass.User;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        unexpectedProbe).Capture();
+                });
+            var oversizedProbe = new FakeWindowsTokenNative();
+            oversizedProbe.OversizedProbe =
+                MaintenanceTokenInformationClass.User;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        oversizedProbe).Capture();
+                });
+            var invalidReturned = new FakeWindowsTokenNative();
+            invalidReturned.InvalidReturnedLength =
+                MaintenanceTokenInformationClass.User;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        invalidReturned).Capture();
+                });
+
+            var truncated = new FakeWindowsTokenNative();
+            truncated.Payloads[
+                MaintenanceTokenInformationClass.User] =
+                    new byte[1];
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        truncated).Capture();
+                });
+            var tooManyGroups = new FakeWindowsTokenNative();
+            tooManyGroups.Payloads[
+                MaintenanceTokenInformationClass.Groups] =
+                    FakeWindowsTokenNative.Int32Payload(4097);
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        tooManyGroups).Capture();
+                });
+            var countMismatch = new FakeWindowsTokenNative();
+            countMismatch.Payloads[
+                MaintenanceTokenInformationClass.Groups] =
+                    FakeWindowsTokenNative.GroupsPayload(
+                        new string[0],
+                        new uint[0]);
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        countMismatch).Capture();
+                });
+            var outsideSid = new FakeWindowsTokenNative();
+            outsideSid.InvalidSidPointer = true;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        outsideSid).Capture();
+                });
+            var sidInsideFixedHeader =
+                new FakeWindowsTokenNative();
+            sidInsideFixedHeader.SidPointerOffsetOverride =
+                IntPtr.Size;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        sidInsideFixedHeader).Capture();
+                });
+            var wrongIntegrityAuthority =
+                new FakeWindowsTokenNative();
+            wrongIntegrityAuthority.Payloads[
+                MaintenanceTokenInformationClass.IntegrityLevel] =
+                    FakeWindowsTokenNative.SidPayload("S-1-5-18");
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        wrongIntegrityAuthority).Capture();
+                });
+            var duplicateGroups = new FakeWindowsTokenNative();
+            duplicateGroups.Payloads[
+                MaintenanceTokenInformationClass.Groups] =
+                    FakeWindowsTokenNative.GroupsPayload(
+                        new[]
+                        {
+                            "S-1-5-32-544",
+                            "S-1-5-32-544"
+                        },
+                        new[]
+                        {
+                            (uint)MaintenanceTokenGroupAttributes.Enabled,
+                            (uint)MaintenanceTokenGroupAttributes.Enabled
+                        });
+            SetStatisticsGroupCount(duplicateGroups, 2);
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        duplicateGroups).Capture();
+                });
+
+            int[] sandwichOffsets =
+            {
+                0,
+                8,
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "ExpirationTime")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "TokenType")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "ImpersonationLevel")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "DynamicCharged")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "DynamicAvailable")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "GroupCount")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "PrivilegeCount")),
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    "ModifiedId"))
+            };
+            foreach (int offset in sandwichOffsets)
+            {
+                var drifting = new FakeWindowsTokenNative();
+                drifting.StatisticsDriftOffset = offset;
+                RejectAny(
+                    delegate
+                    {
+                        new MaintenanceWindowsTokenSnapshotReader(
+                            drifting).Capture();
+                    });
+                Assert(
+                    drifting.ReleaseCalls == 1,
+                    "Unstable statistics leaked the token handle.");
+            }
+
+            var typeDisagreement = new FakeWindowsTokenNative();
+            SetStatisticsInt32(
+                typeDisagreement,
+                "TokenType",
+                1);
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        typeDisagreement).Capture();
+                });
+            var levelDisagreement = new FakeWindowsTokenNative();
+            SetStatisticsInt32(
+                levelDisagreement,
+                "ImpersonationLevel",
+                1);
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        levelDisagreement).Capture();
+                });
+
+            var openFailure = new FakeWindowsTokenNative();
+            openFailure.FailOpen = true;
+            RejectAny(
+                delegate
+                {
+                    new MaintenanceWindowsTokenSnapshotReader(
+                        openFailure).Capture();
+                });
+            Assert(
+                openFailure.ReleaseCalls == 0,
+                "Failed OpenThreadToken fabricated ownership.");
+        }
+
+        private static void
+            ProcessLocalThreadTokenIntegrationRestoresSelf()
+        {
+            Exception failure = null;
+            var thread = new Thread(
+                new ThreadStart(
+                delegate
+                {
+                    try
+                    {
+                        if (!ImpersonateSelfForTest(2))
+                        {
+                            throw new Win32Exception(
+                                Marshal.GetLastWin32Error(),
+                                "ImpersonateSelf failed.");
+                        }
+                        try
+                        {
+                            MaintenanceClientTokenEvidence snapshot =
+                                new MaintenanceWindowsTokenSnapshotReader().
+                                    Capture();
+                            Assert(
+                                !String.IsNullOrWhiteSpace(
+                                    snapshot.UserSid) &&
+                                snapshot.TokenType ==
+                                    MaintenanceClientTokenType.
+                                        Impersonation &&
+                                snapshot.ImpersonationLevel >=
+                                    MaintenanceClientImpersonationLevel.
+                                        Impersonation,
+                                "Real thread-token snapshot is invalid.");
+                        }
+                        finally
+                        {
+                            if (!MaintenanceWindowsNativeMethods.
+                                    RevertToSelf())
+                            {
+                                throw new Win32Exception(
+                                    Marshal.GetLastWin32Error(),
+                                    "Integration RevertToSelf failed.");
+                            }
+                        }
+
+                        try
+                        {
+                            using (MaintenanceSafeTokenHandle unexpected =
+                                new MaintenanceWindowsTokenNative().
+                                    OpenCurrentThreadTokenForQuery())
+                            {
+                            }
+                        }
+                        catch (Win32Exception exception)
+                        {
+                            if (exception.NativeErrorCode == 1008)
+                            {
+                                return;
+                            }
+                            throw;
+                        }
+                        throw new InvalidOperationException(
+                            "Thread token survived RevertToSelf.");
+                    }
+                    catch (Exception exception)
+                    {
+                        failure = exception;
+                    }
+                }));
+            thread.Start();
+            thread.Join();
+            if (failure != null)
+            {
+                throw new InvalidOperationException(
+                    "Process-local thread-token integration failed: " +
+                    failure,
+                    failure);
+            }
+        }
+
+        private static void SetStatisticsGroupCount(
+            FakeWindowsTokenNative native,
+            int count)
+        {
+            SetStatisticsInt32(native, "GroupCount", count);
+        }
+
+        private static void SetStatisticsInt32(
+            FakeWindowsTokenNative native,
+            string field,
+            int value)
+        {
+            byte[] statistics = native.Payloads[
+                MaintenanceTokenInformationClass.Statistics];
+            byte[] bytes = BitConverter.GetBytes(value);
+            Buffer.BlockCopy(
+                bytes,
+                0,
+                statistics,
+                checked((int)Marshal.OffsetOf(
+                    typeof(MaintenanceNativeTokenStatistics),
+                    field)),
+                bytes.Length);
+        }
+
+        [DllImport(
+            "advapi32.dll",
+            EntryPoint = "ImpersonateSelf",
+            SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ImpersonateSelfForTest(
+            int impersonationLevel);
+
+        private static void RejectAny(Action action)
+        {
+            try
+            {
+                action();
+            }
+            catch
+            {
+                return;
+            }
+            throw new InvalidOperationException(
+                "Expected failure.");
+        }
+
+        private static void RejectExact(
+            Action action,
+            Exception expected)
+        {
+            try
+            {
+                action();
+            }
+            catch (Exception actual)
+            {
+                Assert(
+                    Object.ReferenceEquals(actual, expected),
+                    "Unexpected exception replaced the sentinel.");
+                return;
+            }
+            throw new InvalidOperationException(
+                "Expected sentinel failure.");
         }
 
         private static MaintenanceClientTokenGroupEvidence Group(

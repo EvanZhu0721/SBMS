@@ -307,8 +307,9 @@ namespace SBMSSetup
 
     internal interface IMaintenanceClientImpersonationRunner
     {
-        void Impersonate();
-        void Revert();
+        MaintenanceClientTokenEvidence CaptureScoped(
+            IMaintenanceClientTokenCapture capture,
+            IMaintenanceProcessTerminator terminator);
     }
 
     internal interface IMaintenanceClientTokenCapture
@@ -341,51 +342,15 @@ namespace SBMSSetup
 
         internal MaintenanceClientTokenEvidence CaptureAndRevert()
         {
-            MaintenanceClientTokenEvidence evidence = null;
-            Exception captureFailure = null;
-            bool armed = false;
-            try
-            {
-                impersonation.Impersonate();
-                armed = true;
-                evidence = capture.Capture();
-                if (evidence == null)
-                {
-                    captureFailure = new UnauthorizedAccessException(
-                        "Maintenance token capture returned no evidence.");
-                }
-            }
-            catch (Exception failure)
-            {
-                captureFailure = failure;
-            }
-
-            finally
-            {
-                if (armed)
-                {
-                    try
-                    {
-                        impersonation.Revert();
-                    }
-                    catch (Exception revertFailure)
-                    {
-                        terminator.Terminate(
-                            "Maintenance client impersonation revert " +
-                            "failed.");
-                        throw new InvalidOperationException(
-                            "Maintenance process terminator returned " +
-                            "after impersonation revert failure.",
-                            revertFailure);
-                    }
-                }
-            }
-
-            if (captureFailure != null)
+            MaintenanceClientTokenEvidence evidence =
+                impersonation.CaptureScoped(
+                    capture,
+                    terminator);
+            if (evidence == null)
             {
                 throw new UnauthorizedAccessException(
-                    "Maintenance client token capture failed.",
-                    captureFailure);
+                    "Maintenance scoped token capture returned no " +
+                    "evidence.");
             }
             return evidence;
         }

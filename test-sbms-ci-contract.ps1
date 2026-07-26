@@ -19,6 +19,99 @@ function Read-Utf8 {
         [Text.Encoding]::UTF8)
 }
 
+function Get-CSharpBalancedBlock {
+    param(
+        [string] $Text,
+        [int] $OpeningBrace,
+        [string] $Label
+    )
+    if ($OpeningBrace -lt 0 -or
+        $OpeningBrace -ge $Text.Length -or
+        $Text[$OpeningBrace] -ne '{') {
+        throw "Missing C# block opening brace: $Label"
+    }
+    $depth = 0
+    for ($index = $OpeningBrace; $index -lt $Text.Length; $index++) {
+        $character = $Text[$index]
+        if ($character -eq '{') {
+            $depth++
+        }
+        elseif ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) {
+                return $Text.Substring(
+                    $OpeningBrace,
+                    $index - $OpeningBrace + 1
+                )
+            }
+        }
+    }
+    throw "Unbalanced C# block: $Label"
+}
+
+function Get-CSharpMethodBody {
+    param(
+        [string] $Text,
+        [string] $Signature
+    )
+    $signatureIndex = $Text.IndexOf(
+        $Signature,
+        [StringComparison]::Ordinal
+    )
+    if ($signatureIndex -lt 0) {
+        throw "Missing C# method signature: $Signature"
+    }
+    $openingBrace = $Text.IndexOf('{', $signatureIndex)
+    if ($openingBrace -lt 0) {
+        throw "Missing C# method opening brace: $Signature"
+    }
+    return Get-CSharpBalancedBlock `
+        -Text $Text `
+        -OpeningBrace $openingBrace `
+        -Label $Signature
+}
+
+function Get-EmptyTryCerFinallyBody {
+    param([string] $MethodBody)
+    $matches = [regex]::Matches(
+        $MethodBody,
+        'PrepareConstrainedRegions\(\);\s*try\s*\{\s*\}\s*finally\s*'
+    )
+    if ($matches.Count -ne 1) {
+        throw ("Expected exactly one empty-try CER finally; found " +
+            $matches.Count)
+    }
+    $openingBrace = $MethodBody.IndexOf(
+        '{',
+        $matches[0].Index + $matches[0].Length
+    )
+    return Get-CSharpBalancedBlock `
+        -Text $MethodBody `
+        -OpeningBrace $openingBrace `
+        -Label 'empty-try CER finally'
+}
+
+function Test-NativeAcquireCerShape {
+    param([string] $MethodBody)
+    try {
+        $finallyBody = Get-EmptyTryCerFinallyBody $MethodBody
+        return $finallyBody.Contains('ImpersonateNamedPipeClient') -and
+            [regex]::IsMatch($finallyBody, 'armed\s*=\s*true')
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-LegacyNativeAcquireShape {
+    param([string] $MethodBody)
+    return [regex]::IsMatch(
+        $MethodBody,
+        'try\s*\{(?:(?!\}\s*finally).)*ImpersonateNamedPipeClient(?:(?!\}\s*finally).)*\}\s*finally\s*\{[\s\S]*?armed\s*=\s*true',
+        [Text.RegularExpressions.RegexOptions]::Singleline
+    )
+}
+
 $windowsCi = Read-Utf8 '.github/workflows/windows-ci.yml'
 $hardwareCi = Read-Utf8 '.github/workflows/hardware-evidence.yml'
 $qualifyCi = Read-Utf8 '.github/workflows/qualify-release-candidate.yml'
@@ -36,6 +129,14 @@ $releaseVerifier = Read-Utf8 'installer/ReleaseIntegrityVerifier.cs'
 $maintenanceHost = Read-Utf8 'maintenance-service/SBMSMaintenanceService.cs'
 $maintenanceContracts = Read-Utf8 'maintenance-service/MaintenanceServiceRuntimeContracts.cs'
 $maintenanceClientAuthorization = Read-Utf8 'maintenance-service/MaintenanceClientAuthorization.cs'
+$maintenanceWindowsClientNative = Read-Utf8 'maintenance-service/MaintenanceWindowsClientNative.cs'
+$maintenanceRuntimeTests = Read-Utf8 'tests/MaintenanceServiceRuntimeContractTests.cs'
+$maintenanceNativeAcquireMethod = Get-CSharpMethodBody `
+    -Text $maintenanceWindowsClientNative `
+    -Signature 'public void AcquireClient('
+$maintenanceFailStopChildMethod = Get-CSharpMethodBody `
+    -Text $maintenanceRuntimeTests `
+    -Signature 'private static int RunNativeFailStopChild('
 $maintenanceReplayStore = Read-Utf8 'maintenance-service/MaintenanceReplayProductionStore.cs'
 $maintenanceReplayFactory = Read-Utf8 'maintenance-service/MaintenanceReplayFileTransactionJournalFactory.cs'
 $journalStore = Read-Utf8 'installer/FileTransactionJournalStore.cs'
@@ -169,10 +270,65 @@ Assert-True ($maintenanceHost.Contains('args.Length != 0') -and $maintenanceHost
 Assert-True ($maintenanceHost.Contains('OnShutdown') -and $maintenanceHost.Contains('StopRuntime')) 'SCM shutdown must use the bounded lifecycle stop path.'
 Assert-True ($maintenanceContracts.Contains('IMaintenanceCommandAuthorizer') -and $maintenanceContracts.Contains('MaintenanceAuthorizationEvidence')) 'Dispatcher authorization must consume injected trusted evidence.'
 Assert-True ($maintenanceBuild.Contains('MaintenanceClientAuthorization.cs') -and $setupBuild.Contains('$MaintenanceClientAuthorizationSource')) 'Product builds must compile the maintenance client authorization contract.'
+Assert-True ($maintenanceBuild.Contains('MaintenanceWindowsClientNative.cs') -and -not $setupBuild.Contains('MaintenanceWindowsClientNative')) 'Only the maintenance service build may compile the Windows client native adapter.'
 Assert-True ($maintenanceClientAuthorization.Contains('ReadOnlyCollection') -and $maintenanceClientAuthorization.Contains('AuthenticationId') -and $maintenanceClientAuthorization.Contains('HasEnabledGroup')) 'Client token evidence must retain an immutable complete authorization snapshot.'
 Assert-True ($maintenanceClientAuthorization.Contains('MaintenanceProductionClientPolicyAuthorizer') -and $maintenanceClientAuthorization.Contains('BuiltinAdministratorsSid') -and $maintenanceClientAuthorization.Contains('UseForDenyOnly') -and $maintenanceClientAuthorization.Contains('HighIntegrityRid')) 'Production client policy must retain exact SID, group-attribute, elevation, and integrity gates.'
-Assert-True ($maintenanceClientAuthorization.Contains('CaptureAndRevert') -and $maintenanceClientAuthorization.Contains('bool armed = false') -and $maintenanceClientAuthorization.Contains('impersonation.Impersonate()') -and $maintenanceClientAuthorization.Contains('impersonation.Revert()') -and $maintenanceClientAuthorization.Contains('terminator.Terminate')) 'Client request sequencing must arm only after impersonation, then revert and terminate on failed revert.'
+Assert-True ($maintenanceClientAuthorization.Contains('CaptureScoped') -and $maintenanceClientAuthorization.Contains('impersonation.CaptureScoped') -and -not $maintenanceClientAuthorization.Contains('void Impersonate()') -and -not $maintenanceClientAuthorization.Contains('void Revert()')) 'Client request sequencing must consume only evidence returned by a scoped impersonate-capture-revert API.'
 Assert-True (-not $maintenanceClientAuthorization.Contains('RunImpersonated') -and -not $maintenanceClientAuthorization.Contains('DllImport') -and -not $maintenanceClientAuthorization.Contains('CreateNamedPipe') -and -not $maintenanceClientAuthorization.Contains('RunAsClient')) 'Offline client authorization slice must not introduce ambiguous callbacks, native pipes, or impersonation bindings.'
+Assert-True ($maintenanceWindowsClientNative.Contains('OpenThreadToken') -and $maintenanceWindowsClientNative.Contains('TokenQuery,') -and $maintenanceWindowsClientNative.Contains('true,') -and -not $maintenanceWindowsClientNative.Contains('OpenProcessToken')) 'Token snapshots must query only the already-impersonated thread token with openAsSelf=true.'
+Assert-True ($maintenanceWindowsClientNative.Contains('MaximumTokenInformationLength') -and $maintenanceWindowsClientNative.Contains('MaximumSnapshotAttempts') -and $maintenanceWindowsClientNative.Contains('SameSnapshot') -and $maintenanceWindowsClientNative.Contains('GroupCount')) 'Native token snapshots must bound buffers and statistics consistency retries.'
+Assert-True ($maintenanceWindowsClientNative.Contains('first.ExpirationTime == second.ExpirationTime') -and $maintenanceWindowsClientNative.Contains('first.DynamicCharged == second.DynamicCharged') -and $maintenanceWindowsClientNative.Contains('first.DynamicAvailable == second.DynamicAvailable') -and $maintenanceWindowsClientNative.Contains('first.PrivilegeCount == second.PrivilegeCount')) 'TOKEN_STATISTICS sandwich consistency must compare every statistics field, not only identity fields.'
+Assert-True ($maintenanceWindowsClientNative.Contains('nativeRestricted | informationRestricted') -and $maintenanceWindowsClientNative.Contains('HasRestrictions') -and -not $maintenanceWindowsClientNative.Contains('IsTokenRestricted(token) ||')) 'Restricted-token evidence must read and merge both native restriction signals without short-circuiting.'
+Assert-True ($maintenanceWindowsClientNative.Contains('buffer.Length != 1') -and $maintenanceWindowsClientNative.Contains('buffer.Length != sizeof(int)') -and $maintenanceWindowsClientNative.Contains('expected=1-or-4')) 'TokenHasRestrictions must accept only the documented DWORD or the empirically observed Windows 11 BOOLEAN width.'
+Assert-True ($maintenanceWindowsClientNative.Contains('GetLengthSid') -and $maintenanceWindowsClientNative.Contains('IsValidSid') -and $maintenanceWindowsClientNative.Contains('S-1-16-')) 'Native SID snapshots must validate bounded SID bytes and the mandatory-label authority.'
+Assert-True ($maintenanceWindowsClientNative.Contains('Marshal.SizeOf(') -and $maintenanceWindowsClientNative.Contains('typeof(MaintenanceNativeSidAndAttributes)') -and $maintenanceWindowsClientNative.Contains('Token SID points into its fixed native header')) 'TOKEN_USER and TOKEN_MANDATORY_LABEL parsing must retain the complete SID_AND_ATTRIBUTES header and reject header-overlapping SID pointers.'
+Assert-True ($maintenanceWindowsClientNative.Contains('PrepareConstrainedRegions') -and $maintenanceWindowsClientNative.Contains('DangerousAddRef') -and $maintenanceWindowsClientNative.Contains('DangerousRelease') -and $maintenanceWindowsClientNative.Contains('armed = true') -and $maintenanceWindowsClientNative.Contains('ImpersonateNamedPipeClient') -and $maintenanceWindowsClientNative.Contains('RevertToSelf') -and $maintenanceWindowsClientNative.Contains('GetCurrentThreadIdValue') -and $maintenanceWindowsClientNative.Contains('TerminateUnsafeImpersonation')) 'Named-pipe impersonation ownership must be handle-scoped, CER-armed, thread-bound, exactly reverted, and terminal on unsafe cleanup.'
+Assert-True (Test-NativeAcquireCerShape $maintenanceNativeAcquireMethod) 'MaintenanceNamedPipeClientNative.AcquireClient must place its P/Invoke and armed=true in the finally paired with an empty CER try.'
+Assert-True (-not (Test-LegacyNativeAcquireShape $maintenanceNativeAcquireMethod)) 'MaintenanceNamedPipeClientNative.AcquireClient must reject the legacy P/Invoke-in-try/finally-arm shape.'
+$legacyNativeAcquireFixture = @'
+{
+    RuntimeHelpers.PrepareConstrainedRegions();
+    try
+    {
+        succeeded = Native.ImpersonateNamedPipeClient(handle);
+    }
+    finally
+    {
+        if (succeeded)
+        {
+            armed = true;
+        }
+    }
+}
+'@
+Assert-True (-not (Test-NativeAcquireCerShape $legacyNativeAcquireFixture) -and (Test-LegacyNativeAcquireShape $legacyNativeAcquireFixture)) 'CER shape checks must positively identify and reject the legacy P/Invoke-in-try structure.'
+$outsideArmNativeAcquireFixture = @'
+{
+    RuntimeHelpers.PrepareConstrainedRegions();
+    try
+    {
+    }
+    finally
+    {
+        succeeded = Native.ImpersonateNamedPipeClient(handle);
+    }
+    if (succeeded)
+    {
+        armed = true;
+    }
+}
+'@
+Assert-True (-not (Test-NativeAcquireCerShape $outsideArmNativeAcquireFixture)) 'CER shape checks must reject armed=true moved outside the exact paired finally block.'
+Assert-True ([regex]::IsMatch($maintenanceWindowsClientNative, 'try\s*\{\s*\}\s*finally\s*\{[\s\S]*?DangerousAddRef[\s\S]*?AcquireClient[\s\S]*?RevertToSelf[\s\S]*?DangerousRelease')) 'Every borrowed pipe native operation must remain inside one standard CER-acquired SafeHandle DangerousAddRef lease.'
+Assert-True ($maintenanceWindowsClientNative.Contains('failStopAttempted = true') -and $maintenanceWindowsClientNative.Contains('Environment.FailFast(reason, failStopCause)') -and $maintenanceWindowsClientNative.Contains('armed && !failStopAttempted')) 'Unsafe impersonation cleanup must make one terminal attempt and use a non-returning FailFast fallback without claiming safe ownership release.'
+Assert-True ($maintenanceRuntimeTests.Contains('child-enter:') -and $maintenanceRuntimeTests.Contains('capture-enter:') -and $maintenanceRuntimeTests.Contains('terminator-enter:') -and $maintenanceRuntimeTests.Contains('returned-after-failstop') -and $maintenanceRuntimeTests.Contains('child.ExitCode == CorEFailFast') -and $maintenanceRuntimeTests.Contains('CorEUnhandledException')) 'Fail-stop subprocess tests must prove marker-backed branch entry, reject post-termination return, and distinguish FailFast from an ordinary unhandled CLR exception.'
+Assert-True ($maintenanceFailStopChildMethod.IndexOf('TryDisableFailStopUi', [StringComparison]::Ordinal) -ge 0 -and $maintenanceFailStopChildMethod.IndexOf('TryDisableFailStopUi', [StringComparison]::Ordinal) -lt $maintenanceFailStopChildMethod.IndexOf('child-enter:', [StringComparison]::Ordinal)) 'Every FailFast child must install the process UI guard before its first execution marker or fault-capable test action.'
+Assert-True ($maintenanceRuntimeTests.Contains('SemFailCriticalErrors = 0x0001') -and $maintenanceRuntimeTests.Contains('SemNoGpFaultErrorBox = 0x0002') -and $maintenanceRuntimeTests.Contains('WerFaultReportingNoUi = 32') -and $maintenanceRuntimeTests.Contains('FailStopUiNative.SetErrorMode') -and $maintenanceRuntimeTests.Contains('FailStopUiNative.WerSetFlags') -and $maintenanceRuntimeTests.IndexOf('FailStopUiNative.SetErrorMode', [StringComparison]::Ordinal) -lt $maintenanceRuntimeTests.IndexOf('FailStopUiNative.WerSetFlags', [StringComparison]::Ordinal)) 'FailFast children must set SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, and WER_FAULT_REPORTING_NO_UI in process scope and in that order.'
+Assert-True ($maintenanceRuntimeTests.Contains('ui-guard-failed:') -and $maintenanceRuntimeTests.Contains('return FailStopUiSetupFailed') -and $maintenanceRuntimeTests.Contains('FailStopUiSetupFailed = 96') -and $maintenanceRuntimeTests.Contains('child.ExitCode != FailStopUiSetupFailed')) 'UI-guard setup failure must be marker-visible and exit through a distinct controlled code without reaching FailFast.'
+Assert-True (-not $maintenanceWindowsClientNative.Contains('SetErrorMode') -and -not $maintenanceWindowsClientNative.Contains('WerSetFlags') -and -not $maintenanceClientAuthorization.Contains('SetErrorMode') -and -not $maintenanceClientAuthorization.Contains('WerSetFlags')) 'Error-dialog and WER suppression P/Invokes must remain test-only and must not enter production authorization or native capture code.'
+Assert-True ($maintenanceWindowsClientNative.Contains('if (active)') -and $maintenanceWindowsClientNative.Contains('scoped capture is already') -and $maintenanceWindowsClientNative.Contains('if (!armed)') -and $maintenanceWindowsClientNative.Contains('active = false')) 'Scoped named-pipe capture must reject lock-reentrant acquisition and clear the guard only after safe reversion.'
+Assert-True (-not $maintenanceWindowsClientNative.Contains('InjectedPostSuccessFailure') -and -not $maintenanceWindowsClientNative.Contains('ImpersonateSelf') -and -not $maintenanceWindowsClientNative.Contains('IMaintenanceNamedPipeImpersonationNative')) 'Production native code must not retain test-only impersonation seams.'
+Assert-True (-not $maintenanceWindowsClientNative.Contains('CreateNamedPipe') -and -not $maintenanceWindowsClientNative.Contains('ConnectNamedPipe') -and -not $maintenanceHost.Contains('MaintenanceWindowsTokenSnapshotReader') -and -not $maintenanceHost.Contains('MaintenanceNamedPipeClientImpersonationAdapter')) 'Offline native adapters must not create or host-connect a pipe.'
 Assert-True (-not $maintenanceContracts.Contains('new Fake') -and -not $maintenanceHost.Contains('new Fake')) 'Production maintenance sources must not contain test fakes.'
 Assert-True ($maintenanceBuild.Contains('InstallerJournal.cs') -and $maintenanceBuild.Contains('MaintenanceReplayProductionStore.cs')) 'Maintenance build must compile the shared atomic publisher and replay adapter.'
 $maintenanceReplayReferences = [regex]::Matches(
