@@ -1,13 +1,18 @@
-# SBMS Notice
+# SBMS notices
 
 SBMS means "SBMS bridges multiple screens".
 
-This repository contains SBMS code plus a substantially adapted copy of Microsoft's Windows driver sample under `Windows-driver-samples/video/IndirectDisplay`.
-
-The Indirect Display Driver sample originates from:
+`driver/Driver.cpp` is a substantially reduced derivative of Microsoft's
+Indirect Display Driver sample:
 
 https://github.com/microsoft/Windows-driver-samples/tree/main/video/IndirectDisplay
 
-The active driver package, service, hardware ID, software-device enumerator, endpoint, monitor, trace, and diagnostic identities are SBMS-owned. `IddSampleDriver` remains only in upstream source-directory names, attribution, legacy-residue diagnostics, migration rules, and negative tests.
+That derived driver source remains subject to the Microsoft Public License.
+The complete license is included at `LICENSES/MS-PL.txt`.
 
-Repository builds are not automatically production-signed. A distributable driver must pass the documented publisher-signing, Microsoft WHQL-return, integrity, and normal-boot acceptance process.
+The Rust host and other original SBMS files do not currently carry an explicit
+open-source license. Visibility of the source does not grant redistribution or
+reuse rights beyond applicable law.
+
+Repository builds are development builds. A distributable Windows driver still
+requires an appropriate signing and certification process.

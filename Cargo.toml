@@ -1,0 +1,13 @@
+[package]
+name = "sbms"
+version = "0.1.5"
+edition = "2024"
+publish = false
+
+[dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Devices_Enumeration_Pnp",
+    "Win32_Devices_Properties",
+    "Win32_Foundation",
+    "Win32_Security",
+] }
