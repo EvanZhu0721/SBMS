@@ -40,10 +40,12 @@ try {
         (Join-Path $root 'installer\ProtectedPayloadBrokerContracts.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceServiceRuntimeContracts.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceClientAuthorization.cs'),
+        (Join-Path $root 'maintenance-service\MaintenancePipeTransportContracts.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceWindowsClientNative.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceReplayProductionStore.cs'),
         (Join-Path $root 'maintenance-service\MaintenanceReplayFileTransactionJournalFactory.cs'),
         (Join-Path $root 'tests\MaintenancePipeWireContractTests.cs'),
+        (Join-Path $root 'tests\MaintenancePipeTransportContractTests.cs'),
         (Join-Path $root 'tests\MaintenanceServiceRuntimeContractTests.cs')
     )
     $compilerArgs = @(

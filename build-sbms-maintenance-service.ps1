@@ -33,6 +33,7 @@ $sources = @(
     (Join-Path $Root 'installer\ProtectedPayloadBrokerContracts.cs'),
     (Join-Path $Root 'maintenance-service\MaintenanceServiceRuntimeContracts.cs'),
     (Join-Path $Root 'maintenance-service\MaintenanceClientAuthorization.cs'),
+    (Join-Path $Root 'maintenance-service\MaintenancePipeTransportContracts.cs'),
     (Join-Path $Root 'maintenance-service\MaintenanceWindowsClientNative.cs'),
     (Join-Path $Root 'maintenance-service\MaintenanceReplayProductionStore.cs'),
     (Join-Path $Root 'maintenance-service\SBMSMaintenanceService.cs'),

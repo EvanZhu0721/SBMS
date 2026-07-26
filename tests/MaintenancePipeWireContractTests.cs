@@ -549,7 +549,7 @@ namespace SBMSSetup
             rejectedStructuredMutations++;
         }
 
-        private static PayloadBrokerCommand Command()
+        internal static PayloadBrokerCommand Command()
         {
             var checkpoint =
                 new PayloadNamespaceOwnershipCheckpoint
@@ -594,7 +594,7 @@ namespace SBMSSetup
             };
         }
 
-        private static PayloadBrokerResponse Response(
+        internal static PayloadBrokerResponse Response(
             PayloadBrokerCommand command)
         {
             var receipt =

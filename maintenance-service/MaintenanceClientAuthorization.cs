@@ -358,7 +358,7 @@ namespace SBMSSetup
 
     internal interface IMaintenancePreauthorizedCommandDispatcher
     {
-        PayloadBrokerResponse Dispatch(
+        MaintenanceCommittedResponse Dispatch(
             PayloadBrokerCommand command,
             MaintenanceAuthorizationEvidence authorization,
             CancellationToken cancellation);
@@ -388,7 +388,7 @@ namespace SBMSSetup
             this.dispatcher = dispatcher;
         }
 
-        internal PayloadBrokerResponse Execute(
+        internal MaintenanceCommittedResponse Execute(
             Func<PayloadBrokerCommand> parseCommand,
             CancellationToken cancellation)
         {
@@ -400,6 +400,7 @@ namespace SBMSSetup
                 captureRunner.CaptureAndRevert();
             MaintenanceAuthorizationEvidence authorization =
                 authorizer.Authorize(evidence, cancellation);
+            cancellation.ThrowIfCancellationRequested();
             PayloadBrokerCommand command = parseCommand();
             if (command == null)
             {
@@ -407,10 +408,21 @@ namespace SBMSSetup
                     "Maintenance command parser returned no command.");
             }
             command.Validate();
-            return dispatcher.Dispatch(
+            cancellation.ThrowIfCancellationRequested();
+            MaintenanceCommittedResponse committed =
+                dispatcher.Dispatch(
                 command,
                 authorization,
                 cancellation);
+            if (committed == null)
+            {
+                throw new InvalidDataException(
+                    "Maintenance dispatcher returned no committed response.");
+            }
+            PayloadBrokerResponse response =
+                committed.GetValidatedResponse();
+            response.ValidateForCommand(command);
+            return committed;
         }
     }
 }

@@ -757,9 +757,69 @@ namespace SBMSSetup
     // EnvironmentInstallerProgramDataPathProvider and reuse
     // FileTransactionJournalStore/WindowsHandleRelativeJournalFileSystem.
     // This slice has no production factory and never falls back to CWD/temp.
+    internal sealed class MaintenanceCommittedResponse
+    {
+        private readonly byte[] canonicalResponse;
+
+        private MaintenanceCommittedResponse(
+            PayloadBrokerCommand command,
+            PayloadBrokerResponse response,
+            MaintenanceWriteBeforeAckExecutor.CommitAuthority authority)
+        {
+            if (!MaintenanceWriteBeforeAckExecutor.
+                    IsCommitAuthority(authority))
+            {
+                throw new UnauthorizedAccessException(
+                    "Committed response authority is missing.");
+            }
+            response.ValidateForCommand(command);
+            canonicalResponse =
+                PayloadBrokerResponseCodec.SerializeCanonical(response);
+        }
+
+        internal static MaintenanceCommittedResponse Issue(
+            PayloadBrokerCommand command,
+            PayloadBrokerResponse response,
+            MaintenanceWriteBeforeAckExecutor.CommitAuthority authority)
+        {
+            return new MaintenanceCommittedResponse(
+                command,
+                response,
+                authority);
+        }
+
+        internal PayloadBrokerResponse GetValidatedResponse()
+        {
+            var stable = new byte[canonicalResponse.Length];
+            Buffer.BlockCopy(
+                canonicalResponse,
+                0,
+                stable,
+                0,
+                stable.Length);
+            return PayloadBrokerResponseCodec.
+                DeserializeAndValidate(stable);
+        }
+    }
+
     internal sealed class MaintenanceWriteBeforeAckExecutor
     {
+        internal sealed class CommitAuthority
+        {
+            internal CommitAuthority()
+            {
+            }
+        }
+
+        private static readonly CommitAuthority Authority =
+            new CommitAuthority();
         private readonly IMaintenanceReplayAtomicStore store;
+
+        internal static bool IsCommitAuthority(
+            CommitAuthority candidate)
+        {
+            return Object.ReferenceEquals(candidate, Authority);
+        }
 
         internal MaintenanceWriteBeforeAckExecutor(
             IMaintenanceReplayAtomicStore store,
@@ -859,6 +919,19 @@ namespace SBMSSetup
                     Committed(command, response));
                 return response;
             }
+        }
+
+        internal MaintenanceCommittedResponse ExecuteCommitted(
+            PayloadBrokerCommand command,
+            Func<PayloadBrokerCommand, PayloadBrokerResponse> mutate,
+            Func<PayloadBrokerCommand, PayloadBrokerResponse> reconcile)
+        {
+            PayloadBrokerResponse response =
+                Execute(command, mutate, reconcile);
+            return MaintenanceCommittedResponse.Issue(
+                command,
+                response,
+                Authority);
         }
 
         private static MaintenanceReplayRecord Committed(

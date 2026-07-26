@@ -764,14 +764,20 @@ namespace SBMSSetup
         : IMaintenancePreauthorizedCommandDispatcher
     {
         internal readonly List<string> Events;
+        private readonly MaintenanceWriteBeforeAckExecutor replay;
         internal int Calls;
 
         internal SequencePreauthorizedDispatcher(List<string> events)
         {
             Events = events;
+            var store = new FakeReplayStore();
+            replay =
+                new MaintenanceWriteBeforeAckExecutor(
+                    store,
+                    store.RootAuthorityInvariantDigest);
         }
 
-        public PayloadBrokerResponse Dispatch(
+        public MaintenanceCommittedResponse Dispatch(
             PayloadBrokerCommand command,
             MaintenanceAuthorizationEvidence authorization,
             CancellationToken cancellation)
@@ -783,7 +789,10 @@ namespace SBMSSetup
                 throw new InvalidOperationException(
                     "Dispatcher did not receive authorization evidence.");
             }
-            return null;
+            return replay.ExecuteCommitted(
+                command,
+                MaintenancePipeWireContractTests.Response,
+                MaintenancePipeWireContractTests.Response);
         }
     }
 
@@ -1366,6 +1375,9 @@ namespace SBMSSetup
             Run(
                 "maintenance pipe wire codec is strict",
                 MaintenancePipeWireContractTests.Run);
+            Run(
+                "maintenance pipe transport slot is fail closed",
+                MaintenancePipeTransportContractTests.Run);
             Run("client token evidence is immutable", ClientTokenEvidenceIsImmutable);
             Run("production client policy is exact", ProductionClientPolicyIsExact);
             Run("client capture sequencing is fail closed", ClientCaptureSequencingIsFailClosed);
@@ -2105,6 +2117,13 @@ namespace SBMSSetup
             WriteFailStopMarker(
                 markerPath,
                 "child-enter:" + mode);
+            if (mode.StartsWith(
+                    "transport-",
+                    StringComparison.Ordinal))
+            {
+                return MaintenancePipeTransportContractTests.
+                    RunFailStopChild(mode, markerPath);
+            }
             var handle = new CountingPipeSafeHandle();
             var native = new FakeNamedPipeClientNative();
             var terminator = new FakeTerminator();
@@ -2240,7 +2259,7 @@ namespace SBMSSetup
                 marker + Environment.NewLine);
         }
 
-        private static void AssertNativeFailStopChild(
+        internal static void AssertNativeFailStopChild(
             string mode)
         {
             string executable =
@@ -2281,16 +2300,18 @@ namespace SBMSSetup
                     string[] markers = File.Exists(markerPath)
                         ? File.ReadAllLines(markerPath)
                         : new string[0];
+                    bool transport =
+                        mode.StartsWith(
+                            "transport-",
+                            StringComparison.Ordinal);
                     bool terminatorThrows =
-                        mode == "wrong-throw" ||
-                        mode == "revert-throw";
-                    Assert(
+                        mode.EndsWith(
+                            "-throw",
+                            StringComparison.Ordinal);
+                    bool markersValid =
                         Array.IndexOf(
                             markers,
                             "child-enter:" + mode) >= 0 &&
-                        Array.IndexOf(
-                            markers,
-                            "capture-enter:" + mode) >= 0 &&
                         Array.IndexOf(
                             markers,
                             "terminator-enter:" +
@@ -2310,6 +2331,24 @@ namespace SBMSSetup
                         Array.IndexOf(
                             markers,
                             "returned-after-failstop") < 0 &&
+                        Array.IndexOf(
+                            markers,
+                            "unsafe-cleanup-before-terminate") < 0;
+                    markersValid =
+                        markersValid &&
+                        Array.IndexOf(
+                            markers,
+                            "unsafe-operation-dispose-before-terminate") < 0;
+                    if (!transport)
+                    {
+                        markersValid =
+                            markersValid &&
+                            Array.IndexOf(
+                                markers,
+                                "capture-enter:" + mode) >= 0;
+                    }
+                    Assert(
+                        markersValid &&
                         Array.FindIndex(
                             markers,
                             delegate(string marker)
@@ -2321,7 +2360,7 @@ namespace SBMSSetup
                         child.ExitCode != FailStopUiSetupFailed &&
                         child.ExitCode == CorEFailFast &&
                         child.ExitCode != CorEUnhandledException,
-                        "Unsafe native child did not prove FailFast for " +
+                        "Unsafe child did not prove FailFast for " +
                         mode + ": exit=" + child.ExitCode +
                         " markers=" + String.Join(",", markers) +
                         " output=" + output);
