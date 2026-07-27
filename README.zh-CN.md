@@ -11,6 +11,7 @@ SBMS 正围绕一条可审查的路径重建：创建一个 Windows 间接显示
 ```text
 src/main.rs                 CLI 和进程生命周期
 src/controller.rs           不阻塞 UI 的会话控制 worker
+src/control.rs              托盘单实例与优雅退出事件
 src/display.rs              稳定的显示器标识和活动拓扑
 src/input.rs                鼠标捕获、转发与安全释放
 src/mapping.rs              映射的启动/停止及所有权
@@ -22,6 +23,8 @@ src/virtual_display.rs      SwDeviceCreate 和 HSWDEVICE 所有权
 driver/Driver.cpp           IddCx 交换链排空和 BGRA 帧发布
 driver/SBMSIndirectDisplay.inf
 build-driver.ps1            构建、验证和可选的测试签名
+installer/                  极薄的 Inno Setup 清单与维护脚本
+build-installer.ps1         构建并签名预览安装包
 ```
 
 Rust 进程负责产品策略。C++ 驱动只负责 Windows Driver Kit 天然以 C++ 暴露的 WDF/IddCx 边界。
@@ -36,7 +39,7 @@ Rust 进程负责产品策略。C++ 驱动只负责 Windows Driver Kit 天然以
 6. 停止时先释放输入捕获并关闭镜像，再回迁窗口并关闭唯一拥有的 `HSWDEVICE`；等待虚拟拓扑消失后，再按照仅含物理显示器的终态校准一次窗口位置。
 7. 关闭该句柄会使当前设备节点变为不在场；Windows 仍可能保留它的历史设备记录。
 
-## 0.2.8 能力边界
+## 0.2.9 能力边界
 
 支持：
 
@@ -48,6 +51,9 @@ Rust 进程负责产品策略。C++ 驱动只负责 Windows Driver Kit 天然以
 - 任务栏托盘快速控制面板：选择/刷新物理目标、Start/Stop、状态与错误、能力说明和退出。独立 controller worker 持有 `MappingSession`，阻塞式生命周期操作不占用 UI 线程。
 - 点击物理镜像后捕获鼠标并转发到虚拟桌面：支持相对移动、左/右/中/X1/X2 键、垂直/水平滚轮，以及由 IDD 帧携带的真实 Windows 软件光标。按 F8 释放捕获。
 - 键盘遵循注入点击后 Windows 的正常前台焦点；SBMS 不复制也不记录按键。Print Screen 和 Win+Shift+S 会先释放鼠标捕获，再交给 Windows 处理。
+- 单文件 x64 Inno Setup 安装包，将两个 Rust 可执行文件和已签名 IDD 包安装到 `Program Files\SBMS`。
+- 为当前安装用户注册一个 `Highest` 运行级别的登录任务。这不是装饰性提权：当前跨会话 IDD 帧通道使用 `Global\` 内核对象，中完整性托盘无法创建它们。
+- 升级与卸载会先通知托盘优雅退出，并最多等待 30 秒让 `MappingSession` 清理。卸载随后删除本产品拥有的登录任务，以及精确匹配 SBMS provider/硬件 ID 的全部 OEM INF。若外部清理失败，会尝试补偿并保留安装器登记的程序文件，不会假装已经卸干净。
 - 已在本机实测普通、最大化窗口跨不同 DPI 显示器往返，也验证了会话开始后新打开窗口的持续迁移与回迁。
 - 首帧确认、有界停止、连续五次启停，以及并发会话拒绝。
 - `--version`、`list`、`create` 和 `map`；其中 `create` 只测试原始设备生命周期。
@@ -58,9 +64,10 @@ v3 帧通道使用两个槽。Rust 租用已发布的槽并直接交给 `Stretch
 
 不支持：
 
-- 配置持久化、后台服务或生产级安装程序。
+- 配置持久化或后台服务。
 - 自动选择目标、多路映射、动态显示模式、旋转、HDR 或色彩管理。
 - 触控、笔、绝对指针转发、键盘重映射或通用拓扑恢复。
+- 公开受信任的生产发行包。当前预览安装器、Rust 可执行文件、驱动 DLL 和 catalog 使用本地测试证书签名，且没有公开时间戳；普通机器不会默认信任。
 - Windows 原生复制模式语义、全 GPU 路径或低延迟游戏串流保证。
 
 窗口迁移不是一个通用窗口管理器。它只处理当前交互桌面中符合条件、仍然存活且可见的标准顶层窗口。最小化窗口会刻意留在原处：它的 `WINDOWPLACEMENT` 使用 workspace 坐标，DPI 与任务栏偏移语义不适合被通用地改写。受 UIPI 或更高完整性级别阻挡的窗口、挂起窗口、持续自定位的应用，以及会话期间被关闭或重建的窗口，都无法承诺无损恢复，不属于保证范围。
@@ -89,9 +96,28 @@ cargo build --release
 .\build-driver.ps1 -SigningCertificateThumbprint <thumbprint>
 ```
 
-## 使用
+使用 Inno Setup 6 构建完整预览安装包：
 
-在管理员终端中安装已签名的驱动包：
+```powershell
+.\build-installer.ps1 `
+  -SigningCertificateThumbprint <thumbprint>
+```
+
+输出为 `target\installer\SBMS-Setup-0.2.9-x64.exe`。构建脚本还会用同一测试证书签名两个 Rust 可执行文件和最终安装器，验证全部签名，并打印安装包 SHA-256。
+
+## 安装与使用
+
+运行 `SBMS-Setup-0.2.9-x64.exe` 并批准 UAC。安装器会安装/升级驱动、更新安装器拥有的文件、仅删除明确列出的旧版遗留文件、为当前交互式安装账户注册提权登录任务并启动托盘；它不会清空安装目录中的任意文件。固定 Inno `AppId` 让后续 0.2.x 包执行原位升级。
+
+可从 Windows“已安装的应用”卸载，或运行：
+
+```powershell
+& 'C:\Program Files\SBMS\unins000.exe'
+```
+
+如果活动映射无法正常停止，或驱动包无法删除，卸载器会拒绝继续删除文件；它不会使用 `pnputil /force`。
+
+开发者仍可在管理员终端中手动安装已签名驱动包：
 
 ```powershell
 pnputil /add-driver .\target\driver\SBMSIndirectDisplay.inf /install
@@ -117,4 +143,4 @@ pnputil /add-driver .\target\driver\SBMSIndirectDisplay.inf /install
 .\target\release\sbms.exe create --hold-ms 5000
 ```
 
-构建、安装和运行都应在管理员终端中完成。本地驱动包使用测试签名；正式分发仍然需要生产级驱动签名。
+手动构建、安装和映射应在管理员终端中完成。安装包中的托盘通过已注册的登录任务获得所需权限。

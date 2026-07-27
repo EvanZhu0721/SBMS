@@ -1,3 +1,4 @@
+pub mod control;
 pub mod controller;
 pub mod display;
 pub mod frame_transport;

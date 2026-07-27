@@ -17,9 +17,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("list") => list(arguments),
         Some("create") => create(arguments),
         Some("map") => map(arguments),
+        Some("shutdown") => shutdown(arguments),
         Some("ui") => sbms::ui::run_open(),
         _ => usage(),
     }
+}
+
+fn shutdown(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    if arguments.next().is_some() {
+        usage();
+    }
+    println!(
+        "{}",
+        if sbms::control::signal_shutdown()? {
+            "shutdown=signaled"
+        } else {
+            "shutdown=not-running"
+        }
+    );
+    Ok(())
 }
 
 fn version(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
@@ -124,6 +140,7 @@ fn usage() -> ! {
   sbms list
   sbms create [--hold-ms <milliseconds>]
   sbms map --target <monitor-device-path> [--hold-ms <milliseconds>]
+  sbms shutdown
   sbms ui"
     );
     std::process::exit(2);

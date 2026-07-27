@@ -15,6 +15,7 @@ absent. Their last tree is preserved by the `legacy-csharp-eb9d2a1` Git tag.
 ```text
 src/main.rs                 CLI and process lifetime
 src/controller.rs           non-blocking UI-to-session worker
+src/control.rs              tray singleton and graceful shutdown event
 src/display.rs              stable display identity and active topology
 src/input.rs                captured mouse routing and safe release
 src/mapping.rs              mapping start/stop ownership
@@ -26,6 +27,8 @@ src/virtual_display.rs      SwDeviceCreate and HSWDEVICE ownership
 driver/Driver.cpp           IddCx swapchain drain and BGRA publisher
 driver/SBMSIndirectDisplay.inf
 build-driver.ps1            build, validation, and optional test signing
+installer/                  thin Inno Setup manifest and maintenance script
+build-installer.ps1         signed preview-package build
 ```
 
 The Rust process owns product policy. The C++ driver owns only the WDF/IddCx
@@ -49,7 +52,7 @@ The invariant is deliberately small:
 7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 0.2.8 capability boundary
+## 0.2.9 capability boundary
 
 Supported:
 
@@ -73,6 +76,16 @@ Supported:
 - Keyboard input follows normal Windows foreground focus after the injected
   source click; it is not copied or keylogged by SBMS. Print Screen and
   Win+Shift+S release mouse capture before Windows handles the shortcut.
+- One x64 Inno Setup executable that installs the two Rust executables and the
+  signed IDD package under `Program Files\SBMS`.
+- One per-user Task Scheduler logon entry with `Highest` run level. This is not
+  decorative elevation: the current cross-session IDD frame channel uses
+  `Global\` kernel objects and cannot be created by a medium-integrity tray.
+- Graceful upgrade and uninstall: signal the tray and wait up to 30 seconds for
+  `MappingSession` cleanup. Uninstall then removes verified owned logon tasks
+  and every OEM INF that exactly matches the SBMS provider/hardware ID. If
+  external cleanup fails, it attempts compensation and retains the registered
+  application files instead of reporting a clean uninstall.
 - Normal and maximized window round trips, including a window opened after the
   session started, have been exercised locally across different display DPI
   settings.
@@ -97,11 +110,14 @@ under one of those trusted identities remains inside the boundary.
 
 Not supported:
 
-- Configuration persistence, background service, or production installer.
+- Configuration persistence or a background service.
 - Automatic target choice, multiple mappings, dynamic modes, rotation, HDR, or
   color management.
 - Touch, pen, absolute-pointer forwarding, keyboard remapping, or general
   topology recovery.
+- A publicly trusted production package. The current preview installer, Rust
+  executables, driver DLL, and catalog are signed with a local test certificate
+  without a public timestamp. Ordinary machines will not trust it.
 - Native Windows clone-mode semantics, an all-GPU path, or low-latency game
   streaming guarantees.
 
@@ -148,9 +164,37 @@ verifies both signatures:
 .\build-driver.ps1 -SigningCertificateThumbprint <thumbprint>
 ```
 
-## Run
+Build the complete preview installer with Inno Setup 6:
 
-Install a signed package from an elevated terminal:
+```powershell
+.\build-installer.ps1 `
+  -SigningCertificateThumbprint <thumbprint>
+```
+
+The output is `target\installer\SBMS-Setup-0.2.9-x64.exe`. The build signs both
+Rust executables and the resulting installer with the same test certificate,
+verifies all signatures, and prints the package SHA-256.
+
+## Install and run
+
+Run `SBMS-Setup-0.2.9-x64.exe` and approve UAC. Setup installs/updates the
+driver, updates installer-owned files, removes only explicitly known legacy
+artifacts, registers the elevated logon task for the installing interactive
+account, and starts the tray. It does not clear arbitrary files from the install
+directory. A fixed Inno `AppId` makes later 0.2.x packages in-place upgrades.
+
+Uninstall from Windows Installed Apps or run:
+
+```powershell
+& 'C:\Program Files\SBMS\unins000.exe'
+```
+
+The uninstaller refuses to delete files if the active mapping cannot stop
+cleanly or the driver package cannot be removed. It never uses
+`pnputil /force`.
+
+For developer-mode manual deployment, install a signed package from an elevated
+terminal:
 
 ```powershell
 pnputil /add-driver .\target\driver\SBMSIndirectDisplay.inf /install
@@ -181,5 +225,5 @@ the process bypasses user-mode restoration. For bounded unattended use:
 .\target\release\sbms.exe create --hold-ms 5000
 ```
 
-Build, install, and run from an elevated terminal. The local package is
-test-signed; ordinary distribution still requires production driver signing.
+Manual build, install, and mapping run from an elevated terminal. The packaged
+tray receives that elevation through its registered logon task.

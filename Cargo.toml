@@ -1,6 +1,6 @@
 [package]
 name = "sbms"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 publish = false
 default-run = "sbms"

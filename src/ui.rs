@@ -9,6 +9,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
 
+use crate::control::{TrayInstance, listen_for_shutdown};
 use crate::controller::{Controller, ControllerEvent, DisplayOption};
 
 slint::include_modules!();
@@ -22,6 +23,14 @@ pub fn run_open() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
+    let Some(_instance) = TrayInstance::acquire()? else {
+        return Ok(());
+    };
+    listen_for_shutdown(|| {
+        let _ = slint::invoke_from_event_loop(|| {
+            let _ = slint::quit_event_loop();
+        });
+    })?;
     let flyout = QuickAccess::new()?;
     let settings = SettingsWindow::new()?;
     let tray = SbmsTray::new()?;

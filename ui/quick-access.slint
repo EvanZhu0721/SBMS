@@ -288,7 +288,7 @@ export component SettingsWindow inherits Window {
                 padding: MdTokens.space-2;
                 spacing: MdTokens.space-1;
                 Text {
-                    text: "0.2.8 has no mutable runtime settings.";
+                    text: "0.2.9 has no mutable runtime settings.";
                     color: MdTokens.on-surface;
                     font-size: MdTokens.type-title-medium;
                     font-weight: MdTokens.weight-medium;
@@ -298,6 +298,10 @@ export component SettingsWindow inherits Window {
                     color: MdTokens.on-surface-variant;
                     font-size: MdTokens.type-body-medium;
                     wrap: word-wrap;
+                }
+                StatusRow {
+                    title: "Startup";
+                    value: "Elevated logon task";
                 }
             }
         }

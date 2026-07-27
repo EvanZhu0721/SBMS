@@ -3,49 +3,65 @@
 ## Baseline
 
 - Branch: `rust-vnext`
-- Product core: one Rust process owns one virtual display and one mapping worker.
-- Driver boundary: the C++/WDK IDD reports one 3840x2160@240 test mode and publishes
-  IddCx swapchain surfaces through two shared BGRA frame slots. It contains no
-  target-selection or lifecycle policy.
-- Target identity: active DisplayConfig `monitorDevicePath`. `\\.\DISPLAYn` is
-  session-local and is never a persisted identity.
+- Version: 0.2.9
+- Product core: one Rust process owns one virtual display, one mapping worker,
+  one reversible window-migration set, and one captured mouse route.
+- Driver boundary: the C++/WDK IDD reports one 3840x2160@240 test mode and
+  publishes IddCx swapchain surfaces through two shared BGRA slots.
+- Target identity: active DisplayConfig `monitorDevicePath`.
 
 ## Implemented
 
-- `sbms list` exposes stable active-display IDs and current geometry.
-- `sbms create` owns the raw virtual-device lifetime.
-- `sbms map --target <id>` validates one physical target, creates the virtual
-  source, waits for active topology, migrates eligible visible standard
-  top-level windows, starts a one-path mirror, and reports success only after
-  the first copied frame. A 250 ms scanner continues migrating newly opened
-  windows and tracked windows moved back to the target.
-- Stop order is window restoration first, mirror worker second, and
-  virtual-device handle third. After a bounded wait for topology removal, SBMS
-  performs a final placement reconciliation against the physical-only layout.
-- Normal and maximized windows, including one opened after startup, completed
-  local round trips across displays with different DPI settings.
-- The frame channel and protected session gate use protocol v3.
-- Rust draws directly from a leased shared slot; the driver drops instead of
-  waiting when the other slot is still being read.
-- The channel gate and random per-session objects authorize the launching user,
-  SYSTEM, LocalService, and Administrators.
+- CLI `list`, `create`, `map`, `shutdown`, and `ui`.
+- Slint/Material 3 taskbar tray panel; its controller worker exclusively owns
+  `MappingSession` so the UI thread never performs blocking lifecycle work.
+- Startup and 250 ms continuous migration of eligible windows from the selected
+  physical target to the virtual source.
+- Cross-resolution migration clamps temporary restored rectangles into the
+  virtual source; stop restores saved physical placement and state.
+- Click-to-capture relative mouse forwarding with five buttons, two wheel axes,
+  Windows software-cursor semantics, F8 release, screenshot-shortcut release,
+  UIPI failure release, and prior `ClipCursor` restoration.
+- Stop order: input/mirror, window restoration, virtual device, topology wait,
+  and final placement reconciliation.
+- Tray single instance and a local named shutdown event used by upgrade and
+  uninstall.
+- One Inno Setup x64 preview package containing the two Rust executables, three
+  driver-package files, one maintenance script, and the required driver notice
+  and MS-PL text.
+- Per-installing-user elevated logon task. Medium-integrity auto-start is not
+  claimed because the current driver frame channel uses `Global\` objects.
+- Graceful uninstall removes the task and every OEM INF that exactly matches the
+  SBMS provider, display class, and hardware ID before Inno removes its
+  registered application files.
+
+## Verified locally
+
+- Three consecutive elevated map/start/stop cycles with the signed test driver.
+- Maximized Obsidian and Firefox windows round-tripped from a 5120-wide physical
+  screen through the 3840-wide virtual source.
+- Clean install, in-place reinstall over a legacy directory, full uninstall,
+  and clean reinstall.
+- Post-uninstall state: no SBMS tray process, scheduled task, Program Files
+  directory, or SBMS OEM driver package.
+- Final installed state: 0.2.9 binaries, `Highest` logon task running, and
+  `sbms create --hold-ms 2000` returning success.
 
 ## Deliberately absent
 
-GUI, installer, configuration persistence, input capture, multi-mapping,
-automatic topology recovery, and a general test framework.
+Configuration persistence, background service, touch/pen/absolute-pointer
+forwarding, keyboard remapping, multi-mapping, dynamic modes, HDR, general
+runtime topology recovery, all-GPU transport, and a general test framework.
 
-## Known boundary
+## Distribution boundary
 
-The virtual mode is fixed at 3840x2160@240 BGRA, but that mode is not a 240 fps
-performance guarantee. CPU staging readback, one full-frame
-driver-to-shared-memory copy, and GDI output remain. The ACL is identity-level,
-not process-level: other processes under a trusted SID remain trusted.
+The current package is a developer preview. Its binaries, installer, driver DLL,
+and catalog use a local test certificate without a public timestamp. A normal
+machine will not trust it. Public distribution requires trusted application
+code signing and the appropriate Microsoft driver-signing path.
 
-Window migration covers eligible live standard top-level windows only. UIPI or
-higher-integrity boundaries, hung applications, self-positioning windows, and
-windows closed or recreated during a session prevent any general lossless
-guarantee. Minimized windows are deliberately left untouched because their
-workspace-coordinate placement is not safe to rewrite generically across DPI
-and taskbar layouts. GPU transport, dynamic modes, rotation, cursor semantics,
-input, and general runtime topology recovery remain future work.
+The elevated logon task is a real security boundary, not a convenience. Lowering
+the tray to medium integrity requires moving ownership of the cross-session
+global frame channel into a privileged broker or the driver; changing the
+startup registry entry alone would produce a tray whose Start button always
+fails.

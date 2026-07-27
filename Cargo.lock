@@ -4061,7 +4061,7 @@ dependencies = [
 
 [[package]]
 name = "sbms"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "slint",
  "slint-build",
