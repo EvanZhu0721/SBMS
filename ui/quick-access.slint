@@ -1,8 +1,9 @@
 import {
     Button,
-    ComboBox,
+    LineEdit,
     Palette,
     ProgressIndicator,
+    ScrollView,
 } from "std-widgets.slint";
 
 // Material 3 semantic roles. Keeping colors behind roles makes the panel
@@ -28,34 +29,344 @@ global MdTokens {
     out property <length> target: 48px;
     out property <length> type-title-large: 22px;
     out property <length> type-title-medium: 16px;
+    out property <length> type-body-large: 16px;
     out property <length> type-body-medium: 14px;
     out property <length> type-body-small: 12px;
     out property <int> weight-medium: 500;
 }
 
+component ResolutionLineEdit inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <string> field-label;
+    in property <string> suggestion;
+    in property <string> suggestion-suffix;
+    callback edited();
+
+    height: MdTokens.target;
+    background: transparent;
+    clip: true;
+
+    editor := LineEdit {
+        width: parent.width;
+        height: parent.height;
+        text <=> root.text;
+        placeholder-text: root.placeholder-text;
+        input-type: InputType.number;
+        font-size: MdTokens.type-body-large;
+        accessible-label: root.field-label;
+        accessible-description: root.suggestion == ""
+            ? ""
+            : "Suggested " + root.suggestion + ". Press Tab to accept.";
+        edited => { root.edited(); }
+        key-pressed(event) => {
+            if event.text == Key.Tab && root.suggestion != "" {
+                root.text = root.suggestion;
+                root.edited();
+            }
+            // Let Tab keep its normal focus-navigation behavior.
+            return reject;
+        }
+    }
+
+    prefix-measure := Text {
+        x: 16px;
+        width: self.preferred-width;
+        height: parent.height;
+        text: root.text;
+        color: transparent;
+        font-size: MdTokens.type-body-large;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    if editor.has-focus && root.suggestion-suffix != "" : Text {
+        x: 16px + prefix-measure.preferred-width;
+        width: parent.width - self.x - 40px;
+        height: parent.height;
+        text: root.suggestion-suffix;
+        color: MdTokens.on-surface-variant;
+        opacity: 0.55;
+        font-size: MdTokens.type-body-large;
+        vertical-alignment: center;
+        overflow: clip;
+        accessible-role: none;
+    }
+}
+
+component CompactComboBox inherits Rectangle {
+    in property <[string]> model;
+    in property <[string]> collapsed-model: root.model;
+    in-out property <int> current-index: -1;
+    in property <bool> control-enabled: true;
+    in property <string> field-label;
+    in property <length> popup-width: root.width;
+    callback selected();
+
+    property <string> current-value: root.current-index >= 0
+        && root.current-index < root.collapsed-model.length
+        ? root.collapsed-model[root.current-index]
+        : "";
+    property <length> popup-height: root.model.length * MdTokens.target + 8px;
+
+    height: MdTokens.target;
+    background: selector-touch.pressed
+        ? MdTokens.surface-container
+        : (selector-touch.has-hover ? MdTokens.surface-container : MdTokens.surface);
+    border-width: combo-focus.has-focus || popup.is-open ? 2px : 1px;
+    border-color: combo-focus.has-focus || popup.is-open
+        ? MdTokens.primary
+        : MdTokens.outline-variant;
+    border-radius: MdTokens.space-1;
+    opacity: root.control-enabled ? 1 : 0.38;
+    forward-focus: combo-focus;
+
+    accessible-role: combobox;
+    accessible-label: root.field-label;
+    accessible-value: root.current-value;
+    accessible-enabled: root.control-enabled;
+    accessible-expandable: true;
+    accessible-expanded: popup.is-open;
+    accessible-action-expand => {
+        if root.control-enabled && root.model.length > 0 {
+            popup.show();
+        }
+    }
+
+    Text {
+        x: MdTokens.space-2;
+        width: parent.width - 52px;
+        height: parent.height;
+        text: root.current-value;
+        color: MdTokens.on-surface;
+        font-size: MdTokens.type-body-large;
+        vertical-alignment: center;
+        overflow: clip;
+        accessible-role: none;
+    }
+
+    Path {
+        x: parent.width - 36px;
+        y: 12px;
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M7 9.5L12 14.5L17 9.5";
+        fill: transparent;
+        stroke: MdTokens.on-surface;
+        stroke-width: 2.5px;
+        accessible-role: none;
+    }
+
+    combo-focus := FocusScope {
+        key-pressed(event) => {
+            if !root.control-enabled || root.model.length == 0 {
+                return reject;
+            }
+            if event.text == Key.UpArrow {
+                root.current-index = Math.max(root.current-index - 1, 0);
+                root.selected();
+                return accept;
+            } else if event.text == Key.DownArrow {
+                root.current-index = Math.min(root.current-index + 1, root.model.length - 1);
+                root.selected();
+                return accept;
+            } else if event.text == Key.Return {
+                popup.show();
+                return accept;
+            }
+            return reject;
+        }
+
+        selector-touch := TouchArea {
+            enabled: root.control-enabled && root.model.length > 0;
+            clicked => {
+                root.focus();
+                popup.show();
+            }
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: -root.popup-height - 4px;
+        width: root.popup-width;
+        height: root.popup-height;
+        close-policy: close-on-click-outside;
+        forward-focus: popup-focus;
+
+        popup-focus := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.UpArrow {
+                    root.current-index = Math.max(root.current-index - 1, 0);
+                    root.selected();
+                    return accept;
+                } else if event.text == Key.DownArrow {
+                    root.current-index = Math.min(root.current-index + 1, root.model.length - 1);
+                    root.selected();
+                    return accept;
+                } else if event.text == Key.Return || event.text == Key.Escape {
+                    popup.close();
+                    return accept;
+                }
+                return reject;
+            }
+
+            Rectangle {
+                background: MdTokens.surface;
+                border-width: 1px;
+                border-color: MdTokens.outline-variant;
+                border-radius: MdTokens.shape-medium;
+                clip: true;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 0px;
+
+                    for option[index] in root.model : Rectangle {
+                        height: MdTokens.target;
+                        border-radius: MdTokens.space-1;
+                        background: index == root.current-index
+                            ? MdTokens.primary-container
+                            : (option-touch.has-hover ? MdTokens.surface-container : transparent);
+
+                        Text {
+                            x: MdTokens.space-2;
+                            width: parent.width - 2 * MdTokens.space-2;
+                            height: parent.height;
+                            text: option;
+                            color: index == root.current-index
+                                ? MdTokens.on-primary-container
+                                : MdTokens.on-surface;
+                            font-size: MdTokens.type-body-large;
+                            vertical-alignment: center;
+                            overflow: clip;
+                            accessible-role: none;
+                        }
+
+                        option-touch := TouchArea {
+                            clicked => {
+                                root.current-index = index;
+                                root.selected();
+                                popup.close();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    animate background { duration: 120ms; easing: ease-in-out; }
+}
+
+component ReferenceActionButton inherits Rectangle {
+    in property <bool> manual;
+    in property <bool> action-enabled;
+    callback clicked();
+
+    width: MdTokens.target;
+    height: MdTokens.target;
+    background: transparent;
+
+    Button {
+        width: parent.width;
+        height: parent.height;
+        text: "";
+        enabled: root.action-enabled;
+        accessible-label: root.manual
+            ? "Configure manual reference display"
+            : "Calculate virtual display geometry";
+        clicked => { root.clicked(); }
+    }
+
+    if !root.manual : Path {
+        x: 12px;
+        y: 12px;
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M19 3H5C3.9 3 3 3.9 3 5V19C3 20.1 3.9 21 5 21H19C20.1 21 21 20.1 21 19V5C21 3.9 20.1 3 19 3ZM19 19H5V5H19V19ZM7 7H17V11H7V7ZM7 13H9V15H7V13ZM11 13H13V15H11V13ZM15 13H17V15H15V13ZM7 17H9V19H7V17ZM11 17H13V19H11V17ZM15 17H17V19H15V17Z";
+        fill: MdTokens.on-surface;
+        opacity: root.action-enabled ? 1 : 0.38;
+        accessible-role: none;
+    }
+
+    if root.manual : Path {
+        x: 12px;
+        y: 12px;
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M3 17V19H9V17H3ZM3 5V7H13V5H3ZM13 21V19H21V17H13V15H11V21H13ZM7 9V11H3V13H7V15H9V9H7ZM21 13V11H11V13H21ZM15 9H17V7H21V5H17V3H15V9Z";
+        fill: MdTokens.on-surface;
+        opacity: root.action-enabled ? 1 : 0.38;
+        accessible-role: none;
+    }
+}
+
 export component QuickAccess inherits Window {
     title: "SBMS Quick Access";
     width: 384px;
-    height: 360px;
+    height: 488px;
     background: MdTokens.surface;
     always-on-top: true;
     no-frame: true;
 
+    in-out property <[string]> display-names;
     in-out property <[string]> display-labels;
     in-out property <[string]> display-ids;
+    in-out property <[int]> display-widths;
+    in-out property <[int]> display-heights;
     in-out property <int> selected-display: -1;
+    in-out property <[string]> reference-names;
+    in-out property <[string]> reference-labels;
+    in-out property <[string]> reference-ids;
+    in-out property <int> selected-reference: -1;
+    in property <bool> reference-manual: false;
+    in property <bool> reference-action-enabled: false;
+    in-out property <int> sizing-strategy: 0;
     in property <string> state: "Stopped";
     in property <string> state-detail: "Select a physical display to begin";
     in property <bool> running: false;
     in property <bool> busy: false;
     in property <string> error-text: "";
+    in-out property <bool> geometry-page: false;
+    in property <bool> geometry-valid: false;
+    in property <bool> geometry-save-blocked: false;
+    in property <bool> geometry-configured: false;
+    in property <string> geometry-summary: "3840 × 2160";
+    in property <string> geometry-summary-detail: "Driver · 240 Hz";
+    in property <string> geometry-result: "Enter display measurements";
+    in property <string> geometry-result-detail: "All values use pixels or millimetres";
+    in property <string> geometry-error: "";
+    in-out property <string> reference-width: "";
+    in-out property <string> reference-height: "";
+    in-out property <string> reference-diagonal: "";
+    in-out property <int> reference-aspect-ratio: 0;
+    in-out property <int> reference-rotation: 0;
+    in property <string> reference-width-suggestion: "";
+    in property <string> reference-width-suffix: "";
+    in property <string> reference-height-suggestion: "";
+    in property <string> reference-height-suffix: "";
 
     callback start();
     callback stop();
     callback refresh();
+    callback display-selected();
+    callback reference-selected();
+    callback strategy-selected();
+    callback calculate-geometry();
+    callback open-manual-geometry();
     callback dismiss();
+    callback close-geometry();
+    callback geometry-edited();
+    callback save-geometry();
 
-    FocusScope {
+    if !root.geometry-page : FocusScope {
         key-pressed(event) => {
             if event.text == Key.Escape {
                 root.dismiss();
@@ -65,15 +376,11 @@ export component QuickAccess inherits Window {
         }
 
         Rectangle {
-            x: 1px;
-            y: 1px;
-            width: parent.width - 2px;
-            height: parent.height - 2px;
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: parent.height;
             background: MdTokens.surface;
-            border-width: 1px;
-            border-color: MdTokens.outline-variant;
-            border-radius: MdTokens.shape-large;
-            clip: true;
 
             VerticalLayout {
                 padding: MdTokens.space-2;
@@ -101,7 +408,7 @@ export component QuickAccess inherits Window {
                 }
 
                 Rectangle {
-                    height: 72px;
+                    height: 64px;
                     background: root.error-text != ""
                         ? MdTokens.error-container
                         : (root.running ? MdTokens.primary-container : MdTokens.surface-container);
@@ -166,7 +473,7 @@ export component QuickAccess inherits Window {
 
                 Text {
                     text: "Physical display";
-                    height: 24px;
+                    height: 20px;
                     color: MdTokens.on-surface-variant;
                     font-size: MdTokens.type-body-medium;
                     font-weight: MdTokens.weight-medium;
@@ -177,13 +484,16 @@ export component QuickAccess inherits Window {
                     height: MdTokens.target;
                     spacing: MdTokens.space-1;
 
-                    ComboBox {
+                    CompactComboBox {
                         horizontal-stretch: 1;
                         height: MdTokens.target;
                         model: root.display-labels;
+                        collapsed-model: root.display-names;
                         current-index <=> root.selected-display;
-                        enabled: !root.running && !root.busy && root.display-labels.length > 0;
-                        accessible-label: "Physical target display";
+                        control-enabled: !root.running && !root.busy && root.display-labels.length > 0;
+                        field-label: "Physical target display";
+                        popup-width: 352px;
+                        selected => { root.display-selected(); }
                     }
 
                     Button {
@@ -193,6 +503,151 @@ export component QuickAccess inherits Window {
                         enabled: !root.running && !root.busy;
                         accessible-label: "Refresh physical displays";
                         clicked => { root.refresh(); }
+                    }
+                }
+
+                VerticalLayout {
+                    height: 72px;
+                    spacing: 4px;
+
+                    HorizontalLayout {
+                        height: 20px;
+                        spacing: MdTokens.space-1;
+
+                        Text {
+                            text: "Reference display";
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-medium;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: bottom;
+                        }
+
+                        Text {
+                            width: 144px;
+                            text: "Sizing";
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-medium;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: bottom;
+                        }
+
+                        Rectangle {
+                            width: MdTokens.target;
+                            background: transparent;
+                        }
+                    }
+
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+
+                        CompactComboBox {
+                            horizontal-stretch: 1;
+                            height: MdTokens.target;
+                            model: root.reference-labels;
+                            collapsed-model: root.reference-names;
+                            current-index <=> root.selected-reference;
+                            control-enabled: !root.running && !root.busy && root.reference-labels.length > 0;
+                            field-label: "Reference display";
+                            popup-width: 352px;
+                            selected => { root.reference-selected(); }
+                        }
+
+                        CompactComboBox {
+                            width: 144px;
+                            height: MdTokens.target;
+                            model: [
+                                "Physical",
+                                "Rounded",
+                                "Integer",
+                            ];
+                            current-index <=> root.sizing-strategy;
+                            control-enabled: !root.running && !root.busy;
+                            field-label: "Virtual display sizing strategy";
+                            selected => { root.strategy-selected(); }
+                        }
+
+                        ReferenceActionButton {
+                            manual: root.reference-manual;
+                            action-enabled: root.reference-action-enabled
+                                && !root.running && !root.busy;
+                            clicked => {
+                                if root.reference-manual {
+                                    root.open-manual-geometry();
+                                } else {
+                                    root.calculate-geometry();
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 64px;
+                    background: MdTokens.surface-container;
+                    border-radius: MdTokens.shape-medium;
+
+                    HorizontalLayout {
+                        padding: MdTokens.space-2;
+                        spacing: 12px;
+
+                        Rectangle {
+                            width: 12px;
+                            background: transparent;
+
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 12px;
+                                height: 12px;
+                                border-radius: MdTokens.shape-full;
+                                background: root.geometry-configured
+                                    ? MdTokens.primary
+                                    : MdTokens.outline-variant;
+                            }
+                        }
+
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 3px;
+
+                            Text {
+                                text: "Virtual display";
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+
+                            Text {
+                                text: root.geometry-configured ? "Saved geometry" : "Using driver default";
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-small;
+                                overflow: elide;
+                            }
+                        }
+
+                        VerticalLayout {
+                            width: 144px;
+                            alignment: center;
+                            spacing: 3px;
+
+                            Text {
+                                text: root.geometry-summary;
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                                horizontal-alignment: right;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                text: root.geometry-summary-detail;
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-small;
+                                horizontal-alignment: right;
+                                overflow: elide;
+                            }
+                        }
                     }
                 }
 
@@ -216,6 +671,188 @@ export component QuickAccess inherits Window {
                     font-size: MdTokens.type-body-small;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    if root.geometry-page : FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close-geometry();
+                return accept;
+            }
+            return reject;
+        }
+
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: MdTokens.surface;
+
+            VerticalLayout {
+                padding: MdTokens.space-2;
+                spacing: MdTokens.space-1;
+
+                HorizontalLayout {
+                    height: MdTokens.target;
+                    spacing: MdTokens.space-1;
+
+                    Button {
+                        text: "Back";
+                        width: 72px;
+                        height: MdTokens.target;
+                        accessible-label: "Back to quick access";
+                        clicked => { root.close-geometry(); }
+                    }
+
+                    Text {
+                        text: "Manual reference";
+                        color: MdTokens.on-surface;
+                        font-size: MdTokens.type-title-large;
+                        font-weight: MdTokens.weight-medium;
+                        vertical-alignment: center;
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        spacing: 12px;
+
+                        Rectangle {
+                            height: 200px;
+                            background: MdTokens.surface-container;
+                            border-radius: MdTokens.shape-medium;
+
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 4px;
+
+                                Text {
+                                    text: "Reference display";
+                                    height: 20px;
+                                    color: MdTokens.on-surface;
+                                    font-size: MdTokens.type-body-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                }
+
+                                HorizontalLayout {
+                                    height: 48px;
+                                    spacing: MdTokens.space-1;
+                                    ResolutionLineEdit {
+                                        text <=> root.reference-width;
+                                        placeholder-text: "Width px";
+                                        field-label: "Reference display width in pixels";
+                                        suggestion: root.reference-width-suggestion;
+                                        suggestion-suffix: root.reference-width-suffix;
+                                        edited => { root.geometry-edited(); }
+                                    }
+                                    ResolutionLineEdit {
+                                        text <=> root.reference-height;
+                                        placeholder-text: "Height px";
+                                        field-label: "Reference display height in pixels";
+                                        suggestion: root.reference-height-suggestion;
+                                        suggestion-suffix: root.reference-height-suffix;
+                                        edited => { root.geometry-edited(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    height: 48px;
+                                    spacing: MdTokens.space-1;
+                                    LineEdit {
+                                        text <=> root.reference-diagonal;
+                                        placeholder-text: "Diagonal in";
+                                        input-type: InputType.decimal;
+                                        accessible-label: "Reference display diagonal in inches";
+                                        edited => { root.geometry-edited(); }
+                                    }
+                                    CompactComboBox {
+                                        model: ["16:9", "16:10", "3:2", "4:3", "21:9", "32:9"];
+                                        current-index <=> root.reference-aspect-ratio;
+                                        field-label: "Reference display physical aspect ratio";
+                                        selected => { root.geometry-edited(); }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    height: 48px;
+                                    spacing: MdTokens.space-1;
+
+                                    CompactComboBox {
+                                        model: [
+                                            "Landscape",
+                                            "Landscape (flipped)",
+                                            "Portrait (clockwise)",
+                                            "Portrait (counter-clockwise)",
+                                        ];
+                                        current-index <=> root.reference-rotation;
+                                        field-label: "Reference display orientation";
+                                        selected => { root.geometry-edited(); }
+                                    }
+
+                                    CompactComboBox {
+                                        model: [
+                                            "Physical",
+                                            "Rounded",
+                                            "Integer",
+                                        ];
+                                        current-index <=> root.sizing-strategy;
+                                        field-label: "Virtual display sizing strategy";
+                                        selected => {
+                                            root.strategy-selected();
+                                            root.geometry-edited();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: root.geometry-error == "" ? 64px : 84px;
+                    background: root.geometry-error == ""
+                        ? MdTokens.primary-container
+                        : MdTokens.error-container;
+                    border-radius: MdTokens.shape-medium;
+
+                    VerticalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        alignment: center;
+                        spacing: 2px;
+
+                        Text {
+                            text: root.geometry-result;
+                            color: root.geometry-error == ""
+                                ? MdTokens.on-primary-container
+                                : MdTokens.on-error-container;
+                            font-size: MdTokens.type-title-medium;
+                            font-weight: MdTokens.weight-medium;
+                        }
+                        Text {
+                            text: root.geometry-error == ""
+                                ? root.geometry-result-detail
+                                : root.geometry-error;
+                            color: root.geometry-error == ""
+                                ? MdTokens.on-primary-container
+                                : MdTokens.on-error-container;
+                            font-size: MdTokens.type-body-small;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Button {
+                    text: "Save plan";
+                    height: MdTokens.target;
+                    enabled: root.geometry-valid && !root.geometry-save-blocked;
+                    primary: true;
+                    accessible-label: "Save planned virtual display geometry";
+                    clicked => { root.save-geometry(); }
                 }
             }
         }

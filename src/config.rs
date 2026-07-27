@@ -22,12 +22,21 @@ const CONFIG_DIRECTORY: &str = "SBMS";
 const CONFIG_FILE: &str = "config-v1.json";
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceSource {
+    Display(String),
+    Manual,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub version: u32,
     #[serde(default)]
     pub target_id: Option<String>,
+    #[serde(default)]
+    pub reference_source: Option<ReferenceSource>,
     #[serde(default)]
     pub sizing: Option<SizingRequest>,
 }
@@ -59,6 +68,7 @@ impl Default for AppConfig {
         Self {
             version: CONFIG_VERSION,
             target_id: None,
+            reference_source: None,
             sizing: None,
         }
     }
@@ -141,6 +151,18 @@ impl ConfigStore {
                 )),
             });
         }
+        if matches!(
+            config.reference_source.as_ref(),
+            Some(ReferenceSource::Display(id)) if id.trim().is_empty()
+        ) {
+            return Ok(LoadOutcome {
+                config: AppConfig::default(),
+                warning: Some(format!(
+                    "{} contains an empty reference display id and was left unchanged",
+                    self.path.display()
+                )),
+            });
+        }
         if let Some(sizing) = config.sizing
             && let Err(error) = sizing.calculate()
         {
@@ -169,6 +191,12 @@ impl ConfigStore {
             && target.trim().is_empty()
         {
             return Err(ConfigError("target id cannot be empty".into()));
+        }
+        if matches!(
+            config.reference_source.as_ref(),
+            Some(ReferenceSource::Display(id)) if id.trim().is_empty()
+        ) {
+            return Err(ConfigError("reference display id cannot be empty".into()));
         }
         if let Some(sizing) = config.sizing {
             sizing
@@ -306,6 +334,7 @@ mod tests {
         let store = test_store("round-trip");
         let mut config = AppConfig {
             target_id: Some("stable-display-id".into()),
+            reference_source: Some(ReferenceSource::Display("reference-display-id".into())),
             ..AppConfig::default()
         };
         store.save(&config).unwrap();
@@ -315,6 +344,16 @@ mod tests {
         store.save(&config).unwrap();
         assert_eq!(store.load().unwrap().config, config);
         store.reset().unwrap();
+    }
+
+    #[test]
+    fn empty_reference_display_id_is_rejected() {
+        let store = test_store("empty-reference");
+        let config = AppConfig {
+            reference_source: Some(ReferenceSource::Display(" ".into())),
+            ..AppConfig::default()
+        };
+        assert!(store.save(&config).is_err());
     }
 
     #[test]

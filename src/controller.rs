@@ -2,12 +2,24 @@ use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use crate::display::active_displays;
+use crate::geometry::Rotation;
 use crate::mapping::{MappingRequest, MappingSession};
 
 #[derive(Clone, Debug)]
 pub struct DisplayOption {
     pub id: String,
+    pub name: String,
     pub label: String,
+    pub width: i32,
+    pub height: i32,
+    pub native_width: u32,
+    pub native_height: u32,
+    pub physical_width_mm: Option<f64>,
+    pub physical_height_mm: Option<f64>,
+    pub rotation: Rotation,
+    pub refresh_numerator: u32,
+    pub refresh_denominator: u32,
+    pub primary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +137,17 @@ fn refresh(emit: &impl Fn(ControllerEvent)) {
                 .filter(|display| !display.virtual_display)
                 .map(|display| DisplayOption {
                     id: display.id,
+                    name: display.name.clone(),
+                    width: display.rect.right - display.rect.left,
+                    height: display.rect.bottom - display.rect.top,
+                    native_width: display.native_width,
+                    native_height: display.native_height,
+                    physical_width_mm: display.physical_width_mm,
+                    physical_height_mm: display.physical_height_mm,
+                    rotation: display.rotation,
+                    refresh_numerator: display.refresh_numerator,
+                    refresh_denominator: display.refresh_denominator,
+                    primary: display.primary,
                     label: format!(
                         "{} · {}×{}{}",
                         display.name,

@@ -1,11 +1,19 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PixelSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AspectRatio {
     pub width: u32,
     pub height: u32,
 }
@@ -27,14 +35,55 @@ pub enum Rotation {
     Deg270,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SizingStrategy {
     #[default]
     MatchPhysicalSize,
-    IntegerScale {
-        max_scale: u8,
-    },
+    RoundedScale,
+    IntegerScale,
+}
+
+impl<'de> Deserialize<'de> for SizingStrategy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Current {
+            MatchPhysicalSize,
+            RoundedScale,
+            IntegerScale,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Legacy {
+            IntegerScale { max_scale: u8 },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compatible {
+            Current(Current),
+            Legacy(Legacy),
+        }
+
+        match Compatible::deserialize(deserializer)? {
+            Compatible::Current(Current::MatchPhysicalSize) => Ok(Self::MatchPhysicalSize),
+            Compatible::Current(Current::RoundedScale) => Ok(Self::RoundedScale),
+            Compatible::Current(Current::IntegerScale) => Ok(Self::IntegerScale),
+            Compatible::Legacy(Legacy::IntegerScale { max_scale })
+                if (1..=8).contains(&max_scale) =>
+            {
+                Ok(Self::IntegerScale)
+            }
+            Compatible::Legacy(Legacy::IntegerScale { .. }) => {
+                Err(D::Error::custom("legacy max_scale must be between 1 and 8"))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
@@ -42,6 +91,8 @@ pub enum SizingStrategy {
 pub struct DisplayGeometry {
     pub native_pixels: PixelSize,
     pub physical: PhysicalMeasurement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<AspectRatio>,
     #[serde(default)]
     pub rotation: Rotation,
 }
@@ -121,6 +172,26 @@ impl PixelSize {
     }
 }
 
+impl AspectRatio {
+    fn validate(self) -> Result<(), GeometryError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(GeometryError(
+                "aspect ratio dimensions must be non-zero".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn physical_dimensions(self, diagonal: f64) -> Result<(f64, f64), GeometryError> {
+        self.validate()?;
+        let hypotenuse = (self.width as f64).hypot(self.height as f64);
+        Ok((
+            diagonal * self.width as f64 / hypotenuse,
+            diagonal * self.height as f64 / hypotenuse,
+        ))
+    }
+}
+
 impl DisplayGeometry {
     fn oriented_pixels(self) -> Result<PixelSize, GeometryError> {
         self.native_pixels.validate("display")?;
@@ -128,7 +199,10 @@ impl DisplayGeometry {
     }
 
     fn oriented_physical_mm(self) -> Result<(f64, f64), GeometryError> {
-        let pixels = self.oriented_pixels()?;
+        self.oriented_pixels()?;
+        if let Some(aspect_ratio) = self.aspect_ratio {
+            aspect_ratio.validate()?;
+        }
         let (width, height) = match self.physical {
             PhysicalMeasurement::DimensionsMm { width, height } => match self.rotation {
                 Rotation::Deg0 | Rotation::Deg180 => (width, height),
@@ -136,11 +210,15 @@ impl DisplayGeometry {
             },
             PhysicalMeasurement::DiagonalMm(diagonal) => {
                 validate_measurement(diagonal, "diagonal")?;
-                let hypotenuse = (pixels.width as f64).hypot(pixels.height as f64);
-                (
-                    diagonal * pixels.width as f64 / hypotenuse,
-                    diagonal * pixels.height as f64 / hypotenuse,
-                )
+                let aspect_ratio = self.aspect_ratio.unwrap_or(AspectRatio {
+                    width: self.native_pixels.width,
+                    height: self.native_pixels.height,
+                });
+                let dimensions = aspect_ratio.physical_dimensions(diagonal)?;
+                match self.rotation {
+                    Rotation::Deg0 | Rotation::Deg180 => dimensions,
+                    Rotation::Deg90 | Rotation::Deg270 => (dimensions.1, dimensions.0),
+                }
             }
         };
         validate_measurement(width, "physical width")?;
@@ -172,24 +250,11 @@ impl SizingRequest {
 
         let virtual_mode = match self.strategy {
             SizingStrategy::MatchPhysicalSize => physical_mode,
-            SizingStrategy::IntegerScale { max_scale } => {
-                if !(1..=8).contains(&max_scale) {
-                    return Err(GeometryError(
-                        "max integer scale must be between 1 and 8".into(),
-                    ));
-                }
-                (1..=max_scale)
-                    .filter_map(|scale| {
-                        let width = target_pixels.width.checked_mul(scale as u32)?;
-                        let height = target_pixels.height.checked_mul(scale as u32)?;
-                        (width % self.alignment == 0 && height % self.alignment == 0)
-                            .then_some(PixelSize { width, height })
-                    })
-                    .min_by(|left, right| {
-                        sizing_error(*left, physical_mode)
-                            .total_cmp(&sizing_error(*right, physical_mode))
-                    })
-                    .ok_or_else(|| GeometryError("no integer scale candidate".into()))?
+            SizingStrategy::RoundedScale => {
+                snapped_scale_mode(physical_width, target_pixels, self.alignment, 4)?
+            }
+            SizingStrategy::IntegerScale => {
+                snapped_scale_mode(physical_width, target_pixels, self.alignment, 1)?
             }
         };
         virtual_mode.validate("calculated virtual mode")?;
@@ -337,10 +402,17 @@ fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
     left.max(1)
 }
 
-fn sizing_error(candidate: PixelSize, ideal: PixelSize) -> f64 {
-    let width = candidate.width as f64 / ideal.width as f64 - 1.0;
-    let height = candidate.height as f64 / ideal.height as f64 - 1.0;
-    width * width + height * height
+fn snapped_scale_mode(
+    ideal_width: f64,
+    target: PixelSize,
+    alignment: u32,
+    steps_per_unit: u32,
+) -> Result<PixelSize, GeometryError> {
+    let target_width = target.width as f64;
+    let steps_per_unit = steps_per_unit as f64;
+    let minimum_scale = 1.0 / steps_per_unit;
+    let scale = ((ideal_width / target_width) * steps_per_unit).round() / steps_per_unit;
+    aspect_aligned_mode(target_width * scale.max(minimum_scale), target, alignment)
 }
 
 fn scale_index(value: i32, from_extent: u32, to_extent: u32) -> i32 {
@@ -357,8 +429,76 @@ mod tests {
         DisplayGeometry {
             native_pixels: PixelSize { width, height },
             physical: PhysicalMeasurement::DiagonalMm(diagonal_mm),
+            aspect_ratio: None,
             rotation: Rotation::Deg0,
         }
+    }
+
+    fn assert_approximately_equal(left: f64, right: f64) {
+        assert!(
+            (left - right).abs() < 1e-9,
+            "expected {left} to approximately equal {right}"
+        );
+    }
+
+    #[test]
+    fn explicit_aspect_ratio_changes_physical_width_for_the_same_diagonal() {
+        let mut widescreen = display(2560, 1440, 600.0);
+        widescreen.aspect_ratio = Some(AspectRatio {
+            width: 16,
+            height: 9,
+        });
+        let mut square = widescreen;
+        square.aspect_ratio = Some(AspectRatio {
+            width: 1,
+            height: 1,
+        });
+
+        let (widescreen_width, _) = widescreen.oriented_physical_mm().unwrap();
+        let (square_width, _) = square.oriented_physical_mm().unwrap();
+
+        assert!(widescreen_width > square_width);
+        assert_approximately_equal(widescreen_width, 600.0 * 16.0 / 337.0_f64.sqrt());
+        assert_approximately_equal(square_width, 600.0 / 2.0_f64.sqrt());
+    }
+
+    #[test]
+    fn explicit_aspect_ratio_swaps_physical_axes_when_vertical() {
+        let mut horizontal = display(3840, 2160, 600.0);
+        horizontal.aspect_ratio = Some(AspectRatio {
+            width: 16,
+            height: 9,
+        });
+        let mut vertical = horizontal;
+        vertical.rotation = Rotation::Deg90;
+
+        let horizontal_dimensions = horizontal.oriented_physical_mm().unwrap();
+        let vertical_dimensions = vertical.oriented_physical_mm().unwrap();
+
+        assert_approximately_equal(vertical_dimensions.0, horizontal_dimensions.1);
+        assert_approximately_equal(vertical_dimensions.1, horizontal_dimensions.0);
+    }
+
+    #[test]
+    fn missing_aspect_ratio_preserves_native_pixel_ratio_behavior() {
+        let legacy = display(2560, 1600, 400.0);
+        let (width, height) = legacy.oriented_physical_mm().unwrap();
+        let hypotenuse = 2560.0_f64.hypot(1600.0);
+
+        assert_approximately_equal(width, 400.0 * 2560.0 / hypotenuse);
+        assert_approximately_equal(height, 400.0 * 1600.0 / hypotenuse);
+    }
+
+    #[test]
+    fn zero_aspect_ratio_dimension_is_rejected() {
+        let mut invalid = display(2560, 1440, 600.0);
+        invalid.aspect_ratio = Some(AspectRatio {
+            width: 0,
+            height: 9,
+        });
+
+        let error = invalid.oriented_physical_mm().unwrap_err();
+        assert!(error.to_string().contains("aspect ratio"));
     }
 
     #[test]
@@ -399,11 +539,51 @@ mod tests {
     }
 
     #[test]
-    fn integer_strategy_selects_nearest_two_dimensional_scale() {
+    fn rounded_strategy_snaps_to_quarter_scale() {
         let result = SizingRequest {
-            reference: display(3840, 2160, 708.0),
-            target: display(1920, 1080, 354.0),
-            strategy: SizingStrategy::IntegerScale { max_scale: 4 },
+            reference: display(2496, 1404, 1_000.0),
+            target: display(1920, 1080, 1_000.0),
+            strategy: SizingStrategy::RoundedScale,
+            alignment: 2,
+            preferred_refresh_millihz: None,
+        }
+        .calculate()
+        .unwrap();
+        assert_eq!(
+            result.virtual_mode,
+            PixelSize {
+                width: 2400,
+                height: 1350
+            }
+        );
+    }
+
+    #[test]
+    fn integer_strategy_snaps_to_nearest_whole_scale() {
+        let result = SizingRequest {
+            reference: display(3008, 1692, 1_000.0),
+            target: display(1920, 1080, 1_000.0),
+            strategy: SizingStrategy::IntegerScale,
+            alignment: 2,
+            preferred_refresh_millihz: None,
+        }
+        .calculate()
+        .unwrap();
+        assert_eq!(
+            result.virtual_mode,
+            PixelSize {
+                width: 3840,
+                height: 2160
+            }
+        );
+    }
+
+    #[test]
+    fn integer_strategy_never_drops_below_native_size() {
+        let result = SizingRequest {
+            reference: display(960, 540, 1_000.0),
+            target: display(1920, 1080, 1_000.0),
+            strategy: SizingStrategy::IntegerScale,
             alignment: 2,
             preferred_refresh_millihz: None,
         }
@@ -415,6 +595,38 @@ mod tests {
                 width: 1920,
                 height: 1080
             }
+        );
+    }
+
+    #[test]
+    fn legacy_integer_strategy_deserializes_without_exposing_its_old_limit() {
+        for max_scale in [1, 4, 8] {
+            let json = format!(r#"{{"integer_scale":{{"max_scale":{max_scale}}}}}"#);
+            let strategy: SizingStrategy = serde_json::from_str(&json).unwrap();
+            assert_eq!(strategy, SizingStrategy::IntegerScale);
+        }
+        for max_scale in [0, 9] {
+            let json = format!(r#"{{"integer_scale":{{"max_scale":{max_scale}}}}}"#);
+            assert!(serde_json::from_str::<SizingStrategy>(&json).is_err());
+        }
+    }
+
+    #[test]
+    fn current_sizing_strategies_round_trip_as_canonical_strings() {
+        for strategy in [
+            SizingStrategy::MatchPhysicalSize,
+            SizingStrategy::RoundedScale,
+            SizingStrategy::IntegerScale,
+        ] {
+            let json = serde_json::to_string(&strategy).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SizingStrategy>(&json).unwrap(),
+                strategy
+            );
+        }
+        assert_eq!(
+            serde_json::to_string(&SizingStrategy::IntegerScale).unwrap(),
+            r#""integer_scale""#
         );
     }
 

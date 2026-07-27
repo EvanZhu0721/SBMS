@@ -24,13 +24,18 @@ SBMS 1.0.0 的 IDD 仍固定报告 `3840x2160@240`。计算结果尚未下发给
 | --- | --- | --- |
 | `PixelSize` | `width: u32`, `height: u32` | 原生像素尺寸；宽高必须非零 |
 | `PhysicalMeasurement` | `DimensionsMm { width, height }` | 明确的物理宽高，单位毫米 |
-| `PhysicalMeasurement` | `DiagonalMm(f64)` | 物理对角线，单位毫米；宽高按已旋转像素比例推导 |
+| `PhysicalMeasurement` | `DiagonalMm(f64)` | 物理对角线，核心单位毫米；GUI 可以用英寸输入并乘以 `25.4` |
+| `AspectRatio` | `width: u32`, `height: u32` | 可选的显式物理宽高比；两项都必须非零 |
 | `Rotation` | `Deg0`, `Deg90`, `Deg180`, `Deg270` | 明确的顺时针旋转；默认 `Deg0` |
-| `DisplayGeometry` | `native_pixels`, `physical`, `rotation` | 一台显示器的完整几何输入 |
+| `DisplayGeometry` | `native_pixels`, `physical`, `aspect_ratio`, `rotation` | 一台显示器的完整几何输入 |
 
 `native_pixels` 和明确的 `DimensionsMm` 都描述显示器未旋转时的数据。
 计算时先应用 `rotation`；90° 和 270° 会同时交换像素宽高与物理宽高。
 不要通过 `width > height` 判断旋转方向。
+
+当 `physical` 是 `DiagonalMm` 时，`aspect_ratio: Some(...)` 会决定从对角线
+推导出的物理宽高；`None` 为旧配置兼容路径，继续使用 `native_pixels` 的比例。
+GUI 不得只展示比例而不把它传入计算。
 
 ### 计算请求
 
@@ -51,12 +56,19 @@ pub struct SizingRequest {
 - `preferred_refresh_millihz`：刷新率偏好，单位千分之一 Hz；例如
   240 Hz 写作 `Some(240_000)`。
 
-`SizingStrategy` 有两种取值：
+`SizingStrategy` 有三种取值：
 
 - `MatchPhysicalSize`：使用参考显示器的横向像素密度和目标显示器的物理
   宽度计算理想宽度，然后保持目标显示器宽高比并满足对齐要求。
-- `IntegerScale { max_scale }`：在 `1..=max_scale` 的整数倍候选中，选择
-  二维尺寸最接近上述物理尺寸结果、同时满足对齐要求的候选。
+- `RoundedScale`：把理想缩放倍率四舍五入到最近的 `0.25×`，然后保持
+  目标显示器宽高比并满足对齐要求。该策略在物理尺寸精度与规整分辨率之间
+  取得平衡。
+- `IntegerScale`：把理想缩放倍率四舍五入到最近的正整数倍，最小为 `1×`，
+  然后保持目标显示器宽高比并满足对齐要求。
+
+旧版配置中的 `{"integer_scale":{"max_scale":N}}` 仍可读取；合法的
+`1..=8` 会迁移为新的无参数 `IntegerScale`，下一次保存时写成
+`"integer_scale"`。
 
 ### 计算结果
 
@@ -89,9 +101,9 @@ pub struct SizingResult {
 | 物理宽、高或对角线 | 必须是有限数，范围 `10..=10000` mm |
 | `alignment` | `1..=256` 之间的 2 的幂 |
 | `preferred_refresh_millihz` | 存在时必须大于 0 |
-| `max_scale` | `1..=8` |
 
-计算还会拒绝溢出、超出支持范围的尺寸以及不存在有效整数缩放候选的请求。
+计算还会拒绝溢出和超出支持范围的尺寸。`RoundedScale` 在宽高比或对齐要求
+无法精确表达 `0.25×` 时，会向上选择最接近且有效的像素尺寸。
 
 ## GUI 推荐调用流程
 
@@ -100,7 +112,7 @@ use std::error::Error;
 
 use sbms::config::ConfigStore;
 use sbms::geometry::{
-    DisplayGeometry, PhysicalMeasurement, PixelSize, Rotation, SizingRequest,
+    AspectRatio, DisplayGeometry, PhysicalMeasurement, PixelSize, Rotation, SizingRequest,
     SizingResult, SizingStrategy,
 };
 
@@ -128,6 +140,7 @@ fn example() -> Result<(), Box<dyn Error>> {
                 height: 2160,
             },
             physical: PhysicalMeasurement::DiagonalMm(685.8),
+            aspect_ratio: Some(AspectRatio { width: 16, height: 9 }),
             rotation: Rotation::Deg0,
         },
         target: DisplayGeometry {
@@ -136,6 +149,7 @@ fn example() -> Result<(), Box<dyn Error>> {
                 height: 1440,
             },
             physical: PhysicalMeasurement::DiagonalMm(609.6),
+            aspect_ratio: None,
             rotation: Rotation::Deg0,
         },
         strategy: SizingStrategy::MatchPhysicalSize,
@@ -191,11 +205,7 @@ GUI 实现时按以下顺序处理：
       },
       "rotation": "deg0"
     },
-    "strategy": {
-      "integer_scale": {
-        "max_scale": 4
-      }
-    },
+    "strategy": "rounded_scale",
     "alignment": 2,
     "preferred_refresh_millihz": 240000
   }

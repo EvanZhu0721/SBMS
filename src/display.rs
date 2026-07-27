@@ -4,15 +4,29 @@ use std::mem::size_of;
 use std::thread;
 use std::time::Duration;
 
+use windows::Win32::Devices::DeviceAndDriverInstallation::{
+    DICS_FLAG_GLOBAL, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DIREG_DEV, HDEVINFO,
+    SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
+    SetupDiDestroyDeviceInfoList, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
+    SetupDiOpenDevRegKey, SetupDiOpenDeviceInterfaceW,
+};
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
-    DisplayConfigGetDeviceInfo, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
-    QueryDisplayConfig,
+    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION_IDENTITY,
+    DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE180,
+    DISPLAYCONFIG_ROTATION_ROTATE270, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
+    DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GUID_DEVINTERFACE_MONITOR,
+    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
+use windows::Win32::System::Registry::{
+    HKEY, KEY_READ, REG_BINARY, REG_VALUE_TYPE, RegCloseKey, RegQueryValueExW,
+};
+use windows::core::{PCWSTR, w};
+
+use crate::geometry::Rotation;
 
 #[derive(Clone, Debug)]
 pub struct Display {
@@ -20,6 +34,11 @@ pub struct Display {
     pub name: String,
     pub device_name: String,
     pub rect: RECT,
+    pub native_width: u32,
+    pub native_height: u32,
+    pub physical_width_mm: Option<f64>,
+    pub physical_height_mm: Option<f64>,
+    pub rotation: Rotation,
     pub refresh_numerator: u32,
     pub refresh_denominator: u32,
     pub primary: bool,
@@ -100,9 +119,17 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
             let mode = unsafe { mode.Anonymous.sourceMode };
             let left = mode.position.x;
             let top = mode.position.y;
+            let rotation = rotation(path.targetInfo.rotation);
+            let (native_width, native_height) =
+                target_active_size(&path, &modes).unwrap_or(match rotation {
+                    Rotation::Deg90 | Rotation::Deg270 => (mode.height, mode.width),
+                    Rotation::Deg0 | Rotation::Deg180 => (mode.width, mode.height),
+                });
             let name = wide_string(&target.monitorFriendlyDeviceName);
+            let id = wide_string(&target.monitorDevicePath);
+            let physical_size = physical_dimensions_mm(&id);
             displays.push(Display {
-                id: wide_string(&target.monitorDevicePath),
+                id,
                 name: name.clone(),
                 device_name: source,
                 rect: RECT {
@@ -111,6 +138,11 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
                     right: left + mode.width as i32,
                     bottom: top + mode.height as i32,
                 },
+                native_width,
+                native_height,
+                physical_width_mm: physical_size.map(|size| size.0),
+                physical_height_mm: physical_size.map(|size| size.1),
+                rotation,
                 refresh_numerator: path.targetInfo.refreshRate.Numerator,
                 refresh_denominator: path.targetInfo.refreshRate.Denominator,
                 primary: left == 0 && top == 0,
@@ -123,6 +155,188 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
     Err(DisplayError(
         "display topology kept changing while it was read".into(),
     ))
+}
+
+fn target_active_size(
+    path: &DISPLAYCONFIG_PATH_INFO,
+    modes: &[DISPLAYCONFIG_MODE_INFO],
+) -> Option<(u32, u32)> {
+    let index = unsafe { path.targetInfo.Anonymous.modeInfoIdx } as usize;
+    let mode = modes.get(index)?;
+    if mode.infoType != DISPLAYCONFIG_MODE_INFO_TYPE_TARGET {
+        return None;
+    }
+    let target = unsafe { mode.Anonymous.targetMode };
+    let active = target.targetVideoSignalInfo.activeSize;
+    (active.cx > 0 && active.cy > 0).then_some((active.cx, active.cy))
+}
+
+fn rotation(value: windows::Win32::Devices::Display::DISPLAYCONFIG_ROTATION) -> Rotation {
+    match value {
+        DISPLAYCONFIG_ROTATION_ROTATE90 => Rotation::Deg90,
+        DISPLAYCONFIG_ROTATION_ROTATE180 => Rotation::Deg180,
+        DISPLAYCONFIG_ROTATION_ROTATE270 => Rotation::Deg270,
+        DISPLAYCONFIG_ROTATION_IDENTITY => Rotation::Deg0,
+        _ => Rotation::Deg0,
+    }
+}
+
+struct DeviceInfoSet(HDEVINFO);
+
+impl Drop for DeviceInfoSet {
+    fn drop(&mut self) {
+        let _ = unsafe { SetupDiDestroyDeviceInfoList(self.0) };
+    }
+}
+
+struct RegistryKey(HKEY);
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        let _ = unsafe { RegCloseKey(self.0) };
+    }
+}
+
+fn physical_dimensions_mm(monitor_device_path: &str) -> Option<(f64, f64)> {
+    let device_path: Vec<u16> = monitor_device_path
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let device_info_set = DeviceInfoSet(
+        unsafe {
+            SetupDiGetClassDevsW(
+                Some(&GUID_DEVINTERFACE_MONITOR),
+                PCWSTR::null(),
+                None,
+                DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+            )
+        }
+        .ok()?,
+    );
+
+    let mut interface = SP_DEVICE_INTERFACE_DATA {
+        cbSize: size_of::<SP_DEVICE_INTERFACE_DATA>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SetupDiOpenDeviceInterfaceW(
+            device_info_set.0,
+            PCWSTR(device_path.as_ptr()),
+            0,
+            Some(&mut interface),
+        )
+    }
+    .ok()?;
+
+    let mut required_size = 0;
+    let _ = unsafe {
+        SetupDiGetDeviceInterfaceDetailW(
+            device_info_set.0,
+            &interface,
+            None,
+            0,
+            Some(&mut required_size),
+            None,
+        )
+    };
+    if required_size < size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32 {
+        return None;
+    }
+
+    let word_count = (required_size as usize).div_ceil(size_of::<usize>());
+    let mut detail_buffer = vec![0usize; word_count];
+    let detail = detail_buffer
+        .as_mut_ptr()
+        .cast::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>();
+    unsafe {
+        (*detail).cbSize = size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
+    }
+    let mut device_info = SP_DEVINFO_DATA {
+        cbSize: size_of::<SP_DEVINFO_DATA>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SetupDiGetDeviceInterfaceDetailW(
+            device_info_set.0,
+            &interface,
+            Some(detail),
+            required_size,
+            None,
+            Some(&mut device_info),
+        )
+    }
+    .ok()?;
+
+    let registry_key = RegistryKey(
+        unsafe {
+            SetupDiOpenDevRegKey(
+                device_info_set.0,
+                &device_info,
+                DICS_FLAG_GLOBAL.0,
+                0,
+                DIREG_DEV,
+                KEY_READ.0,
+            )
+        }
+        .ok()?,
+    );
+    let mut value_type = REG_VALUE_TYPE::default();
+    let mut byte_count = 0;
+    if unsafe {
+        RegQueryValueExW(
+            registry_key.0,
+            w!("EDID"),
+            None,
+            Some(&mut value_type),
+            None,
+            Some(&mut byte_count),
+        )
+    } != ERROR_SUCCESS
+        || value_type != REG_BINARY
+        || byte_count < 128
+    {
+        return None;
+    }
+
+    let mut edid = vec![0u8; byte_count as usize];
+    if unsafe {
+        RegQueryValueExW(
+            registry_key.0,
+            w!("EDID"),
+            None,
+            Some(&mut value_type),
+            Some(edid.as_mut_ptr()),
+            Some(&mut byte_count),
+        )
+    } != ERROR_SUCCESS
+    {
+        return None;
+    }
+    edid_dimensions_mm(&edid[..byte_count as usize])
+}
+
+fn edid_dimensions_mm(edid: &[u8]) -> Option<(f64, f64)> {
+    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    if edid.len() < 128 || edid[..8] != HEADER {
+        return None;
+    }
+
+    for offset in (54..=108).step_by(18) {
+        let descriptor = &edid[offset..offset + 18];
+        if descriptor[0] == 0 && descriptor[1] == 0 {
+            continue;
+        }
+        let width = u16::from(descriptor[12]) | (u16::from(descriptor[14] & 0xf0) << 4);
+        let height = u16::from(descriptor[13]) | (u16::from(descriptor[14] & 0x0f) << 8);
+        if width > 0 && height > 0 {
+            return Some((f64::from(width), f64::from(height)));
+        }
+    }
+
+    let width_cm = edid[21];
+    let height_cm = edid[22];
+    (width_cm > 0 && height_cm > 0)
+        .then_some((f64::from(width_cm) * 10.0, f64::from(height_cm) * 10.0))
 }
 
 fn adapter_name(adapter_id: windows::Win32::Foundation::LUID) -> Result<String, DisplayError> {
@@ -208,4 +422,46 @@ fn wide_string(value: &[u16]) -> String {
 
 fn win32_error(operation: &str, code: u32) -> DisplayError {
     DisplayError(format!("{operation} failed with Win32 error {code}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edid_dimensions_mm;
+
+    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+
+    fn edid() -> Vec<u8> {
+        let mut value = vec![0u8; 128];
+        value[..8].copy_from_slice(&HEADER);
+        value
+    }
+
+    #[test]
+    fn edid_prefers_detailed_timing_dimensions() {
+        let mut value = edid();
+        value[21] = 52;
+        value[22] = 29;
+        let descriptor = &mut value[54..72];
+        descriptor[0] = 1;
+        descriptor[12] = (600u16 & 0xff) as u8;
+        descriptor[13] = (340u16 & 0xff) as u8;
+        descriptor[14] = ((600u16 >> 8) as u8) << 4 | (340u16 >> 8) as u8;
+
+        assert_eq!(edid_dimensions_mm(&value), Some((600.0, 340.0)));
+    }
+
+    #[test]
+    fn edid_falls_back_to_basic_centimeter_dimensions() {
+        let mut value = edid();
+        value[21] = 60;
+        value[22] = 34;
+
+        assert_eq!(edid_dimensions_mm(&value), Some((600.0, 340.0)));
+    }
+
+    #[test]
+    fn edid_rejects_missing_or_unidentified_dimensions() {
+        assert_eq!(edid_dimensions_mm(&[0; 128]), None);
+        assert_eq!(edid_dimensions_mm(&edid()), None);
+    }
 }
