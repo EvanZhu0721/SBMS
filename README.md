@@ -71,7 +71,8 @@ Supported:
   on the UI thread.
 - Click-to-capture mouse routing from the physical mirror into the virtual
   desktop: relative movement, left/right/middle/X1/X2 buttons, vertical and
-  horizontal wheels, plus a visible high-contrast software pointer marker.
+  horizontal wheels. SBMS does not draw an additional software pointer; the
+  Windows-composited cursor remains authoritative.
   Press F8 to release capture.
 - Keyboard input follows normal Windows foreground focus after the injected
   source click; it is not copied or keylogged by SBMS. Print Screen and
@@ -79,10 +80,8 @@ Supported:
 - Raw mouse input and low-level hooks run on a message pump that is independent
   of the synchronous 4K mirror draw worker. Relative movement packets are
   coalesced to the newest absolute source position before injection.
-- The mirror explicitly composites pointer visibility and virtual-desktop
-  position into the leased BGRA frame instead of assuming the IDD swapchain
-  surface contains a cursor. The marker is intentionally fixed-shape; native
-  I-beam, resize, animated, and application-defined shapes are not reproduced.
+- The mirror does not composite its own pointer marker. This avoids a duplicate
+  arrow when Windows already composites the cursor into the visible output.
 - One x64 Inno Setup executable that installs the two Rust executables and the
   signed IDD package under `Program Files\SBMS`.
 - One per-user Task Scheduler logon entry with `Highest` run level. This is not

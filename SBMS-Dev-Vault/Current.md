@@ -20,14 +20,13 @@
 - Cross-resolution migration clamps temporary restored rectangles into the
   virtual source; stop restores saved physical placement and state.
 - Click-to-capture relative mouse forwarding with five buttons, two wheel axes,
-  a high-contrast fixed pointer marker, F8 release, screenshot-shortcut release,
+  F8 release, screenshot-shortcut release,
   UIPI failure release, and prior `ClipCursor` restoration.
 - Dedicated input message pumping keeps Raw Input and low-level hooks off the
   synchronous 4K GDI draw worker. A drained message batch injects only its
   newest absolute source position.
-- The mirror writes a fixed high-contrast pointer marker into the leased BGRA
-  frame at the current visible virtual-desktop position, then restores the
-  small modified region after drawing.
+- The mirror does not draw a second pointer marker; Windows' composited cursor
+  remains the single visible pointer.
 - Stop order: input/mirror, window restoration, virtual device, topology wait,
   and final placement reconciliation.
 - Tray single instance and a local named shutdown event used by upgrade and
