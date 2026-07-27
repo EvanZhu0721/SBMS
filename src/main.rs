@@ -3,6 +3,7 @@ mod frame_transport;
 mod mapping;
 mod renderer;
 mod virtual_display;
+mod window_migration;
 
 use std::error::Error;
 use std::io;
@@ -41,7 +42,7 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
     }
     for display in active_displays()? {
         println!(
-            "id={}\tname={}\tdevice={}\trect={},{},{},{}\t{}{}",
+            "id={}\tname={}\tdevice={}\trect={},{},{},{}\trefresh={}/{}\t{}{}",
             display.id,
             display.name,
             display.device_name,
@@ -49,6 +50,8 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
             display.rect.top,
             display.rect.right - display.rect.left,
             display.rect.bottom - display.rect.top,
+            display.refresh_numerator,
+            display.refresh_denominator,
             if display.primary { "primary " } else { "" },
             if display.virtual_display {
                 "virtual"

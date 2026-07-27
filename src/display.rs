@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use windows::Win32::Devices::Display::{
+    DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
     DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME,
@@ -19,6 +20,8 @@ pub struct Display {
     pub name: String,
     pub device_name: String,
     pub rect: RECT,
+    pub refresh_numerator: u32,
+    pub refresh_denominator: u32,
     pub primary: bool,
     pub virtual_display: bool,
 }
@@ -86,6 +89,7 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
                 path.sourceInfo.id,
             )?;
             let target = target_name(path.targetInfo.adapterId, path.targetInfo.id)?;
+            let adapter = adapter_name(path.sourceInfo.adapterId)?;
             let mode_index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
             let Some(mode) = modes.get(mode_index) else {
                 continue;
@@ -107,8 +111,10 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
                     right: left + mode.width as i32,
                     bottom: top + mode.height as i32,
                 },
+                refresh_numerator: path.targetInfo.refreshRate.Numerator,
+                refresh_denominator: path.targetInfo.refreshRate.Denominator,
                 primary: left == 0 && top == 0,
-                virtual_display: name == "SBMS Display",
+                virtual_display: is_sbms_adapter(&adapter),
             });
         }
         return Ok(displays);
@@ -117,6 +123,32 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
     Err(DisplayError(
         "display topology kept changing while it was read".into(),
     ))
+}
+
+fn adapter_name(adapter_id: windows::Win32::Foundation::LUID) -> Result<String, DisplayError> {
+    let mut packet = DISPLAYCONFIG_ADAPTER_NAME {
+        header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
+            r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
+            size: size_of::<DISPLAYCONFIG_ADAPTER_NAME>() as u32,
+            adapterId: adapter_id,
+            id: 0,
+        },
+        ..Default::default()
+    };
+    let result = unsafe { DisplayConfigGetDeviceInfo(&mut packet.header) };
+    if result != 0 {
+        return Err(win32_error(
+            "DisplayConfigGetDeviceInfo(adapter)",
+            result as u32,
+        ));
+    }
+    Ok(wide_string(&packet.adapterDevicePath))
+}
+
+fn is_sbms_adapter(adapter: &str) -> bool {
+    let adapter = adapter.to_ascii_lowercase();
+    adapter.contains(r"swd#sbms#virtualdisplay-01")
+        || adapter.contains(r"swd\sbms\virtualdisplay-01")
 }
 
 fn device_name(

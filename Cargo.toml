@@ -1,6 +1,6 @@
 [package]
 name = "sbms"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 publish = false
 
@@ -10,6 +10,7 @@ windows = { version = "0.62.2", features = [
     "Win32_Devices_Enumeration_Pnp",
     "Win32_Devices_Properties",
     "Win32_Foundation",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",

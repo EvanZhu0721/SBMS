@@ -16,6 +16,7 @@ absent. Their last tree is preserved by the `legacy-csharp-eb9d2a1` Git tag.
 src/main.rs                 CLI and process lifetime
 src/display.rs              stable display identity and active topology
 src/mapping.rs              mapping start/stop ownership
+src/window_migration.rs     reversible top-level window migration
 src/frame_transport.rs      one-session shared frame channel
 src/renderer.rs             shared-frame reader and target window
 src/virtual_display.rs      SwDeviceCreate and HSWDEVICE ownership
@@ -32,32 +33,45 @@ The invariant is deliberately small:
 1. A target is selected by DisplayConfig `monitorDevicePath`, never by display
    order or resolution.
 2. `sbms map` requests `SBMS\IndirectDisplay` and waits for its active source.
-3. The IDD publishes each IddCx swapchain surface through two shared BGRA
+3. Eligible standard top-level windows on the target are moved to the virtual
+   source before the mirror is exposed as running.
+4. The IDD publishes each IddCx swapchain surface through two shared BGRA
    slots; a slow renderer drops frames instead of blocking IddCx.
-4. Start succeeds only after Rust draws the first valid shared frame to the
+5. Start succeeds only after Rust draws the first valid shared frame to the
    selected physical target.
-5. Stop tears down the mirror before closing the uniquely owned `HSWDEVICE`.
-6. Closing that handle makes the current devnode non-present; Windows may keep
+6. Stop restores migrated windows before tearing down the mirror, closes the
+   uniquely owned `HSWDEVICE`, waits for the virtual topology to disappear, and
+   then reconciles final window placement against the physical-only topology.
+7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 0.2.6 capability boundary
+## 0.2.7 capability boundary
 
 Supported:
 
 - Windows 10/11 x64, one process, one virtual source, and one physical target.
-- One fixed 1920x1080@60 BGRA virtual display.
+- One fixed 3840x2160@240 BGRA test virtual mode.
 - Explicit target selection by active DisplayConfig `monitorDevicePath`.
+- Startup migration of eligible visible standard top-level windows from the
+  selected physical target to the virtual source, followed by a 250 ms scan
+  that catches newly opened windows or tracked windows moved back to the target.
+- Stop-time restoration before mirror teardown, followed by a final placement
+  reconciliation after Windows removes the virtual topology.
+- Normal and maximized window round trips, including a window opened after the
+  session started, have been exercised locally across different display DPI
+  settings.
 - First-frame confirmation, bounded stop, five-cycle repeatability, and
   concurrent-session rejection.
 - `--version`, `list`, `create`, and `map`; `create` tests only the raw device
   lifetime.
 
-The v2 frame channel uses two slots. Rust leases the published slot and gives it
+The v3 frame channel uses two slots. Rust leases the published slot and gives it
 directly to `StretchDIBits`; the driver writes the other slot or drops that
 frame. There is no Rust full-frame copy. Scaling uses performance-first
-`COLORONCOLOR`, so a non-1920x1080 target is sharper and more pixelated than the
-old halftone output. This is not zero-copy: D3D11 staging readback, one
-driver-to-shared-memory copy, and GDI output remain.
+`COLORONCOLOR`. The advertised 3840x2160@240 mode is a display-mode and
+transport stress target, not a 240 fps performance claim. D3D11 CPU staging
+readback, a driver-to-shared-memory copy, and GDI output remain, so the current
+pipeline is not expected to sustain 240 full 4K frames per second.
 
 Shared objects use a protected ACL for the launching user, SYSTEM, LocalService,
 and Administrators. A protected fixed gate carries a 128-bit random session ID;
@@ -70,9 +84,18 @@ Not supported:
 - GUI, configuration persistence, background service, or production installer.
 - Automatic target choice, multiple mappings, dynamic modes, rotation, HDR, or
   color management.
-- Cursor composition, input forwarding, window migration, or topology recovery.
+- Cursor composition, input forwarding, or general topology recovery.
 - Native Windows clone-mode semantics, an all-GPU path, or low-latency game
   streaming guarantees.
+
+Window migration is deliberately narrower than a window manager. It targets
+eligible live, visible standard top-level windows owned by the current
+interactive desktop. Minimized windows are deliberately left in place because
+their `WINDOWPLACEMENT` uses workspace coordinates whose DPI/taskbar semantics
+are not safe to rewrite generically. Windows blocked by UIPI or a
+higher-integrity owner, hung windows, applications that continuously reposition
+themselves, and windows that close or are recreated during the session cannot
+be restored losslessly and are outside the guarantee.
 
 The selected physical screen is covered by a topmost no-activate window.
 Topology is revalidated during start. Runtime topology changes are not recovered
@@ -121,7 +144,9 @@ From the same elevated terminal, run:
 Copy the complete `id=` from a `physical` line. It is a `monitorDevicePath`, not
 `\\.\DISPLAYn`; the target must still be active when `map` starts. The command
 prints `running=` only after Windows exposes the virtual source and Rust draws
-the first valid frame. Press Enter to stop. For bounded unattended use:
+the first valid frame. Eligible target windows are migrated automatically.
+Press Enter to take the normal stop path and restore them; forcibly terminating
+the process bypasses user-mode restoration. For bounded unattended use:
 
 ```powershell
 .\target\release\sbms.exe map `

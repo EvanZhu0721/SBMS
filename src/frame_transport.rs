@@ -21,16 +21,16 @@ use windows::Win32::System::Memory::{
 use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
 use windows::core::{PCWSTR, PWSTR, w};
 
-pub const WIDTH: usize = 1920;
-pub const HEIGHT: usize = 1080;
+pub const WIDTH: usize = 3840;
+pub const HEIGHT: usize = 2160;
 pub const STRIDE: usize = WIDTH * 4;
 pub const HEADER_BYTES: usize = 24;
 pub const FRAME_PIXELS: usize = STRIDE * HEIGHT;
 pub const FRAME_BYTES: usize = HEADER_BYTES + 2 * FRAME_PIXELS;
 pub const MAGIC: u32 = 0x5342_4d53;
-const GATE_MAGIC: u32 = 0x5342_4732;
-const PROTOCOL_VERSION: u32 = 2;
-const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v2");
+const GATE_MAGIC: u32 = 0x5342_4733;
+const PROTOCOL_VERSION: u32 = 3;
+const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v3");
 
 #[repr(C)]
 struct GateHeader {
@@ -130,8 +130,8 @@ impl FrameTransport {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let channel = FrameChannel {
-            mapping: wide(&format!("Global\\SBMSFrame-v2-{suffix}")),
-            event: wide(&format!("Global\\SBMSFrameReady-v2-{suffix}")),
+            mapping: wide(&format!("Global\\SBMSFrame-v3-{suffix}")),
+            event: wide(&format!("Global\\SBMSFrameReady-v3-{suffix}")),
         };
         let mapping = match unsafe {
             CreateFileMappingW(

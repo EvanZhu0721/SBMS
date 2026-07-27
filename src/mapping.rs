@@ -7,8 +7,10 @@ use crate::display::{Display, active_displays};
 use crate::frame_transport::FrameTransport;
 use crate::renderer::Renderer;
 use crate::virtual_display::VirtualDisplay;
+use crate::window_migration::WindowMigration;
 
 const TOPOLOGY_TIMEOUT: Duration = Duration::from_secs(15);
+const TOPOLOGY_SETTLE: Duration = Duration::from_millis(750);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct MappingRequest {
@@ -17,9 +19,11 @@ pub struct MappingRequest {
 
 pub struct MappingSession {
     renderer: Option<Renderer>,
+    migration: Option<WindowMigration>,
     display: Option<VirtualDisplay>,
     transport: Option<FrameTransport>,
     source_id: String,
+    target_id: String,
 }
 
 #[derive(Debug)]
@@ -44,21 +48,34 @@ impl MappingSession {
         let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
         let (source, target) = wait_for_source(&request.target)?;
         let source_id = source.id.clone();
+        let target_id = target.id.clone();
+        let migration =
+            WindowMigration::start(&target, &source).map_err(|error| stage("windows", error))?;
         let renderer = Renderer::start(target, transport.channel())
             .map_err(|error| stage("first-frame", error))?;
 
         Ok(Self {
             renderer: Some(renderer),
+            migration: Some(migration),
             display: Some(display),
             transport: Some(transport),
             source_id,
+            target_id,
         })
     }
 
     pub fn stop(&mut self) -> Result<(), MappingError> {
-        if self.renderer.is_none() && self.display.is_none() && self.transport.is_none() {
+        if self.renderer.is_none()
+            && self.migration.is_none()
+            && self.display.is_none()
+            && self.transport.is_none()
+        {
             return Ok(());
         }
+        let mut migration = self.migration.take();
+        let migration_error = migration
+            .as_mut()
+            .and_then(|migration| migration.restore().err());
         let renderer_error = self
             .renderer
             .take()
@@ -66,8 +83,15 @@ impl MappingSession {
         self.display.take();
 
         let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
+        let mut remove_error = None;
         loop {
-            let displays = active_displays().map_err(|error| stage("remove", error))?;
+            let displays = match active_displays() {
+                Ok(displays) => displays,
+                Err(error) => {
+                    remove_error = Some(stage("remove", error));
+                    break;
+                }
+            };
             if !displays
                 .iter()
                 .any(|display| display.id.eq_ignore_ascii_case(&self.source_id))
@@ -75,17 +99,35 @@ impl MappingSession {
                 break;
             }
             if Instant::now() >= deadline {
-                return Err(MappingError {
+                remove_error = Some(MappingError {
                     stage: "remove",
                     message: "virtual source stayed active after its device handle closed".into(),
                 });
+                break;
             }
             thread::sleep(POLL_INTERVAL);
         }
 
+        thread::sleep(TOPOLOGY_SETTLE);
+        let final_target = active_displays()
+            .ok()
+            .and_then(|displays| unique_target(&displays, &self.target_id).ok());
+        let reconciliation_error = migration.as_mut().and_then(|migration| {
+            migration
+                .reconcile_after_topology_change(final_target.as_ref())
+                .err()
+        });
+        if let Some(error) = reconciliation_error.or(migration_error) {
+            self.transport.take();
+            return Err(stage("windows-restore", error));
+        }
         if let Some(error) = renderer_error {
             self.transport.take();
             return Err(stage("renderer-stop", error));
+        }
+        if let Some(error) = remove_error {
+            self.transport.take();
+            return Err(error);
         }
         self.transport.take();
         Ok(())

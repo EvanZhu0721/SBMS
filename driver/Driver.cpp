@@ -20,16 +20,16 @@ EVT_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN UnassignSwapChain;
 
 namespace
 {
-constexpr UINT kWidth = 1920;
-constexpr UINT kHeight = 1080;
-constexpr UINT kRefreshRate = 60;
+constexpr UINT kWidth = 3840;
+constexpr UINT kHeight = 2160;
+constexpr UINT kRefreshRate = 240;
 constexpr UINT kStride = kWidth * 4;
 constexpr SIZE_T kFramePixels = static_cast<SIZE_T>(kStride) * kHeight;
-constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v2";
-constexpr wchar_t kFramePrefix[] = L"Global\\SBMSFrame-v2-";
-constexpr wchar_t kEventPrefix[] = L"Global\\SBMSFrameReady-v2-";
-constexpr UINT kGateMagic = 0x53424732;
-constexpr UINT kProtocolVersion = 2;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v3";
+constexpr wchar_t kFramePrefix[] = L"Global\\SBMSFrame-v3-";
+constexpr wchar_t kEventPrefix[] = L"Global\\SBMSFrameReady-v3-";
+constexpr UINT kGateMagic = 0x53424733;
+constexpr UINT kProtocolVersion = 3;
 
 struct GateHeader
 {
@@ -58,18 +58,6 @@ static_assert(sizeof(GateHeader) == 24);
 // virtual monitor as new hardware and loses its saved desktop placement.
 constexpr GUID kMonitorContainerId =
     {0x67453031, 0x7ba9, 0x4d45, {0x8f, 0x0b, 0x72, 0x1d, 0xb4, 0x61, 0x62, 0x42}};
-
-// EDID 1.4: SBMS Display, serial SBMS00000001, one 1920x1080@60 detailed mode.
-constexpr BYTE kEdid[128] = {
-    0x00,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x4c,0x4d,0x01,0x00,0x01,0x00,0x00,0x00,
-    0x01,0x24,0x01,0x04,0xa5,0x34,0x1d,0x78,0x0a,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-    0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,0x01,
-    0x01,0x01,0x01,0x01,0x01,0x01,0x02,0x3a,0x80,0x18,0x71,0x38,0x2d,0x40,0x58,0x2c,
-    0x45,0x00,0xfd,0x1e,0x11,0x00,0x00,0x1a,0x00,0x00,0x00,0xff,0x00,0x53,0x42,0x4d,
-    0x53,0x30,0x30,0x30,0x30,0x30,0x30,0x30,0x31,0x0a,0x00,0x00,0x00,0xfc,0x00,0x53,
-    0x42,0x4d,0x53,0x20,0x44,0x69,0x73,0x70,0x6c,0x61,0x79,0x0a,0x00,0x00,0x00,0xfe,
-    0x00,0x53,0x42,0x4d,0x53,0x20,0x49,0x44,0x44,0x0a,0x20,0x20,0x20,0x20,0x00,0x22
-};
 
 struct Drain
 {
@@ -210,13 +198,13 @@ void FillSignal(DISPLAYCONFIG_VIDEO_SIGNAL_INFO& signal, bool monitorMode)
 {
     signal.activeSize.cx = kWidth;
     signal.activeSize.cy = kHeight;
-    signal.totalSize.cx = 2200;
-    signal.totalSize.cy = 1125;
+    signal.totalSize.cx = kWidth;
+    signal.totalSize.cy = kHeight;
     signal.vSyncFreq.Numerator = kRefreshRate;
     signal.vSyncFreq.Denominator = 1;
-    signal.hSyncFreq.Numerator = 67500;
+    signal.hSyncFreq.Numerator = kHeight * kRefreshRate;
     signal.hSyncFreq.Denominator = 1;
-    signal.pixelRate = 148500000;
+    signal.pixelRate = static_cast<UINT64>(kWidth) * kHeight * kRefreshRate;
     signal.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
     signal.AdditionalSignalInfo.videoStandard = 255;
     signal.AdditionalSignalInfo.vSyncFreqDivider = monitorMode ? 0 : 1;
@@ -465,8 +453,8 @@ void ReportMonitor(DeviceState* state)
     info.MonitorContainerId = kMonitorContainerId;
     info.MonitorDescription.Size = sizeof(info.MonitorDescription);
     info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
-    info.MonitorDescription.DataSize = sizeof(kEdid);
-    info.MonitorDescription.pData = const_cast<BYTE*>(kEdid);
+    info.MonitorDescription.DataSize = 0;
+    info.MonitorDescription.pData = nullptr;
 
     IDARG_IN_MONITORCREATE input{};
     input.ObjectAttributes = &attributes;
@@ -620,27 +608,9 @@ NTSTATUS ParseMonitorDescription(
     const IDARG_IN_PARSEMONITORDESCRIPTION* input,
     IDARG_OUT_PARSEMONITORDESCRIPTION* output)
 {
-    if (input->MonitorDescription.Type != IDDCX_MONITOR_DESCRIPTION_TYPE_EDID ||
-        input->MonitorDescription.DataSize != sizeof(kEdid) ||
-        memcmp(input->MonitorDescription.pData, kEdid, sizeof(kEdid)) != 0)
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    output->MonitorModeBufferOutputCount = 1;
-    if (input->MonitorModeBufferInputCount == 0)
-    {
-        return STATUS_SUCCESS;
-    }
-    if (input->MonitorModeBufferInputCount < 1)
-    {
-        return STATUS_BUFFER_TOO_SMALL;
-    }
-
-    input->pMonitorModes[0] =
-        MonitorMode(IDDCX_MONITOR_MODE_ORIGIN_MONITORDESCRIPTOR);
-    output->PreferredMonitorModeIdx = 0;
-    return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(input);
+    UNREFERENCED_PARAMETER(output);
+    return STATUS_INVALID_PARAMETER;
 }
 
 NTSTATUS GetDefaultMonitorModes(
