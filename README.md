@@ -1,5 +1,7 @@
 # SBMS
 
+[简体中文](README.zh-CN.md)
+
 SBMS is being rebuilt around one auditable path: create one Windows indirect
 display, copy that virtual desktop to one explicitly selected physical display,
 and remove every owned resource when the session stops.
