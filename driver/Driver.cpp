@@ -533,13 +533,13 @@ bool StartDrain(
     return true;
 }
 
-void ReportMonitor(DeviceState* state)
+NTSTATUS ReportMonitor(DeviceState* state)
 {
     ModeConfig mode{};
     BYTE nonce[16]{};
     if (!ReadSessionConfig(mode, nonce))
     {
-        return;
+        return STATUS_INVALID_PARAMETER;
     }
 
     WDF_OBJECT_ATTRIBUTES attributes;
@@ -560,9 +560,11 @@ void ReportMonitor(DeviceState* state)
     input.ObjectAttributes = &attributes;
     input.pMonitorInfo = &info;
     IDARG_OUT_MONITORCREATE output{};
-    if (!NT_SUCCESS(IddCxMonitorCreate(state->adapter, &input, &output)))
+    const NTSTATUS createStatus =
+        IddCxMonitorCreate(state->adapter, &input, &output);
+    if (!NT_SUCCESS(createStatus))
     {
-        return;
+        return createStatus;
     }
 
     MonitorState* monitorState = GetMonitorState(output.MonitorObject);
@@ -570,10 +572,30 @@ void ReportMonitor(DeviceState* state)
     memcpy(monitorState->nonce, nonce, sizeof(nonce));
 
     IDARG_OUT_MONITORARRIVAL arrival{};
-    if (!NT_SUCCESS(IddCxMonitorArrival(output.MonitorObject, &arrival)))
+    const NTSTATUS arrivalStatus =
+        IddCxMonitorArrival(output.MonitorObject, &arrival);
+    if (!NT_SUCCESS(arrivalStatus))
     {
         WdfObjectDelete(output.MonitorObject);
+        return arrivalStatus;
     }
+
+    IDDCX_TARGET_MODE targetMode = TargetMode(mode);
+    IDARG_IN_UPDATEMODES update{};
+    update.Reason = IDDCX_UPDATE_REASON_CONFIGURATION_CONSTRAINTS;
+    update.TargetModeCount = 1;
+    update.pTargetModes = &targetMode;
+    const NTSTATUS updateStatus =
+        IddCxMonitorUpdateModes(output.MonitorObject, &update);
+    if (!NT_SUCCESS(updateStatus))
+    {
+        // Arrival transfers ownership to IddCx. Departure both reports the
+        // failed monitor as gone and destroys its IDDCX_MONITOR object.
+        const NTSTATUS departureStatus =
+            IddCxMonitorDeparture(output.MonitorObject);
+        return NT_SUCCESS(departureStatus) ? updateStatus : departureStatus;
+    }
+    return STATUS_SUCCESS;
 }
 
 void InitAdapter(DeviceState* state)
@@ -695,9 +717,9 @@ NTSTATUS AdapterInitFinished(
 {
     if (NT_SUCCESS(input->AdapterInitStatus))
     {
-        ReportMonitor(GetDeviceState(adapter));
+        return ReportMonitor(GetDeviceState(adapter));
     }
-    return STATUS_SUCCESS;
+    return input->AdapterInitStatus;
 }
 
 NTSTATUS AdapterCommitModes(
