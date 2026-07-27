@@ -53,8 +53,9 @@
   and clean reinstall.
 - Post-uninstall state: no SBMS tray process, scheduled task, Program Files
   directory, or SBMS OEM driver package.
-- Final installed state before this build: 0.2.10 binaries, `Highest` logon task running, and
-  `sbms create --hold-ms 2000` returning success.
+- Final installed state: 1.0.0 binaries, `Highest` logon task running, and
+  `sbms map --hold-ms 2500` completing successfully with the target loaded from
+  `%LOCALAPPDATA%\SBMS\config-v1.json` rather than a command-line override.
 
 ## Deliberately absent
 
