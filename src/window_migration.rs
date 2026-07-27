@@ -22,7 +22,7 @@ use windows::core::BOOL;
 
 use crate::display::Display;
 
-const MOVE_TIMEOUT: Duration = Duration::from_millis(750);
+const MOVE_TIMEOUT: Duration = Duration::from_millis(1500);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -62,13 +62,15 @@ impl WindowMigration {
     pub fn start(target: &Display, source: &Display) -> Result<Self, String> {
         let target_monitor = monitor_for_rect(target.rect, "target")?;
         let source_monitor = monitor_for_rect(source.rect, "virtual source")?;
-        let screen_dx = source.rect.left - target.rect.left;
-        let screen_dy = source.rect.top - target.rect.top;
         let mut entries = enumerate_target_windows(target_monitor)?;
         for entry in &mut entries {
-            if let Err(error) =
-                move_entry(entry, target_monitor, source_monitor, screen_dx, screen_dy)
-            {
+            if let Err(error) = move_entry(
+                entry,
+                target_monitor,
+                source_monitor,
+                target.rect,
+                source.rect,
+            ) {
                 let mut migration = Self {
                     entries: Arc::new(Mutex::new(entries)),
                     stop_scanner: Arc::new(AtomicBool::new(true)),
@@ -94,8 +96,6 @@ impl WindowMigration {
             Arc::clone(&stop_scanner),
             target.rect,
             source.rect,
-            screen_dx,
-            screen_dy,
         ) {
             Ok(scanner) => scanner,
             Err(error) => {
@@ -354,8 +354,6 @@ fn spawn_scanner(
     stop: Arc<AtomicBool>,
     target_rect: RECT,
     source_rect: RECT,
-    screen_dx: i32,
-    screen_dy: i32,
 ) -> Result<JoinHandle<Vec<String>>, String> {
     thread::Builder::new()
         .name("sbms-window-scanner".into())
@@ -409,8 +407,8 @@ fn spawn_scanner(
                             &mut candidate,
                             target_monitor,
                             source_monitor,
-                            screen_dx,
-                            screen_dy,
+                            target_rect,
+                            source_rect,
                         );
                         if candidate.moved {
                             existing.moved = true;
@@ -424,8 +422,8 @@ fn spawn_scanner(
                         &mut candidate,
                         target_monitor,
                         source_monitor,
-                        screen_dx,
-                        screen_dy,
+                        target_rect,
+                        source_rect,
                     );
                     if candidate.moved {
                         tracked.push(candidate);
@@ -564,8 +562,8 @@ fn move_entry(
     entry: &mut WindowSnapshot,
     target_monitor: HMONITOR,
     source_monitor: HMONITOR,
-    screen_dx: i32,
-    screen_dy: i32,
+    target_rect: RECT,
+    source_rect: RECT,
 ) -> Result<(), String> {
     if !same_window(entry) {
         return Ok(());
@@ -584,23 +582,40 @@ fn move_entry(
         }
         let current = current_rect(entry)?;
         entry.outer_rect = current;
-        let destination =
-            translated_position(entry, current.left, current.top, screen_dx, screen_dy)?;
-        set_window_rect(
+        let mut virtual_placement = window_placement(entry)?;
+        virtual_placement.rcNormalPosition = translated_rect(
             entry,
-            destination.x,
-            destination.y,
-            current.right - current.left,
-            current.bottom - current.top,
-        )
-        .map_err(|error| describe(entry, &format!("restored window move failed: {error}")))?;
+            virtual_placement.rcNormalPosition,
+            target_rect,
+            source_rect,
+        )?;
+        virtual_placement.showCmd = SW_RESTORE.0 as u32;
+        unsafe { SetWindowPlacement(entry.hwnd, &virtual_placement) }
+            .map_err(|error| describe(entry, &format!("restored window move failed: {error}")))?;
+        unsafe {
+            let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
+        }
         if !wait_for_monitor(entry, source_monitor) {
+            let actual = current_rect(entry).unwrap_or_default();
+            let normal = window_placement(entry)
+                .map(|placement| placement.rcNormalPosition)
+                .unwrap_or_default();
             return Err(describe(
                 entry,
-                "restored window did not move to the virtual display",
+                &format!(
+                    "restored window did not move to the virtual display \
+                     (outer={},{},{},{}, normal={},{},{},{})",
+                    actual.left,
+                    actual.top,
+                    actual.right,
+                    actual.bottom,
+                    normal.left,
+                    normal.top,
+                    normal.right,
+                    normal.bottom,
+                ),
             ));
         }
-        let mut virtual_placement = window_placement(entry)?;
         virtual_placement.flags = entry.placement.flags;
         virtual_placement.showCmd = entry.placement.showCmd;
         unsafe { SetWindowPlacement(entry.hwnd, &virtual_placement) }
@@ -620,12 +635,16 @@ fn move_entry(
 
     let width = entry.outer_rect.right - entry.outer_rect.left;
     let height = entry.outer_rect.bottom - entry.outer_rect.top;
+    let moved_width = width.min(source_rect.right - source_rect.left).max(1);
+    let moved_height = height.min(source_rect.bottom - source_rect.top).max(1);
     let destination = translated_position(
         entry,
         entry.outer_rect.left,
         entry.outer_rect.top,
-        screen_dx,
-        screen_dy,
+        moved_width,
+        moved_height,
+        target_rect,
+        source_rect,
     )?;
     unsafe {
         SetWindowPos(
@@ -633,8 +652,8 @@ fn move_entry(
             None,
             destination.x,
             destination.y,
-            width,
-            height,
+            moved_width,
+            moved_height,
             SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
         )
     }
@@ -653,19 +672,60 @@ fn translated_position(
     entry: &WindowSnapshot,
     left: i32,
     top: i32,
-    physical_dx: i32,
-    physical_dy: i32,
+    width: i32,
+    height: i32,
+    target_rect: RECT,
+    source_rect: RECT,
 ) -> Result<POINT, String> {
     // main() makes this process per-monitor-v2 aware before any display or
     // window API call, so GetWindowRect and SetWindowPos share physical
     // virtual-screen coordinates across monitors.
-    let x = left
-        .checked_add(physical_dx)
+    let relative_x = left
+        .checked_sub(target_rect.left)
         .ok_or_else(|| describe(entry, "horizontal window coordinate overflow"))?;
-    let y = top
-        .checked_add(physical_dy)
+    let relative_y = top
+        .checked_sub(target_rect.top)
+        .ok_or_else(|| describe(entry, "vertical window coordinate overflow"))?;
+    let max_x = (source_rect.right - source_rect.left - width).max(0);
+    let max_y = (source_rect.bottom - source_rect.top - height).max(0);
+    let x = source_rect
+        .left
+        .checked_add(relative_x.clamp(0, max_x))
+        .ok_or_else(|| describe(entry, "horizontal window coordinate overflow"))?;
+    let y = source_rect
+        .top
+        .checked_add(relative_y.clamp(0, max_y))
         .ok_or_else(|| describe(entry, "vertical window coordinate overflow"))?;
     Ok(POINT { x, y })
+}
+
+fn translated_rect(
+    entry: &WindowSnapshot,
+    rect: RECT,
+    target_rect: RECT,
+    source_rect: RECT,
+) -> Result<RECT, String> {
+    let width = (rect.right - rect.left)
+        .min(source_rect.right - source_rect.left)
+        .max(1);
+    let height = (rect.bottom - rect.top)
+        .min(source_rect.bottom - source_rect.top)
+        .max(1);
+    let top_left = translated_position(
+        entry,
+        rect.left,
+        rect.top,
+        width,
+        height,
+        target_rect,
+        source_rect,
+    )?;
+    Ok(RECT {
+        left: top_left.x,
+        top: top_left.y,
+        right: top_left.x + width,
+        bottom: top_left.y + height,
+    })
 }
 
 fn wait_for_normal_rect(entry: &WindowSnapshot, expected: RECT) -> bool {

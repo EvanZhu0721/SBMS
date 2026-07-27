@@ -14,11 +14,14 @@ absent. Their last tree is preserved by the `legacy-csharp-eb9d2a1` Git tag.
 
 ```text
 src/main.rs                 CLI and process lifetime
+src/controller.rs           non-blocking UI-to-session worker
 src/display.rs              stable display identity and active topology
+src/input.rs                captured mouse routing and safe release
 src/mapping.rs              mapping start/stop ownership
 src/window_migration.rs     reversible top-level window migration
 src/frame_transport.rs      one-session shared frame channel
 src/renderer.rs             shared-frame reader and target window
+src/ui.rs + ui/             tray adapter and Slint quick-access panel
 src/virtual_display.rs      SwDeviceCreate and HSWDEVICE ownership
 driver/Driver.cpp           IddCx swapchain drain and BGRA publisher
 driver/SBMSIndirectDisplay.inf
@@ -39,13 +42,14 @@ The invariant is deliberately small:
    slots; a slow renderer drops frames instead of blocking IddCx.
 5. Start succeeds only after Rust draws the first valid shared frame to the
    selected physical target.
-6. Stop restores migrated windows before tearing down the mirror, closes the
-   uniquely owned `HSWDEVICE`, waits for the virtual topology to disappear, and
-   then reconciles final window placement against the physical-only topology.
+6. Stop first releases input capture and closes the mirror, then restores
+   migrated windows, closes the uniquely owned `HSWDEVICE`, waits for the
+   virtual topology to disappear, and reconciles final window placement against
+   the physical-only topology.
 7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 0.2.7 capability boundary
+## 0.2.8 capability boundary
 
 Supported:
 
@@ -55,8 +59,20 @@ Supported:
 - Startup migration of eligible visible standard top-level windows from the
   selected physical target to the virtual source, followed by a 250 ms scan
   that catches newly opened windows or tracked windows moved back to the target.
-- Stop-time restoration before mirror teardown, followed by a final placement
-  reconciliation after Windows removes the virtual topology.
+- Stop-time input release and mirror shutdown before window restoration,
+  followed by final placement reconciliation after Windows removes the virtual
+  topology.
+- A tray quick-access panel with physical-target selection, refresh,
+  Start/Stop, status and error reporting, settings information, and Exit. Its
+  controller worker owns `MappingSession`; blocking lifecycle work does not run
+  on the UI thread.
+- Click-to-capture mouse routing from the physical mirror into the virtual
+  desktop: relative movement, left/right/middle/X1/X2 buttons, vertical and
+  horizontal wheels, and the real Windows software cursor carried by the IDD
+  frame. Press F8 to release capture.
+- Keyboard input follows normal Windows foreground focus after the injected
+  source click; it is not copied or keylogged by SBMS. Print Screen and
+  Win+Shift+S release mouse capture before Windows handles the shortcut.
 - Normal and maximized window round trips, including a window opened after the
   session started, have been exercised locally across different display DPI
   settings.
@@ -81,10 +97,11 @@ under one of those trusted identities remains inside the boundary.
 
 Not supported:
 
-- GUI, configuration persistence, background service, or production installer.
+- Configuration persistence, background service, or production installer.
 - Automatic target choice, multiple mappings, dynamic modes, rotation, HDR, or
   color management.
-- Cursor composition, input forwarding, or general topology recovery.
+- Touch, pen, absolute-pointer forwarding, keyboard remapping, or general
+  topology recovery.
 - Native Windows clone-mode semantics, an all-GPU path, or low-latency game
   streaming guarantees.
 
@@ -98,6 +115,12 @@ themselves, and windows that close or are recreated during the session cannot
 be restored losslessly and are outside the guarantee.
 
 The selected physical screen is covered by a topmost no-activate window.
+Clicking it captures the mouse; F8 returns the pointer to the corresponding
+physical-screen position. SBMS restores the previous `ClipCursor` boundary and
+releases only buttons that it successfully injected. `SendInput` cannot cross
+Windows UIPI into a higher-integrity application; capture is released and an
+error is reported instead of pretending forwarding succeeded.
+
 Topology is revalidated during start. Runtime topology changes are not recovered
 and have no guaranteed behavior; stop and restart the session.
 
@@ -139,6 +162,8 @@ From the same elevated terminal, run:
 .\target\release\sbms.exe --version
 .\target\release\sbms.exe list
 .\target\release\sbms.exe map --target '<monitor-device-path>'
+.\target\release\sbms.exe ui
+.\target\release\sbms-tray.exe
 ```
 
 Copy the complete `id=` from a `physical` line. It is a `monitorDevicePath`, not

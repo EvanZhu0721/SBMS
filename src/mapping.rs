@@ -51,7 +51,7 @@ impl MappingSession {
         let target_id = target.id.clone();
         let migration =
             WindowMigration::start(&target, &source).map_err(|error| stage("windows", error))?;
-        let renderer = Renderer::start(target, transport.channel())
+        let renderer = Renderer::start(target, source, transport.channel())
             .map_err(|error| stage("first-frame", error))?;
 
         Ok(Self {
@@ -72,14 +72,14 @@ impl MappingSession {
         {
             return Ok(());
         }
-        let mut migration = self.migration.take();
-        let migration_error = migration
-            .as_mut()
-            .and_then(|migration| migration.restore().err());
         let renderer_error = self
             .renderer
             .take()
             .and_then(|mut renderer| renderer.stop().err());
+        let mut migration = self.migration.take();
+        let migration_error = migration
+            .as_mut()
+            .and_then(|migration| migration.restore().err());
         self.display.take();
 
         let deadline = Instant::now() + TOPOLOGY_TIMEOUT;

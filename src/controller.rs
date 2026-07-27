@@ -1,0 +1,194 @@
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
+
+use crate::display::active_displays;
+use crate::mapping::{MappingRequest, MappingSession};
+
+#[derive(Clone, Debug)]
+pub struct DisplayOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum ControllerEvent {
+    Displays(Vec<DisplayOption>),
+    State {
+        state: &'static str,
+        detail: String,
+        running: bool,
+        busy: bool,
+        error: String,
+    },
+}
+
+enum Command {
+    Refresh,
+    Start(String),
+    Stop,
+    Shutdown,
+}
+
+#[derive(Clone)]
+pub struct ControllerSender(Sender<Command>);
+
+pub struct Controller {
+    sender: ControllerSender,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl ControllerSender {
+    pub fn refresh(&self) {
+        let _ = self.0.send(Command::Refresh);
+    }
+
+    pub fn start(&self, target: String) {
+        let _ = self.0.send(Command::Start(target));
+    }
+
+    pub fn stop(&self) {
+        let _ = self.0.send(Command::Stop);
+    }
+}
+
+impl Controller {
+    pub fn spawn(emit: impl Fn(ControllerEvent) + Send + 'static) -> Self {
+        let (tx, rx) = mpsc::channel();
+        let sender = ControllerSender(tx);
+        let worker = thread::spawn(move || {
+            let mut session = None;
+            while let Ok(command) = rx.recv() {
+                match command {
+                    Command::Refresh => refresh(&emit),
+                    Command::Start(target) => {
+                        if session.is_some() {
+                            continue;
+                        }
+                        emit(state(
+                            "Starting",
+                            "Preparing virtual display…".into(),
+                            false,
+                            true,
+                            "",
+                        ));
+                        match MappingSession::start(MappingRequest { target }) {
+                            Ok(started) => {
+                                let source = started.source_id().to_owned();
+                                session = Some(started);
+                                emit(state(
+                                    "Running",
+                                    format!("Virtual source {source}"),
+                                    true,
+                                    false,
+                                    "",
+                                ));
+                            }
+                            Err(error) => emit(state(
+                                "Stopped",
+                                "Mapping did not start".into(),
+                                false,
+                                false,
+                                error.to_string(),
+                            )),
+                        }
+                    }
+                    Command::Stop => stop(&mut session, &emit),
+                    Command::Shutdown => {
+                        stop(&mut session, &emit);
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            sender,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn sender(&self) -> ControllerSender {
+        self.sender.clone()
+    }
+
+    pub fn shutdown(mut self) {
+        let _ = self.sender.0.send(Command::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn refresh(emit: &impl Fn(ControllerEvent)) {
+    match active_displays() {
+        Ok(displays) => {
+            let displays = displays
+                .into_iter()
+                .filter(|display| !display.virtual_display)
+                .map(|display| DisplayOption {
+                    id: display.id,
+                    label: format!(
+                        "{} · {}×{} · {} Hz{}",
+                        display.name,
+                        display.rect.right - display.rect.left,
+                        display.rect.bottom - display.rect.top,
+                        display.refresh_numerator / display.refresh_denominator.max(1),
+                        if display.primary { " · Primary" } else { "" }
+                    ),
+                })
+                .collect();
+            emit(ControllerEvent::Displays(displays));
+        }
+        Err(error) => emit(state(
+            "Stopped",
+            "Display discovery failed".into(),
+            false,
+            false,
+            error.to_string(),
+        )),
+    }
+}
+
+fn stop(session: &mut Option<MappingSession>, emit: &impl Fn(ControllerEvent)) {
+    let Some(mut active) = session.take() else {
+        return;
+    };
+    emit(state(
+        "Stopping",
+        "Restoring windows and display topology…".into(),
+        true,
+        true,
+        "",
+    ));
+    match active.stop() {
+        Ok(()) => emit(state(
+            "Stopped",
+            "Windows restored safely".into(),
+            false,
+            false,
+            "",
+        )),
+        Err(error) => emit(state(
+            "Stopped",
+            "Cleanup completed with errors".into(),
+            false,
+            false,
+            error.to_string(),
+        )),
+    }
+}
+
+fn state(
+    state: &'static str,
+    detail: String,
+    running: bool,
+    busy: bool,
+    error: impl Into<String>,
+) -> ControllerEvent {
+    ControllerEvent::State {
+        state,
+        detail,
+        running,
+        busy,
+        error: error.into(),
+    }
+}

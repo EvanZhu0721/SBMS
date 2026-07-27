@@ -1,17 +1,10 @@
-mod display;
-mod frame_transport;
-mod mapping;
-mod renderer;
-mod virtual_display;
-mod window_migration;
-
 use std::error::Error;
 use std::io;
 use std::time::Duration;
 
-use display::active_displays;
-use mapping::{MappingRequest, MappingSession};
-use virtual_display::VirtualDisplay;
+use sbms::display::active_displays;
+use sbms::mapping::{MappingRequest, MappingSession};
+use sbms::virtual_display::VirtualDisplay;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -24,6 +17,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("list") => list(arguments),
         Some("create") => create(arguments),
         Some("map") => map(arguments),
+        Some("ui") => sbms::ui::run_open(),
         _ => usage(),
     }
 }
@@ -129,7 +123,8 @@ fn usage() -> ! {
   sbms --version
   sbms list
   sbms create [--hold-ms <milliseconds>]
-  sbms map --target <monitor-device-path> [--hold-ms <milliseconds>]"
+  sbms map --target <monitor-device-path> [--hold-ms <milliseconds>]
+  sbms ui"
     );
     std::process::exit(2);
 }

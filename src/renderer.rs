@@ -21,7 +21,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG,
     PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, ShowWindow,
-    TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WNDCLASSW,
+    TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT, WNDCLASSW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
@@ -30,6 +30,7 @@ use crate::display::Display;
 use crate::frame_transport::{
     FRAME_BYTES, FRAME_PIXELS, FrameChannel, HEADER_BYTES, HEIGHT, MAGIC, STRIDE, WIDTH,
 };
+use crate::input::{InputGuard, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -51,13 +52,13 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn start(target: Display, channel: FrameChannel) -> Result<Self, String> {
+    pub fn start(target: Display, source: Display, channel: FrameChannel) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
-            let result = run(target.rect, channel, &worker_stop, &ready_tx);
+            let result = run(target.rect, source.rect, channel, &worker_stop, &ready_tx);
             if let Err(error) = &result {
                 let _ = ready_tx.send(Err(error.clone()));
             }
@@ -111,6 +112,7 @@ impl Drop for Renderer {
 
 fn run(
     target: RECT,
+    source: RECT,
     channel: FrameChannel,
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), String>>,
@@ -158,7 +160,18 @@ fn run(
         let _ = ShowWindow(window, SW_SHOW);
     }
 
+    let input = match InputGuard::start(window, target, source, instance) {
+        Ok(input) => input,
+        Err(error) => {
+            unsafe {
+                let _ = DestroyWindow(window);
+                let _ = UnregisterClassW(class_name, Some(instance));
+            }
+            return Err(error);
+        }
+    };
     let result = draw_frames(window, width, height, channel, stop, ready);
+    drop(input);
     unsafe {
         let _ = DestroyWindow(window);
         let _ = UnregisterClassW(class_name, Some(instance));
@@ -201,7 +214,9 @@ fn draw_frames(
         if stop.load(Ordering::Acquire) {
             break Ok(());
         }
-        pump_messages();
+        if !pump_messages() {
+            break Ok(());
+        }
         let Some(frame) = reader.acquire()? else {
             continue;
         };
@@ -348,14 +363,18 @@ impl Drop for FrameReader {
     }
 }
 
-fn pump_messages() {
+fn pump_messages() -> bool {
     let mut message = MSG::default();
     while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+        if message.message == WM_QUIT {
+            return false;
+        }
         unsafe {
             let _ = TranslateMessage(&message);
             DispatchMessageW(&message);
         }
     }
+    true
 }
 
 unsafe extern "system" fn window_proc(
@@ -364,6 +383,9 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    if let Some(result) = handle_message(message, lparam) {
+        return result;
+    }
     match message {
         WM_CLOSE => {
             unsafe {
