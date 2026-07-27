@@ -1,7 +1,9 @@
+pub mod config;
 pub mod control;
 pub mod controller;
 pub mod display;
 pub mod frame_transport;
+pub mod geometry;
 pub mod input;
 pub mod mapping;
 pub mod renderer;

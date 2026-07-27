@@ -23,6 +23,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
+use crate::geometry::{CoordinateTransform, PixelPoint, PixelRect, Rotation};
+
 const WM_RELEASE_CAPTURE: u32 = WM_APP + 1;
 const RELEASE_NORMAL: isize = 0;
 const RELEASE_INJECTION_FAILURE: isize = 1;
@@ -42,6 +44,7 @@ thread_local! {
 struct InputMapper {
     target: RECT,
     source: RECT,
+    transform: CoordinateTransform,
     cursor: POINT,
     move_pending: bool,
     captured: bool,
@@ -64,6 +67,22 @@ impl InputGuard {
         source: RECT,
         instance: HINSTANCE,
     ) -> Result<Self, String> {
+        let transform = CoordinateTransform::stretch(
+            PixelRect {
+                left: 0,
+                top: 0,
+                width: rect_extent(target.left, target.right)?,
+                height: rect_extent(target.top, target.bottom)?,
+            },
+            PixelRect {
+                left: source.left,
+                top: source.top,
+                width: rect_extent(source.left, source.right)?,
+                height: rect_extent(source.top, source.bottom)?,
+            },
+            Rotation::Deg0,
+        )
+        .map_err(|error| format!("input geometry is invalid: {error}"))?;
         let mut nonce = [0u8; size_of::<usize>()];
         let status = unsafe { BCryptGenRandom(None, &mut nonce, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
         if status.0 < 0 {
@@ -102,6 +121,7 @@ impl InputGuard {
             *cell.borrow_mut() = Some(InputMapper {
                 target,
                 source,
+                transform,
                 cursor: POINT {
                     x: (target.right - target.left).max(1) / 2,
                     y: (target.bottom - target.top).max(1) / 2,
@@ -514,19 +534,16 @@ fn post_release(window: HWND, reason: isize) {
 }
 
 fn source_point(state: &InputMapper) -> POINT {
+    let point = state
+        .transform
+        .map_target_point(PixelPoint {
+            x: state.cursor.x,
+            y: state.cursor.y,
+        })
+        .expect("captured cursor is clamped inside the target transform");
     POINT {
-        x: state.source.left
-            + scale(
-                state.cursor.x,
-                state.target.right - state.target.left,
-                state.source.right - state.source.left,
-            ),
-        y: state.source.top
-            + scale(
-                state.cursor.y,
-                state.target.bottom - state.target.top,
-                state.source.bottom - state.source.top,
-            ),
+        x: point.x,
+        y: point.y,
     }
 }
 
@@ -545,9 +562,11 @@ fn normalize(value: i32, extent: i32) -> i32 {
     ((value as i64 * 65_535) / extent.saturating_sub(1).max(1) as i64).clamp(0, 65_535) as i32
 }
 
-fn scale(value: i32, from: i32, to: i32) -> i32 {
-    ((value as i64 * to.max(1) as i64) / from.max(1) as i64)
-        .clamp(0, to.saturating_sub(1).max(0) as i64) as i32
+fn rect_extent(start: i32, end: i32) -> Result<u32, String> {
+    u32::try_from(end.saturating_sub(start))
+        .ok()
+        .filter(|extent| *extent > 0)
+        .ok_or_else(|| format!("invalid rectangle extent {start}..{end}"))
 }
 
 fn x_button_bit(data: u32) -> u8 {

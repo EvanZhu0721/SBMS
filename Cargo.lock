@@ -4061,9 +4061,11 @@ dependencies = [
 
 [[package]]
 name = "sbms"
-version = "0.2.10"
+version = "1.0.0"
 dependencies = [
  "raw-window-handle",
+ "serde",
+ "serde_json",
  "slint",
  "slint-build",
  "windows",

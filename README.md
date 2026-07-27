@@ -16,7 +16,9 @@ absent. Their last tree is preserved by the `legacy-csharp-eb9d2a1` Git tag.
 src/main.rs                 CLI and process lifetime
 src/controller.rs           non-blocking UI-to-session worker
 src/control.rs              tray singleton and graceful shutdown event
+src/config.rs               versioned per-user product configuration
 src/display.rs              stable display identity and active topology
+src/geometry.rs             physical sizing and coordinate transforms
 src/input.rs                captured mouse routing and safe release
 src/mapping.rs              mapping start/stop ownership
 src/window_migration.rs     reversible top-level window migration
@@ -52,13 +54,17 @@ The invariant is deliberately small:
 7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 0.2.10 capability boundary
+## 1.0.0 capability boundary
 
 Supported:
 
 - Windows 10/11 x64, one process, one virtual source, and one physical target.
 - One fixed 3840x2160@240 BGRA test virtual mode.
 - Explicit target selection by active DisplayConfig `monitorDevicePath`.
+- Versioned configuration at `%LOCALAPPDATA%\SBMS\config-v1.json`. It stores
+  only the stable target ID and an optional sizing request. Writes use a
+  same-directory temporary file and an atomic Windows replace. Invalid or
+  unsupported files are preserved and reported instead of silently overwritten.
 - Startup migration of eligible visible standard top-level windows from the
   selected physical target to the virtual source, followed by a 250 ms scan
   that catches newly opened windows or tracked windows moved back to the target.
@@ -81,7 +87,13 @@ Supported:
   of the synchronous 4K mirror draw worker. Relative movement packets are
   coalesced to the newest absolute source position before injection.
 - The mirror does not composite its own pointer marker. This avoids a duplicate
-  arrow when Windows already composites the cursor into the visible output.
+  arrow. The driver leaves IddCx hardware-cursor support disabled, so the
+  platform's default software cursor remains part of the virtual-display frame
+  with its native shape, hotspot, animation, and visibility.
+- Public pure-Rust sizing types expose native pixel size, physical dimensions
+  or diagonal, explicit rotation, physical/integer strategy, alignment, and
+  preferred refresh. The calculator is planning infrastructure; the fixed IDD
+  mode is not changed by it yet.
 - One x64 Inno Setup executable that installs the two Rust executables and the
   signed IDD package under `Program Files\SBMS`.
 - One per-user Task Scheduler logon entry with `Highest` run level. This is not
@@ -97,8 +109,8 @@ Supported:
   settings.
 - First-frame confirmation, bounded stop, five-cycle repeatability, and
   concurrent-session rejection.
-- `--version`, `list`, `create`, and `map`; `create` tests only the raw device
-  lifetime.
+- `--version`, `list`, `create`, `map`, and `config`. `map` accepts an explicit
+  target or the saved target; `create` tests only the raw device lifetime.
 
 The v3 frame channel uses two slots. Rust leases the published slot and gives it
 directly to `StretchDIBits`; the driver writes the other slot or drops that
@@ -116,7 +128,7 @@ under one of those trusted identities remains inside the boundary.
 
 Not supported:
 
-- Configuration persistence or a background service.
+- A background service.
 - Automatic target choice, multiple mappings, dynamic modes, rotation, HDR, or
   color management.
 - Touch, pen, absolute-pointer forwarding, keyboard remapping, or general
@@ -145,6 +157,24 @@ error is reported instead of pretending forwarding succeeded.
 
 Topology is revalidated during start. Runtime topology changes are not recovered
 and have no guaranteed behavior; stop and restart the session.
+
+## Configuration and sizing API
+
+```powershell
+sbms config path
+sbms config show
+sbms config set-target <monitor-device-path>
+sbms config clear-target
+sbms config reset
+sbms map
+```
+
+`set-target` accepts only one currently active physical display. A malformed
+configuration is left untouched; `reset` is the explicit recovery operation.
+The public `geometry` module contains `DisplayGeometry`, `SizingRequest`,
+`SizingStrategy`, `Rotation`, and `CoordinateTransform`. Input forwarding now
+uses that shared transform instead of maintaining a second private scaling
+formula. No UI reads or writes these settings in 1.0.0.
 
 ## Build
 
@@ -177,13 +207,13 @@ Build the complete preview installer with Inno Setup 6:
   -SigningCertificateThumbprint <thumbprint>
 ```
 
-The output is `target\installer\SBMS-Setup-0.2.10-x64.exe`. The build signs both
+The output is `target\installer\SBMS-Setup-1.0.0-x64.exe`. The build signs both
 Rust executables and the resulting installer with the same test certificate,
 verifies all signatures, and prints the package SHA-256.
 
 ## Install and run
 
-Run `SBMS-Setup-0.2.10-x64.exe` and approve UAC. Setup installs/updates the
+Run `SBMS-Setup-1.0.0-x64.exe` and approve UAC. Setup installs/updates the
 driver, updates installer-owned files, removes only explicitly known legacy
 artifacts, registers the elevated logon task for the installing interactive
 account, and starts the tray. It does not clear arbitrary files from the install

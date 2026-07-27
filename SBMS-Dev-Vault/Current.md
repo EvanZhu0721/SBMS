@@ -2,8 +2,8 @@
 
 ## Baseline
 
-- Branch: `rust-vnext`
-- Version: 0.2.10
+- Branch: `main`
+- Version: 1.0.0
 - Product core: one Rust process owns one virtual display, one mapping worker,
   one reversible window-migration set, and one captured mouse route.
 - Driver boundary: the C++/WDK IDD reports one 3840x2160@240 test mode and
@@ -12,7 +12,11 @@
 
 ## Implemented
 
-- CLI `list`, `create`, `map`, `shutdown`, and `ui`.
+- CLI `list`, `create`, `map`, `config`, `shutdown`, and `ui`.
+- Versioned per-user configuration atomically persists a stable target ID and
+  optional sizing request; malformed files are preserved with a warning.
+- Public geometry types expose physical measurements, explicit rotation,
+  sizing policy, alignment, refresh preference, and shared coordinate mapping.
 - Slint/Material 3 taskbar tray panel; its controller worker exclusively owns
   `MappingSession` so the UI thread never performs blocking lifecycle work.
 - Startup and 250 ms continuous migration of eligible windows from the selected
@@ -25,8 +29,8 @@
 - Dedicated input message pumping keeps Raw Input and low-level hooks off the
   synchronous 4K GDI draw worker. A drained message batch injects only its
   newest absolute source position.
-- The mirror does not draw a second pointer marker; Windows' composited cursor
-  remains the single visible pointer.
+- The mirror does not draw a second pointer marker. The IDD keeps the platform
+  default software cursor, preserving the native shape and hotspot in-frame.
 - Stop order: input/mirror, window restoration, virtual device, topology wait,
   and final placement reconciliation.
 - Tray single instance and a local named shutdown event used by upgrade and
@@ -49,13 +53,13 @@
   and clean reinstall.
 - Post-uninstall state: no SBMS tray process, scheduled task, Program Files
   directory, or SBMS OEM driver package.
-- Final installed state: 0.2.10 binaries, `Highest` logon task running, and
+- Final installed state before this build: 0.2.10 binaries, `Highest` logon task running, and
   `sbms create --hold-ms 2000` returning success.
 
 ## Deliberately absent
 
-Configuration persistence, background service, touch/pen/absolute-pointer
-forwarding, keyboard remapping, multi-mapping, dynamic modes, HDR, general
+Background service, touch/pen/absolute-pointer forwarding, keyboard remapping,
+multi-mapping, dynamic modes, HDR, general
 runtime topology recovery, all-GPU transport, and a general test framework.
 
 ## Distribution boundary
