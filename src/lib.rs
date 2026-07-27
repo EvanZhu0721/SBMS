@@ -4,6 +4,7 @@ pub mod controller;
 pub mod display;
 pub mod frame_transport;
 pub mod geometry;
+pub mod gpu_renderer;
 pub mod input;
 pub mod mapping;
 pub mod renderer;

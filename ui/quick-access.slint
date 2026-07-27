@@ -17,6 +17,7 @@ global MdTokens {
     out property <brush> primary: Palette.accent-background;
     out property <brush> primary-container: Palette.color-scheme == ColorScheme.dark ? #4f378b : #eaddff;
     out property <brush> on-primary-container: Palette.color-scheme == ColorScheme.dark ? #eaddff : #21005d;
+    out property <brush> error: Palette.color-scheme == ColorScheme.dark ? #ffb4ab : #ba1a1a;
     out property <brush> error-container: Palette.color-scheme == ColorScheme.dark ? #93000a : #ffdad6;
     out property <brush> on-error-container: Palette.color-scheme == ColorScheme.dark ? #ffdad6 : #410002;
     out property <brush> outline-variant: Palette.border;
@@ -308,6 +309,113 @@ component ReferenceActionButton inherits Rectangle {
     }
 }
 
+component SegmentGlyph inherits Rectangle {
+    in property <int> glyph;
+    in property <brush> lit-color;
+    property <brush> dim-color: transparent;
+
+    width: 14px;
+    height: 24px;
+    background: transparent;
+
+    // Segment order: a, b, c, d, e, f, g.
+    Rectangle {
+        x: 2px; y: 0px; width: 10px; height: 2px;
+        background: root.glyph == 0 || root.glyph == 2 || root.glyph == 3
+            || root.glyph == 5 || root.glyph == 6 || root.glyph == 7
+            || root.glyph == 8 || root.glyph == 9 || root.glyph == 10
+            ? root.lit-color : root.dim-color;
+    }
+    Rectangle {
+        x: 12px; y: 2px; width: 2px; height: 9px;
+        background: root.glyph == 0 || root.glyph == 1 || root.glyph == 2
+            || root.glyph == 3 || root.glyph == 4 || root.glyph == 7
+            || root.glyph == 8 || root.glyph == 9
+            ? root.lit-color : root.dim-color;
+    }
+    Rectangle {
+        x: 12px; y: 13px; width: 2px; height: 9px;
+        background: root.glyph == 0 || root.glyph == 1 || root.glyph == 3
+            || root.glyph == 4 || root.glyph == 5 || root.glyph == 6
+            || root.glyph == 7 || root.glyph == 8 || root.glyph == 9
+            ? root.lit-color : root.dim-color;
+    }
+    Rectangle {
+        x: 2px; y: 22px; width: 10px; height: 2px;
+        background: root.glyph == 0 || root.glyph == 2 || root.glyph == 3
+            || root.glyph == 5 || root.glyph == 6 || root.glyph == 8
+            || root.glyph == 9 || root.glyph == 10
+            ? root.lit-color : root.dim-color;
+    }
+    Rectangle {
+        x: 0px; y: 13px; width: 2px; height: 9px;
+        background: root.glyph == 0 || root.glyph == 2 || root.glyph == 6
+            || root.glyph == 8 || root.glyph == 10 || root.glyph == 11
+            ? root.lit-color : root.dim-color;
+    }
+    Rectangle {
+        x: 0px; y: 2px; width: 2px; height: 9px;
+        background: root.glyph == 0 || root.glyph == 4 || root.glyph == 5
+            || root.glyph == 6 || root.glyph == 8 || root.glyph == 9
+            || root.glyph == 10
+            ? root.lit-color : root.dim-color;
+    }
+    Rectangle {
+        x: 2px; y: 11px; width: 10px; height: 2px;
+        background: root.glyph == 2 || root.glyph == 3 || root.glyph == 4
+            || root.glyph == 5 || root.glyph == 6 || root.glyph == 8
+            || root.glyph == 9 || root.glyph == 10 || root.glyph == 11
+            || root.glyph == 12
+            ? root.lit-color : root.dim-color;
+    }
+}
+
+component SevenSegmentDisplay inherits Rectangle {
+    in property <int> fps;
+    in property <bool> valid;
+    in property <bool> running;
+    in property <bool> error;
+    property <int> clamped-fps: Math.min(Math.max(root.fps, 0), 999);
+    property <brush> segment-color: root.error ? MdTokens.error : MdTokens.primary;
+
+    width: 76px;
+    height: 36px;
+    background: transparent;
+    accessible-role: text;
+    accessible-label: root.error
+        ? "Mapping error"
+        : (root.running && root.valid
+            ? "Mapping frame rate " + root.clamped-fps + " frames per second"
+            : "Mapping frame rate unavailable");
+
+    HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 9px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 4px;
+        alignment: center;
+
+        SegmentGlyph {
+            glyph: root.error ? 10
+                : (root.running && root.valid
+                    ? Math.mod(Math.floor(root.clamped-fps / 100), 10) : 12);
+            lit-color: root.segment-color;
+        }
+        SegmentGlyph {
+            glyph: root.error ? 11
+                : (root.running && root.valid
+                    ? Math.mod(Math.floor(root.clamped-fps / 10), 10) : 12);
+            lit-color: root.segment-color;
+        }
+        SegmentGlyph {
+            glyph: root.error ? 11
+                : (root.running && root.valid ? Math.mod(root.clamped-fps, 10) : 12);
+            lit-color: root.segment-color;
+        }
+    }
+}
+
 export component QuickAccess inherits Window {
     title: "SBMS Quick Access";
     width: 384px;
@@ -334,6 +442,9 @@ export component QuickAccess inherits Window {
     in property <bool> running: false;
     in property <bool> busy: false;
     in property <string> error-text: "";
+    in property <int> mapping-fps: 0;
+    in property <bool> mapping-fps-valid: false;
+    in property <bool> mapping-fps-error: false;
     in-out property <bool> geometry-page: false;
     in property <bool> geometry-valid: false;
     in property <bool> geometry-save-blocked: false;
@@ -391,6 +502,7 @@ export component QuickAccess inherits Window {
                     spacing: MdTokens.space-1;
 
                     VerticalLayout {
+                        horizontal-stretch: 1;
                         alignment: center;
                         spacing: 2px;
                         Text {
@@ -404,6 +516,13 @@ export component QuickAccess inherits Window {
                             color: MdTokens.on-surface-variant;
                             font-size: MdTokens.type-body-small;
                         }
+                    }
+
+                    SevenSegmentDisplay {
+                        fps: root.mapping-fps;
+                        valid: root.mapping-fps-valid;
+                        running: root.running;
+                        error: root.mapping-fps-error;
                     }
                 }
 

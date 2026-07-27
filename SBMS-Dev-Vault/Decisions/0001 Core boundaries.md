@@ -2,6 +2,10 @@
 
 Accepted: 2026-07-27
 
+Pixel transport and presentation were superseded by
+`0002 GPU mirror path.md` in 1.1.3. The single-session ownership and topology
+boundaries below remain in force.
+
 The core owns one mapping session. Rust owns display discovery, lifecycle,
 errors, target rendering, and concurrency policy. C++ owns only the WDF/IddCx
 boundary and publishes the swapchain's latest BGRA frame.

@@ -239,11 +239,16 @@ fn apply_event(
     preferences: &SelectionPreferences,
     event: ControllerEvent,
 ) {
-    let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
     match event {
         ControllerEvent::Displays(displays) => {
             set_displays(ui, &displays, preferences);
             *display_state.lock().expect("display metadata poisoned") = displays;
+        }
+        ControllerEvent::Fps(fps) => {
+            if ui.get_running() && !ui.get_mapping_fps_error() {
+                ui.set_mapping_fps(fps.min(999) as i32);
+                ui.set_mapping_fps_valid(true);
+            }
         }
         ControllerEvent::State {
             state,
@@ -252,6 +257,7 @@ fn apply_event(
             busy,
             error,
         } => {
+            let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(tray) = tray {
                 tray.set_status(state.into());
             }
@@ -261,6 +267,8 @@ fn apply_event(
             ui.set_busy(busy);
             ui.set_error_text(error.as_str().into());
             if !error.is_empty() {
+                ui.set_mapping_fps_error(true);
+                ui.set_mapping_fps_valid(false);
                 let ui = ui.as_weak();
                 let error_revision = error_revision.clone();
                 slint::Timer::single_shot(Duration::from_secs(6), move || {
@@ -280,6 +288,10 @@ fn apply_event(
                         }
                     }
                 });
+            } else {
+                ui.set_mapping_fps(0);
+                ui.set_mapping_fps_valid(false);
+                ui.set_mapping_fps_error(false);
             }
         }
     }

@@ -22,11 +22,12 @@ src/geometry.rs             physical sizing and coordinate transforms
 src/input.rs                captured mouse routing and safe release
 src/mapping.rs              mapping start/stop ownership
 src/window_migration.rs     reversible top-level window migration
-src/frame_transport.rs      one-session shared frame channel
-src/renderer.rs             shared-frame reader and target window
+src/frame_transport.rs      protected one-session mode gate
+src/renderer.rs             Desktop Duplication and target window
+src/gpu_renderer.rs         D3D11 scaling and flip-model presentation
 src/ui.rs + ui/             tray adapter and Slint quick-access panel
 src/virtual_display.rs      SwDeviceCreate and HSWDEVICE ownership
-driver/Driver.cpp           IddCx swapchain drain and BGRA publisher
+driver/Driver.cpp           IddCx mode reporting and swapchain drain
 driver/SBMSIndirectDisplay.inf
 build-driver.ps1            build, validation, and optional test signing
 installer/                  thin Inno Setup manifest and maintenance script
@@ -43,10 +44,11 @@ The invariant is deliberately small:
 2. `sbms map` requests `SBMS\IndirectDisplay` and waits for its active source.
 3. Eligible standard top-level windows on the target are moved to the virtual
    source before the mirror is exposed as running.
-4. The IDD publishes each IddCx swapchain surface through two shared BGRA
-   slots; a slow renderer drops frames instead of blocking IddCx.
-5. Start succeeds only after Rust draws the first valid shared frame to the
-   selected physical target.
+4. The IDD continuously acquires and finishes IddCx swapchain buffers without
+   reading their pixels back to the CPU.
+5. Rust locates the exact virtual DXGI output, duplicates it on the GPU, and
+   start succeeds only after the first successful presentation to the selected
+   physical target.
 6. Stop first releases input capture and closes the mirror, then restores
    migrated windows, closes the uniquely owned `HSWDEVICE`, waits for the
    virtual topology to disappear, and reconciles final window placement against
@@ -54,7 +56,7 @@ The invariant is deliberately small:
 7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 1.1.2 capability boundary
+## 1.1.3 capability boundary
 
 Supported:
 
@@ -78,19 +80,19 @@ Supported:
   on the UI thread.
 - Click-to-capture mouse routing from the physical mirror into the virtual
   desktop: relative movement, left/right/middle/X1/X2 buttons, vertical and
-  horizontal wheels. SBMS does not draw an additional software pointer; the
-  Windows-composited cursor remains authoritative.
+  horizontal wheels. SBMS does not draw a synthetic fixed pointer; the
+  Desktop Duplication image and pointer metadata remain authoritative.
   Press F8 to release capture.
 - Keyboard input follows normal Windows foreground focus after the injected
   source click; it is not copied or keylogged by SBMS. Print Screen and
   Win+Shift+S release mouse capture before Windows handles the shortcut.
 - Raw mouse input and low-level hooks run on a message pump that is independent
-  of the synchronous 4K mirror draw worker. Relative movement packets are
+  of the GPU presentation worker. Relative movement packets are
   coalesced to the newest absolute source position before injection.
-- The mirror does not composite its own pointer marker. This avoids a duplicate
-  arrow. The driver leaves IddCx hardware-cursor support disabled, so the
-  platform's default software cursor remains part of the virtual-display frame
-  with its native shape, hotspot, animation, and visibility.
+- The mirror does not composite a fixed pointer marker. Desktop Duplication
+  pointer metadata is rendered only when Windows reports that the pointer is
+  not already part of the duplicated image, preserving the current shape,
+  hotspot, visibility, and position without drawing two arrows.
 - Public pure-Rust sizing types expose native pixel size, physical dimensions
   or diagonal, explicit rotation, physical/integer strategy, alignment, and
   preferred refresh. `MappingRequest` turns the result into the mode requested
@@ -98,8 +100,8 @@ Supported:
 - One x64 Inno Setup executable that installs the two Rust executables and the
   signed IDD package under `Program Files\SBMS`.
 - One per-user Task Scheduler logon entry with `Highest` run level. This is not
-  decorative elevation: the current cross-session IDD frame channel uses
-  `Global\` kernel objects and cannot be created by a medium-integrity tray.
+  decorative elevation: the protected cross-session mode gate uses a `Global\`
+  kernel object and cannot be created by a medium-integrity tray.
 - Graceful upgrade and uninstall: signal the tray and wait up to 30 seconds for
   `MappingSession` cleanup. Uninstall then removes verified owned logon tasks
   and every OEM INF that exactly matches the SBMS provider/hardware ID. If
@@ -113,14 +115,28 @@ Supported:
 - `--version`, `list`, `create`, `map`, and `config`. `map` accepts an explicit
   target or the saved target; `create` tests only the raw device lifetime.
 
-The v4 session gate carries the validated width, height, stride, rational
-refresh rate, and random session ID before `SwDeviceCreate`. The IDD advertises
-one monitor/target mode for that session, and the two-slot frame mapping and
-renderer use the same dynamic dimensions. Rust leases the published slot
-directly to `StretchDIBits`; the driver writes the other slot or drops that
-frame. D3D11 CPU staging readback, a driver-to-shared-memory copy, and GDI
-output remain. An advertised 240 Hz mode is not a 240 fps promise, especially
-at modes such as 4640x2610.
+The v4 session gate carries the validated width, height, stride, and rational
+refresh rate before `SwDeviceCreate`. The IDD advertises one monitor/target mode
+for that session and only drains its IddCx swapchain. Rust matches the virtual
+source rectangle to one exact DXGI output, then uses
+`Desktop Duplication -> D3D11 texture -> pixel shader -> flip-model swap chain`.
+The pixel hot path has no CPU staging readback, shared pixel mapping, or GDI
+output.
+
+At a 1:1 scale, the shader bypasses filtering. For a reduction between 1x and
+2x on each axis, it performs exact source-pixel area integration with four
+bilinear texture fetches, then uses two additional horizontal samples for a
+neutral-content chroma low-pass that reduces rescaled ClearType fringes while
+preserving luminance. Other scale ratios fall back to bilinear sampling. This
+is a lightweight display heuristic, not font recognition, gamma-linear
+resampling, HDR, or color management. An advertised 240 Hz mode is not a
+sustained 240 fps promise.
+
+On the validated machine, a 12-second cursor-driven 4640x2610@240 to
+2560x1440 run held 239-240 fps. WUDFHost used 0% CPU and exposed no GPU engine
+above 0.01%; the `sbms` renderer used 0% CPU and averaged 3.36% 3D-engine load
+with a 3.44% peak. This is one-machine composition stress evidence, not a
+guarantee for every workload or GPU.
 
 Windows can restore an older desktop source resolution for the permanent
 virtual-monitor identity. Start therefore enumerates the legal GDI mode,
@@ -130,11 +146,11 @@ confirmation. Start snapshots the physical topology before creating the virtual
 source; failure cleanup and normal stop reapply it after device removal, so
 Windows rearrangement does not become the user's final layout.
 
-Shared objects use a protected ACL for the launching user, SYSTEM, LocalService,
-and Administrators. A protected fixed gate carries a 128-bit random session ID;
-the frame mapping and event receive unguessable per-session names. This is
-Windows identity-level authorization, not process attestation: another process
-under one of those trusted identities remains inside the boundary.
+The fixed session gate uses a protected ACL for the launching user, SYSTEM,
+LocalService, and Administrators. There are no shared pixel mappings or frame
+events. This is Windows identity-level authorization, not process attestation:
+another process under one of those trusted identities remains inside the
+boundary.
 
 Not supported:
 
@@ -146,8 +162,8 @@ Not supported:
 - A publicly trusted production package. The current preview installer, Rust
   executables, driver DLL, and catalog are signed with a local test certificate
   without a public timestamp. Ordinary machines will not trust it.
-- Native Windows clone-mode semantics, an all-GPU path, or low-latency game
-  streaming guarantees.
+- Native Windows clone-mode semantics, HDR or color management, low-latency
+  game-streaming guarantees, or sustained 240 fps.
 
 Window migration is deliberately narrower than a window manager. It targets
 eligible live, visible standard top-level windows owned by the current
@@ -218,13 +234,13 @@ Build the complete preview installer with Inno Setup 6:
   -SigningCertificateThumbprint <thumbprint>
 ```
 
-The output is `target\installer\SBMS-Setup-1.1.2-x64.exe`. The build signs both
+The output is `target\installer\SBMS-Setup-1.1.3-x64.exe`. The build signs both
 Rust executables and the resulting installer with the same test certificate,
 verifies all signatures, and prints the package SHA-256.
 
 ## Install and run
 
-Run `SBMS-Setup-1.1.2-x64.exe` and approve UAC. Setup installs/updates the
+Run `SBMS-Setup-1.1.3-x64.exe` and approve UAC. Setup installs/updates the
 driver, updates installer-owned files, removes only explicitly known legacy
 artifacts, registers the elevated logon task for the installing interactive
 account, and starts the tray. It does not clear arbitrary files from the install

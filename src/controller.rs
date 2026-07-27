@@ -1,9 +1,11 @@
+use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use crate::display::active_displays;
 use crate::geometry::Rotation;
 use crate::mapping::{MappingRequest, MappingSession};
+use crate::renderer::{RendererEvent, RendererReporter};
 
 #[derive(Clone, Debug)]
 pub struct DisplayOption {
@@ -25,6 +27,7 @@ pub struct DisplayOption {
 #[derive(Clone, Debug)]
 pub enum ControllerEvent {
     Displays(Vec<DisplayOption>),
+    Fps(u32),
     State {
         state: &'static str,
         detail: String,
@@ -41,8 +44,16 @@ enum Command {
     Shutdown,
 }
 
+enum Message {
+    Command(Command),
+    Renderer {
+        generation: u64,
+        event: RendererEvent,
+    },
+}
+
 #[derive(Clone)]
-pub struct ControllerSender(Sender<Command>);
+pub struct ControllerSender(Sender<Message>);
 
 pub struct Controller {
     sender: ControllerSender,
@@ -51,15 +62,15 @@ pub struct Controller {
 
 impl ControllerSender {
     pub fn refresh(&self) {
-        let _ = self.0.send(Command::Refresh);
+        let _ = self.0.send(Message::Command(Command::Refresh));
     }
 
     pub fn start(&self, target: String) {
-        let _ = self.0.send(Command::Start(target));
+        let _ = self.0.send(Message::Command(Command::Start(target)));
     }
 
     pub fn stop(&self) {
-        let _ = self.0.send(Command::Stop);
+        let _ = self.0.send(Message::Command(Command::Stop));
     }
 }
 
@@ -67,15 +78,20 @@ impl Controller {
     pub fn spawn(emit: impl Fn(ControllerEvent) + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         let sender = ControllerSender(tx);
+        let worker_tx = sender.0.clone();
         let worker = thread::spawn(move || {
             let mut session = None;
-            while let Ok(command) = rx.recv() {
-                match command {
-                    Command::Refresh => refresh(&emit),
-                    Command::Start(target) => {
+            let mut active_generation = None;
+            let mut next_generation = 0_u64;
+            while let Ok(message) = rx.recv() {
+                match message {
+                    Message::Command(Command::Refresh) => refresh(&emit),
+                    Message::Command(Command::Start(target)) => {
                         if session.is_some() {
                             continue;
                         }
+                        next_generation = next_generation.wrapping_add(1);
+                        let generation = next_generation;
                         emit(state(
                             "Starting",
                             "Creating virtual display…".into(),
@@ -83,9 +99,16 @@ impl Controller {
                             true,
                             "",
                         ));
-                        match MappingRequest::configured(target).and_then(MappingSession::start) {
+                        let report_tx = worker_tx.clone();
+                        let reporter: RendererReporter = Arc::new(move |event| {
+                            let _ = report_tx.send(Message::Renderer { generation, event });
+                        });
+                        match MappingRequest::configured(target).and_then(|request| {
+                            MappingSession::start_with_reporter(request, reporter)
+                        }) {
                             Ok(started) => {
                                 session = Some(started);
+                                active_generation = Some(generation);
                                 emit(state(
                                     "Running",
                                     "Mapping is active".into(),
@@ -94,20 +117,56 @@ impl Controller {
                                     "",
                                 ));
                             }
-                            Err(error) => emit(state(
-                                "Stopped",
-                                "Couldn’t start mapping".into(),
-                                false,
-                                false,
-                                error.to_string(),
-                            )),
+                            Err(error) => {
+                                active_generation = None;
+                                emit(state(
+                                    "Stopped",
+                                    "Couldn’t start mapping".into(),
+                                    false,
+                                    false,
+                                    error.to_string(),
+                                ));
+                            }
                         }
                     }
-                    Command::Stop => stop(&mut session, &emit),
-                    Command::Shutdown => {
+                    Message::Command(Command::Stop) => {
+                        active_generation = None;
+                        stop(&mut session, &emit);
+                    }
+                    Message::Command(Command::Shutdown) => {
                         stop(&mut session, &emit);
                         break;
                     }
+                    Message::Renderer { generation, event }
+                        if active_generation == Some(generation) && session.is_some() =>
+                    {
+                        match event {
+                            RendererEvent::Fps(fps) => {
+                                emit(ControllerEvent::Fps(fps.min(999)));
+                            }
+                            RendererEvent::Failed(error) => {
+                                active_generation = None;
+                                let cleanup_error = session
+                                    .take()
+                                    .and_then(|mut active| active.stop().err())
+                                    .map(|cleanup| cleanup.to_string());
+                                let error = match cleanup_error {
+                                    Some(cleanup) => {
+                                        format!("{error}; cleanup also failed: {cleanup}")
+                                    }
+                                    None => error,
+                                };
+                                emit(state(
+                                    "Stopped",
+                                    "Mapping stopped unexpectedly".into(),
+                                    false,
+                                    false,
+                                    error,
+                                ));
+                            }
+                        }
+                    }
+                    Message::Renderer { .. } => {}
                 }
             }
         });
@@ -122,7 +181,7 @@ impl Controller {
     }
 
     pub fn shutdown(mut self) {
-        let _ = self.sender.0.send(Command::Shutdown);
+        let _ = self.sender.0.send(Message::Command(Command::Shutdown));
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }

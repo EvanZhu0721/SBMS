@@ -1,11 +1,13 @@
 use std::error::Error;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use sbms::config::ConfigStore;
 use sbms::display::active_displays;
 use sbms::frame_transport::{FrameTransport, VirtualMode};
 use sbms::mapping::{MappingRequest, MappingSession};
+use sbms::renderer::RendererEvent;
 use sbms::virtual_display::VirtualDisplay;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -84,12 +86,12 @@ fn create(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
         usage();
     }
 
-    let transport = FrameTransport::create(VirtualMode::default())?;
+    let session_gate = FrameTransport::create(VirtualMode::default())?;
     let display = VirtualDisplay::create()?;
     println!("created={}", display.instance_id());
     wait(hold)?;
     drop(display);
-    drop(transport);
+    drop(session_gate);
     println!("removed");
     Ok(())
 }
@@ -127,7 +129,11 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
     };
 
     let request = MappingRequest::configured(target)?;
-    let mut session = MappingSession::start(request)?;
+    let reporter = Arc::new(|event| match event {
+        RendererEvent::Fps(fps) => println!("fps={fps}"),
+        RendererEvent::Failed(error) => eprintln!("renderer_error={error}"),
+    });
+    let mut session = MappingSession::start_with_reporter(request, reporter)?;
     println!("running={}", session.source_id());
     wait(hold)?;
     session.stop()?;

@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use crate::config::ConfigStore;
 use crate::display::{Display, active_displays, apply_display_mode, restore_display_topology};
 use crate::frame_transport::{FrameLayout, FrameTransport, VirtualMode};
-use crate::renderer::Renderer;
+use crate::renderer::{Renderer, RendererReporter};
 use crate::virtual_display::VirtualDisplay;
 use crate::window_migration::WindowMigration;
 
@@ -23,7 +23,7 @@ pub struct MappingSession {
     renderer: Option<Renderer>,
     migration: Option<WindowMigration>,
     display: Option<VirtualDisplay>,
-    transport: Option<FrameTransport>,
+    session_gate: Option<FrameTransport>,
     source_id: String,
     target_id: String,
     physical_topology: Vec<Display>,
@@ -79,6 +79,13 @@ impl MappingRequest {
 
 impl MappingSession {
     pub fn start(request: MappingRequest) -> Result<Self, MappingError> {
+        Self::start_with_reporter(request, std::sync::Arc::new(|_| {}))
+    }
+
+    pub fn start_with_reporter(
+        request: MappingRequest,
+        reporter: RendererReporter,
+    ) -> Result<Self, MappingError> {
         let displays = active_displays().map_err(|error| stage("target", error))?;
         unique_target(&displays, &request.target)?;
         let mut topology_guard = PhysicalTopologyGuard {
@@ -89,15 +96,15 @@ impl MappingSession {
                 .collect(),
             armed: true,
         };
-        let transport =
-            FrameTransport::create(request.mode).map_err(|error| stage("transport", error))?;
+        let session_gate =
+            FrameTransport::create(request.mode).map_err(|error| stage("session-gate", error))?;
         let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
         let (source, target) = wait_for_source(&request.target, request.mode)?;
         let source_id = source.id.clone();
         let target_id = target.id.clone();
         let migration =
             WindowMigration::start(&target, &source).map_err(|error| stage("windows", error))?;
-        let renderer = Renderer::start(target, source, transport.channel())
+        let renderer = Renderer::start_with_reporter(target, source, reporter)
             .map_err(|error| stage("first-frame", error))?;
         topology_guard.armed = false;
         let physical_topology = std::mem::take(&mut topology_guard.expected);
@@ -106,7 +113,7 @@ impl MappingSession {
             renderer: Some(renderer),
             migration: Some(migration),
             display: Some(display),
-            transport: Some(transport),
+            session_gate: Some(session_gate),
             source_id,
             target_id,
             physical_topology,
@@ -117,7 +124,7 @@ impl MappingSession {
         if self.renderer.is_none()
             && self.migration.is_none()
             && self.display.is_none()
-            && self.transport.is_none()
+            && self.session_gate.is_none()
         {
             return Ok(());
         }
@@ -173,22 +180,22 @@ impl MappingSession {
                 .err()
         });
         if let Some(error) = reconciliation_error.or(migration_error) {
-            self.transport.take();
+            self.session_gate.take();
             return Err(stage("windows-restore", error));
         }
         if let Some(error) = renderer_error {
-            self.transport.take();
+            self.session_gate.take();
             return Err(stage("renderer-stop", error));
         }
         if let Some(error) = topology_error {
-            self.transport.take();
+            self.session_gate.take();
             return Err(error);
         }
         if let Some(error) = remove_error {
-            self.transport.take();
+            self.session_gate.take();
             return Err(error);
         }
-        self.transport.take();
+        self.session_gate.take();
         Ok(())
     }
 

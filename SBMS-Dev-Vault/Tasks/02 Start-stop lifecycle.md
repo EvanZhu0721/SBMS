@@ -5,12 +5,12 @@ Status: complete.
 ## Start
 
 1. Resolve one active physical target by stable monitor device path.
-2. Acquire the protected one-session gate and create random frame-channel
-   objects.
+2. Acquire and populate the protected one-session mode gate.
 3. Create and own the software-device handle.
 4. Wait at most 15 seconds for exactly one active SBMS source.
 5. Re-resolve the target after the topology change.
-6. Start the mirror and wait at most 10 seconds for its first frame.
+6. Start the GPU mirror and wait at most 10 seconds for its first successful
+   presentation.
 
 Any failure unwinds owned resources in reverse order.
 
@@ -28,3 +28,6 @@ cycle printed `running`, printed `stopped`, exited zero, and restored the
 two-display baseline. A simultaneous second session failed before device
 creation with an explicit ownership error. A separate 30-second session exited
 cleanly and left no virtual display active.
+
+Signed 1.1.3 also completed first-frame confirmation and normal stop through
+the Desktop Duplication/D3D11 presentation path.

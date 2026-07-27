@@ -1,23 +1,10 @@
-use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{
-    CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
-};
-use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLORONCOLOR, DIB_RGB_COLORS, GetDC, ReleaseDC, SRCCOPY,
-    SetStretchBltMode, StretchDIBits,
-};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Memory::{
-    FILE_MAP_READ, FILE_MAP_WRITE, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile,
-};
-use windows::Win32::System::Threading::{
-    OpenEventW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
-};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG,
     PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, ShowWindow,
@@ -27,21 +14,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 use crate::display::Display;
-use crate::frame_transport::{FrameChannel, FrameLayout, HEADER_BYTES, MAGIC};
+use crate::gpu_renderer::{FilterMode, GpuRendererConfig, run_gpu_renderer};
 use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
-#[repr(C, align(8))]
-struct FrameHeader {
-    magic: u32,
-    width: u32,
-    height: u32,
-    stride: u32,
-    published_slot: AtomicI32,
-    reader_slot: AtomicI32,
+#[derive(Clone, Debug)]
+pub enum RendererEvent {
+    Fps(u32),
+    Failed(String),
 }
+
+pub type RendererReporter = Arc<dyn Fn(RendererEvent) + Send + Sync + 'static>;
 
 pub struct Renderer {
     stop: Arc<AtomicBool>,
@@ -50,17 +35,29 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn start(target: Display, source: Display, channel: FrameChannel) -> Result<Self, String> {
+    pub fn start(target: Display, source: Display) -> Result<Self, String> {
+        Self::start_with_reporter(target, source, Arc::new(|_| {}))
+    }
+
+    pub fn start_with_reporter(
+        target: Display,
+        source: Display,
+        reporter: RendererReporter,
+    ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
-            let result = run(target.rect, source.rect, channel, &worker_stop, &ready_tx);
+            let result = run(target.rect, source.rect, &worker_stop, &ready_tx, &reporter);
             if let Err(error) = &result {
                 let _ = ready_tx.send(Err(error.clone()));
             }
+            let failure = result.as_ref().err().cloned();
             let _ = done_tx.send(result);
+            if let Some(error) = failure {
+                reporter(RendererEvent::Failed(error));
+            }
         });
 
         match ready_rx.recv_timeout(START_TIMEOUT) {
@@ -111,9 +108,9 @@ impl Drop for Renderer {
 fn run(
     target: RECT,
     source: RECT,
-    channel: FrameChannel,
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), String>>,
+    reporter: &RendererReporter,
 ) -> Result<(), String> {
     let instance = unsafe { GetModuleHandleW(None) }
         .map_err(|error| format!("GetModuleHandleW failed: {error}"))?;
@@ -173,7 +170,7 @@ fn run(
         let window_value = window.0 as usize;
         let draw_thread = scope.spawn(move || {
             let window = HWND(window_value as *mut _);
-            let result = draw_frames(window, width, height, channel, stop, ready);
+            let result = draw_frames(window, width, height, source, stop, ready, reporter);
             let _ = draw_done_tx.send(result);
         });
         let draw_result = loop {
@@ -209,192 +206,49 @@ fn draw_frames(
     window: HWND,
     target_width: i32,
     target_height: i32,
-    channel: FrameChannel,
+    source: RECT,
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), String>>,
+    reporter: &RendererReporter,
 ) -> Result<(), String> {
-    let layout = channel.layout();
-    let mut reader = FrameReader::open(channel)?;
-    let dc = unsafe { GetDC(Some(window)) };
-    if dc.is_invalid() {
-        return Err("GetDC(target) failed".into());
-    }
-    unsafe {
-        SetStretchBltMode(dc, COLORONCOLOR);
-    }
-
-    let bitmap = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: layout.mode.width as i32,
-            biHeight: -(layout.mode.height as i32),
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            biSizeImage: layout.plane_bytes as u32,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
     let mut first_frame = true;
-    let result = loop {
-        if stop.load(Ordering::Acquire) {
-            break Ok(());
-        }
-        let Some(frame) = reader.acquire()? else {
-            continue;
-        };
-        let copied = unsafe {
-            StretchDIBits(
-                dc,
-                0,
-                0,
-                target_width,
-                target_height,
-                0,
-                0,
-                layout.mode.width as i32,
-                layout.mode.height as i32,
-                Some(frame.pixels.cast()),
-                &bitmap,
-                DIB_RGB_COLORS,
-                SRCCOPY,
-            )
-        };
-        if copied == 0 {
-            break Err("StretchDIBits failed".into());
-        }
-        if first_frame {
-            ready
-                .send(Ok(()))
-                .map_err(|_| "mapping start was cancelled".to_string())?;
-            first_frame = false;
-        }
-    };
-    unsafe {
-        ReleaseDC(Some(window), dc);
-    }
-    result
-}
-
-struct FrameReader {
-    mapping: windows::Win32::Foundation::HANDLE,
-    event: windows::Win32::Foundation::HANDLE,
-    view: windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS,
-    layout: FrameLayout,
-}
-
-impl FrameReader {
-    fn open(channel: FrameChannel) -> Result<Self, String> {
-        let layout = channel.layout();
-        let mapping = unsafe {
-            OpenFileMappingW(FILE_MAP_READ.0 | FILE_MAP_WRITE.0, false, channel.mapping())
-        }
-        .map_err(|error| format!("OpenFileMappingW failed: {error}"))?;
-        let view = unsafe {
-            MapViewOfFile(
-                mapping,
-                FILE_MAP_READ | FILE_MAP_WRITE,
-                0,
-                0,
-                layout.mapping_bytes,
-            )
-        };
-        if view.Value.is_null() {
-            unsafe {
-                let _ = CloseHandle(mapping);
+    let mut frames = 0_u32;
+    let mut sample_started = Instant::now();
+    run_gpu_renderer(
+        GpuRendererConfig {
+            target_window: window,
+            target_width: target_width as u32,
+            target_height: target_height as u32,
+            source_rect: source,
+            filter_mode: FilterMode::ExactArea,
+            vsync: true,
+        },
+        stop,
+        || {
+            frames = frames.saturating_add(1);
+            if first_frame {
+                ready
+                    .send(Ok(()))
+                    .map_err(|_| "mapping start was cancelled".to_string())?;
+                first_frame = false;
             }
-            return Err("MapViewOfFile failed".into());
-        }
-        let event = match unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, channel.event()) }
-        {
-            Ok(event) => event,
-            Err(error) => {
-                unsafe {
-                    let _ = UnmapViewOfFile(view);
-                    let _ = CloseHandle(mapping);
-                }
-                return Err(format!("OpenEventW failed: {error}"));
+            let elapsed = sample_started.elapsed();
+            if elapsed >= Duration::from_secs(1) {
+                reporter(RendererEvent::Fps(measured_fps(frames, elapsed)));
+                frames = 0;
+                sample_started = Instant::now();
             }
-        };
-        Ok(Self {
-            mapping,
-            event,
-            view,
-            layout,
-        })
-    }
-
-    fn acquire(&mut self) -> Result<Option<FrameLease>, String> {
-        let wait = unsafe { WaitForSingleObject(self.event, 4) };
-        if wait == WAIT_TIMEOUT {
-            return Ok(None);
-        }
-        if wait != WAIT_OBJECT_0 {
-            return Err(format!("frame event wait failed: {}", wait.0));
-        }
-
-        let header = self.view.Value.cast::<FrameHeader>();
-        let valid = unsafe {
-            (*header).magic == MAGIC
-                && (*header).width == self.layout.mode.width
-                && (*header).height == self.layout.mode.height
-                && (*header).stride == self.layout.stride
-        };
-        if !valid {
-            return Err(unsafe {
-                format!(
-                    "driver frame error magic=0x{:08x} stage={} hr=0x{:08x} detail={}",
-                    (*header).magic,
-                    (*header).width,
-                    (*header).height,
-                    (*header).stride
-                )
-            });
-        }
-
-        loop {
-            let published = unsafe { &(*header).published_slot }.load(Ordering::Acquire);
-            if !(0..=1).contains(&published) {
-                return Ok(None);
-            }
-            unsafe { &(*header).reader_slot }.store(published, Ordering::Release);
-            if unsafe { &(*header).published_slot }.load(Ordering::Acquire) == published {
-                let pixels = unsafe {
-                    self.view
-                        .Value
-                        .cast::<u8>()
-                        .add(HEADER_BYTES + published as usize * self.layout.plane_bytes)
-                };
-                return Ok(Some(FrameLease {
-                    pixels,
-                    reader_slot: unsafe { &(*header).reader_slot },
-                }));
-            }
-            unsafe { &(*header).reader_slot }.store(-1, Ordering::Release);
-        }
-    }
+            Ok(())
+        },
+    )
+    .map_err(|error| error.to_string())
 }
 
-struct FrameLease {
-    pixels: *const u8,
-    reader_slot: *const AtomicI32,
-}
-
-impl Drop for FrameLease {
-    fn drop(&mut self) {
-        unsafe { &*self.reader_slot }.store(-1, Ordering::Release);
+fn measured_fps(frames: u32, elapsed: Duration) -> u32 {
+    if elapsed.is_zero() {
+        return 0;
     }
-}
-
-impl Drop for FrameReader {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = UnmapViewOfFile(self.view);
-            let _ = CloseHandle(self.event);
-            let _ = CloseHandle(self.mapping);
-        }
-    }
+    ((frames as f64 / elapsed.as_secs_f64()).round()).clamp(0.0, u32::MAX as f64) as u32
 }
 
 fn pump_messages() -> bool {
@@ -432,5 +286,23 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(window, message, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::measured_fps;
+    use std::time::Duration;
+
+    #[test]
+    fn fps_uses_actual_sample_duration() {
+        assert_eq!(measured_fps(60, Duration::from_secs(1)), 60);
+        assert_eq!(measured_fps(90, Duration::from_millis(1500)), 60);
+    }
+
+    #[test]
+    fn fps_reports_idle_and_handles_zero_duration() {
+        assert_eq!(measured_fps(0, Duration::from_secs(1)), 0);
+        assert_eq!(measured_fps(1, Duration::ZERO), 0);
     }
 }

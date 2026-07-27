@@ -10,7 +10,6 @@ use windows::Win32::Foundation::{
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
-use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::Security::{
     GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
     TokenUser,
@@ -18,17 +17,14 @@ use windows::Win32::Security::{
 use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_WRITE, MapViewOfFile, PAGE_READWRITE, UnmapViewOfFile,
 };
-use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess, OpenProcessToken};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{PCWSTR, PWSTR, w};
 
-pub const HEADER_BYTES: usize = 24;
-pub const MAGIC: u32 = 0x5342_4d53;
 const GATE_MAGIC: u32 = 0x5342_4734;
 const PROTOCOL_VERSION: u32 = 4;
 const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v4");
 const MAX_DIMENSION: u32 = 16_384;
 const MAX_REFRESH_HZ: u64 = 1_000;
-const MAX_MAPPING_BYTES: usize = 512 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualMode {
@@ -74,8 +70,6 @@ impl VirtualMode {
 pub struct FrameLayout {
     pub mode: VirtualMode,
     pub stride: u32,
-    pub plane_bytes: usize,
-    pub mapping_bytes: usize,
 }
 
 impl FrameLayout {
@@ -104,28 +98,7 @@ impl FrameLayout {
             .width
             .checked_mul(4)
             .ok_or_else(|| TransportError("virtual stride overflow".into()))?;
-        let plane_bytes = usize::try_from(stride)
-            .ok()
-            .and_then(|stride| stride.checked_mul(mode.height as usize))
-            .ok_or_else(|| TransportError("virtual frame size overflow".into()))?;
-        let mapping_bytes = plane_bytes
-            .checked_mul(2)
-            .and_then(|bytes| bytes.checked_add(HEADER_BYTES))
-            .ok_or_else(|| TransportError("virtual frame mapping size overflow".into()))?;
-        if mapping_bytes > MAX_MAPPING_BYTES {
-            return Err(TransportError(format!(
-                "virtual frame mapping exceeds the {} MiB product limit",
-                MAX_MAPPING_BYTES / 1024 / 1024
-            )));
-        }
-        u32::try_from(mapping_bytes)
-            .map_err(|_| TransportError("virtual frame mapping exceeds 4 GiB".into()))?;
-        Ok(Self {
-            mode,
-            stride,
-            plane_bytes,
-            mapping_bytes,
-        })
+        Ok(Self { mode, stride })
     }
 }
 
@@ -139,35 +112,11 @@ struct GateHeader {
     refresh_numerator: u32,
     refresh_denominator: u32,
     flags: u32,
-    nonce: [u8; 16],
-}
-
-#[derive(Clone)]
-pub struct FrameChannel {
-    mapping: Vec<u16>,
-    event: Vec<u16>,
-    layout: FrameLayout,
-}
-
-impl FrameChannel {
-    pub fn mapping(&self) -> PCWSTR {
-        PCWSTR(self.mapping.as_ptr())
-    }
-
-    pub fn event(&self) -> PCWSTR {
-        PCWSTR(self.event.as_ptr())
-    }
-
-    pub fn layout(&self) -> FrameLayout {
-        self.layout
-    }
+    reserved: [u8; 16],
 }
 
 pub struct FrameTransport {
     gate: HANDLE,
-    mapping: HANDLE,
-    event: HANDLE,
-    channel: FrameChannel,
 }
 
 #[derive(Debug)]
@@ -206,17 +155,6 @@ impl FrameTransport {
             ));
         }
 
-        let mut nonce = [0u8; 16];
-        let status = unsafe { BCryptGenRandom(None, &mut nonce, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
-        if status.0 < 0 {
-            unsafe {
-                let _ = CloseHandle(gate);
-            }
-            return Err(TransportError(format!(
-                "BCryptGenRandom failed: 0x{:08x}",
-                status.0 as u32
-            )));
-        }
         let gate_view =
             unsafe { MapViewOfFile(gate, FILE_MAP_WRITE, 0, 0, size_of::<GateHeader>()) };
         if gate_view.Value.is_null() {
@@ -235,75 +173,12 @@ impl FrameTransport {
                 refresh_numerator: mode.refresh_numerator,
                 refresh_denominator: mode.refresh_denominator,
                 flags: 0,
-                nonce,
+                reserved: [0; 16],
             });
             let _ = UnmapViewOfFile(gate_view);
         }
 
-        let suffix = nonce
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let channel = FrameChannel {
-            mapping: wide(&format!("Global\\SBMSFrame-v4-{suffix}")),
-            event: wide(&format!("Global\\SBMSFrameReady-v4-{suffix}")),
-            layout,
-        };
-        let mapping = match unsafe {
-            CreateFileMappingW(
-                INVALID_HANDLE_VALUE,
-                Some(&attributes),
-                PAGE_READWRITE,
-                0,
-                layout.mapping_bytes as u32,
-                channel.mapping(),
-            )
-        } {
-            Ok(mapping) => mapping,
-            Err(error) => {
-                unsafe {
-                    let _ = CloseHandle(gate);
-                }
-                return Err(TransportError(format!("create frame mapping: {error}")));
-            }
-        };
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            unsafe {
-                let _ = CloseHandle(mapping);
-                let _ = CloseHandle(gate);
-            }
-            return Err(TransportError("random frame mapping name collision".into()));
-        }
-        let event = match unsafe { CreateEventW(Some(&attributes), false, false, channel.event()) }
-        {
-            Ok(event) => event,
-            Err(error) => {
-                unsafe {
-                    let _ = CloseHandle(mapping);
-                    let _ = CloseHandle(gate);
-                }
-                return Err(TransportError(format!("create frame event: {error}")));
-            }
-        };
-        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-            unsafe {
-                let _ = CloseHandle(event);
-                let _ = CloseHandle(mapping);
-                let _ = CloseHandle(gate);
-            }
-            return Err(TransportError("random frame event name collision".into()));
-        }
-
-        Ok(Self {
-            gate,
-            mapping,
-            event,
-            channel,
-        })
-    }
-
-    pub fn channel(&self) -> FrameChannel {
-        self.channel.clone()
+        Ok(Self { gate })
     }
 }
 
@@ -319,8 +194,6 @@ const fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
 impl Drop for FrameTransport {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseHandle(self.event);
-            let _ = CloseHandle(self.mapping);
             let _ = CloseHandle(self.gate);
         }
     }
@@ -402,15 +275,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dynamic_layout_matches_4640_by_2610() {
+    fn dynamic_mode_header_matches_4640_by_2610() {
         let mode = VirtualMode::from_millihz(4640, 2610, 240_000).unwrap();
         let layout = FrameLayout::new(mode).unwrap();
 
         assert_eq!(mode.refresh_numerator, 240);
         assert_eq!(mode.refresh_denominator, 1);
         assert_eq!(layout.stride, 18_560);
-        assert_eq!(layout.plane_bytes, 48_441_600);
-        assert_eq!(layout.mapping_bytes, 96_883_224);
         assert_eq!(size_of::<GateHeader>(), 48);
     }
 
@@ -418,7 +289,7 @@ mod tests {
     fn invalid_or_excessive_modes_are_rejected() {
         assert!(VirtualMode::from_millihz(0, 2160, 240_000).is_err());
         assert!(VirtualMode::from_millihz(3840, 2160, 0).is_err());
-        assert!(VirtualMode::from_millihz(16_384, 16_384, 240_000).is_err());
+        assert!(VirtualMode::from_millihz(16_385, 16_384, 240_000).is_err());
         assert!(
             FrameLayout::new(VirtualMode {
                 width: 3840,

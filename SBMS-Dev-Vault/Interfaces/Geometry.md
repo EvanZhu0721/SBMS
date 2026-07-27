@@ -1,6 +1,6 @@
 # 尺寸计算与坐标变换接口
 
-状态：SBMS 1.1.2
+状态：SBMS 1.1.3
 Rust 模块：`sbms::geometry`  
 配置模块：`sbms::config`
 
@@ -12,7 +12,7 @@ Rust 模块：`sbms::geometry`
 `SizingRequest::calculate()` 是纯计算接口：它根据参考显示器和目标显示器
 的像素、物理尺寸、旋转及缩放策略，返回计划使用的虚拟显示模式。
 
-SBMS 1.1.2 已把该结果接入映射链路。`MappingRequest::configured(target)`
+SBMS 1.1.3 已把该结果接入映射链路。`MappingRequest::configured(target)`
 加载已保存的请求，将 `virtual_mode` 和首选刷新率转成 `VirtualMode`；
 没有刷新率偏好时沿用物理目标刷新率，没有尺寸请求时回退
 `3840x2160@240`。计算成功仍然只是规划成功；只有 Windows Source Mode
@@ -244,16 +244,26 @@ GUI 输入
   -> 保存 SizingRequest
   -> MappingRequest::configured()
   -> VirtualMode / FrameLayout
-  -> v4 会话入口（mode / refresh / stride / nonce）
+  -> v4 会话入口（mode / refresh / stride）
   -> IDD 发布本次会话唯一的 Monitor/Target Mode
   -> Windows 活动 Source Mode
   -> 必要时枚举并应用精确 GDI 模式
-  -> Source Mode 收敛与首帧确认
+  -> Source Mode 收敛
+  -> 精确匹配虚拟 DXGI output
+  -> Desktop Duplication GPU texture
+  -> exact-area / chroma shader
+  -> 目标 flip-model swapchain
+  -> 首次成功 Present
 ```
 
 `FrameLayout` 接受的宽高范围为 `1..=16384`，刷新率不超过 1000 Hz，
-双 BGRA 帧映射总长不得超过 512 MiB。模式在创建 `HSWDEVICE` 前固定，
-当前不支持会话运行中热切换。
+BGRA stride 必须能由 `u32` 表示。模式在创建 `HSWDEVICE` 前固定，当前
+不支持会话运行中热切换。
+
+尺寸计算和坐标映射接口不选择渲染滤镜。当前 Renderer 在 1:1 时绕过
+滤镜；每轴 1× 到 2× 缩小时使用精确面积积分和受控色度低通，其他比例
+回退双线性。该选择属于 Renderer policy，GUI 不得复制着色器判定，也
+不得把滤镜能力写回 `SizingRequest`。
 
 若请求模式不存在、Windows 拒绝切换、Source Mode 未在时限内收敛或首帧
 失败，启动会按实际失败阶段返回错误。物理拓扑会在创建虚拟源前快照；

@@ -23,8 +23,6 @@ namespace
 constexpr UINT kMaximumDimension = 16384;
 constexpr UINT kMaximumRefreshRate = 1000;
 constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v4";
-constexpr wchar_t kFramePrefix[] = L"Global\\SBMSFrame-v4-";
-constexpr wchar_t kEventPrefix[] = L"Global\\SBMSFrameReady-v4-";
 constexpr UINT kGateMagic = 0x53424734;
 constexpr UINT kProtocolVersion = 4;
 
@@ -38,22 +36,9 @@ struct GateHeader
     UINT refreshNumerator;
     UINT refreshDenominator;
     UINT flags;
-    BYTE nonce[16];
+    BYTE reserved[16];
 };
 
-struct FrameHeader
-{
-    UINT magic;
-    UINT width;
-    UINT height;
-    UINT stride;
-    volatile LONG publishedSlot;
-    volatile LONG readerSlot;
-};
-
-constexpr UINT kFrameMagic = 0x53424d53;
-constexpr UINT kFrameError = 0x45525221;
-static_assert(sizeof(FrameHeader) == 24);
 static_assert(sizeof(GateHeader) == 48);
 
 struct ModeConfig
@@ -62,9 +47,6 @@ struct ModeConfig
     UINT height;
     UINT refreshNumerator;
     UINT refreshDenominator;
-    SIZE_T stride;
-    SIZE_T framePixels;
-    SIZE_T frameBytes;
 };
 
 // One permanent monitor identity. Changing either value makes Windows treat the
@@ -76,126 +58,11 @@ struct Drain
 {
     IDDCX_SWAPCHAIN swapChain{};
     ID3D11Device* d3dDevice{};
-    ID3D11DeviceContext* d3dContext{};
-    ID3D11Texture2D* staging{};
     HANDLE frameAvailable{};
-    HANDLE frameMapping{};
-    HANDLE frameEvent{};
-    FrameHeader* frame{};
     HANDLE stop{};
     HANDLE thread{};
     volatile LONG ownership{};
-    ModeConfig mode{};
 };
-
-void PublishError(Drain* drain, UINT stage, HRESULT result, UINT detail = 0)
-{
-    drain->frame->width = stage;
-    drain->frame->height = static_cast<UINT>(result);
-    drain->frame->stride = detail;
-    MemoryBarrier();
-    drain->frame->magic = kFrameError;
-    SetEvent(drain->frameEvent);
-}
-
-bool PublishFrame(Drain* drain, IDXGIResource* surface)
-{
-    ID3D11Texture2D* source = nullptr;
-    HRESULT result = surface->QueryInterface(IID_PPV_ARGS(&source));
-    if (FAILED(result))
-    {
-        PublishError(drain, 1, result);
-        return false;
-    }
-
-    if (drain->staging == nullptr)
-    {
-        D3D11_TEXTURE2D_DESC description{};
-        source->GetDesc(&description);
-        if (description.Width != drain->mode.width ||
-            description.Height != drain->mode.height ||
-            description.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
-        {
-            PublishError(
-                drain,
-                2,
-                E_INVALIDARG,
-                static_cast<UINT>(description.Format));
-            source->Release();
-            return false;
-        }
-        description.Usage = D3D11_USAGE_STAGING;
-        description.BindFlags = 0;
-        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        description.MiscFlags = 0;
-        result = drain->d3dDevice->CreateTexture2D(&description, nullptr, &drain->staging);
-        if (FAILED(result))
-        {
-            PublishError(drain, 3, result);
-        }
-    }
-    if (SUCCEEDED(result))
-    {
-        const LONG published =
-            InterlockedCompareExchange(&drain->frame->publishedSlot, 0, 0);
-        const LONG destinationSlot = published == 0 ? 1 : 0;
-        if (InterlockedCompareExchange(&drain->frame->readerSlot, 0, 0) ==
-            destinationSlot)
-        {
-            source->Release();
-            return true;
-        }
-
-        drain->d3dContext->CopyResource(drain->staging, source);
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        result = drain->d3dContext->Map(drain->staging, 0, D3D11_MAP_READ, 0, &mapped);
-        if (SUCCEEDED(result))
-        {
-            BYTE* destination =
-                reinterpret_cast<BYTE*>(drain->frame + 1) +
-                static_cast<SIZE_T>(destinationSlot) * drain->mode.framePixels;
-            const BYTE* sourceRow = static_cast<const BYTE*>(mapped.pData);
-            for (UINT row = 0; row < drain->mode.height; ++row)
-            {
-                memcpy(
-                    destination + static_cast<SIZE_T>(row) * drain->mode.stride,
-                    sourceRow,
-                    drain->mode.stride);
-                sourceRow += mapped.RowPitch;
-            }
-            MemoryBarrier();
-            InterlockedExchange(&drain->frame->publishedSlot, destinationSlot);
-            SetEvent(drain->frameEvent);
-            drain->d3dContext->Unmap(drain->staging, 0);
-        }
-        else
-        {
-            PublishError(drain, 4, result);
-        }
-    }
-    source->Release();
-    return SUCCEEDED(result);
-}
-
-void ChannelName(
-    const wchar_t* prefix,
-    const BYTE (&nonce)[16],
-    wchar_t (&output)[96])
-{
-    constexpr wchar_t hex[] = L"0123456789abcdef";
-    size_t index = 0;
-    while (prefix[index] != L'\0')
-    {
-        output[index] = prefix[index];
-        ++index;
-    }
-    for (BYTE value : nonce)
-    {
-        output[index++] = hex[value >> 4];
-        output[index++] = hex[value & 0x0f];
-    }
-    output[index] = L'\0';
-}
 
 struct DeviceState
 {
@@ -207,7 +74,6 @@ struct MonitorState
 {
     Drain* drain{};
     ModeConfig mode{};
-    BYTE nonce[16]{};
 };
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DeviceState, GetDeviceState);
@@ -235,28 +101,14 @@ bool ValidateMode(
         return false;
     }
 
-    const SIZE_T stride = static_cast<SIZE_T>(width) * 4;
-    if (height > MAXSIZE_T / stride)
-    {
-        return false;
-    }
-    const SIZE_T framePixels = stride * height;
-    if (framePixels > (MAXSIZE_T - sizeof(FrameHeader)) / 2)
-    {
-        return false;
-    }
-
     mode.width = width;
     mode.height = height;
     mode.refreshNumerator = refreshNumerator;
     mode.refreshDenominator = refreshDenominator;
-    mode.stride = stride;
-    mode.framePixels = framePixels;
-    mode.frameBytes = sizeof(FrameHeader) + 2 * framePixels;
     return true;
 }
 
-bool ReadSessionConfig(ModeConfig& mode, BYTE (&nonce)[16])
+bool ReadSessionConfig(ModeConfig& mode)
 {
     HANDLE gate = OpenFileMappingW(FILE_MAP_READ, FALSE, kSessionGate);
     if (gate == nullptr)
@@ -278,7 +130,6 @@ bool ReadSessionConfig(ModeConfig& mode, BYTE (&nonce)[16])
             header->refreshDenominator,
             mode))
     {
-        memcpy(nonce, header->nonce, sizeof(header->nonce));
         valid = true;
     }
     if (header != nullptr) UnmapViewOfFile(header);
@@ -332,11 +183,6 @@ void DestroyDrain(Drain* drain)
 {
     if (drain->thread != nullptr) CloseHandle(drain->thread);
     if (drain->stop != nullptr) CloseHandle(drain->stop);
-    if (drain->frame != nullptr) UnmapViewOfFile(drain->frame);
-    if (drain->frameEvent != nullptr) CloseHandle(drain->frameEvent);
-    if (drain->frameMapping != nullptr) CloseHandle(drain->frameMapping);
-    if (drain->staging != nullptr) drain->staging->Release();
-    if (drain->d3dContext != nullptr) drain->d3dContext->Release();
     if (drain->d3dDevice != nullptr) drain->d3dDevice->Release();
     delete drain;
 }
@@ -374,7 +220,6 @@ DWORD WINAPI DrainFrames(void* argument)
 
         if (buffer.MetaData.pSurface != nullptr)
         {
-            PublishFrame(drain, buffer.MetaData.pSurface);
             buffer.MetaData.pSurface->Release();
         }
 
@@ -428,7 +273,6 @@ bool StartDrain(
     IDXGIAdapter1* adapter = nullptr;
     IDXGIDevice* dxgiDevice = nullptr;
     ID3D11Device* d3dDevice = nullptr;
-    ID3D11DeviceContext* d3dContext = nullptr;
 
     HRESULT result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
     if (SUCCEEDED(result))
@@ -447,7 +291,7 @@ bool StartDrain(
             D3D11_SDK_VERSION,
             &d3dDevice,
             nullptr,
-            &d3dContext);
+            nullptr);
     }
     if (SUCCEEDED(result))
     {
@@ -466,7 +310,6 @@ bool StartDrain(
 
     if (FAILED(result))
     {
-        if (d3dContext != nullptr) d3dContext->Release();
         if (d3dDevice != nullptr) d3dDevice->Release();
         return false;
     }
@@ -480,50 +323,15 @@ bool StartDrain(
 
     drain->swapChain = swapChain;
     drain->d3dDevice = d3dDevice;
-    drain->d3dContext = d3dContext;
     drain->frameAvailable = frameAvailable;
-    drain->mode = monitor->mode;
-    wchar_t frameName[96]{};
-    wchar_t eventName[96]{};
-    ChannelName(kFramePrefix, monitor->nonce, frameName);
-    ChannelName(kEventPrefix, monitor->nonce, eventName);
-
-    if (frameName[0] != L'\0')
-    {
-        drain->frameMapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, frameName);
-    }
-    if (drain->frameMapping != nullptr)
-    {
-        drain->frame = static_cast<FrameHeader*>(
-            MapViewOfFile(
-                drain->frameMapping,
-                FILE_MAP_WRITE,
-                0,
-                0,
-                drain->mode.frameBytes));
-    }
-    if (eventName[0] != L'\0')
-    {
-        drain->frameEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName);
-    }
     drain->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (drain->frame != nullptr && drain->frameEvent != nullptr && drain->stop != nullptr)
+    if (drain->stop != nullptr)
     {
-        drain->frame->magic = kFrameMagic;
-        drain->frame->width = drain->mode.width;
-        drain->frame->height = drain->mode.height;
-        drain->frame->stride = static_cast<UINT>(drain->mode.stride);
-        drain->frame->publishedSlot = -1;
-        drain->frame->readerSlot = -1;
         drain->thread = CreateThread(nullptr, 0, DrainFrames, drain, 0, nullptr);
     }
     if (drain->thread == nullptr)
     {
         if (drain->stop != nullptr) CloseHandle(drain->stop);
-        if (drain->frame != nullptr) UnmapViewOfFile(drain->frame);
-        if (drain->frameEvent != nullptr) CloseHandle(drain->frameEvent);
-        if (drain->frameMapping != nullptr) CloseHandle(drain->frameMapping);
-        d3dContext->Release();
         d3dDevice->Release();
         delete drain;
         return false;
@@ -536,8 +344,7 @@ bool StartDrain(
 NTSTATUS ReportMonitor(DeviceState* state)
 {
     ModeConfig mode{};
-    BYTE nonce[16]{};
-    if (!ReadSessionConfig(mode, nonce))
+    if (!ReadSessionConfig(mode))
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -569,7 +376,6 @@ NTSTATUS ReportMonitor(DeviceState* state)
 
     MonitorState* monitorState = GetMonitorState(output.MonitorObject);
     monitorState->mode = mode;
-    memcpy(monitorState->nonce, nonce, sizeof(nonce));
 
     IDARG_OUT_MONITORARRIVAL arrival{};
     const NTSTATUS arrivalStatus =
