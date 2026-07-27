@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use sbms::config::ConfigStore;
 use sbms::display::active_displays;
+use sbms::frame_transport::{FrameTransport, VirtualMode};
 use sbms::mapping::{MappingRequest, MappingSession};
 use sbms::virtual_display::VirtualDisplay;
 use windows::Win32::UI::HiDpi::{
@@ -81,10 +82,12 @@ fn create(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
         usage();
     }
 
+    let transport = FrameTransport::create(VirtualMode::default())?;
     let display = VirtualDisplay::create()?;
     println!("created={}", display.instance_id());
     wait(hold)?;
     drop(display);
+    drop(transport);
     println!("removed");
     Ok(())
 }
@@ -121,7 +124,8 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
         }
     };
 
-    let mut session = MappingSession::start(MappingRequest { target })?;
+    let request = MappingRequest::configured(target)?;
+    let mut session = MappingSession::start(request)?;
     println!("running={}", session.source_id());
     wait(hold)?;
     session.stop()?;

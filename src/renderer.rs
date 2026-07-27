@@ -27,9 +27,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 use crate::display::Display;
-use crate::frame_transport::{
-    FRAME_BYTES, FRAME_PIXELS, FrameChannel, HEADER_BYTES, HEIGHT, MAGIC, STRIDE, WIDTH,
-};
+use crate::frame_transport::{FrameChannel, FrameLayout, HEADER_BYTES, MAGIC};
 use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -215,6 +213,7 @@ fn draw_frames(
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), String>>,
 ) -> Result<(), String> {
+    let layout = channel.layout();
     let mut reader = FrameReader::open(channel)?;
     let dc = unsafe { GetDC(Some(window)) };
     if dc.is_invalid() {
@@ -227,12 +226,12 @@ fn draw_frames(
     let bitmap = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: WIDTH as i32,
-            biHeight: -(HEIGHT as i32),
+            biWidth: layout.mode.width as i32,
+            biHeight: -(layout.mode.height as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB.0,
-            biSizeImage: (STRIDE * HEIGHT) as u32,
+            biSizeImage: layout.plane_bytes as u32,
             ..Default::default()
         },
         ..Default::default()
@@ -254,8 +253,8 @@ fn draw_frames(
                 target_height,
                 0,
                 0,
-                WIDTH as i32,
-                HEIGHT as i32,
+                layout.mode.width as i32,
+                layout.mode.height as i32,
                 Some(frame.pixels.cast()),
                 &bitmap,
                 DIB_RGB_COLORS,
@@ -282,16 +281,25 @@ struct FrameReader {
     mapping: windows::Win32::Foundation::HANDLE,
     event: windows::Win32::Foundation::HANDLE,
     view: windows::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS,
+    layout: FrameLayout,
 }
 
 impl FrameReader {
     fn open(channel: FrameChannel) -> Result<Self, String> {
+        let layout = channel.layout();
         let mapping = unsafe {
             OpenFileMappingW(FILE_MAP_READ.0 | FILE_MAP_WRITE.0, false, channel.mapping())
         }
         .map_err(|error| format!("OpenFileMappingW failed: {error}"))?;
-        let view =
-            unsafe { MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, FRAME_BYTES) };
+        let view = unsafe {
+            MapViewOfFile(
+                mapping,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0,
+                0,
+                layout.mapping_bytes,
+            )
+        };
         if view.Value.is_null() {
             unsafe {
                 let _ = CloseHandle(mapping);
@@ -313,6 +321,7 @@ impl FrameReader {
             mapping,
             event,
             view,
+            layout,
         })
     }
 
@@ -328,9 +337,9 @@ impl FrameReader {
         let header = self.view.Value.cast::<FrameHeader>();
         let valid = unsafe {
             (*header).magic == MAGIC
-                && (*header).width == WIDTH as u32
-                && (*header).height == HEIGHT as u32
-                && (*header).stride == STRIDE as u32
+                && (*header).width == self.layout.mode.width
+                && (*header).height == self.layout.mode.height
+                && (*header).stride == self.layout.stride
         };
         if !valid {
             return Err(unsafe {
@@ -355,7 +364,7 @@ impl FrameReader {
                     self.view
                         .Value
                         .cast::<u8>()
-                        .add(HEADER_BYTES + published as usize * FRAME_PIXELS)
+                        .add(HEADER_BYTES + published as usize * self.layout.plane_bytes)
                 };
                 return Ok(Some(FrameLease {
                     pixels,

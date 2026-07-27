@@ -3,8 +3,9 @@ use std::fmt::{Display as FmtDisplay, Formatter};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::config::ConfigStore;
 use crate::display::{Display, active_displays};
-use crate::frame_transport::FrameTransport;
+use crate::frame_transport::{FrameLayout, FrameTransport, VirtualMode};
 use crate::renderer::Renderer;
 use crate::virtual_display::VirtualDisplay;
 use crate::window_migration::WindowMigration;
@@ -15,6 +16,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct MappingRequest {
     pub target: String,
+    pub mode: VirtualMode,
 }
 
 pub struct MappingSession {
@@ -40,13 +42,48 @@ impl FmtDisplay for MappingError {
 
 impl Error for MappingError {}
 
+impl MappingRequest {
+    pub fn configured(target: String) -> Result<Self, MappingError> {
+        let outcome = ConfigStore::default_store()
+            .and_then(|store| store.load())
+            .map_err(|error| stage("config", error))?;
+        if let Some(warning) = outcome.warning {
+            return Err(MappingError {
+                stage: "config",
+                message: format!("{warning}; reset or repair the configuration before mapping"),
+            });
+        }
+        let mode = match outcome.config.sizing {
+            Some(sizing) => {
+                let result = sizing
+                    .calculate()
+                    .map_err(|error| stage("geometry", error))?;
+                let refresh_millihz = match result.preferred_refresh_millihz {
+                    Some(refresh) => refresh,
+                    None => target_refresh_millihz(&target)?,
+                };
+                VirtualMode::from_millihz(
+                    result.virtual_mode.width,
+                    result.virtual_mode.height,
+                    refresh_millihz,
+                )
+                .map_err(|error| stage("mode", error))?
+            }
+            None => VirtualMode::default(),
+        };
+        FrameLayout::new(mode).map_err(|error| stage("mode", error))?;
+        Ok(Self { target, mode })
+    }
+}
+
 impl MappingSession {
     pub fn start(request: MappingRequest) -> Result<Self, MappingError> {
         let displays = active_displays().map_err(|error| stage("target", error))?;
         unique_target(&displays, &request.target)?;
-        let transport = FrameTransport::create().map_err(|error| stage("transport", error))?;
+        let transport =
+            FrameTransport::create(request.mode).map_err(|error| stage("transport", error))?;
         let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
-        let (source, target) = wait_for_source(&request.target)?;
+        let (source, target) = wait_for_source(&request.target, request.mode)?;
         let source_id = source.id.clone();
         let target_id = target.id.clone();
         let migration =
@@ -188,7 +225,10 @@ fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, Mappi
     Ok(target)
 }
 
-fn wait_for_source(target_id: &str) -> Result<(Display, Display), MappingError> {
+fn wait_for_source(
+    target_id: &str,
+    requested_mode: VirtualMode,
+) -> Result<(Display, Display), MappingError> {
     let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
     loop {
         let displays = active_displays().map_err(|error| stage("topology", error))?;
@@ -199,7 +239,21 @@ fn wait_for_source(target_id: &str) -> Result<(Display, Display), MappingError> 
             .collect();
         if sources.len() == 1 {
             let target = unique_target(&displays, target_id)?;
-            return Ok((sources[0].clone(), target));
+            let source = &sources[0];
+            let width = source.rect.right - source.rect.left;
+            let height = source.rect.bottom - source.rect.top;
+            if width == requested_mode.width as i32 && height == requested_mode.height as i32 {
+                return Ok((source.clone(), target));
+            }
+            if Instant::now() >= deadline {
+                return Err(MappingError {
+                    stage: "topology",
+                    message: format!(
+                        "virtual source became {}x{} but {}x{} was requested",
+                        width, height, requested_mode.width, requested_mode.height
+                    ),
+                });
+            }
         }
         if sources.len() > 1 {
             return Err(MappingError {
@@ -215,6 +269,27 @@ fn wait_for_source(target_id: &str) -> Result<(Display, Display), MappingError> 
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn target_refresh_millihz(target_id: &str) -> Result<u32, MappingError> {
+    let displays = active_displays().map_err(|error| stage("target", error))?;
+    let target = unique_target(&displays, target_id)?;
+    if target.refresh_numerator == 0 || target.refresh_denominator == 0 {
+        return Err(MappingError {
+            stage: "mode",
+            message: "target display reported an invalid refresh rate".into(),
+        });
+    }
+    let millihz = u64::from(target.refresh_numerator)
+        .checked_mul(1_000)
+        .and_then(|value| value.checked_div(u64::from(target.refresh_denominator)))
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| MappingError {
+            stage: "mode",
+            message: "target refresh rate is outside the supported range".into(),
+        })?;
+    Ok(millihz)
 }
 
 fn stage(stage: &'static str, error: impl FmtDisplay) -> MappingError {

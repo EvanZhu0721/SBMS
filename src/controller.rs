@@ -83,7 +83,7 @@ impl Controller {
                             true,
                             "",
                         ));
-                        match MappingSession::start(MappingRequest { target }) {
+                        match MappingRequest::configured(target).and_then(MappingSession::start) {
                             Ok(started) => {
                                 session = Some(started);
                                 emit(state(
