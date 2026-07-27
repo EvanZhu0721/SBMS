@@ -66,18 +66,17 @@ impl Controller {
                         }
                         emit(state(
                             "Starting",
-                            "Preparing virtual display…".into(),
+                            "Creating virtual display…".into(),
                             false,
                             true,
                             "",
                         ));
                         match MappingSession::start(MappingRequest { target }) {
                             Ok(started) => {
-                                let source = started.source_id().to_owned();
                                 session = Some(started);
                                 emit(state(
                                     "Running",
-                                    format!("Virtual source {source}"),
+                                    "Mapping is active".into(),
                                     true,
                                     false,
                                     "",
@@ -85,7 +84,7 @@ impl Controller {
                             }
                             Err(error) => emit(state(
                                 "Stopped",
-                                "Mapping did not start".into(),
+                                "Couldn’t start mapping".into(),
                                 false,
                                 false,
                                 error.to_string(),
@@ -127,11 +126,10 @@ fn refresh(emit: &impl Fn(ControllerEvent)) {
                 .map(|display| DisplayOption {
                     id: display.id,
                     label: format!(
-                        "{} · {}×{} · {} Hz{}",
+                        "{} · {}×{}{}",
                         display.name,
                         display.rect.right - display.rect.left,
                         display.rect.bottom - display.rect.top,
-                        display.refresh_numerator / display.refresh_denominator.max(1),
                         if display.primary { " · Primary" } else { "" }
                     ),
                 })
@@ -162,7 +160,7 @@ fn stop(session: &mut Option<MappingSession>, emit: &impl Fn(ControllerEvent)) {
     match active.stop() {
         Ok(()) => emit(state(
             "Stopped",
-            "Windows restored safely".into(),
+            "Choose a display to start".into(),
             false,
             false,
             "",

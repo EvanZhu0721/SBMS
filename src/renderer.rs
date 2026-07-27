@@ -5,7 +5,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use windows::Win32::Foundation::{
-    CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
+    CloseHandle, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLORONCOLOR, DIB_RGB_COLORS, GetDC, ReleaseDC, SRCCOPY,
@@ -19,10 +19,11 @@ use windows::Win32::System::Threading::{
     OpenEventW, SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG,
-    PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassW, SW_SHOW, ShowWindow,
-    TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CS_HREDRAW, CS_VREDRAW, CURSOR_SHOWING, CURSORINFO, CreateWindowExW, DefWindowProcW,
+    DestroyWindow, DispatchMessageW, GetCursorInfo, HICON, MSG, PM_REMOVE, PeekMessageW,
+    PostQuitMessage, RegisterClassW, SW_SHOW, ShowWindow, TranslateMessage, UnregisterClassW,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::w;
 
@@ -30,7 +31,7 @@ use crate::display::Display;
 use crate::frame_transport::{
     FRAME_BYTES, FRAME_PIXELS, FrameChannel, HEADER_BYTES, HEIGHT, MAGIC, STRIDE, WIDTH,
 };
-use crate::input::{InputGuard, handle_message};
+use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -170,7 +171,35 @@ fn run(
             return Err(error);
         }
     };
-    let result = draw_frames(window, width, height, channel, stop, ready);
+    let result = thread::scope(|scope| {
+        let (draw_done_tx, draw_done_rx) = mpsc::sync_channel(1);
+        let window_value = window.0 as usize;
+        let draw_thread = scope.spawn(move || {
+            let window = HWND(window_value as *mut _);
+            let result = draw_frames(window, width, height, source, channel, stop, ready);
+            let _ = draw_done_tx.send(result);
+        });
+        let draw_result = loop {
+            if let Ok(result) = draw_done_rx.try_recv() {
+                break result;
+            }
+            if stop.load(Ordering::Acquire) {
+                break draw_done_rx
+                    .recv()
+                    .map_err(|_| "renderer draw worker exited without a result".to_string())?;
+            }
+            if !pump_messages() {
+                stop.store(true, Ordering::Release);
+                continue;
+            }
+            flush_movement();
+            thread::sleep(Duration::from_millis(1));
+        };
+        draw_thread
+            .join()
+            .map_err(|_| "renderer draw worker panicked".to_string())?;
+        draw_result
+    });
     drop(input);
     unsafe {
         let _ = DestroyWindow(window);
@@ -183,6 +212,7 @@ fn draw_frames(
     window: HWND,
     target_width: i32,
     target_height: i32,
+    source: RECT,
     channel: FrameChannel,
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), String>>,
@@ -210,16 +240,18 @@ fn draw_frames(
         ..Default::default()
     };
     let mut first_frame = true;
+    let mut last_cursor = None;
     let result = loop {
         if stop.load(Ordering::Acquire) {
             break Ok(());
         }
-        if !pump_messages() {
-            break Ok(());
-        }
-        let Some(frame) = reader.acquire()? else {
+        let cursor = cursor_snapshot(source);
+        let cursor_changed = cursor != last_cursor;
+        let Some(frame) = reader.acquire(cursor_changed)? else {
             continue;
         };
+        let _cursor_overlay =
+            cursor.map(|cursor| CursorOverlay::apply(frame.pixels, cursor, source));
         let copied = unsafe {
             StretchDIBits(
                 dc,
@@ -240,6 +272,7 @@ fn draw_frames(
         if copied == 0 {
             break Err("StretchDIBits failed".into());
         }
+        last_cursor = cursor;
         if first_frame {
             ready
                 .send(Ok(()))
@@ -251,6 +284,118 @@ fn draw_frames(
         ReleaseDC(Some(window), dc);
     }
     result
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct CursorSnapshot {
+    position: POINT,
+    icon: HICON,
+}
+
+fn cursor_snapshot(source: RECT) -> Option<CursorSnapshot> {
+    let mut info = CURSORINFO {
+        cbSize: size_of::<CURSORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetCursorInfo(&mut info) }.ok()?;
+    if info.flags.0 & CURSOR_SHOWING.0 == 0
+        || info.ptScreenPos.x < source.left
+        || info.ptScreenPos.x >= source.right
+        || info.ptScreenPos.y < source.top
+        || info.ptScreenPos.y >= source.bottom
+    {
+        return None;
+    }
+    Some(CursorSnapshot {
+        position: info.ptScreenPos,
+        icon: HICON(info.hCursor.0),
+    })
+}
+
+struct CursorOverlay {
+    pixels: *mut u8,
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+    backup: Vec<u8>,
+}
+
+impl CursorOverlay {
+    fn apply(pixels: *const u8, cursor: CursorSnapshot, source: RECT) -> Self {
+        const MARKER_WIDTH: i32 = 18;
+        const MARKER_HEIGHT: i32 = 28;
+
+        let marker_left = cursor.position.x - source.left;
+        let marker_top = cursor.position.y - source.top;
+        let left = marker_left.clamp(0, WIDTH as i32) as usize;
+        let top = marker_top.clamp(0, HEIGHT as i32) as usize;
+        let right = (marker_left + MARKER_WIDTH).clamp(0, WIDTH as i32) as usize;
+        let bottom = (marker_top + MARKER_HEIGHT).clamp(0, HEIGHT as i32) as usize;
+        let width = right.saturating_sub(left);
+        let height = bottom.saturating_sub(top);
+        let pixels = pixels.cast_mut();
+        let mut backup = vec![0u8; width * height * 4];
+
+        for row in 0..height {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    pixels.add((top + row) * STRIDE + left * 4),
+                    backup.as_mut_ptr().add(row * width * 4),
+                    width * 4,
+                );
+            }
+        }
+        for row in 0..height {
+            for column in 0..width {
+                let marker_x = left as i32 + column as i32 - marker_left;
+                let marker_y = top as i32 + row as i32 - marker_top;
+                if !cursor_marker_contains(marker_x, marker_y) {
+                    continue;
+                }
+                let boundary = !cursor_marker_contains(marker_x - 1, marker_y)
+                    || !cursor_marker_contains(marker_x + 1, marker_y)
+                    || !cursor_marker_contains(marker_x, marker_y - 1)
+                    || !cursor_marker_contains(marker_x, marker_y + 1);
+                let color = if boundary { 0 } else { 255 };
+                let pixel = unsafe { pixels.add((top + row) * STRIDE + (left + column) * 4) };
+                unsafe {
+                    pixel.write(color);
+                    pixel.add(1).write(color);
+                    pixel.add(2).write(color);
+                    pixel.add(3).write(255);
+                }
+            }
+        }
+
+        Self {
+            pixels,
+            left,
+            top,
+            width,
+            height,
+            backup,
+        }
+    }
+}
+
+impl Drop for CursorOverlay {
+    fn drop(&mut self) {
+        for row in 0..self.height {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    self.backup.as_ptr().add(row * self.width * 4),
+                    self.pixels.add((self.top + row) * STRIDE + self.left * 4),
+                    self.width * 4,
+                );
+            }
+        }
+    }
+}
+
+fn cursor_marker_contains(x: i32, y: i32) -> bool {
+    (0..20).contains(&y) && (0..=(y / 2)).contains(&x)
+        || (4..9).contains(&x) && (10..27).contains(&y)
 }
 
 struct FrameReader {
@@ -291,12 +436,12 @@ impl FrameReader {
         })
     }
 
-    fn acquire(&mut self) -> Result<Option<FrameLease>, String> {
-        let wait = unsafe { WaitForSingleObject(self.event, 16) };
-        if wait == WAIT_TIMEOUT {
+    fn acquire(&mut self, reuse_latest_on_timeout: bool) -> Result<Option<FrameLease>, String> {
+        let wait = unsafe { WaitForSingleObject(self.event, 4) };
+        if wait == WAIT_TIMEOUT && !reuse_latest_on_timeout {
             return Ok(None);
         }
-        if wait != WAIT_OBJECT_0 {
+        if wait != WAIT_OBJECT_0 && wait != WAIT_TIMEOUT {
             return Err(format!("frame event wait failed: {}", wait.0));
         }
 

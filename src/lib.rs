@@ -7,4 +7,5 @@ pub mod mapping;
 pub mod renderer;
 pub mod ui;
 pub mod virtual_display;
+mod win32_flyout;
 pub mod window_migration;

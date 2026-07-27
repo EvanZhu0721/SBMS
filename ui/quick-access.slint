@@ -3,65 +3,41 @@ import {
     ComboBox,
     Palette,
     ProgressIndicator,
-    VerticalBox,
 } from "std-widgets.slint";
 
+// Material 3 semantic roles. Keeping colors behind roles makes the panel
+// automatically follow the platform light/dark palette without styling
+// individual controls ad hoc.
 global MdTokens {
     out property <brush> surface: Palette.background;
     out property <brush> on-surface: Palette.foreground;
     out property <brush> surface-container: Palette.alternate-background;
     out property <brush> on-surface-variant: Palette.alternate-foreground;
     out property <brush> primary: Palette.accent-background;
-    out property <brush> on-primary: Palette.accent-foreground;
-    out property <brush> error: Palette.color-scheme == ColorScheme.dark ? #f2b8b5 : #b3261e;
-    out property <brush> error-container: Palette.color-scheme == ColorScheme.dark ? #8c1d18 : #f9dedc;
-    out property <brush> on-error-container: Palette.color-scheme == ColorScheme.dark ? #f9dedc : #410e0b;
+    out property <brush> primary-container: Palette.color-scheme == ColorScheme.dark ? #4f378b : #eaddff;
+    out property <brush> on-primary-container: Palette.color-scheme == ColorScheme.dark ? #eaddff : #21005d;
+    out property <brush> error-container: Palette.color-scheme == ColorScheme.dark ? #93000a : #ffdad6;
+    out property <brush> on-error-container: Palette.color-scheme == ColorScheme.dark ? #ffdad6 : #410002;
     out property <brush> outline-variant: Palette.border;
+
     out property <length> space-1: 8px;
     out property <length> space-2: 16px;
-    out property <length> space-3: 24px;
     out property <length> shape-medium: 12px;
     out property <length> shape-large: 16px;
     out property <length> shape-full: 999px;
     out property <length> target: 48px;
-    out property <length> type-headline-medium: 28px;
     out property <length> type-title-large: 22px;
     out property <length> type-title-medium: 16px;
     out property <length> type-body-medium: 14px;
     out property <length> type-body-small: 12px;
-    out property <length> type-label-small: 11px;
     out property <int> weight-medium: 500;
-}
-
-component StatusRow inherits Rectangle {
-    in property <string> title;
-    in property <string> value;
-    height: 40px;
-    background: transparent;
-    HorizontalLayout {
-        spacing: MdTokens.space-1;
-        Text {
-            text: root.title;
-            color: MdTokens.on-surface-variant;
-            font-size: MdTokens.type-body-medium;
-            vertical-alignment: center;
-        }
-        Rectangle { horizontal-stretch: 1; }
-        Text {
-            text: root.value;
-            color: MdTokens.on-surface;
-            font-size: MdTokens.type-body-medium;
-            font-weight: MdTokens.weight-medium;
-            vertical-alignment: center;
-        }
-    }
 }
 
 export component QuickAccess inherits Window {
     title: "SBMS Quick Access";
-    width: 400px;
-    height: 632px;
-    background: MdTokens.surface;
+    width: 384px;
+    height: 360px;
+    background: transparent;
     always-on-top: true;
     no-frame: true;
 
@@ -77,9 +53,7 @@ export component QuickAccess inherits Window {
     callback start();
     callback stop();
     callback refresh();
-    callback open-settings();
     callback dismiss();
-    callback quit();
 
     FocusScope {
         key-pressed(event) => {
@@ -95,10 +69,11 @@ export component QuickAccess inherits Window {
             y: 1px;
             width: parent.width - 2px;
             height: parent.height - 2px;
+            background: MdTokens.surface;
             border-width: 1px;
             border-color: MdTokens.outline-variant;
             border-radius: MdTokens.shape-large;
-            background: MdTokens.surface;
+            clip: true;
 
             VerticalLayout {
                 padding: MdTokens.space-2;
@@ -107,73 +82,101 @@ export component QuickAccess inherits Window {
                 HorizontalLayout {
                     height: MdTokens.target;
                     spacing: MdTokens.space-1;
-                    Text {
-                        text: "SBMS";
-                        color: MdTokens.on-surface;
-                        font-size: MdTokens.type-title-large;
-                        font-weight: MdTokens.weight-medium;
-                        vertical-alignment: center;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "×";
-                        width: MdTokens.target;
-                        height: MdTokens.target;
-                        accessible-label: "Close quick access";
-                        clicked => { root.dismiss(); }
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 2px;
+                        Text {
+                            text: "SBMS";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                        }
+                        Text {
+                            text: "Display mapping";
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-small;
+                        }
                     }
                 }
 
                 Rectangle {
-                    height: 96px;
-                    background: MdTokens.surface-container;
+                    height: 72px;
+                    background: root.error-text != ""
+                        ? MdTokens.error-container
+                        : (root.running ? MdTokens.primary-container : MdTokens.surface-container);
                     border-radius: MdTokens.shape-medium;
+
                     HorizontalLayout {
                         padding: MdTokens.space-2;
-                        spacing: MdTokens.space-2;
+                        spacing: 12px;
+
                         Rectangle {
-                            width: 16px;
-                            height: 16px;
-                            border-radius: MdTokens.shape-full;
-                            background: root.running ? MdTokens.primary : MdTokens.outline-variant;
+                            width: 12px;
+                            background: transparent;
+                            Rectangle {
+                                y: (parent.height - self.height) / 2;
+                                width: 12px;
+                                height: 12px;
+                                border-radius: MdTokens.shape-full;
+                                background: root.error-text != ""
+                                    ? MdTokens.on-error-container
+                                    : (root.running ? MdTokens.primary : MdTokens.outline-variant);
+                            }
                         }
+
                         VerticalLayout {
                             alignment: center;
-                            spacing: 4px;
+                            spacing: 3px;
                             Text {
-                                text: root.state;
-                                color: MdTokens.on-surface;
+                                text: root.error-text != "" ? "Action failed" : root.state;
+                                color: root.error-text != ""
+                                    ? MdTokens.on-error-container
+                                    : (root.running ? MdTokens.on-primary-container : MdTokens.on-surface);
                                 font-size: MdTokens.type-title-medium;
                                 font-weight: MdTokens.weight-medium;
                             }
                             Text {
                                 text: root.state-detail;
-                                color: MdTokens.on-surface-variant;
+                                color: root.error-text != ""
+                                    ? MdTokens.on-error-container
+                                    : (root.running ? MdTokens.on-primary-container : MdTokens.on-surface-variant);
                                 font-size: MdTokens.type-body-small;
                                 overflow: elide;
                             }
                         }
-                        ProgressIndicator {
-                            visible: root.busy;
+
+                        Rectangle { horizontal-stretch: 1; }
+
+                        Rectangle {
                             width: 24px;
-                            height: 24px;
-                            indeterminate: true;
+                            background: transparent;
+                            visible: root.busy;
+                            ProgressIndicator {
+                                y: (parent.height - self.height) / 2;
+                                width: 24px;
+                                height: 24px;
+                                indeterminate: true;
+                            }
                         }
                     }
+
+                    animate background { duration: 150ms; easing: ease-in-out; }
                 }
 
                 Text {
-                    text: "PHYSICAL TARGET";
-                    color: MdTokens.on-surface-variant;
-                    font-size: MdTokens.type-label-small;
-                    font-weight: MdTokens.weight-medium;
-                    letter-spacing: 0.5px;
+                    text: "Physical display";
                     height: 24px;
+                    color: MdTokens.on-surface-variant;
+                    font-size: MdTokens.type-body-medium;
+                    font-weight: MdTokens.weight-medium;
                     vertical-alignment: bottom;
                 }
+
                 HorizontalLayout {
                     height: MdTokens.target;
                     spacing: MdTokens.space-1;
+
                     ComboBox {
                         horizontal-stretch: 1;
                         height: MdTokens.target;
@@ -182,52 +185,14 @@ export component QuickAccess inherits Window {
                         enabled: !root.running && !root.busy && root.display-labels.length > 0;
                         accessible-label: "Physical target display";
                     }
+
                     Button {
-                        text: "↻";
-                        width: MdTokens.target;
+                        text: "Refresh";
+                        width: 88px;
                         height: MdTokens.target;
                         enabled: !root.running && !root.busy;
                         accessible-label: "Refresh physical displays";
                         clicked => { root.refresh(); }
-                    }
-                }
-
-                Rectangle {
-                    height: 204px;
-                    background: MdTokens.surface-container;
-                    border-radius: MdTokens.shape-medium;
-                    VerticalLayout {
-                        padding-left: MdTokens.space-2;
-                        padding-right: MdTokens.space-2;
-                        StatusRow { title: "Virtual mode"; value: "3840 × 2160 · 240 Hz"; }
-                        Rectangle { height: 1px; background: MdTokens.outline-variant; }
-                        StatusRow { title: "Window migration"; value: "Continuous · 250 ms"; }
-                        Rectangle { height: 1px; background: MdTokens.outline-variant; }
-                        StatusRow { title: "Mouse forwarding"; value: "Available · F8 releases"; }
-                        Rectangle { height: 1px; background: MdTokens.outline-variant; }
-                        StatusRow { title: "Keyboard"; value: "Follows foreground focus"; }
-                        Rectangle { height: 1px; background: MdTokens.outline-variant; }
-                        StatusRow { title: "Touch / pen"; value: "Unsupported"; }
-                    }
-                }
-
-                Rectangle {
-                    visible: root.error-text != "";
-                    height: 64px;
-                    background: MdTokens.error-container;
-                    border-width: 1px;
-                    border-color: MdTokens.error;
-                    border-radius: MdTokens.shape-medium;
-                    Text {
-                        text: root.error-text;
-                        color: MdTokens.on-error-container;
-                        font-size: MdTokens.type-body-small;
-                        wrap: word-wrap;
-                        x: MdTokens.space-2;
-                        y: MdTokens.space-1;
-                        width: parent.width - MdTokens.space-2 * 2;
-                        height: parent.height - MdTokens.space-2;
-                        vertical-alignment: center;
                     }
                 }
 
@@ -243,73 +208,16 @@ export component QuickAccess inherits Window {
                         if root.running { root.stop(); } else { root.start(); }
                     }
                 }
-                HorizontalLayout {
-                    height: MdTokens.target;
-                    spacing: MdTokens.space-1;
-                    Button {
-                        text: "Settings";
-                        horizontal-stretch: 1;
-                        height: MdTokens.target;
-                        clicked => { root.open-settings(); }
-                    }
-                    Button {
-                        text: "Exit";
-                        horizontal-stretch: 1;
-                        height: MdTokens.target;
-                        clicked => { root.quit(); }
-                    }
-                }
-            }
-        }
-    }
-}
 
-export component SettingsWindow inherits Window {
-    title: "SBMS Settings";
-    width: 480px;
-    height: 360px;
-    background: MdTokens.surface;
-    callback dismiss();
-
-    VerticalLayout {
-        padding: MdTokens.space-3;
-        spacing: MdTokens.space-2;
-        Text {
-            text: "Settings";
-            color: MdTokens.on-surface;
-            font-size: MdTokens.type-headline-medium;
-            font-weight: MdTokens.weight-medium;
-        }
-        Rectangle {
-            background: MdTokens.surface-container;
-            border-radius: MdTokens.shape-large;
-            vertical-stretch: 1;
-            VerticalLayout {
-                padding: MdTokens.space-2;
-                spacing: MdTokens.space-1;
                 Text {
-                    text: "0.2.9 has no mutable runtime settings.";
-                    color: MdTokens.on-surface;
-                    font-size: MdTokens.type-title-medium;
-                    font-weight: MdTokens.weight-medium;
-                }
-                Text {
-                    text: "The virtual mode and continuous window migration policy are fixed so the core remains auditable. Mouse forwarding is available; press F8 to release capture. Keyboard input follows foreground focus. Touch and pen input are not supported.";
+                    height: 18px;
+                    text: root.running ? "Press F8 to release mouse capture" : "";
                     color: MdTokens.on-surface-variant;
-                    font-size: MdTokens.type-body-medium;
-                    wrap: word-wrap;
-                }
-                StatusRow {
-                    title: "Startup";
-                    value: "Elevated logon task";
+                    font-size: MdTokens.type-body-small;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
             }
-        }
-        Button {
-            text: "Done";
-            height: MdTokens.target;
-            primary: true;
-            clicked => { root.dismiss(); }
         }
     }
 }

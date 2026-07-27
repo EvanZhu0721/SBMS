@@ -43,6 +43,7 @@ struct InputMapper {
     target: RECT,
     source: RECT,
     cursor: POINT,
+    move_pending: bool,
     captured: bool,
     swallow_f8_up: bool,
     pressed: u8,
@@ -105,6 +106,7 @@ impl InputGuard {
                     x: (target.right - target.left).max(1) / 2,
                     y: (target.bottom - target.top).max(1) / 2,
                 },
+                move_pending: false,
                 captured: false,
                 swallow_f8_up: false,
                 pressed: 0,
@@ -219,15 +221,17 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         return Ok(());
     }
     let mouse = unsafe { raw.data.mouse };
-    let result = INPUT_STATE.with(|cell| {
+    INPUT_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
-        let state = state.as_mut()?;
+        let Some(state) = state.as_mut() else {
+            return;
+        };
         if !state.captured {
-            return None;
+            return;
         }
         if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
             post_release(state.window, RELEASE_ABSOLUTE_INPUT);
-            return None;
+            return;
         }
         let width = (state.target.right - state.target.left).max(1);
         let height = (state.target.bottom - state.target.top).max(1);
@@ -241,13 +245,8 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
             .y
             .saturating_add(mouse.lLastY)
             .clamp(0, height - 1);
-        Some((source_point(state), state.tag, state.window))
+        state.move_pending = true;
     });
-    if let Some((point, tag, window)) = result
-        && !send_mouse(point, MOUSEEVENTF_MOVE, 0, tag)
-    {
-        post_release(window, RELEASE_INJECTION_FAILURE);
-    }
     Ok(())
 }
 
@@ -255,6 +254,7 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     if code < HC_ACTION as i32 {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
+    flush_movement();
     let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     let snapshot = INPUT_STATE.with(|cell| {
         cell.borrow()
@@ -395,6 +395,23 @@ fn send_mouse(point: POINT, flags: MOUSE_EVENT_FLAGS, data: u32, tag: usize) -> 
     (unsafe { SendInput(&[input], size_of::<INPUT>() as i32) }) == 1
 }
 
+pub(crate) fn flush_movement() {
+    let pending = INPUT_STATE.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let state = state.as_mut()?;
+        if !state.captured || !state.move_pending {
+            return None;
+        }
+        state.move_pending = false;
+        Some((source_point(state), state.tag, state.window))
+    });
+    if let Some((point, tag, window)) = pending
+        && !send_mouse(point, MOUSEEVENTF_MOVE, 0, tag)
+    {
+        post_release(window, RELEASE_INJECTION_FAILURE);
+    }
+}
+
 fn release_capture() {
     let release = INPUT_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
@@ -403,6 +420,7 @@ fn release_capture() {
             return None;
         }
         state.captured = false;
+        state.move_pending = false;
         let pressed = state.pressed;
         state.pressed = 0;
         Some((

@@ -4061,8 +4061,9 @@ dependencies = [
 
 [[package]]
 name = "sbms"
-version = "0.2.9"
+version = "0.2.10"
 dependencies = [
+ "raw-window-handle",
  "slint",
  "slint-build",
  "windows",
@@ -4305,6 +4306,7 @@ dependencies = [
  "num-traits",
  "once_cell",
  "pin-weak",
+ "raw-window-handle",
  "slint-macros",
  "unicode-segmentation",
  "vtable",

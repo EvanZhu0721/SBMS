@@ -3,7 +3,7 @@
 ## Baseline
 
 - Branch: `rust-vnext`
-- Version: 0.2.9
+- Version: 0.2.10
 - Product core: one Rust process owns one virtual display, one mapping worker,
   one reversible window-migration set, and one captured mouse route.
 - Driver boundary: the C++/WDK IDD reports one 3840x2160@240 test mode and
@@ -20,8 +20,14 @@
 - Cross-resolution migration clamps temporary restored rectangles into the
   virtual source; stop restores saved physical placement and state.
 - Click-to-capture relative mouse forwarding with five buttons, two wheel axes,
-  Windows software-cursor semantics, F8 release, screenshot-shortcut release,
+  a high-contrast fixed pointer marker, F8 release, screenshot-shortcut release,
   UIPI failure release, and prior `ClipCursor` restoration.
+- Dedicated input message pumping keeps Raw Input and low-level hooks off the
+  synchronous 4K GDI draw worker. A drained message batch injects only its
+  newest absolute source position.
+- The mirror writes a fixed high-contrast pointer marker into the leased BGRA
+  frame at the current visible virtual-desktop position, then restores the
+  small modified region after drawing.
 - Stop order: input/mirror, window restoration, virtual device, topology wait,
   and final placement reconciliation.
 - Tray single instance and a local named shutdown event used by upgrade and
@@ -44,7 +50,7 @@
   and clean reinstall.
 - Post-uninstall state: no SBMS tray process, scheduled task, Program Files
   directory, or SBMS OEM driver package.
-- Final installed state: 0.2.9 binaries, `Highest` logon task running, and
+- Final installed state: 0.2.10 binaries, `Highest` logon task running, and
   `sbms create --hold-ms 2000` returning success.
 
 ## Deliberately absent

@@ -1,16 +1,13 @@
 use std::error::Error;
-use std::mem::size_of;
 use std::rc::Rc;
-
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
-use windows::Win32::Foundation::{POINT, RECT};
-use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-};
-use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use crate::control::{TrayInstance, listen_for_shutdown};
 use crate::controller::{Controller, ControllerEvent, DisplayOption};
+use crate::win32_flyout;
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
 
@@ -32,59 +29,47 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         });
     })?;
     let flyout = QuickAccess::new()?;
-    let settings = SettingsWindow::new()?;
     let tray = SbmsTray::new()?;
 
     let flyout_weak = flyout.as_weak();
     tray.on_tray_clicked(move || {
         if let Some(flyout) = flyout_weak.upgrade() {
-            position_near_tray(&flyout);
-            let _ = flyout.show();
+            if flyout.window().is_visible() {
+                let _ = flyout.hide();
+            } else {
+                show_flyout(&flyout);
+            }
         }
     });
 
     let flyout_weak = flyout.as_weak();
     tray.on_open_panel(move || {
         if let Some(flyout) = flyout_weak.upgrade() {
-            position_near_tray(&flyout);
-            let _ = flyout.show();
+            show_flyout(&flyout);
         }
     });
     tray.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
 
-    let settings_weak = settings.as_weak();
-    flyout.on_open_settings(move || {
-        if let Some(settings) = settings_weak.upgrade() {
-            let _ = settings.show();
-        }
-    });
     let flyout_weak = flyout.as_weak();
     flyout.on_dismiss(move || {
         if let Some(flyout) = flyout_weak.upgrade() {
             let _ = flyout.hide();
         }
     });
-    flyout.on_quit(|| {
-        let _ = slint::quit_event_loop();
-    });
-
-    let settings_weak = settings.as_weak();
-    settings.on_dismiss(move || {
-        if let Some(settings) = settings_weak.upgrade() {
-            let _ = settings.hide();
-        }
-    });
 
     let ui = flyout.as_weak();
     let tray_weak = tray.as_weak();
+    let error_revision = Arc::new(AtomicU64::new(0));
+    let event_error_revision = error_revision.clone();
     let controller = Controller::spawn(move |event| {
         let ui = ui.clone();
         let tray = tray_weak.clone();
+        let error_revision = event_error_revision.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui.upgrade() {
-                apply_event(&ui, tray.upgrade().as_ref(), event);
+                apply_event(&ui, tray.upgrade().as_ref(), &error_revision, event);
             }
         });
     });
@@ -108,18 +93,38 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
     let refresh_sender = sender.clone();
     flyout.on_refresh(move || refresh_sender.refresh());
 
+    let dismiss_timer = slint::Timer::default();
+    let dismiss_flyout = flyout.as_weak();
+    dismiss_timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(150),
+        move || {
+            if let Some(flyout) = dismiss_flyout.upgrade() {
+                win32_flyout::configure(flyout.window());
+                if win32_flyout::lost_focus(flyout.window()) {
+                    let _ = flyout.hide();
+                }
+            }
+        },
+    );
+
     sender.refresh();
     tray.show()?;
     if open_on_start {
-        position_near_tray(&flyout);
-        flyout.show()?;
+        show_flyout(&flyout);
     }
     slint::run_event_loop()?;
     controller.shutdown();
     Ok(())
 }
 
-fn apply_event(ui: &QuickAccess, tray: Option<&SbmsTray>, event: ControllerEvent) {
+fn apply_event(
+    ui: &QuickAccess,
+    tray: Option<&SbmsTray>,
+    error_revision: &Arc<AtomicU64>,
+    event: ControllerEvent,
+) {
+    let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
     match event {
         ControllerEvent::Displays(displays) => set_displays(ui, displays),
         ControllerEvent::State {
@@ -136,7 +141,28 @@ fn apply_event(ui: &QuickAccess, tray: Option<&SbmsTray>, event: ControllerEvent
             ui.set_state_detail(detail.into());
             ui.set_running(running);
             ui.set_busy(busy);
-            ui.set_error_text(error.into());
+            ui.set_error_text(error.as_str().into());
+            if !error.is_empty() {
+                let ui = ui.as_weak();
+                let error_revision = error_revision.clone();
+                slint::Timer::single_shot(Duration::from_secs(6), move || {
+                    if error_revision.load(Ordering::Relaxed) != revision {
+                        return;
+                    }
+                    if let Some(ui) = ui.upgrade() {
+                        ui.set_error_text("".into());
+                        if !ui.get_running() && !ui.get_busy() {
+                            if ui.get_selected_display() >= 0 {
+                                ui.set_state("Stopped".into());
+                                ui.set_state_detail("Choose a display to start".into());
+                            } else {
+                                ui.set_state("No displays".into());
+                                ui.set_state_detail("Connect or enable a physical display".into());
+                            }
+                        }
+                    }
+                });
+            }
         }
     }
 }
@@ -154,28 +180,25 @@ fn set_displays(ui: &QuickAccess, displays: Vec<DisplayOption>) {
     ui.set_display_ids(ModelRc::new(Rc::new(VecModel::from(ids))));
     ui.set_selected_display(if displays.is_empty() { -1 } else { 0 });
     if displays.is_empty() {
-        ui.set_error_text("No supported physical displays found".into());
+        ui.set_state("No displays".into());
+        ui.set_state_detail("Connect or enable a physical display".into());
+    } else {
+        ui.set_error_text("".into());
+        if !ui.get_running() && !ui.get_busy() {
+            ui.set_state("Stopped".into());
+            ui.set_state_detail("Choose a display to start".into());
+        }
     }
 }
 
-fn position_near_tray(ui: &QuickAccess) {
-    let mut cursor = POINT::default();
-    if unsafe { GetCursorPos(&mut cursor) }.is_err() {
-        return;
-    }
-    let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        rcMonitor: RECT::default(),
-        rcWork: RECT::default(),
-        dwFlags: 0,
-    };
-    if unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-        let size = ui.window().size();
-        let width = size.width as i32;
-        let height = size.height as i32;
-        let x = (cursor.x - width / 2).clamp(info.rcWork.left, info.rcWork.right - width);
-        let y = (cursor.y - height - 12).clamp(info.rcWork.top, info.rcWork.bottom - height);
-        ui.window().set_position(slint::PhysicalPosition::new(x, y));
-    }
+fn show_flyout(ui: &QuickAccess) {
+    let _ = ui.show();
+    let ui = ui.as_weak();
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = ui.upgrade() {
+            win32_flyout::configure(ui.window());
+            win32_flyout::position(ui.window());
+            win32_flyout::activate(ui.window());
+        }
+    });
 }

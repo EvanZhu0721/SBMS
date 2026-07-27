@@ -52,7 +52,7 @@ The invariant is deliberately small:
 7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 0.2.9 capability boundary
+## 0.2.10 capability boundary
 
 Supported:
 
@@ -71,11 +71,18 @@ Supported:
   on the UI thread.
 - Click-to-capture mouse routing from the physical mirror into the virtual
   desktop: relative movement, left/right/middle/X1/X2 buttons, vertical and
-  horizontal wheels, and the real Windows software cursor carried by the IDD
-  frame. Press F8 to release capture.
+  horizontal wheels, plus a visible high-contrast software pointer marker.
+  Press F8 to release capture.
 - Keyboard input follows normal Windows foreground focus after the injected
   source click; it is not copied or keylogged by SBMS. Print Screen and
   Win+Shift+S release mouse capture before Windows handles the shortcut.
+- Raw mouse input and low-level hooks run on a message pump that is independent
+  of the synchronous 4K mirror draw worker. Relative movement packets are
+  coalesced to the newest absolute source position before injection.
+- The mirror explicitly composites pointer visibility and virtual-desktop
+  position into the leased BGRA frame instead of assuming the IDD swapchain
+  surface contains a cursor. The marker is intentionally fixed-shape; native
+  I-beam, resize, animated, and application-defined shapes are not reproduced.
 - One x64 Inno Setup executable that installs the two Rust executables and the
   signed IDD package under `Program Files\SBMS`.
 - One per-user Task Scheduler logon entry with `Highest` run level. This is not
@@ -171,13 +178,13 @@ Build the complete preview installer with Inno Setup 6:
   -SigningCertificateThumbprint <thumbprint>
 ```
 
-The output is `target\installer\SBMS-Setup-0.2.9-x64.exe`. The build signs both
+The output is `target\installer\SBMS-Setup-0.2.10-x64.exe`. The build signs both
 Rust executables and the resulting installer with the same test certificate,
 verifies all signatures, and prints the package SHA-256.
 
 ## Install and run
 
-Run `SBMS-Setup-0.2.9-x64.exe` and approve UAC. Setup installs/updates the
+Run `SBMS-Setup-0.2.10-x64.exe` and approve UAC. Setup installs/updates the
 driver, updates installer-owned files, removes only explicitly known legacy
 artifacts, registers the elevated logon task for the installing interactive
 account, and starts the tray. It does not clear arbitrary files from the install
