@@ -19,11 +19,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) }?;
     let mut arguments = std::env::args().skip(1);
     match arguments.next().as_deref() {
+        Some("--version") => version(arguments),
         Some("list") => list(arguments),
         Some("create") => create(arguments),
         Some("map") => map(arguments),
         _ => usage(),
     }
+}
+
+fn version(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    if arguments.next().is_some() {
+        usage();
+    }
+    println!("sbms {}", env!("CARGO_PKG_VERSION"));
+    Ok(())
 }
 
 fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
@@ -114,6 +123,7 @@ fn wait(hold: Option<Duration>) -> io::Result<()> {
 fn usage() -> ! {
     eprintln!(
         "usage:
+  sbms --version
   sbms list
   sbms create [--hold-ms <milliseconds>]
   sbms map --target <monitor-device-path> [--hold-ms <milliseconds>]"

@@ -44,7 +44,8 @@ impl MappingSession {
         let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
         let (source, target) = wait_for_source(&request.target)?;
         let source_id = source.id.clone();
-        let renderer = Renderer::start(target).map_err(|error| stage("first-frame", error))?;
+        let renderer = Renderer::start(target, transport.channel())
+            .map_err(|error| stage("first-frame", error))?;
 
         Ok(Self {
             renderer: Some(renderer),

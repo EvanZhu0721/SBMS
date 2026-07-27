@@ -5,8 +5,8 @@ Status: complete.
 ## Start
 
 1. Resolve one active physical target by stable monitor device path.
-2. Acquire the one-session lock and wait at most 5 seconds for the previous
-   driver's shared frame objects to close.
+2. Acquire the protected one-session gate and create random frame-channel
+   objects.
 3. Create and own the software-device handle.
 4. Wait at most 15 seconds for exactly one active SBMS source.
 5. Re-resolve the target after the topology change.
@@ -23,7 +23,8 @@ Any failure unwinds owned resources in reverse order.
 
 `Drop` performs the same cleanup as a last resort. Repeated `stop` is safe.
 
-Signed driver `0.2.5.0` completed five consecutive one-second sessions. Every
+Signed driver `0.2.6.0` completed five consecutive sessions. Every
 cycle printed `running`, printed `stopped`, exited zero, and restored the
 two-display baseline. A simultaneous second session failed before device
-creation with an explicit ownership error.
+creation with an explicit ownership error. A separate 30-second session exited
+cleanly and left no virtual display active.

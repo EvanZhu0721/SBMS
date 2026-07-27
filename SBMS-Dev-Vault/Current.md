@@ -4,8 +4,8 @@
 
 - Branch: `rust-vnext`
 - Product core: one Rust process owns one virtual display and one mapping worker.
-- Driver boundary: the C++/WDK IDD reports one 1920x1080@60 monitor and copies
-  IddCx swapchain surfaces into one shared BGRA frame slot. It contains no
+- Driver boundary: the C++/WDK IDD reports one 1920x1080@60 monitor and publishes
+  IddCx swapchain surfaces through two shared BGRA frame slots. It contains no
   target-selection or lifecycle policy.
 - Target identity: active DisplayConfig `monitorDevicePath`. `\\.\DISPLAYn` is
   session-local and is never a persisted identity.
@@ -19,8 +19,12 @@
   success only after the first copied frame.
 - Stop order is mirror worker first, virtual-device handle second, then a
   bounded wait for topology removal.
-- Signed driver `0.2.5.0` completed a real source-to-physical pixel check, five
+- Signed driver `0.2.6.0` completed a real source-to-physical pixel check, five
   consecutive start/stop cycles, and concurrent-session rejection.
+- Rust draws directly from a leased shared slot; the driver drops instead of
+  waiting when the other slot is still being read.
+- The channel gate and random per-session objects authorize the launching user,
+  SYSTEM, LocalService, and Administrators.
 
 ## Deliberately absent
 
@@ -29,7 +33,8 @@ multi-mapping, automatic recovery, and a general test framework.
 
 ## Known boundary
 
-The frame channel is fixed at 1920x1080 BGRA, CPU-copied, and has a permissive
-DACL for the elevated Rust process and UMDF host. A product release must tighten
-the ACL. GPU transport, dynamic modes, rotation, cursor semantics, and input are
-future features, not hidden claims of this baseline.
+The frame channel is fixed at 1920x1080 BGRA. GPU readback, one full-frame
+driver copy, and GDI output remain. `COLORONCOLOR` scaling trades smoothness for
+substantially lower CPU use. The ACL is identity-level, not process-level:
+other processes under a trusted SID remain trusted. GPU transport, dynamic
+modes, rotation, cursor semantics, and input are future features.

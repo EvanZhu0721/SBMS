@@ -24,22 +24,35 @@ constexpr UINT kWidth = 1920;
 constexpr UINT kHeight = 1080;
 constexpr UINT kRefreshRate = 60;
 constexpr UINT kStride = kWidth * 4;
-constexpr wchar_t kFrameMapping[] = L"Global\\SBMSFrame-v1";
-constexpr wchar_t kFrameEvent[] = L"Global\\SBMSFrameReady-v1";
+constexpr SIZE_T kFramePixels = static_cast<SIZE_T>(kStride) * kHeight;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v2";
+constexpr wchar_t kFramePrefix[] = L"Global\\SBMSFrame-v2-";
+constexpr wchar_t kEventPrefix[] = L"Global\\SBMSFrameReady-v2-";
+constexpr UINT kGateMagic = 0x53424732;
+constexpr UINT kProtocolVersion = 2;
 
-struct alignas(8) FrameHeader
+struct GateHeader
+{
+    UINT magic;
+    UINT version;
+    BYTE nonce[16];
+};
+
+struct FrameHeader
 {
     UINT magic;
     UINT width;
     UINT height;
     UINT stride;
-    volatile LONG64 sequence;
+    volatile LONG publishedSlot;
+    volatile LONG readerSlot;
 };
 
 constexpr UINT kFrameMagic = 0x53424d53;
 constexpr UINT kFrameError = 0x45525221;
-constexpr SIZE_T kFrameBytes = sizeof(FrameHeader) + static_cast<SIZE_T>(kStride) * kHeight;
+constexpr SIZE_T kFrameBytes = sizeof(FrameHeader) + 2 * kFramePixels;
 static_assert(sizeof(FrameHeader) == 24);
+static_assert(sizeof(GateHeader) == 24);
 
 // One permanent monitor identity. Changing either value makes Windows treat the
 // virtual monitor as new hardware and loses its saved desktop placement.
@@ -75,13 +88,11 @@ struct Drain
 
 void PublishError(Drain* drain, UINT stage, HRESULT result, UINT detail = 0)
 {
-    InterlockedIncrement64(&drain->frame->sequence);
-    drain->frame->magic = kFrameError;
     drain->frame->width = stage;
     drain->frame->height = static_cast<UINT>(result);
     drain->frame->stride = detail;
     MemoryBarrier();
-    InterlockedIncrement64(&drain->frame->sequence);
+    drain->frame->magic = kFrameError;
     SetEvent(drain->frameEvent);
 }
 
@@ -123,17 +134,24 @@ bool PublishFrame(Drain* drain, IDXGIResource* surface)
     }
     if (SUCCEEDED(result))
     {
+        const LONG published =
+            InterlockedCompareExchange(&drain->frame->publishedSlot, 0, 0);
+        const LONG destinationSlot = published == 0 ? 1 : 0;
+        if (InterlockedCompareExchange(&drain->frame->readerSlot, 0, 0) ==
+            destinationSlot)
+        {
+            source->Release();
+            return true;
+        }
+
         drain->d3dContext->CopyResource(drain->staging, source);
         D3D11_MAPPED_SUBRESOURCE mapped{};
         result = drain->d3dContext->Map(drain->staging, 0, D3D11_MAP_READ, 0, &mapped);
         if (SUCCEEDED(result))
         {
-            InterlockedIncrement64(&drain->frame->sequence);
-            drain->frame->magic = kFrameMagic;
-            drain->frame->width = kWidth;
-            drain->frame->height = kHeight;
-            drain->frame->stride = kStride;
-            BYTE* destination = reinterpret_cast<BYTE*>(drain->frame + 1);
+            BYTE* destination =
+                reinterpret_cast<BYTE*>(drain->frame + 1) +
+                static_cast<SIZE_T>(destinationSlot) * kFramePixels;
             const BYTE* sourceRow = static_cast<const BYTE*>(mapped.pData);
             for (UINT row = 0; row < kHeight; ++row)
             {
@@ -141,7 +159,7 @@ bool PublishFrame(Drain* drain, IDXGIResource* surface)
                 sourceRow += mapped.RowPitch;
             }
             MemoryBarrier();
-            InterlockedIncrement64(&drain->frame->sequence);
+            InterlockedExchange(&drain->frame->publishedSlot, destinationSlot);
             SetEvent(drain->frameEvent);
             drain->d3dContext->Unmap(drain->staging, 0);
         }
@@ -152,6 +170,26 @@ bool PublishFrame(Drain* drain, IDXGIResource* surface)
     }
     source->Release();
     return SUCCEEDED(result);
+}
+
+void ChannelName(
+    const wchar_t* prefix,
+    const BYTE (&nonce)[16],
+    wchar_t (&output)[96])
+{
+    constexpr wchar_t hex[] = L"0123456789abcdef";
+    size_t index = 0;
+    while (prefix[index] != L'\0')
+    {
+        output[index] = prefix[index];
+        ++index;
+    }
+    for (BYTE value : nonce)
+    {
+        output[index++] = hex[value >> 4];
+        output[index++] = hex[value & 0x0f];
+    }
+    output[index] = L'\0';
 }
 
 struct DeviceState
@@ -355,17 +393,47 @@ bool StartDrain(
     drain->d3dDevice = d3dDevice;
     drain->d3dContext = d3dContext;
     drain->frameAvailable = frameAvailable;
-    drain->frameMapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, kFrameMapping);
+    wchar_t frameName[96]{};
+    wchar_t eventName[96]{};
+    HANDLE gate = OpenFileMappingW(FILE_MAP_READ, FALSE, kSessionGate);
+    GateHeader* gateHeader = nullptr;
+    if (gate != nullptr)
+    {
+        gateHeader = static_cast<GateHeader*>(
+            MapViewOfFile(gate, FILE_MAP_READ, 0, 0, sizeof(GateHeader)));
+    }
+    if (gateHeader != nullptr &&
+        gateHeader->magic == kGateMagic &&
+        gateHeader->version == kProtocolVersion)
+    {
+        ChannelName(kFramePrefix, gateHeader->nonce, frameName);
+        ChannelName(kEventPrefix, gateHeader->nonce, eventName);
+    }
+    if (gateHeader != nullptr) UnmapViewOfFile(gateHeader);
+    if (gate != nullptr) CloseHandle(gate);
+
+    if (frameName[0] != L'\0')
+    {
+        drain->frameMapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, frameName);
+    }
     if (drain->frameMapping != nullptr)
     {
         drain->frame = static_cast<FrameHeader*>(
             MapViewOfFile(drain->frameMapping, FILE_MAP_WRITE, 0, 0, kFrameBytes));
     }
-    drain->frameEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, kFrameEvent);
+    if (eventName[0] != L'\0')
+    {
+        drain->frameEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, eventName);
+    }
     drain->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (drain->frame != nullptr && drain->frameEvent != nullptr && drain->stop != nullptr)
     {
-        drain->frame->sequence = 0;
+        drain->frame->magic = kFrameMagic;
+        drain->frame->width = kWidth;
+        drain->frame->height = kHeight;
+        drain->frame->stride = kStride;
+        drain->frame->publishedSlot = -1;
+        drain->frame->readerSlot = -1;
         drain->thread = CreateThread(nullptr, 0, DrainFrames, drain, 0, nullptr);
     }
     if (drain->thread == nullptr)
