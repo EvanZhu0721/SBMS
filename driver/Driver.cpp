@@ -580,21 +580,6 @@ NTSTATUS ReportMonitor(DeviceState* state)
         return arrivalStatus;
     }
 
-    IDDCX_TARGET_MODE targetMode = TargetMode(mode);
-    IDARG_IN_UPDATEMODES update{};
-    update.Reason = IDDCX_UPDATE_REASON_CONFIGURATION_CONSTRAINTS;
-    update.TargetModeCount = 1;
-    update.pTargetModes = &targetMode;
-    const NTSTATUS updateStatus =
-        IddCxMonitorUpdateModes(output.MonitorObject, &update);
-    if (!NT_SUCCESS(updateStatus))
-    {
-        // Arrival transfers ownership to IddCx. Departure both reports the
-        // failed monitor as gone and destroys its IDDCX_MONITOR object.
-        const NTSTATUS departureStatus =
-            IddCxMonitorDeparture(output.MonitorObject);
-        return NT_SUCCESS(departureStatus) ? updateStatus : departureStatus;
-    }
     return STATUS_SUCCESS;
 }
 

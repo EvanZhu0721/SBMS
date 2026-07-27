@@ -21,11 +21,17 @@ use windows::Win32::Devices::Display::{
     GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
+use windows::Win32::Graphics::Gdi::{
+    CDS_FULLSCREEN, CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
+    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
+    DM_POSITION, ENUM_DISPLAY_SETTINGS_FLAGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
+};
 use windows::Win32::System::Registry::{
     HKEY, KEY_READ, REG_BINARY, REG_VALUE_TYPE, RegCloseKey, RegQueryValueExW,
 };
 use windows::core::{PCWSTR, w};
 
+use crate::frame_transport::VirtualMode;
 use crate::geometry::Rotation;
 
 #[derive(Clone, Debug)]
@@ -66,6 +72,151 @@ pub fn active_displays() -> Result<Vec<Display>, DisplayError> {
         thread::sleep(Duration::from_millis(20));
     }
     Err(last_error.expect("display read retry ran at least once"))
+}
+
+pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(), DisplayError> {
+    let requested_hz = u64::from(requested.refresh_numerator)
+        .checked_add(u64::from(requested.refresh_denominator) / 2)
+        .and_then(|value| value.checked_div(u64::from(requested.refresh_denominator)))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| DisplayError("requested refresh rate is invalid".into()))?;
+    let device_name = wide(&display.device_name);
+    let mut mode = find_display_mode(
+        PCWSTR(device_name.as_ptr()),
+        requested.width,
+        requested.height,
+        requested_hz,
+    )
+    .ok_or_else(|| {
+        DisplayError(format!(
+            "{} does not expose requested mode {}x{}@{}",
+            display.device_name, requested.width, requested.height, requested_hz
+        ))
+    })?;
+    mode.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    let result = unsafe {
+        ChangeDisplaySettingsExW(
+            PCWSTR(device_name.as_ptr()),
+            Some(&raw const mode),
+            None,
+            CDS_FULLSCREEN,
+            None,
+        )
+    };
+    if result != DISP_CHANGE_SUCCESSFUL {
+        return Err(DisplayError(format!(
+            "ChangeDisplaySettingsExW({}) rejected {}x{}@{} with status {}",
+            display.device_name, requested.width, requested.height, requested_hz, result.0
+        )));
+    }
+    Ok(())
+}
+
+pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError> {
+    let current = active_displays()?;
+    let mut pending = false;
+    for display in expected.iter().filter(|display| !display.virtual_display) {
+        let Some(actual) = current
+            .iter()
+            .find(|actual| actual.id.eq_ignore_ascii_case(&display.id))
+        else {
+            continue;
+        };
+        if actual.rect == display.rect
+            && actual.refresh_numerator == display.refresh_numerator
+            && actual.refresh_denominator == display.refresh_denominator
+        {
+            continue;
+        }
+
+        let width = u32::try_from(display.rect.right - display.rect.left)
+            .map_err(|_| DisplayError("saved display width is invalid".into()))?;
+        let height = u32::try_from(display.rect.bottom - display.rect.top)
+            .map_err(|_| DisplayError("saved display height is invalid".into()))?;
+        let refresh_hz = u64::from(display.refresh_numerator)
+            .checked_add(u64::from(display.refresh_denominator) / 2)
+            .and_then(|value| value.checked_div(u64::from(display.refresh_denominator)))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| DisplayError("saved display refresh rate is invalid".into()))?;
+        let device_name = wide(&actual.device_name);
+        let mut mode = find_display_mode(PCWSTR(device_name.as_ptr()), width, height, refresh_hz)
+            .ok_or_else(|| {
+            DisplayError(format!(
+                "{} no longer exposes saved mode {}x{}@{}",
+                actual.device_name, width, height, refresh_hz
+            ))
+        })?;
+        let position = unsafe { &mut mode.Anonymous1.Anonymous2.dmPosition };
+        position.x = display.rect.left;
+        position.y = display.rect.top;
+        mode.dmFields =
+            DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+        let result = unsafe {
+            ChangeDisplaySettingsExW(
+                PCWSTR(device_name.as_ptr()),
+                Some(&raw const mode),
+                None,
+                CDS_UPDATEREGISTRY | CDS_NORESET,
+                None,
+            )
+        };
+        if result != DISP_CHANGE_SUCCESSFUL {
+            return Err(DisplayError(format!(
+                "could not stage saved topology for {}: status {}",
+                actual.device_name, result.0
+            )));
+        }
+        pending = true;
+    }
+    if pending {
+        let result = unsafe {
+            ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE::default(), None)
+        };
+        if result != DISP_CHANGE_SUCCESSFUL {
+            return Err(DisplayError(format!(
+                "could not apply saved physical topology: status {}",
+                result.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn find_display_mode(
+    device_name: PCWSTR,
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+) -> Option<DEVMODEW> {
+    for index in 0..u32::MAX {
+        let mut mode = DEVMODEW {
+            dmSize: size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        if !unsafe {
+            EnumDisplaySettingsExW(
+                device_name,
+                ENUM_DISPLAY_SETTINGS_MODE(index),
+                &mut mode,
+                ENUM_DISPLAY_SETTINGS_FLAGS::default(),
+            )
+        }
+        .as_bool()
+        {
+            break;
+        }
+        if mode.dmPelsWidth == width
+            && mode.dmPelsHeight == height
+            && mode.dmDisplayFrequency == refresh_hz
+        {
+            return Some(mode);
+        }
+    }
+    None
+}
+
+fn wide(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 fn read_active_displays() -> Result<Vec<Display>, DisplayError> {

@@ -55,7 +55,7 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
     }
     for display in active_displays()? {
         println!(
-            "id={}\tname={}\tdevice={}\trect={},{},{},{}\trefresh={}/{}\t{}{}",
+            "id={}\tname={}\tdevice={}\trect={},{},{},{}\tnative={}x{}\trefresh={}/{}\t{}{}",
             display.id,
             display.name,
             display.device_name,
@@ -63,6 +63,8 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
             display.rect.top,
             display.rect.right - display.rect.left,
             display.rect.bottom - display.rect.top,
+            display.native_width,
+            display.native_height,
             display.refresh_numerator,
             display.refresh_denominator,
             if display.primary { "primary " } else { "" },

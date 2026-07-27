@@ -4061,7 +4061,7 @@ dependencies = [
 
 [[package]]
 name = "sbms"
-version = "1.1.1"
+version = "1.1.2"
 dependencies = [
  "raw-window-handle",
  "serde",

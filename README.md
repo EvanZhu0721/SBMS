@@ -54,12 +54,13 @@ The invariant is deliberately small:
 7. Closing that handle makes the current devnode non-present; Windows may keep
    its historical device record.
 
-## 1.0.0 capability boundary
+## 1.1.2 capability boundary
 
 Supported:
 
 - Windows 10/11 x64, one process, one virtual source, and one physical target.
-- One fixed 3840x2160@240 BGRA test virtual mode.
+- One session-specific BGRA virtual mode calculated from the saved sizing
+  request. With no sizing request, the fallback is 3840x2160@240.
 - Explicit target selection by active DisplayConfig `monitorDevicePath`.
 - Versioned configuration at `%LOCALAPPDATA%\SBMS\config-v1.json`. It stores
   only the stable target ID and an optional sizing request. Writes use a
@@ -92,8 +93,8 @@ Supported:
   with its native shape, hotspot, animation, and visibility.
 - Public pure-Rust sizing types expose native pixel size, physical dimensions
   or diagonal, explicit rotation, physical/integer strategy, alignment, and
-  preferred refresh. The calculator is planning infrastructure; the fixed IDD
-  mode is not changed by it yet.
+  preferred refresh. `MappingRequest` turns the result into the mode requested
+  from the IDD; calculation remains pure and independently reviewable.
 - One x64 Inno Setup executable that installs the two Rust executables and the
   signed IDD package under `Program Files\SBMS`.
 - One per-user Task Scheduler logon entry with `Highest` run level. This is not
@@ -112,13 +113,22 @@ Supported:
 - `--version`, `list`, `create`, `map`, and `config`. `map` accepts an explicit
   target or the saved target; `create` tests only the raw device lifetime.
 
-The v3 frame channel uses two slots. Rust leases the published slot and gives it
+The v4 session gate carries the validated width, height, stride, rational
+refresh rate, and random session ID before `SwDeviceCreate`. The IDD advertises
+one monitor/target mode for that session, and the two-slot frame mapping and
+renderer use the same dynamic dimensions. Rust leases the published slot
 directly to `StretchDIBits`; the driver writes the other slot or drops that
-frame. There is no Rust full-frame copy. Scaling uses performance-first
-`COLORONCOLOR`. The advertised 3840x2160@240 mode is a display-mode and
-transport stress target, not a 240 fps performance claim. D3D11 CPU staging
-readback, a driver-to-shared-memory copy, and GDI output remain, so the current
-pipeline is not expected to sustain 240 full 4K frames per second.
+frame. D3D11 CPU staging readback, a driver-to-shared-memory copy, and GDI
+output remain. An advertised 240 Hz mode is not a 240 fps promise, especially
+at modes such as 4640x2610.
+
+Windows can restore an older desktop source resolution for the permanent
+virtual-monitor identity. Start therefore enumerates the legal GDI mode,
+applies the requested source resolution temporarily, and waits for DisplayConfig
+to converge before window migration, input routing, and first-frame
+confirmation. Start snapshots the physical topology before creating the virtual
+source; failure cleanup and normal stop reapply it after device removal, so
+Windows rearrangement does not become the user's final layout.
 
 Shared objects use a protected ACL for the launching user, SYSTEM, LocalService,
 and Administrators. A protected fixed gate carries a 128-bit random session ID;
@@ -129,8 +139,8 @@ under one of those trusted identities remains inside the boundary.
 Not supported:
 
 - A background service.
-- Automatic target choice, multiple mappings, dynamic modes, rotation, HDR, or
-  color management.
+- Automatic target choice, multiple mappings, active-session mode changes,
+  Windows output rotation, HDR, or color management.
 - Touch, pen, absolute-pointer forwarding, keyboard remapping, or general
   topology recovery.
 - A publicly trusted production package. The current preview installer, Rust
@@ -172,9 +182,10 @@ sbms map
 `set-target` accepts only one currently active physical display. A malformed
 configuration is left untouched; `reset` is the explicit recovery operation.
 The public `geometry` module contains `DisplayGeometry`, `SizingRequest`,
-`SizingStrategy`, `Rotation`, and `CoordinateTransform`. Input forwarding now
-uses that shared transform instead of maintaining a second private scaling
-formula. No UI reads or writes these settings in 1.0.0.
+`SizingStrategy`, `Rotation`, and `CoordinateTransform`. Input forwarding uses
+that shared transform instead of maintaining a second private scaling formula.
+The CLI and tray share the persisted sizing request; frontends must not persist
+derived modes or duplicate the calculation/application path.
 
 ## Build
 
@@ -207,17 +218,17 @@ Build the complete preview installer with Inno Setup 6:
   -SigningCertificateThumbprint <thumbprint>
 ```
 
-The output is `target\installer\SBMS-Setup-1.0.0-x64.exe`. The build signs both
+The output is `target\installer\SBMS-Setup-1.1.2-x64.exe`. The build signs both
 Rust executables and the resulting installer with the same test certificate,
 verifies all signatures, and prints the package SHA-256.
 
 ## Install and run
 
-Run `SBMS-Setup-1.0.0-x64.exe` and approve UAC. Setup installs/updates the
+Run `SBMS-Setup-1.1.2-x64.exe` and approve UAC. Setup installs/updates the
 driver, updates installer-owned files, removes only explicitly known legacy
 artifacts, registers the elevated logon task for the installing interactive
 account, and starts the tray. It does not clear arbitrary files from the install
-directory. A fixed Inno `AppId` makes later 0.2.x packages in-place upgrades.
+directory. A fixed Inno `AppId` makes later packages in-place upgrades.
 
 Uninstall from Windows Installed Apps or run:
 

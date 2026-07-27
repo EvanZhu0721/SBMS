@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::config::ConfigStore;
-use crate::display::{Display, active_displays};
+use crate::display::{Display, active_displays, apply_display_mode, restore_display_topology};
 use crate::frame_transport::{FrameLayout, FrameTransport, VirtualMode};
 use crate::renderer::Renderer;
 use crate::virtual_display::VirtualDisplay;
@@ -26,6 +26,7 @@ pub struct MappingSession {
     transport: Option<FrameTransport>,
     source_id: String,
     target_id: String,
+    physical_topology: Vec<Display>,
 }
 
 #[derive(Debug)]
@@ -80,6 +81,14 @@ impl MappingSession {
     pub fn start(request: MappingRequest) -> Result<Self, MappingError> {
         let displays = active_displays().map_err(|error| stage("target", error))?;
         unique_target(&displays, &request.target)?;
+        let mut topology_guard = PhysicalTopologyGuard {
+            expected: displays
+                .iter()
+                .filter(|display| !display.virtual_display)
+                .cloned()
+                .collect(),
+            armed: true,
+        };
         let transport =
             FrameTransport::create(request.mode).map_err(|error| stage("transport", error))?;
         let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
@@ -90,6 +99,8 @@ impl MappingSession {
             WindowMigration::start(&target, &source).map_err(|error| stage("windows", error))?;
         let renderer = Renderer::start(target, source, transport.channel())
             .map_err(|error| stage("first-frame", error))?;
+        topology_guard.armed = false;
+        let physical_topology = std::mem::take(&mut topology_guard.expected);
 
         Ok(Self {
             renderer: Some(renderer),
@@ -98,6 +109,7 @@ impl MappingSession {
             transport: Some(transport),
             source_id,
             target_id,
+            physical_topology,
         })
     }
 
@@ -146,6 +158,12 @@ impl MappingSession {
         }
 
         thread::sleep(TOPOLOGY_SETTLE);
+        let topology_error = restore_display_topology(&self.physical_topology)
+            .map_err(|error| stage("topology-restore", error))
+            .err();
+        if topology_error.is_none() {
+            thread::sleep(TOPOLOGY_SETTLE);
+        }
         let final_target = active_displays()
             .ok()
             .and_then(|displays| unique_target(&displays, &self.target_id).ok());
@@ -162,6 +180,10 @@ impl MappingSession {
             self.transport.take();
             return Err(stage("renderer-stop", error));
         }
+        if let Some(error) = topology_error {
+            self.transport.take();
+            return Err(error);
+        }
         if let Some(error) = remove_error {
             self.transport.take();
             return Err(error);
@@ -172,6 +194,20 @@ impl MappingSession {
 
     pub fn source_id(&self) -> &str {
         &self.source_id
+    }
+}
+
+struct PhysicalTopologyGuard {
+    expected: Vec<Display>,
+    armed: bool,
+}
+
+impl Drop for PhysicalTopologyGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            thread::sleep(TOPOLOGY_SETTLE);
+            let _ = restore_display_topology(&self.expected);
+        }
     }
 }
 
@@ -230,6 +266,7 @@ fn wait_for_source(
     requested_mode: VirtualMode,
 ) -> Result<(Display, Display), MappingError> {
     let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
+    let mut mode_applied = false;
     loop {
         let displays = active_displays().map_err(|error| stage("topology", error))?;
         let sources: Vec<_> = displays
@@ -244,6 +281,10 @@ fn wait_for_source(
             let height = source.rect.bottom - source.rect.top;
             if width == requested_mode.width as i32 && height == requested_mode.height as i32 {
                 return Ok((source.clone(), target));
+            }
+            if !mode_applied {
+                apply_display_mode(source, requested_mode).map_err(|error| stage("mode", error))?;
+                mode_applied = true;
             }
             if Instant::now() >= deadline {
                 return Err(MappingError {

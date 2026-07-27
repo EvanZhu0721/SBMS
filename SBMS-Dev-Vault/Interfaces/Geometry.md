@@ -1,6 +1,6 @@
 # 尺寸计算与坐标变换接口
 
-状态：SBMS 1.0.0  
+状态：SBMS 1.1.2
 Rust 模块：`sbms::geometry`  
 配置模块：`sbms::config`
 
@@ -12,9 +12,11 @@ Rust 模块：`sbms::geometry`
 `SizingRequest::calculate()` 是纯计算接口：它根据参考显示器和目标显示器
 的像素、物理尺寸、旋转及缩放策略，返回计划使用的虚拟显示模式。
 
-SBMS 1.0.0 的 IDD 仍固定报告 `3840x2160@240`。计算结果尚未下发给驱动，
-`preferred_refresh_millihz` 也只是随结果返回的偏好值。GUI 在驱动支持动态
-模式前只能把结果标为“计划模式”或“预览”，不能声称已经应用。
+SBMS 1.1.2 已把该结果接入映射链路。`MappingRequest::configured(target)`
+加载已保存的请求，将 `virtual_mode` 和首选刷新率转成 `VirtualMode`；
+没有刷新率偏好时沿用物理目标刷新率，没有尺寸请求时回退
+`3840x2160@240`。计算成功仍然只是规划成功；只有 Windows Source Mode
+收敛且首帧确认成功后，会话才进入 running。
 
 ## 公开数据类型
 
@@ -230,9 +232,9 @@ let mapped = transform.map_target_point(point);
 - 目标矩形内的点按显式旋转映射到源矩形。
 - 这是当前鼠标输入转发实际使用的路径；前端不得维护另一套比例公式。
 
-## 后续接入驱动时的责任边界
+## 当前驱动接入链路
 
-动态模式落地后，建议保持以下单向数据流：
+当前实现保持以下单向数据流：
 
 ```text
 GUI 输入
@@ -240,9 +242,20 @@ GUI 输入
   -> calculate()
   -> SizingResult 预览
   -> 保存 SizingRequest
-  -> 映射控制器请求驱动应用 virtual_mode / refresh
-  -> 驱动确认后的实际模式
+  -> MappingRequest::configured()
+  -> VirtualMode / FrameLayout
+  -> v4 会话入口（mode / refresh / stride / nonce）
+  -> IDD 发布本次会话唯一的 Monitor/Target Mode
+  -> Windows 活动 Source Mode
+  -> 必要时枚举并应用精确 GDI 模式
+  -> Source Mode 收敛与首帧确认
 ```
 
-驱动拒绝模式时应保留用户请求并报告实际模式，不能把“计算成功”等同于
-“驱动应用成功”。
+`FrameLayout` 接受的宽高范围为 `1..=16384`，刷新率不超过 1000 Hz，
+双 BGRA 帧映射总长不得超过 512 MiB。模式在创建 `HSWDEVICE` 前固定，
+当前不支持会话运行中热切换。
+
+若请求模式不存在、Windows 拒绝切换、Source Mode 未在时限内收敛或首帧
+失败，启动会按实际失败阶段返回错误。物理拓扑会在创建虚拟源前快照；
+启动失败清理和正常停止都会在虚拟源移除后恢复它。GUI 只保存
+`SizingRequest`，不得保存推导结果、复制尺寸公式或自行实现模式应用。
