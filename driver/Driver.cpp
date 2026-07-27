@@ -20,21 +20,24 @@ EVT_IDD_CX_MONITOR_UNASSIGN_SWAPCHAIN UnassignSwapChain;
 
 namespace
 {
-constexpr UINT kWidth = 3840;
-constexpr UINT kHeight = 2160;
-constexpr UINT kRefreshRate = 240;
-constexpr UINT kStride = kWidth * 4;
-constexpr SIZE_T kFramePixels = static_cast<SIZE_T>(kStride) * kHeight;
-constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v3";
-constexpr wchar_t kFramePrefix[] = L"Global\\SBMSFrame-v3-";
-constexpr wchar_t kEventPrefix[] = L"Global\\SBMSFrameReady-v3-";
-constexpr UINT kGateMagic = 0x53424733;
-constexpr UINT kProtocolVersion = 3;
+constexpr UINT kMaximumDimension = 16384;
+constexpr UINT kMaximumRefreshRate = 1000;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v4";
+constexpr wchar_t kFramePrefix[] = L"Global\\SBMSFrame-v4-";
+constexpr wchar_t kEventPrefix[] = L"Global\\SBMSFrameReady-v4-";
+constexpr UINT kGateMagic = 0x53424734;
+constexpr UINT kProtocolVersion = 4;
 
 struct GateHeader
 {
     UINT magic;
     UINT version;
+    UINT width;
+    UINT height;
+    UINT stride;
+    UINT refreshNumerator;
+    UINT refreshDenominator;
+    UINT flags;
     BYTE nonce[16];
 };
 
@@ -50,9 +53,19 @@ struct FrameHeader
 
 constexpr UINT kFrameMagic = 0x53424d53;
 constexpr UINT kFrameError = 0x45525221;
-constexpr SIZE_T kFrameBytes = sizeof(FrameHeader) + 2 * kFramePixels;
 static_assert(sizeof(FrameHeader) == 24);
-static_assert(sizeof(GateHeader) == 24);
+static_assert(sizeof(GateHeader) == 48);
+
+struct ModeConfig
+{
+    UINT width;
+    UINT height;
+    UINT refreshNumerator;
+    UINT refreshDenominator;
+    SIZE_T stride;
+    SIZE_T framePixels;
+    SIZE_T frameBytes;
+};
 
 // One permanent monitor identity. Changing either value makes Windows treat the
 // virtual monitor as new hardware and loses its saved desktop placement.
@@ -72,6 +85,7 @@ struct Drain
     HANDLE stop{};
     HANDLE thread{};
     volatile LONG ownership{};
+    ModeConfig mode{};
 };
 
 void PublishError(Drain* drain, UINT stage, HRESULT result, UINT detail = 0)
@@ -98,8 +112,8 @@ bool PublishFrame(Drain* drain, IDXGIResource* surface)
     {
         D3D11_TEXTURE2D_DESC description{};
         source->GetDesc(&description);
-        if (description.Width != kWidth ||
-            description.Height != kHeight ||
+        if (description.Width != drain->mode.width ||
+            description.Height != drain->mode.height ||
             description.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
         {
             PublishError(
@@ -139,11 +153,14 @@ bool PublishFrame(Drain* drain, IDXGIResource* surface)
         {
             BYTE* destination =
                 reinterpret_cast<BYTE*>(drain->frame + 1) +
-                static_cast<SIZE_T>(destinationSlot) * kFramePixels;
+                static_cast<SIZE_T>(destinationSlot) * drain->mode.framePixels;
             const BYTE* sourceRow = static_cast<const BYTE*>(mapped.pData);
-            for (UINT row = 0; row < kHeight; ++row)
+            for (UINT row = 0; row < drain->mode.height; ++row)
             {
-                memcpy(destination + static_cast<SIZE_T>(row) * kStride, sourceRow, kStride);
+                memcpy(
+                    destination + static_cast<SIZE_T>(row) * drain->mode.stride,
+                    sourceRow,
+                    drain->mode.stride);
                 sourceRow += mapped.RowPitch;
             }
             MemoryBarrier();
@@ -189,41 +206,125 @@ struct DeviceState
 struct MonitorState
 {
     Drain* drain{};
+    ModeConfig mode{};
+    BYTE nonce[16]{};
 };
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DeviceState, GetDeviceState);
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(MonitorState, GetMonitorState);
 
-void FillSignal(DISPLAYCONFIG_VIDEO_SIGNAL_INFO& signal, bool monitorMode)
+bool ValidateMode(
+    UINT width,
+    UINT height,
+    UINT refreshNumerator,
+    UINT refreshDenominator,
+    ModeConfig& mode)
 {
-    signal.activeSize.cx = kWidth;
-    signal.activeSize.cy = kHeight;
-    signal.totalSize.cx = kWidth;
-    signal.totalSize.cy = kHeight;
-    signal.vSyncFreq.Numerator = kRefreshRate;
-    signal.vSyncFreq.Denominator = 1;
-    signal.hSyncFreq.Numerator = kHeight * kRefreshRate;
-    signal.hSyncFreq.Denominator = 1;
-    signal.pixelRate = static_cast<UINT64>(kWidth) * kHeight * kRefreshRate;
+    if (width == 0 || height == 0 ||
+        width > kMaximumDimension || height > kMaximumDimension ||
+        refreshNumerator == 0 || refreshDenominator == 0)
+    {
+        return false;
+    }
+    const UINT64 maximumNumerator =
+        static_cast<UINT64>(refreshDenominator) * kMaximumRefreshRate;
+    if (refreshNumerator < refreshDenominator ||
+        refreshNumerator > maximumNumerator ||
+        static_cast<UINT64>(height) * refreshNumerator > MAXUINT32)
+    {
+        return false;
+    }
+
+    const SIZE_T stride = static_cast<SIZE_T>(width) * 4;
+    if (height > MAXSIZE_T / stride)
+    {
+        return false;
+    }
+    const SIZE_T framePixels = stride * height;
+    if (framePixels > (MAXSIZE_T - sizeof(FrameHeader)) / 2)
+    {
+        return false;
+    }
+
+    mode.width = width;
+    mode.height = height;
+    mode.refreshNumerator = refreshNumerator;
+    mode.refreshDenominator = refreshDenominator;
+    mode.stride = stride;
+    mode.framePixels = framePixels;
+    mode.frameBytes = sizeof(FrameHeader) + 2 * framePixels;
+    return true;
+}
+
+bool ReadSessionConfig(ModeConfig& mode, BYTE (&nonce)[16])
+{
+    HANDLE gate = OpenFileMappingW(FILE_MAP_READ, FALSE, kSessionGate);
+    if (gate == nullptr)
+    {
+        return false;
+    }
+    const auto* header = static_cast<const GateHeader*>(
+        MapViewOfFile(gate, FILE_MAP_READ, 0, 0, sizeof(GateHeader)));
+    bool valid = false;
+    if (header != nullptr &&
+        header->magic == kGateMagic &&
+        header->version == kProtocolVersion &&
+        header->flags == 0 &&
+        header->stride == static_cast<UINT64>(header->width) * 4 &&
+        ValidateMode(
+            header->width,
+            header->height,
+            header->refreshNumerator,
+            header->refreshDenominator,
+            mode))
+    {
+        memcpy(nonce, header->nonce, sizeof(header->nonce));
+        valid = true;
+    }
+    if (header != nullptr) UnmapViewOfFile(header);
+    CloseHandle(gate);
+    return valid;
+}
+
+void FillSignal(
+    DISPLAYCONFIG_VIDEO_SIGNAL_INFO& signal,
+    const ModeConfig& config,
+    bool monitorMode)
+{
+    signal.activeSize.cx = config.width;
+    signal.activeSize.cy = config.height;
+    signal.totalSize.cx = config.width;
+    signal.totalSize.cy = config.height;
+    signal.vSyncFreq.Numerator = config.refreshNumerator;
+    signal.vSyncFreq.Denominator = config.refreshDenominator;
+    signal.hSyncFreq.Numerator = config.height * config.refreshNumerator;
+    signal.hSyncFreq.Denominator = config.refreshDenominator;
+    signal.pixelRate =
+        static_cast<UINT64>(config.width) *
+        config.height *
+        config.refreshNumerator /
+        config.refreshDenominator;
     signal.scanLineOrdering = DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
     signal.AdditionalSignalInfo.videoStandard = 255;
     signal.AdditionalSignalInfo.vSyncFreqDivider = monitorMode ? 0 : 1;
 }
 
-IDDCX_MONITOR_MODE MonitorMode(IDDCX_MONITOR_MODE_ORIGIN origin)
+IDDCX_MONITOR_MODE MonitorMode(
+    const ModeConfig& config,
+    IDDCX_MONITOR_MODE_ORIGIN origin)
 {
     IDDCX_MONITOR_MODE mode{};
     mode.Size = sizeof(mode);
     mode.Origin = origin;
-    FillSignal(mode.MonitorVideoSignalInfo, true);
+    FillSignal(mode.MonitorVideoSignalInfo, config, true);
     return mode;
 }
 
-IDDCX_TARGET_MODE TargetMode()
+IDDCX_TARGET_MODE TargetMode(const ModeConfig& config)
 {
     IDDCX_TARGET_MODE mode{};
     mode.Size = sizeof(mode);
-    FillSignal(mode.TargetVideoSignalInfo.targetVideoSignalInfo, false);
+    FillSignal(mode.TargetVideoSignalInfo.targetVideoSignalInfo, config, false);
     return mode;
 }
 
@@ -381,24 +482,11 @@ bool StartDrain(
     drain->d3dDevice = d3dDevice;
     drain->d3dContext = d3dContext;
     drain->frameAvailable = frameAvailable;
+    drain->mode = monitor->mode;
     wchar_t frameName[96]{};
     wchar_t eventName[96]{};
-    HANDLE gate = OpenFileMappingW(FILE_MAP_READ, FALSE, kSessionGate);
-    GateHeader* gateHeader = nullptr;
-    if (gate != nullptr)
-    {
-        gateHeader = static_cast<GateHeader*>(
-            MapViewOfFile(gate, FILE_MAP_READ, 0, 0, sizeof(GateHeader)));
-    }
-    if (gateHeader != nullptr &&
-        gateHeader->magic == kGateMagic &&
-        gateHeader->version == kProtocolVersion)
-    {
-        ChannelName(kFramePrefix, gateHeader->nonce, frameName);
-        ChannelName(kEventPrefix, gateHeader->nonce, eventName);
-    }
-    if (gateHeader != nullptr) UnmapViewOfFile(gateHeader);
-    if (gate != nullptr) CloseHandle(gate);
+    ChannelName(kFramePrefix, monitor->nonce, frameName);
+    ChannelName(kEventPrefix, monitor->nonce, eventName);
 
     if (frameName[0] != L'\0')
     {
@@ -407,7 +495,12 @@ bool StartDrain(
     if (drain->frameMapping != nullptr)
     {
         drain->frame = static_cast<FrameHeader*>(
-            MapViewOfFile(drain->frameMapping, FILE_MAP_WRITE, 0, 0, kFrameBytes));
+            MapViewOfFile(
+                drain->frameMapping,
+                FILE_MAP_WRITE,
+                0,
+                0,
+                drain->mode.frameBytes));
     }
     if (eventName[0] != L'\0')
     {
@@ -417,9 +510,9 @@ bool StartDrain(
     if (drain->frame != nullptr && drain->frameEvent != nullptr && drain->stop != nullptr)
     {
         drain->frame->magic = kFrameMagic;
-        drain->frame->width = kWidth;
-        drain->frame->height = kHeight;
-        drain->frame->stride = kStride;
+        drain->frame->width = drain->mode.width;
+        drain->frame->height = drain->mode.height;
+        drain->frame->stride = static_cast<UINT>(drain->mode.stride);
         drain->frame->publishedSlot = -1;
         drain->frame->readerSlot = -1;
         drain->thread = CreateThread(nullptr, 0, DrainFrames, drain, 0, nullptr);
@@ -442,6 +535,13 @@ bool StartDrain(
 
 void ReportMonitor(DeviceState* state)
 {
+    ModeConfig mode{};
+    BYTE nonce[16]{};
+    if (!ReadSessionConfig(mode, nonce))
+    {
+        return;
+    }
+
     WDF_OBJECT_ATTRIBUTES attributes;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorState);
     attributes.EvtCleanupCallback = MonitorCleanup;
@@ -465,6 +565,10 @@ void ReportMonitor(DeviceState* state)
         return;
     }
 
+    MonitorState* monitorState = GetMonitorState(output.MonitorObject);
+    monitorState->mode = mode;
+    memcpy(monitorState->nonce, nonce, sizeof(nonce));
+
     IDARG_OUT_MONITORARRIVAL arrival{};
     if (!NT_SUCCESS(IddCxMonitorArrival(output.MonitorObject, &arrival)))
     {
@@ -485,6 +589,7 @@ void InitAdapter(DeviceState* state)
 
     IDDCX_ADAPTER_CAPS caps{};
     caps.Size = sizeof(caps);
+    caps.Flags = IDDCX_ADAPTER_FLAGS_USE_SMALLEST_MODE;
     caps.MaxMonitorsSupported = 1;
     caps.EndPointDiagnostics.Size = sizeof(caps.EndPointDiagnostics);
     caps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
@@ -629,7 +734,8 @@ NTSTATUS GetDefaultMonitorModes(
         return STATUS_BUFFER_TOO_SMALL;
     }
 
-    input->pDefaultMonitorModes[0] = MonitorMode(IDDCX_MONITOR_MODE_ORIGIN_DRIVER);
+    input->pDefaultMonitorModes[0] =
+        MonitorMode(GetMonitorState(monitor)->mode, IDDCX_MONITOR_MODE_ORIGIN_DRIVER);
     output->PreferredMonitorModeIdx = 0;
     return STATUS_SUCCESS;
 }
@@ -643,7 +749,7 @@ NTSTATUS QueryTargetModes(
     output->TargetModeBufferOutputCount = 1;
     if (input->TargetModeBufferInputCount >= 1)
     {
-        input->pTargetModes[0] = TargetMode();
+        input->pTargetModes[0] = TargetMode(GetMonitorState(monitor)->mode);
     }
     return STATUS_SUCCESS;
 }
