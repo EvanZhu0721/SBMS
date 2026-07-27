@@ -3,56 +3,20 @@ use std::mem::size_of;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{PhysicalPosition, Window};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
-use windows::Win32::Graphics::Dwm::{
-    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
-};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GWL_EXSTYLE, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowThreadProcessId, HWND_MESSAGE, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    FindWindowExW, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, HWND_MESSAGE,
+    SetForegroundWindow,
 };
 use windows::core::{GUID, PCWSTR, w};
 
 const TRAY_WINDOW_CLASS: PCWSTR = w!("SlintSystemTrayWindow");
 const SLINT_TRAY_ICON_ID: u32 = 1;
 const FLYOUT_GAP: i32 = 8;
-
-pub fn configure(window: &Window) {
-    let Some(hwnd) = hwnd(window) else {
-        return;
-    };
-    let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-    let updated = (current | WS_EX_TOOLWINDOW.0 as isize) & !(WS_EX_APPWINDOW.0 as isize);
-    if updated != current {
-        unsafe {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, updated);
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                0,
-                0,
-                0,
-                0,
-                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER,
-            );
-        }
-    }
-
-    let preference = DWMWCP_ROUND;
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE,
-            std::ptr::from_ref(&preference).cast(),
-            size_of_val(&preference) as u32,
-        );
-    }
-}
 
 pub fn position(window: &Window) {
     let anchor = tray_icon_rect().or_else(cursor_rect);

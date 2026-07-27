@@ -7,6 +7,7 @@ use std::time::Duration;
 use crate::control::{TrayInstance, listen_for_shutdown};
 use crate::controller::{Controller, ControllerEvent, DisplayOption};
 use crate::win32_flyout;
+use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 
 slint::include_modules!();
@@ -20,6 +21,17 @@ pub fn run_open() -> Result<(), Box<dyn Error>> {
 }
 
 fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
+    slint::BackendSelector::new()
+        .backend_name("winit".into())
+        .renderer_name("software".into())
+        .with_winit_window_attributes_hook(|attributes| {
+            attributes
+                .with_transparent(false)
+                .with_skip_taskbar(true)
+                .with_corner_preference(CornerPreference::Round)
+        })
+        .select()?;
+
     let Some(_instance) = TrayInstance::acquire()? else {
         return Ok(());
     };
@@ -100,7 +112,6 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         Duration::from_millis(150),
         move || {
             if let Some(flyout) = dismiss_flyout.upgrade() {
-                win32_flyout::configure(flyout.window());
                 if win32_flyout::lost_focus(flyout.window()) {
                     let _ = flyout.hide();
                 }
@@ -192,13 +203,20 @@ fn set_displays(ui: &QuickAccess, displays: Vec<DisplayOption>) {
 }
 
 fn show_flyout(ui: &QuickAccess) {
+    win32_flyout::position(ui.window());
+
+    // Slint 1.17's winit software renderer can retain a reused-buffer cache
+    // after Windows clears a hidden window during a display-topology change.
+    // Taking a snapshot temporarily selects a new repaint buffer and clears
+    // that cache, so the visible frame below is rendered in full.
+    let _ = ui.window().take_snapshot();
     let _ = ui.show();
+
     let ui = ui.as_weak();
     slint::Timer::single_shot(Duration::ZERO, move || {
         if let Some(ui) = ui.upgrade() {
-            win32_flyout::configure(ui.window());
-            win32_flyout::position(ui.window());
             win32_flyout::activate(ui.window());
+            ui.window().request_redraw();
         }
     });
 }
