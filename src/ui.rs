@@ -111,10 +111,10 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         slint::TimerMode::Repeated,
         Duration::from_millis(150),
         move || {
-            if let Some(flyout) = dismiss_flyout.upgrade() {
-                if win32_flyout::lost_focus(flyout.window()) {
-                    let _ = flyout.hide();
-                }
+            if let Some(flyout) = dismiss_flyout.upgrade()
+                && win32_flyout::lost_focus(flyout.window())
+            {
+                let _ = flyout.hide();
             }
         },
     );
