@@ -1,5 +1,7 @@
 # SBMS
 
+VeryImportant--this project is rebuilding use rust, you can see the progress in the "rust_vnext" branch
+非常重要: 这个项目正在用rust重构, 你可以在"rust_vnext"分支看到工作进度. 
 Production driver certification, signing, package integrity and installer
 verification are documented in
 [`docs/PRODUCTION-SIGNING.md`](docs/PRODUCTION-SIGNING.md).
