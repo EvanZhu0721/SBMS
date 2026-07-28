@@ -1,3 +1,5 @@
+![SBMS banner](assets/sbms-banner.png)
+
 # SBMS
 
 [English](README.md)

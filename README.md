@@ -1,3 +1,5 @@
+![SBMS banner](assets/sbms-banner.png)
+
 # SBMS
 
 [简体中文](README.zh-CN.md)
