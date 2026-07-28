@@ -19,9 +19,6 @@ pub struct DisplayOption {
     pub physical_width_mm: Option<f64>,
     pub physical_height_mm: Option<f64>,
     pub rotation: Rotation,
-    pub refresh_numerator: u32,
-    pub refresh_denominator: u32,
-    pub primary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -204,9 +201,6 @@ fn refresh(emit: &impl Fn(ControllerEvent)) {
                     physical_width_mm: display.physical_width_mm,
                     physical_height_mm: display.physical_height_mm,
                     rotation: display.rotation,
-                    refresh_numerator: display.refresh_numerator,
-                    refresh_denominator: display.refresh_denominator,
-                    primary: display.primary,
                     label: format!(
                         "{} · {}×{}{}",
                         display.name,

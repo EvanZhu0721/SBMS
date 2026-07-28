@@ -29,7 +29,6 @@ impl CreationState {
 
 pub struct VirtualDisplay {
     handle: HSWDEVICE,
-    instance_id: String,
 }
 
 impl VirtualDisplay {
@@ -90,20 +89,13 @@ impl VirtualDisplay {
         }
 
         match result.take().expect("callback completed without a result") {
-            Ok(instance_id) => Ok(Self {
-                handle,
-                instance_id,
-            }),
+            Ok(_) => Ok(Self { handle }),
             Err(hr) => {
                 // SAFETY: handle came from a successful SwDeviceCreate call.
                 unsafe { SwDeviceClose(handle) };
                 Err(Error::from_hresult(hr))
             }
         }
-    }
-
-    pub fn instance_id(&self) -> &str {
-        &self.instance_id
     }
 }
 

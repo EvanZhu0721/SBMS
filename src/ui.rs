@@ -947,9 +947,6 @@ mod tests {
             physical_width_mm: Some(527.0),
             physical_height_mm: Some(296.0),
             rotation: Rotation::Deg0,
-            refresh_numerator: 60_000,
-            refresh_denominator: 1_000,
-            primary: false,
         }
     }
 

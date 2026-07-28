@@ -31,8 +31,8 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::{PCWSTR, w};
 
-use crate::frame_transport::VirtualMode;
 use crate::geometry::Rotation;
+use crate::session_gate::VirtualMode;
 
 #[derive(Clone, Debug)]
 pub struct Display {

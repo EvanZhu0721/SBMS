@@ -252,7 +252,7 @@ function Install-SbmsTask {
         -Trigger $trigger `
         -Principal $principal `
         -Settings $settings `
-        -Description 'Starts the SBMS tray with the privileges required by its global IDD frame channel.' |
+        -Description 'Starts the SBMS tray with the privileges required by its protected session gate.' |
         Out-Null
     Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -273,6 +273,30 @@ function Find-SbmsDriverPackages {
             $text -match '(?i)Provider\s*=\s*"SBMS"' -and
             $text -match '(?i)4D36E968-E325-11CE-BFC1-08002BE10318') {
             $file
+        }
+    }
+}
+
+function Find-ObsoleteSbmsDriverPackages {
+    $sourceText = [IO.File]::ReadAllText($driverInf)
+    $sourceMatch = [regex]::Match(
+        $sourceText,
+        '(?im)^\s*DriverVer\s*=\s*(?<value>.+?)\s*$'
+    )
+    if (-not $sourceMatch.Success) {
+        throw "DriverVer is missing from $driverInf"
+    }
+    $currentVersion = $sourceMatch.Groups['value'].Value.Trim()
+
+    foreach ($package in Find-SbmsDriverPackages) {
+        $packageText = [IO.File]::ReadAllText($package.FullName)
+        $packageMatch = [regex]::Match(
+            $packageText,
+            '(?im)^\s*DriverVer\s*=\s*(?<value>.+?)\s*$'
+        )
+        if (-not $packageMatch.Success -or
+            $packageMatch.Groups['value'].Value.Trim() -ne $currentVersion) {
+            $package
         }
     }
 }
@@ -353,6 +377,10 @@ function Install-Sbms {
         }
         throw $failure
     }
+
+    # The new package and startup task are working. Old SBMS packages are no
+    # longer useful for rollback and otherwise accumulate in DriverStore.
+    Remove-DriverPackages -Packages @(Find-ObsoleteSbmsDriverPackages)
 }
 
 function Uninstall-Sbms {

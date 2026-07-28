@@ -5,10 +5,8 @@ use std::time::Duration;
 
 use sbms::config::ConfigStore;
 use sbms::display::active_displays;
-use sbms::frame_transport::{FrameTransport, VirtualMode};
 use sbms::mapping::{MappingRequest, MappingSession};
 use sbms::renderer::RendererEvent;
-use sbms::virtual_display::VirtualDisplay;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -19,7 +17,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     match arguments.next().as_deref() {
         Some("--version") => version(arguments),
         Some("list") => list(arguments),
-        Some("create") => create(arguments),
         Some("map") => map(arguments),
         Some("config") => config(arguments),
         Some("shutdown") => shutdown(arguments),
@@ -77,22 +74,6 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
             }
         );
     }
-    Ok(())
-}
-
-fn create(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
-    let hold = parse_hold(&mut arguments)?;
-    if arguments.next().is_some() {
-        usage();
-    }
-
-    let session_gate = FrameTransport::create(VirtualMode::default())?;
-    let display = VirtualDisplay::create()?;
-    println!("created={}", display.instance_id());
-    wait(hold)?;
-    drop(display);
-    drop(session_gate);
-    println!("removed");
     Ok(())
 }
 
@@ -209,23 +190,6 @@ fn validate_physical_target(target_id: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn parse_hold(
-    arguments: &mut impl Iterator<Item = String>,
-) -> Result<Option<Duration>, Box<dyn Error>> {
-    let hold = match arguments.next().as_deref() {
-        None => None,
-        Some("--hold-ms") => {
-            let milliseconds = arguments
-                .next()
-                .ok_or("--hold-ms requires a value")?
-                .parse::<u64>()?;
-            Some(Duration::from_millis(milliseconds))
-        }
-        Some(_) => usage(),
-    };
-    Ok(hold)
-}
-
 fn wait(hold: Option<Duration>) -> io::Result<()> {
     if let Some(duration) = hold {
         std::thread::sleep(duration);
@@ -242,7 +206,6 @@ fn usage() -> ! {
         "usage:
   sbms --version
   sbms list
-  sbms create [--hold-ms <milliseconds>]
   sbms map [--target <monitor-device-path>] [--hold-ms <milliseconds>]
   sbms config path|show|set-target <monitor-device-path>|clear-target|reset
   sbms shutdown

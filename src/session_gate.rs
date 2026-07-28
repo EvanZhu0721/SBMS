@@ -20,9 +20,9 @@ use windows::Win32::System::Memory::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{PCWSTR, PWSTR, w};
 
-const GATE_MAGIC: u32 = 0x5342_4734;
-const PROTOCOL_VERSION: u32 = 4;
-const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v4");
+const GATE_MAGIC: u32 = 0x5342_4735;
+const PROTOCOL_VERSION: u32 = 5;
+const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v5");
 const MAX_DIMENSION: u32 = 16_384;
 const MAX_REFRESH_HZ: u64 = 1_000;
 
@@ -50,9 +50,9 @@ impl VirtualMode {
         width: u32,
         height: u32,
         refresh_millihz: u32,
-    ) -> Result<Self, TransportError> {
+    ) -> Result<Self, SessionGateError> {
         if refresh_millihz == 0 {
-            return Err(TransportError("virtual refresh must be non-zero".into()));
+            return Err(SessionGateError("virtual refresh must be non-zero".into()));
         }
         let divisor = greatest_common_divisor(refresh_millihz, 1_000);
         let mode = Self {
@@ -61,44 +61,32 @@ impl VirtualMode {
             refresh_numerator: refresh_millihz / divisor,
             refresh_denominator: 1_000 / divisor,
         };
-        FrameLayout::new(mode)?;
+        mode.validate()?;
         Ok(mode)
     }
-}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FrameLayout {
-    pub mode: VirtualMode,
-    pub stride: u32,
-}
-
-impl FrameLayout {
-    pub fn new(mode: VirtualMode) -> Result<Self, TransportError> {
-        if mode.width == 0
-            || mode.height == 0
-            || mode.width > MAX_DIMENSION
-            || mode.height > MAX_DIMENSION
+    pub fn validate(self) -> Result<(), SessionGateError> {
+        if self.width == 0
+            || self.height == 0
+            || self.width > MAX_DIMENSION
+            || self.height > MAX_DIMENSION
         {
-            return Err(TransportError(format!(
+            return Err(SessionGateError(format!(
                 "virtual dimensions must be between 1 and {MAX_DIMENSION}"
             )));
         }
-        if mode.refresh_numerator == 0 || mode.refresh_denominator == 0 {
-            return Err(TransportError(
+        if self.refresh_numerator == 0 || self.refresh_denominator == 0 {
+            return Err(SessionGateError(
                 "virtual refresh numerator and denominator must be non-zero".into(),
             ));
         }
-        if u64::from(mode.refresh_numerator) > MAX_REFRESH_HZ * u64::from(mode.refresh_denominator)
+        if u64::from(self.refresh_numerator) > MAX_REFRESH_HZ * u64::from(self.refresh_denominator)
         {
-            return Err(TransportError(format!(
+            return Err(SessionGateError(format!(
                 "virtual refresh must not exceed {MAX_REFRESH_HZ} Hz"
             )));
         }
-        let stride = mode
-            .width
-            .checked_mul(4)
-            .ok_or_else(|| TransportError("virtual stride overflow".into()))?;
-        Ok(Self { mode, stride })
+        Ok(())
     }
 }
 
@@ -108,31 +96,28 @@ struct GateHeader {
     version: u32,
     width: u32,
     height: u32,
-    stride: u32,
     refresh_numerator: u32,
     refresh_denominator: u32,
-    flags: u32,
-    reserved: [u8; 16],
 }
 
-pub struct FrameTransport {
+pub struct SessionGate {
     gate: HANDLE,
 }
 
 #[derive(Debug)]
-pub struct TransportError(String);
+pub struct SessionGateError(String);
 
-impl Display for TransportError {
+impl Display for SessionGateError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
     }
 }
 
-impl Error for TransportError {}
+impl Error for SessionGateError {}
 
-impl FrameTransport {
-    pub fn create(mode: VirtualMode) -> Result<Self, TransportError> {
-        let layout = FrameLayout::new(mode)?;
+impl SessionGate {
+    pub fn create(mode: VirtualMode) -> Result<Self, SessionGateError> {
+        mode.validate()?;
         let descriptor = SecurityDescriptor::for_current_user()?;
         let attributes = descriptor.attributes();
         let gate = unsafe {
@@ -145,13 +130,13 @@ impl FrameTransport {
                 GATE_MAPPING,
             )
         }
-        .map_err(|error| TransportError(format!("create session gate: {error}")))?;
+        .map_err(|error| SessionGateError(format!("create session gate: {error}")))?;
         if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
             unsafe {
                 let _ = CloseHandle(gate);
             }
-            return Err(TransportError(
-                "another SBMS mapping session already owns the frame channel".into(),
+            return Err(SessionGateError(
+                "another SBMS mapping session is already running".into(),
             ));
         }
 
@@ -161,7 +146,7 @@ impl FrameTransport {
             unsafe {
                 let _ = CloseHandle(gate);
             }
-            return Err(TransportError("map session gate failed".into()));
+            return Err(SessionGateError("map session gate failed".into()));
         }
         unsafe {
             gate_view.Value.cast::<GateHeader>().write(GateHeader {
@@ -169,11 +154,8 @@ impl FrameTransport {
                 version: PROTOCOL_VERSION,
                 width: mode.width,
                 height: mode.height,
-                stride: layout.stride,
                 refresh_numerator: mode.refresh_numerator,
                 refresh_denominator: mode.refresh_denominator,
-                flags: 0,
-                reserved: [0; 16],
             });
             let _ = UnmapViewOfFile(gate_view);
         }
@@ -191,7 +173,7 @@ const fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
     left
 }
 
-impl Drop for FrameTransport {
+impl Drop for SessionGate {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseHandle(self.gate);
@@ -202,10 +184,10 @@ impl Drop for FrameTransport {
 struct SecurityDescriptor(PSECURITY_DESCRIPTOR);
 
 impl SecurityDescriptor {
-    fn for_current_user() -> Result<Self, TransportError> {
+    fn for_current_user() -> Result<Self, SessionGateError> {
         let mut token = HANDLE::default();
         unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
-            .map_err(|error| TransportError(format!("OpenProcessToken: {error}")))?;
+            .map_err(|error| SessionGateError(format!("OpenProcessToken: {error}")))?;
         let mut length = 0;
         let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut length) };
         let mut token_user = vec![0u8; length as usize];
@@ -221,17 +203,17 @@ impl SecurityDescriptor {
         unsafe {
             let _ = CloseHandle(token);
         }
-        result.map_err(|error| TransportError(format!("GetTokenInformation: {error}")))?;
+        result.map_err(|error| SessionGateError(format!("GetTokenInformation: {error}")))?;
 
         let user = unsafe { &*token_user.as_ptr().cast::<TOKEN_USER>() };
         let mut sid = PWSTR::null();
         unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid) }
-            .map_err(|error| TransportError(format!("ConvertSidToStringSidW: {error}")))?;
+            .map_err(|error| SessionGateError(format!("ConvertSidToStringSidW: {error}")))?;
         let sid_text = unsafe { sid.to_string() };
         unsafe {
             LocalFree(Some(HLOCAL(sid.0.cast::<c_void>())));
         }
-        let sid_text = sid_text.map_err(|error| TransportError(format!("user SID: {error}")))?;
+        let sid_text = sid_text.map_err(|error| SessionGateError(format!("user SID: {error}")))?;
 
         let sddl = wide(&format!(
             "D:P(A;;GA;;;{sid_text})(A;;GA;;;SY)(A;;GA;;;LS)(A;;GA;;;BA)"
@@ -245,7 +227,7 @@ impl SecurityDescriptor {
                 None,
             )
         }
-        .map_err(|error| TransportError(format!("security descriptor: {error}")))?;
+        .map_err(|error| SessionGateError(format!("security descriptor: {error}")))?;
         Ok(Self(descriptor))
     }
 
@@ -277,12 +259,10 @@ mod tests {
     #[test]
     fn dynamic_mode_header_matches_4640_by_2610() {
         let mode = VirtualMode::from_millihz(4640, 2610, 240_000).unwrap();
-        let layout = FrameLayout::new(mode).unwrap();
 
         assert_eq!(mode.refresh_numerator, 240);
         assert_eq!(mode.refresh_denominator, 1);
-        assert_eq!(layout.stride, 18_560);
-        assert_eq!(size_of::<GateHeader>(), 48);
+        assert_eq!(size_of::<GateHeader>(), 24);
     }
 
     #[test]
@@ -291,12 +271,13 @@ mod tests {
         assert!(VirtualMode::from_millihz(3840, 2160, 0).is_err());
         assert!(VirtualMode::from_millihz(16_385, 16_384, 240_000).is_err());
         assert!(
-            FrameLayout::new(VirtualMode {
+            VirtualMode {
                 width: 3840,
                 height: 2160,
                 refresh_numerator: 1001,
                 refresh_denominator: 1,
-            })
+            }
+            .validate()
             .is_err()
         );
     }

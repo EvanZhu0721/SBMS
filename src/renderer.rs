@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::w;
 
 use crate::display::Display;
-use crate::gpu_renderer::{FilterMode, GpuRendererConfig, run_gpu_renderer};
+use crate::gpu_renderer::{GpuRendererConfig, run_gpu_renderer};
 use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -35,10 +35,6 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn start(target: Display, source: Display) -> Result<Self, String> {
-        Self::start_with_reporter(target, source, Arc::new(|_| {}))
-    }
-
     pub fn start_with_reporter(
         target: Display,
         source: Display,
@@ -220,8 +216,6 @@ fn draw_frames(
             target_width: target_width as u32,
             target_height: target_height as u32,
             source_rect: source,
-            filter_mode: FilterMode::ExactArea,
-            vsync: true,
         },
         stop,
         || {

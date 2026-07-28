@@ -22,9 +22,9 @@ namespace
 {
 constexpr UINT kMaximumDimension = 16384;
 constexpr UINT kMaximumRefreshRate = 1000;
-constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v4";
-constexpr UINT kGateMagic = 0x53424734;
-constexpr UINT kProtocolVersion = 4;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v5";
+constexpr UINT kGateMagic = 0x53424735;
+constexpr UINT kProtocolVersion = 5;
 
 struct GateHeader
 {
@@ -32,14 +32,11 @@ struct GateHeader
     UINT version;
     UINT width;
     UINT height;
-    UINT stride;
     UINT refreshNumerator;
     UINT refreshDenominator;
-    UINT flags;
-    BYTE reserved[16];
 };
 
-static_assert(sizeof(GateHeader) == 48);
+static_assert(sizeof(GateHeader) == 24);
 
 struct ModeConfig
 {
@@ -121,8 +118,6 @@ bool ReadSessionConfig(ModeConfig& mode)
     if (header != nullptr &&
         header->magic == kGateMagic &&
         header->version == kProtocolVersion &&
-        header->flags == 0 &&
-        header->stride == static_cast<UINT64>(header->width) * 4 &&
         ValidateMode(
             header->width,
             header->height,

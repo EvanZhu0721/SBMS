@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::ConfigStore;
 use crate::display::{Display, active_displays, apply_display_mode, restore_display_topology};
-use crate::frame_transport::{FrameLayout, FrameTransport, VirtualMode};
 use crate::renderer::{Renderer, RendererReporter};
+use crate::session_gate::{SessionGate, VirtualMode};
 use crate::virtual_display::VirtualDisplay;
 use crate::window_migration::WindowMigration;
 
@@ -23,7 +23,7 @@ pub struct MappingSession {
     renderer: Option<Renderer>,
     migration: Option<WindowMigration>,
     display: Option<VirtualDisplay>,
-    session_gate: Option<FrameTransport>,
+    session_gate: Option<SessionGate>,
     source_id: String,
     target_id: String,
     physical_topology: Vec<Display>,
@@ -72,16 +72,11 @@ impl MappingRequest {
             }
             None => VirtualMode::default(),
         };
-        FrameLayout::new(mode).map_err(|error| stage("mode", error))?;
         Ok(Self { target, mode })
     }
 }
 
 impl MappingSession {
-    pub fn start(request: MappingRequest) -> Result<Self, MappingError> {
-        Self::start_with_reporter(request, std::sync::Arc::new(|_| {}))
-    }
-
     pub fn start_with_reporter(
         request: MappingRequest,
         reporter: RendererReporter,
@@ -97,7 +92,7 @@ impl MappingSession {
             armed: true,
         };
         let session_gate =
-            FrameTransport::create(request.mode).map_err(|error| stage("session-gate", error))?;
+            SessionGate::create(request.mode).map_err(|error| stage("session-gate", error))?;
         let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
         let (source, target) = wait_for_source(&request.target, request.mode)?;
         let source_id = source.id.clone();

@@ -42,8 +42,6 @@ SamplerState source_sampler : register(s0);
 cbuffer ScaleParameters : register(b0) {
     float2 source_size;
     float2 target_size;
-    uint filter_mode;
-    uint3 padding;
 };
 
 struct VertexOutput {
@@ -141,7 +139,7 @@ float4 pixel_main(VertexOutput input) : SV_TARGET {
     bool area_supported =
         scale.x > 1.0001 && scale.x <= 2.0 &&
         scale.y > 1.0001 && scale.y <= 2.0;
-    if (filter_mode == 0 && area_supported) {
+    if (area_supported) {
         float2 target_pixel = floor(input.position.xy);
         float4 area = exact_area(target_pixel);
         area.rgb = suppress_subpixel_fringe(target_pixel, area.rgb);
@@ -151,16 +149,6 @@ float4 pixel_main(VertexOutput input) : SV_TARGET {
 }
 "#;
 
-/// Scaling choice exposed to the controller-facing renderer.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum FilterMode {
-    /// Exact source-pixel area integration for a 1x..=2x reduction per axis.
-    /// Other scale ratios fall back to bilinear sampling.
-    #[default]
-    ExactArea,
-    Bilinear,
-}
-
 /// Everything the GPU loop needs from the existing window-owning renderer.
 #[derive(Clone, Copy, Debug)]
 pub struct GpuRendererConfig {
@@ -168,8 +156,6 @@ pub struct GpuRendererConfig {
     pub target_width: u32,
     pub target_height: u32,
     pub source_rect: RECT,
-    pub filter_mode: FilterMode,
-    pub vsync: bool,
 }
 
 #[derive(Debug)]
@@ -460,10 +446,7 @@ impl Pipeline {
                 GpuRendererError::Failure("source texture view was not initialized".into())
             })?;
             self.draw(view);
-            let present = unsafe {
-                self.swap_chain
-                    .Present(u32::from(self.config.vsync), DXGI_PRESENT(0))
-            };
+            let present = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
             present.ok().map_err(|_| classify_hresult(present))?;
             on_present().map_err(GpuRendererError::Failure)?;
             unsafe {
@@ -508,11 +491,6 @@ impl Pipeline {
                 self.config.target_width as f32,
                 self.config.target_height as f32,
             ],
-            filter_mode: match self.config.filter_mode {
-                FilterMode::ExactArea => 0,
-                FilterMode::Bilinear => 1,
-            },
-            padding: [0; 3],
         };
         unsafe {
             self.context.UpdateSubresource(
@@ -567,8 +545,6 @@ impl Drop for AcquiredFrame<'_> {
 struct ScaleParameters {
     source_size: [f32; 2],
     target_size: [f32; 2],
-    filter_mode: u32,
-    padding: [u32; 3],
 }
 
 fn compile_shader(entry: &str, target: &str) -> Result<Vec<u8>, GpuRendererError> {
@@ -650,7 +626,7 @@ mod tests {
 
     #[test]
     fn scale_parameters_obey_constant_buffer_alignment() {
-        assert_eq!(size_of::<ScaleParameters>(), 32);
+        assert_eq!(size_of::<ScaleParameters>(), 16);
     }
 
     #[test]
