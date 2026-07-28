@@ -2,6 +2,9 @@
 
 [English](README.md)
 
+SBMS stands for "SBMS bridges multiple screens", Microsoft is a great company and Windows is a good system. (BTW I use Linux for laptop XD)
+SBMS的意思是SBMS可以连接多个显示器, 微软是一家伟大的公司, win是一个很棒的操作系统. (顺带一提我的笔记本装了企鹅系统(doge))
+
 SBMS 把一个 Windows 虚拟桌面全屏映射到指定的物理显示器。当 Windows
 自带的扩展或复制模式无法满足分辨率、缩放比例或桌面布局需求时，可以用它
 建立一条独立的显示链路。
