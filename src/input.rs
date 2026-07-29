@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 use std::mem::{MaybeUninit, size_of};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
@@ -37,8 +39,71 @@ const BUTTON_MIDDLE: u8 = 1 << 2;
 const BUTTON_X1: u8 = 1 << 3;
 const BUTTON_X2: u8 = 1 << 4;
 
+const NO_INPUT_ENDPOINT: usize = 0;
+const INPUT_TAG_MASK: usize = if usize::BITS >= 64 {
+    0xffff_ffff_0000_0000_u64 as usize
+} else {
+    0xffff_ffff_u64 as usize
+};
+const INPUT_TAG_SIGNATURE: usize = if usize::BITS >= 64 {
+    0x5342_4d53_0000_0000_u64 as usize
+} else {
+    0x5342_4d53_u64 as usize
+};
+
+static ACTIVE_INPUT_ENDPOINT: ActiveEndpoint = ActiveEndpoint::new();
+static INPUT_COORDINATION: Mutex<InputCoordination> = Mutex::new(InputCoordination::new());
+
 thread_local! {
     static INPUT_STATE: RefCell<Option<InputMapper>> = const { RefCell::new(None) };
+}
+
+struct ActiveEndpoint {
+    window: AtomicUsize,
+}
+
+impl ActiveEndpoint {
+    const fn new() -> Self {
+        Self {
+            window: AtomicUsize::new(NO_INPUT_ENDPOINT),
+        }
+    }
+
+    fn replace(&self, window: usize) -> usize {
+        self.window.swap(window, Ordering::AcqRel)
+    }
+
+    fn restore(&self, expected: usize, previous: usize) -> bool {
+        self.window
+            .compare_exchange(expected, previous, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn release(&self, window: usize) -> bool {
+        self.restore(window, NO_INPUT_ENDPOINT)
+    }
+
+    fn owns(&self, window: usize) -> bool {
+        window != NO_INPUT_ENDPOINT && self.window.load(Ordering::Acquire) == window
+    }
+}
+
+struct InputCoordination {
+    clip_baseline: Option<ClipBaseline>,
+}
+
+impl InputCoordination {
+    const fn new() -> Self {
+        Self {
+            clip_baseline: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ClipBaseline {
+    rect: RECT,
+    was_full_desktop: bool,
 }
 
 struct InputMapper {
@@ -52,8 +117,6 @@ struct InputMapper {
     pressed: u8,
     tag: usize,
     window: HWND,
-    previous_clip: RECT,
-    previous_clip_was_full_desktop: bool,
     mouse_hook: HHOOK,
     keyboard_hook: HHOOK,
 }
@@ -88,22 +151,11 @@ impl InputGuard {
         if status.0 < 0 {
             return Err(format!("BCryptGenRandom failed: 0x{:08x}", status.0 as u32));
         }
-        let tag = usize::from_le_bytes(nonce) | 1;
-
-        let mut previous_clip = RECT::default();
-        unsafe { GetClipCursor(&mut previous_clip) }
-            .map_err(|error| format!("GetClipCursor failed: {error}"))?;
-        let full_desktop = virtual_desktop_rect();
-        let previous_clip_was_full_desktop = rect_eq(previous_clip, full_desktop);
-
-        register_raw_mouse(window, RIDEV_INPUTSINK)?;
+        let tag = input_tag(usize::from_le_bytes(nonce));
 
         let mouse_hook =
             unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), Some(instance), 0) }
-                .map_err(|error| {
-                    unregister_raw_mouse();
-                    format!("SetWindowsHookExW(mouse) failed: {error}")
-                })?;
+                .map_err(|error| format!("SetWindowsHookExW(mouse) failed: {error}"))?;
         let keyboard_hook = match unsafe {
             SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), Some(instance), 0)
         } {
@@ -112,7 +164,6 @@ impl InputGuard {
                 unsafe {
                     let _ = UnhookWindowsHookEx(mouse_hook);
                 }
-                unregister_raw_mouse();
                 return Err(format!("SetWindowsHookExW(keyboard) failed: {error}"));
             }
         };
@@ -132,8 +183,6 @@ impl InputGuard {
                 pressed: 0,
                 tag,
                 window,
-                previous_clip,
-                previous_clip_was_full_desktop,
                 mouse_hook,
                 keyboard_hook,
             });
@@ -190,7 +239,7 @@ pub fn handle_message(message: u32, lparam: LPARAM) -> Option<LRESULT> {
 }
 
 fn capture_at(x: i32, y: i32) -> Result<(), String> {
-    let (source, point, tag) = INPUT_STATE.with(|cell| {
+    let (source, point, tag, window) = INPUT_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state
             .as_mut()
@@ -199,14 +248,17 @@ fn capture_at(x: i32, y: i32) -> Result<(), String> {
         let height = (state.target.bottom - state.target.top).max(1);
         state.cursor.x = x.clamp(0, width - 1);
         state.cursor.y = y.clamp(0, height - 1);
-        Ok::<_, String>((state.source, source_point(state), state.tag))
+        Ok::<_, String>((state.source, source_point(state), state.tag, state.window))
     })?;
 
-    unsafe { ClipCursor(Some(&source)) }.map_err(|error| format!("ClipCursor failed: {error}"))?;
+    let previous = activate_endpoint(window, source)?;
+    if previous != NO_INPUT_ENDPOINT && previous != window_key(window) {
+        post_release(window_from_key(previous), RELEASE_NORMAL);
+    }
     if !send_mouse(point, MOUSEEVENTF_MOVE, 0, tag)
         || !send_mouse(point, MOUSEEVENTF_LEFTDOWN, 0, tag)
     {
-        restore_clip();
+        deactivate_endpoint(window);
         return Err(format!(
             "SendInput failed: {} (the source may run at a higher integrity level)",
             windows::core::Error::from_thread()
@@ -246,7 +298,7 @@ fn handle_raw_input(handle: HRAWINPUT) -> Result<(), String> {
         let Some(state) = state.as_mut() else {
             return;
         };
-        if !state.captured {
+        if !state.captured || !ACTIVE_INPUT_ENDPOINT.owns(window_key(state.window)) {
             return;
         }
         if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE.0 != 0 {
@@ -277,17 +329,22 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
     flush_movement();
     let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
     let snapshot = INPUT_STATE.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .map(|state| (state.captured, state.tag, state.window, source_point(state)))
+        cell.borrow().as_ref().map(|state| {
+            (
+                state.captured && ACTIVE_INPUT_ENDPOINT.owns(window_key(state.window)),
+                state.tag,
+                state.window,
+                source_point(state),
+            )
+        })
     });
     let Some((captured, tag, window, point)) = snapshot else {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     };
-    if event.dwExtraInfo == tag {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    }
     if event.flags & LLMHF_INJECTED != 0 {
+        if is_managed_input_tag(event.dwExtraInfo) {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        }
         if captured {
             post_release(window, RELEASE_EXTERNAL_INJECTION);
         }
@@ -354,14 +411,15 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     let action = INPUT_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
+        let active = ACTIVE_INPUT_ENDPOINT.owns(window_key(state.window));
         if state.swallow_f8_up
             && event.vkCode == VK_F8.0 as u32
             && matches!(message, WM_KEYUP | WM_SYSKEYUP)
         {
             state.swallow_f8_up = false;
-            return Some((true, false, state.window));
+            return active.then_some((true, false, state.window));
         }
-        if !state.captured || !matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+        if !active || !state.captured || !matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
             return None;
         }
         if event.vkCode == VK_F8.0 as u32 {
@@ -419,7 +477,10 @@ pub(crate) fn flush_movement() {
     let pending = INPUT_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
-        if !state.captured || !state.move_pending {
+        if !state.captured
+            || !state.move_pending
+            || !ACTIVE_INPUT_ENDPOINT.owns(window_key(state.window))
+        {
             return None;
         }
         state.move_pending = false;
@@ -451,13 +512,16 @@ fn release_capture() {
             },
             state.tag,
             pressed,
+            state.window,
         ))
     });
-    if let Some((source, target, tag, pressed)) = release {
+    if let Some((source, target, tag, pressed, window)) = release {
+        let owned_endpoint = deactivate_endpoint(window);
         release_pressed_buttons(source, tag, pressed);
-        restore_clip();
-        unsafe {
-            let _ = SetCursorPos(target.x, target.y);
+        if owned_endpoint {
+            unsafe {
+                let _ = SetCursorPos(target.x, target.y);
+            }
         }
     }
 }
@@ -476,23 +540,6 @@ fn release_pressed_buttons(point: POINT, tag: usize, pressed: u8) {
     }
 }
 
-fn restore_clip() {
-    let clip = INPUT_STATE.with(|cell| {
-        let state = cell.borrow();
-        let state = state.as_ref()?;
-        Some((state.previous_clip, state.previous_clip_was_full_desktop))
-    });
-    if let Some((rect, was_full_desktop)) = clip {
-        unsafe {
-            if was_full_desktop {
-                let _ = ClipCursor(None);
-            } else {
-                let _ = ClipCursor(Some(&rect));
-            }
-        }
-    }
-}
-
 fn cleanup() {
     release_capture();
     let hooks = INPUT_STATE.with(|cell| {
@@ -506,7 +553,114 @@ fn cleanup() {
             let _ = UnhookWindowsHookEx(keyboard);
         }
     }
-    unregister_raw_mouse();
+}
+
+fn activate_endpoint(window: HWND, source: RECT) -> Result<usize, String> {
+    let window = window_key(window);
+    let mut coordination = lock_coordination();
+    let current = ACTIVE_INPUT_ENDPOINT.window.load(Ordering::Acquire);
+    if current == window {
+        unsafe { ClipCursor(Some(&source)) }
+            .map_err(|error| format!("ClipCursor failed: {error}"))?;
+        return Ok(current);
+    }
+
+    let added_baseline = current == NO_INPUT_ENDPOINT;
+    if added_baseline {
+        coordination.clip_baseline = Some(read_clip_baseline()?);
+    }
+
+    let previous = ACTIVE_INPUT_ENDPOINT.replace(window);
+    debug_assert_eq!(previous, current);
+    if let Err(error) = register_raw_mouse(window_from_key(window), RIDEV_INPUTSINK) {
+        let _ = ACTIVE_INPUT_ENDPOINT.restore(window, previous);
+        if added_baseline {
+            coordination.clip_baseline = None;
+        }
+        return Err(error);
+    }
+    if let Err(error) = unsafe { ClipCursor(Some(&source)) } {
+        let rollback_error =
+            rollback_activation(&mut coordination, window, previous, added_baseline);
+        return Err(match rollback_error {
+            Some(rollback) => format!("ClipCursor failed: {error}; {rollback}"),
+            None => format!("ClipCursor failed: {error}"),
+        });
+    }
+    Ok(previous)
+}
+
+fn rollback_activation(
+    coordination: &mut InputCoordination,
+    window: usize,
+    previous: usize,
+    added_baseline: bool,
+) -> Option<String> {
+    let registration = if previous == NO_INPUT_ENDPOINT {
+        unregister_raw_mouse()
+    } else {
+        register_raw_mouse(window_from_key(previous), RIDEV_INPUTSINK)
+    };
+    if registration.is_ok() {
+        let _ = ACTIVE_INPUT_ENDPOINT.restore(window, previous);
+        if added_baseline {
+            coordination.clip_baseline = None;
+        }
+        return None;
+    }
+
+    let _ = unregister_raw_mouse();
+    let _ = ACTIVE_INPUT_ENDPOINT.restore(window, NO_INPUT_ENDPOINT);
+    restore_clip_baseline(coordination.clip_baseline.take());
+    Some(format!(
+        "raw input endpoint rollback failed: {}",
+        registration.unwrap_err()
+    ))
+}
+
+fn deactivate_endpoint(window: HWND) -> bool {
+    let window = window_key(window);
+    let mut coordination = lock_coordination();
+    if !ACTIVE_INPUT_ENDPOINT.release(window) {
+        return false;
+    }
+    if let Err(error) = unregister_raw_mouse() {
+        eprintln!("warning: raw mouse cleanup failed: {error}");
+    }
+    restore_clip_baseline(coordination.clip_baseline.take());
+    true
+}
+
+fn read_clip_baseline() -> Result<ClipBaseline, String> {
+    let mut rect = RECT::default();
+    unsafe { GetClipCursor(&mut rect) }
+        .map_err(|error| format!("GetClipCursor failed: {error}"))?;
+    Ok(ClipBaseline {
+        rect,
+        was_full_desktop: rect_eq(rect, virtual_desktop_rect()),
+    })
+}
+
+fn restore_clip_baseline(baseline: Option<ClipBaseline>) {
+    let Some(baseline) = baseline else {
+        return;
+    };
+    let result = unsafe {
+        if baseline.was_full_desktop {
+            ClipCursor(None)
+        } else {
+            ClipCursor(Some(&baseline.rect))
+        }
+    };
+    if let Err(error) = result {
+        eprintln!("warning: ClipCursor restore failed: {error}");
+    }
+}
+
+fn lock_coordination() -> std::sync::MutexGuard<'static, InputCoordination> {
+    INPUT_COORDINATION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn register_raw_mouse(
@@ -523,8 +677,8 @@ fn register_raw_mouse(
         .map_err(|error| format!("RegisterRawInputDevices(mouse) failed: {error}"))
 }
 
-fn unregister_raw_mouse() {
-    let _ = register_raw_mouse(HWND::default(), RIDEV_REMOVE);
+fn unregister_raw_mouse() -> Result<(), String> {
+    register_raw_mouse(HWND::default(), RIDEV_REMOVE)
 }
 
 fn post_release(window: HWND, reason: isize) {
@@ -545,6 +699,22 @@ fn source_point(state: &InputMapper) -> POINT {
         x: point.x,
         y: point.y,
     }
+}
+
+fn input_tag(nonce: usize) -> usize {
+    (nonce & !INPUT_TAG_MASK) | INPUT_TAG_SIGNATURE
+}
+
+fn is_managed_input_tag(tag: usize) -> bool {
+    tag & INPUT_TAG_MASK == INPUT_TAG_SIGNATURE
+}
+
+fn window_key(window: HWND) -> usize {
+    window.0 as usize
+}
+
+fn window_from_key(window: usize) -> HWND {
+    HWND(window as *mut _)
 }
 
 fn virtual_desktop_rect() -> RECT {
@@ -590,4 +760,32 @@ fn low_word_signed(value: isize) -> i32 {
 
 fn high_word_signed(value: isize) -> i32 {
     (value as usize >> 16) as u16 as i16 as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ActiveEndpoint, INPUT_TAG_SIGNATURE, NO_INPUT_ENDPOINT, input_tag, is_managed_input_tag,
+    };
+
+    #[test]
+    fn stale_endpoint_cannot_release_new_owner() {
+        let endpoints = ActiveEndpoint::new();
+        assert_eq!(endpoints.replace(11), NO_INPUT_ENDPOINT);
+        assert_eq!(endpoints.replace(22), 11);
+        assert!(!endpoints.release(11));
+        assert!(endpoints.owns(22));
+        assert!(endpoints.release(22));
+        assert!(!endpoints.owns(22));
+    }
+
+    #[test]
+    fn all_sbms_injection_tags_are_recognized() {
+        let first = input_tag(1);
+        let second = input_tag(usize::MAX);
+        assert!(is_managed_input_tag(first));
+        assert!(is_managed_input_tag(second));
+        assert!(is_managed_input_tag(INPUT_TAG_SIGNATURE));
+        assert!(!is_managed_input_tag(0));
+    }
 }

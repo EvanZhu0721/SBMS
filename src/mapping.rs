@@ -1,12 +1,16 @@
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display as FmtDisplay, Formatter};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::ConfigStore;
 use crate::display::{Display, active_displays, apply_display_mode, restore_display_topology};
-use crate::renderer::{Renderer, RendererReporter};
-use crate::session_gate::{SessionGate, VirtualMode};
+use crate::renderer::{Renderer, RendererEvent, RendererReporter};
+use crate::session_gate::{MAX_VIRTUAL_DISPLAYS, SessionGate, VirtualDisplayConfig, VirtualMode};
 use crate::virtual_display::VirtualDisplay;
 use crate::window_migration::WindowMigration;
 
@@ -14,34 +18,165 @@ const TOPOLOGY_TIMEOUT: Duration = Duration::from_secs(15);
 const TOPOLOGY_SETTLE: Duration = Duration::from_millis(750);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+pub const MAX_MAPPING_GROUPS: usize = MAX_VIRTUAL_DISPLAYS;
+
 pub struct MappingRequest {
     pub target: String,
     pub mode: VirtualMode,
 }
 
-pub struct MappingSession {
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MappingPlan {
+    pub groups: Vec<MappingGroupRequest>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct MappingGroupRequest {
+    /// Stable zero-based output slot. The value is also the IDD connector index.
+    pub id: u32,
+    pub mode: VirtualMode,
+    pub route: MappingRoute,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum MappingRoute {
+    Mirror { target: String },
+    StreamOnly,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MappingGroupInfo {
+    pub id: u32,
+    pub mode: VirtualMode,
+    pub route: MappingRoute,
+    pub source_id: String,
+    pub source_device_name: String,
+    pub sunshine_id: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub enum MappingEvent {
+    GroupReady(MappingGroupInfo),
+    Renderer { id: u32, event: RendererEvent },
+}
+
+pub type MappingReporter = Arc<dyn Fn(MappingEvent) + Send + Sync + 'static>;
+
+struct ActiveGroup {
+    info: MappingGroupInfo,
+    target_id: Option<String>,
     renderer: Option<Renderer>,
     migration: Option<WindowMigration>,
+}
+
+pub struct MappingSession {
+    groups: Vec<ActiveGroup>,
     display: Option<VirtualDisplay>,
     session_gate: Option<SessionGate>,
-    source_id: String,
-    target_id: String,
+    connector_indices: Vec<u32>,
     physical_topology: Vec<Display>,
 }
 
 #[derive(Debug)]
 pub struct MappingError {
     stage: &'static str,
+    group_id: Option<u32>,
     message: String,
 }
 
 impl FmtDisplay for MappingError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.stage, self.message)
+        match self.group_id {
+            Some(id) => write!(formatter, "group {id} {}: {}", self.stage, self.message),
+            None => write!(formatter, "{}: {}", self.stage, self.message),
+        }
     }
 }
 
 impl Error for MappingError {}
+
+impl MappingError {
+    pub fn stage(&self) -> &'static str {
+        self.stage
+    }
+
+    pub fn group_id(&self) -> Option<u32> {
+        self.group_id
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl MappingPlan {
+    pub fn new(groups: Vec<MappingGroupRequest>) -> Result<Self, MappingError> {
+        let plan = Self { groups };
+        plan.validate()?;
+        Ok(plan)
+    }
+
+    pub fn validate(&self) -> Result<(), MappingError> {
+        if self.groups.is_empty() {
+            return Err(MappingError {
+                stage: "plan",
+                group_id: None,
+                message: "at least one mapping group is required".into(),
+            });
+        }
+        if self.groups.len() > MAX_MAPPING_GROUPS {
+            return Err(MappingError {
+                stage: "plan",
+                group_id: None,
+                message: format!("at most {MAX_MAPPING_GROUPS} mapping groups are supported"),
+            });
+        }
+
+        let mut ids = HashSet::with_capacity(self.groups.len());
+        let mut targets = HashSet::with_capacity(self.groups.len());
+        for group in &self.groups {
+            if group.id >= MAX_MAPPING_GROUPS as u32 {
+                return Err(group_stage(
+                    group.id,
+                    "plan",
+                    format!(
+                        "group id must be a connector index between 0 and {}",
+                        MAX_MAPPING_GROUPS - 1
+                    ),
+                ));
+            }
+            if !ids.insert(group.id) {
+                return Err(group_stage(
+                    group.id,
+                    "plan",
+                    "mapping group id is duplicated",
+                ));
+            }
+            group
+                .mode
+                .validate()
+                .map_err(|error| group_stage(group.id, "mode", error))?;
+            if let MappingRoute::Mirror { target } = &group.route {
+                if target.trim().is_empty() {
+                    return Err(group_stage(
+                        group.id,
+                        "plan",
+                        "mirror target id must not be empty",
+                    ));
+                }
+                if !targets.insert(target.to_ascii_lowercase()) {
+                    return Err(group_stage(
+                        group.id,
+                        "plan",
+                        "a physical target may only belong to one mapping group",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
 
 impl MappingRequest {
     pub fn configured(target: String) -> Result<Self, MappingError> {
@@ -51,6 +186,7 @@ impl MappingRequest {
         if let Some(warning) = outcome.warning {
             return Err(MappingError {
                 stage: "config",
+                group_id: None,
                 message: format!("{warning}; reset or repair the configuration before mapping"),
             });
         }
@@ -81,135 +217,254 @@ impl MappingSession {
         request: MappingRequest,
         reporter: RendererReporter,
     ) -> Result<Self, MappingError> {
-        let displays = active_displays().map_err(|error| stage("target", error))?;
-        unique_target(&displays, &request.target)?;
-        let mut topology_guard = PhysicalTopologyGuard {
-            expected: displays
-                .iter()
-                .filter(|display| !display.virtual_display)
-                .cloned()
-                .collect(),
-            armed: true,
-        };
-        let session_gate =
-            SessionGate::create(request.mode).map_err(|error| stage("session-gate", error))?;
-        let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
-        let (source, target) = wait_for_source(&request.target, request.mode)?;
-        let source_id = source.id.clone();
-        let target_id = target.id.clone();
-        let migration =
-            WindowMigration::start(&target, &source).map_err(|error| stage("windows", error))?;
-        let renderer = Renderer::start_with_reporter(target, source, reporter)
-            .map_err(|error| stage("first-frame", error))?;
-        topology_guard.armed = false;
-        let physical_topology = std::mem::take(&mut topology_guard.expected);
+        let mapping_reporter: MappingReporter = Arc::new(move |event| {
+            if let MappingEvent::Renderer { id: 0, event } = event {
+                reporter(event);
+            }
+        });
+        let plan = MappingPlan::new(vec![MappingGroupRequest {
+            id: 0,
+            mode: request.mode,
+            route: MappingRoute::Mirror {
+                target: request.target,
+            },
+        }])?;
+        Self::start_plan_with_reporter(plan, mapping_reporter)
+    }
 
-        Ok(Self {
-            renderer: Some(renderer),
-            migration: Some(migration),
+    pub fn start_plan(plan: MappingPlan) -> Result<Self, MappingError> {
+        Self::start_plan_with_reporter(plan, Arc::new(|_| {}))
+    }
+
+    pub fn start_plan_with_reporter(
+        plan: MappingPlan,
+        reporter: MappingReporter,
+    ) -> Result<Self, MappingError> {
+        plan.validate()?;
+        let displays = active_displays().map_err(|error| stage("target", error))?;
+        for group in &plan.groups {
+            if let MappingRoute::Mirror { target } = &group.route {
+                unique_target(&displays, target).map_err(|error| error.with_group(group.id))?;
+            }
+        }
+
+        let physical_topology = displays
+            .iter()
+            .filter(|display| !display.virtual_display)
+            .cloned()
+            .collect();
+        let connector_indices = plan.groups.iter().map(|group| group.id).collect();
+        let gate_configs: Vec<_> = plan
+            .groups
+            .iter()
+            .map(|group| VirtualDisplayConfig {
+                connector_index: group.id,
+                mode: group.mode,
+            })
+            .collect();
+        let session_gate = SessionGate::create_many(&gate_configs)
+            .map_err(|error| stage("session-gate", error))?;
+        let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
+
+        let mut session = Self {
+            groups: Vec::with_capacity(plan.groups.len()),
             display: Some(display),
             session_gate: Some(session_gate),
-            source_id,
-            target_id,
+            connector_indices,
             physical_topology,
-        })
+        };
+
+        let sources = match wait_for_sources(&plan) {
+            Ok(sources) => sources,
+            Err(error) => return Err(rollback_start(session, error)),
+        };
+        for (request, source) in plan.groups.iter().zip(&sources) {
+            let target_id = match &request.route {
+                MappingRoute::Mirror { target } => Some(target.clone()),
+                MappingRoute::StreamOnly => None,
+            };
+            session.groups.push(ActiveGroup {
+                info: MappingGroupInfo {
+                    id: request.id,
+                    mode: request.mode,
+                    route: request.route.clone(),
+                    source_id: source.id.clone(),
+                    source_device_name: source.device_name.clone(),
+                    sunshine_id: source.sunshine_id.clone(),
+                },
+                target_id,
+                renderer: None,
+                migration: None,
+            });
+        }
+
+        let stable_displays = match active_displays() {
+            Ok(displays) => displays,
+            Err(error) => return Err(rollback_start(session, stage("topology", error))),
+        };
+        for (index, request) in plan.groups.iter().enumerate() {
+            let MappingRoute::Mirror { target } = &request.route else {
+                continue;
+            };
+            let physical = match unique_target(&stable_displays, target) {
+                Ok(target) => target,
+                Err(error) => {
+                    return Err(rollback_start(session, error.with_group(request.id)));
+                }
+            };
+            let migration = match WindowMigration::start(&physical, &sources[index]) {
+                Ok(migration) => migration,
+                Err(error) => {
+                    return Err(rollback_start(
+                        session,
+                        group_stage(request.id, "windows", error),
+                    ));
+                }
+            };
+            session.groups[index].migration = Some(migration);
+        }
+
+        for (index, request) in plan.groups.iter().enumerate() {
+            let MappingRoute::Mirror { target } = &request.route else {
+                continue;
+            };
+            let physical = match unique_target(&stable_displays, target) {
+                Ok(target) => target,
+                Err(error) => {
+                    return Err(rollback_start(session, error.with_group(request.id)));
+                }
+            };
+            let group_reporter = Arc::clone(&reporter);
+            let id = request.id;
+            let renderer_reporter: RendererReporter = Arc::new(move |event| {
+                group_reporter(MappingEvent::Renderer { id, event });
+            });
+            let renderer = match Renderer::start_with_reporter(
+                physical,
+                sources[index].clone(),
+                renderer_reporter,
+            ) {
+                Ok(renderer) => renderer,
+                Err(error) => {
+                    return Err(rollback_start(
+                        session,
+                        group_stage(request.id, "first-frame", error),
+                    ));
+                }
+            };
+            session.groups[index].renderer = Some(renderer);
+        }
+
+        for group in &session.groups {
+            reporter(MappingEvent::GroupReady(group.info.clone()));
+        }
+        Ok(session)
     }
 
     pub fn stop(&mut self) -> Result<(), MappingError> {
-        if self.renderer.is_none()
-            && self.migration.is_none()
+        if self
+            .groups
+            .iter()
+            .all(|group| group.renderer.is_none() && group.migration.is_none())
             && self.display.is_none()
             && self.session_gate.is_none()
         {
             return Ok(());
         }
-        let renderer_error = self
-            .renderer
-            .take()
-            .and_then(|mut renderer| renderer.stop().err());
-        let mut migration = self.migration.take();
-        let migration_error = migration
-            .as_mut()
-            .and_then(|migration| migration.restore().err());
-        self.display.take();
 
-        let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
-        let mut remove_error = None;
-        loop {
-            let displays = match active_displays() {
-                Ok(displays) => displays,
-                Err(error) => {
-                    remove_error = Some(stage("remove", error));
-                    break;
-                }
-            };
-            if !displays
-                .iter()
-                .any(|display| display.id.eq_ignore_ascii_case(&self.source_id))
+        let mut errors = Vec::new();
+        for group in self.groups.iter_mut().rev() {
+            if let Some(mut renderer) = group.renderer.take()
+                && let Err(error) = renderer.stop()
             {
-                break;
+                errors.push(format!("group {} renderer-stop: {error}", group.info.id));
             }
-            if Instant::now() >= deadline {
-                remove_error = Some(MappingError {
-                    stage: "remove",
-                    message: "virtual source stayed active after its device handle closed".into(),
-                });
-                break;
+        }
+        for group in self.groups.iter_mut().rev() {
+            if let Some(migration) = group.migration.as_mut() {
+                migration.prepare_restore();
             }
-            thread::sleep(POLL_INTERVAL);
+        }
+        for group in self.groups.iter_mut().rev() {
+            if let Some(migration) = group.migration.as_mut()
+                && let Err(error) = migration.restore()
+            {
+                errors.push(format!("group {} windows-restore: {error}", group.info.id));
+            }
+        }
+
+        self.display.take();
+        if let Err(error) = wait_for_sources_removed(&self.connector_indices) {
+            errors.push(format!("remove: {error}"));
         }
 
         thread::sleep(TOPOLOGY_SETTLE);
-        let topology_error = restore_display_topology(&self.physical_topology)
-            .map_err(|error| stage("topology-restore", error))
-            .err();
-        if topology_error.is_none() {
+        let topology_restored = match restore_display_topology(&self.physical_topology) {
+            Ok(()) => true,
+            Err(error) => {
+                errors.push(format!("topology-restore: {error}"));
+                false
+            }
+        };
+        if topology_restored {
             thread::sleep(TOPOLOGY_SETTLE);
         }
-        let final_target = active_displays()
-            .ok()
-            .and_then(|displays| unique_target(&displays, &self.target_id).ok());
-        let reconciliation_error = migration.as_mut().and_then(|migration| {
-            migration
-                .reconcile_after_topology_change(final_target.as_ref())
-                .err()
-        });
-        if let Some(error) = reconciliation_error.or(migration_error) {
-            self.session_gate.take();
-            return Err(stage("windows-restore", error));
+
+        let final_displays = active_displays();
+        if let Err(error) = &final_displays {
+            errors.push(format!("windows-reconcile topology read: {error}"));
         }
-        if let Some(error) = renderer_error {
-            self.session_gate.take();
-            return Err(stage("renderer-stop", error));
+        for group in self.groups.iter_mut().rev() {
+            let Some(migration) = group.migration.as_mut() else {
+                continue;
+            };
+            let target = group.target_id.as_ref().and_then(|target_id| {
+                final_displays
+                    .as_ref()
+                    .ok()
+                    .and_then(|displays| unique_target(displays, target_id).ok())
+            });
+            if let Err(error) = migration.reconcile_after_topology_change(target.as_ref()) {
+                errors.push(format!(
+                    "group {} windows-reconcile: {error}",
+                    group.info.id
+                ));
+            }
         }
-        if let Some(error) = topology_error {
-            self.session_gate.take();
-            return Err(error);
-        }
-        if let Some(error) = remove_error {
-            self.session_gate.take();
-            return Err(error);
+        for group in &mut self.groups {
+            group.migration.take();
         }
         self.session_gate.take();
-        Ok(())
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(MappingError {
+                stage: "stop",
+                group_id: None,
+                message: errors.join("; "),
+            })
+        }
     }
 
     pub fn source_id(&self) -> &str {
-        &self.source_id
+        &self
+            .groups
+            .first()
+            .expect("a running mapping session has at least one group")
+            .info
+            .source_id
+    }
+
+    pub fn groups(&self) -> impl ExactSizeIterator<Item = &MappingGroupInfo> {
+        self.groups.iter().map(|group| &group.info)
     }
 }
 
-struct PhysicalTopologyGuard {
-    expected: Vec<Display>,
-    armed: bool,
-}
-
-impl Drop for PhysicalTopologyGuard {
-    fn drop(&mut self) {
-        if self.armed {
-            thread::sleep(TOPOLOGY_SETTLE);
-            let _ = restore_display_topology(&self.expected);
-        }
+impl MappingError {
+    fn with_group(mut self, group_id: u32) -> Self {
+        self.group_id = Some(group_id);
+        self
     }
 }
 
@@ -217,6 +472,15 @@ impl Drop for MappingSession {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+fn rollback_start(mut session: MappingSession, mut cause: MappingError) -> MappingError {
+    if let Err(error) = session.stop() {
+        cause
+            .message
+            .push_str(&format!("; rollback was incomplete: {error}"));
+    }
+    cause
 }
 
 fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, MappingError> {
@@ -229,12 +493,14 @@ fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, Mappi
         [] => {
             return Err(MappingError {
                 stage: "target",
+                group_id: None,
                 message: format!("active display id not found: {target_id}"),
             });
         }
         _ => {
             return Err(MappingError {
                 stage: "target",
+                group_id: None,
                 message: format!("display id is ambiguous: {target_id}"),
             });
         }
@@ -242,6 +508,7 @@ fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, Mappi
     if target.virtual_display {
         return Err(MappingError {
             stage: "target",
+            group_id: None,
             message: "the physical output cannot be the SBMS virtual display".into(),
         });
     }
@@ -257,18 +524,17 @@ fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, Mappi
     {
         return Err(MappingError {
             stage: "target",
+            group_id: None,
             message: "cloned outputs sharing one GDI display name are not supported".into(),
         });
     }
     Ok(target)
 }
 
-fn wait_for_source(
-    target_id: &str,
-    requested_mode: VirtualMode,
-) -> Result<(Display, Display), MappingError> {
+fn wait_for_sources(plan: &MappingPlan) -> Result<Vec<Display>, MappingError> {
+    let requested_ids: HashSet<_> = plan.groups.iter().map(|group| group.id).collect();
     let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
-    let mut mode_applied = false;
+    let mut mode_applied = HashSet::new();
     loop {
         let displays = active_displays().map_err(|error| stage("topology", error))?;
         let sources: Vec<_> = displays
@@ -276,42 +542,117 @@ fn wait_for_source(
             .filter(|display| display.virtual_display)
             .cloned()
             .collect();
-        if sources.len() == 1 {
-            let target = unique_target(&displays, target_id)?;
-            let source = &sources[0];
-            let width = source.rect.right - source.rect.left;
-            let height = source.rect.bottom - source.rect.top;
-            if width == requested_mode.width as i32 && height == requested_mode.height as i32 {
-                return Ok((source.clone(), target));
-            }
-            if !mode_applied {
-                apply_display_mode(source, requested_mode).map_err(|error| stage("mode", error))?;
-                mode_applied = true;
-            }
-            if Instant::now() >= deadline {
-                return Err(MappingError {
-                    stage: "topology",
-                    message: format!(
-                        "virtual source became {}x{} but {}x{} was requested",
-                        width, height, requested_mode.width, requested_mode.height
-                    ),
-                });
-            }
-        }
-        if sources.len() > 1 {
+        if let Some(source) = sources
+            .iter()
+            .find(|source| !requested_ids.contains(&source.connector_index))
+        {
             return Err(MappingError {
                 stage: "topology",
-                message: "more than one active SBMS virtual display exists".into(),
+                group_id: None,
+                message: format!(
+                    "unexpected SBMS virtual connector {} is active",
+                    source.connector_index
+                ),
             });
         }
+        let mut seen = HashSet::new();
+        for source in &sources {
+            if !seen.insert(source.connector_index) {
+                return Err(group_stage(
+                    source.connector_index,
+                    "topology",
+                    "more than one virtual source reported the same connector",
+                ));
+            }
+        }
+        if sources.len() == plan.groups.len() {
+            let mut device_names = HashSet::with_capacity(sources.len());
+            for source in &sources {
+                if !device_names.insert(source.device_name.to_ascii_lowercase()) {
+                    return Err(group_stage(
+                        source.connector_index,
+                        "topology",
+                        "virtual connectors were cloned onto one GDI source",
+                    ));
+                }
+            }
+        }
+
+        let mut ordered = Vec::with_capacity(plan.groups.len());
+        let mut all_ready = true;
+        for group in &plan.groups {
+            let Some(source) = sources
+                .iter()
+                .find(|source| source.connector_index == group.id)
+            else {
+                all_ready = false;
+                continue;
+            };
+            if source_matches_mode(source, group.mode) {
+                ordered.push(source.clone());
+                continue;
+            }
+            all_ready = false;
+            if mode_applied.insert(group.id) {
+                apply_display_mode(source, group.mode)
+                    .map_err(|error| group_stage(group.id, "mode", error))?;
+            }
+        }
+        if all_ready && ordered.len() == plan.groups.len() {
+            return Ok(ordered);
+        }
         if Instant::now() >= deadline {
+            let pending = plan
+                .groups
+                .iter()
+                .filter(|group| {
+                    !sources.iter().any(|source| {
+                        source.connector_index == group.id
+                            && source_matches_mode(source, group.mode)
+                    })
+                })
+                .map(|group| group.id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             return Err(MappingError {
                 stage: "topology",
-                message: "SBMS virtual display did not become active within 15 seconds".into(),
+                group_id: None,
+                message: format!(
+                    "virtual connectors [{pending}] did not become active at their requested modes within 15 seconds"
+                ),
             });
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn wait_for_sources_removed(connector_indices: &[u32]) -> Result<(), MappingError> {
+    let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
+    loop {
+        let displays = active_displays().map_err(|error| stage("remove", error))?;
+        if !displays.iter().any(|display| {
+            display.virtual_display && connector_indices.contains(&display.connector_index)
+        }) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(MappingError {
+                stage: "remove",
+                group_id: None,
+                message: "virtual sources stayed active after the device handle closed".into(),
+            });
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn source_matches_mode(source: &Display, requested: VirtualMode) -> bool {
+    let width = source.rect.right - source.rect.left;
+    let height = source.rect.bottom - source.rect.top;
+    width == requested.width as i32
+        && height == requested.height as i32
+        && u64::from(source.refresh_numerator) * u64::from(requested.refresh_denominator)
+            == u64::from(requested.refresh_numerator) * u64::from(source.refresh_denominator)
 }
 
 fn target_refresh_millihz(target_id: &str) -> Result<u32, MappingError> {
@@ -320,6 +661,7 @@ fn target_refresh_millihz(target_id: &str) -> Result<u32, MappingError> {
     if target.refresh_numerator == 0 || target.refresh_denominator == 0 {
         return Err(MappingError {
             stage: "mode",
+            group_id: None,
             message: "target display reported an invalid refresh rate".into(),
         });
     }
@@ -330,6 +672,7 @@ fn target_refresh_millihz(target_id: &str) -> Result<u32, MappingError> {
         .filter(|value| *value > 0)
         .ok_or_else(|| MappingError {
             stage: "mode",
+            group_id: None,
             message: "target refresh rate is outside the supported range".into(),
         })?;
     Ok(millihz)
@@ -338,6 +681,97 @@ fn target_refresh_millihz(target_id: &str) -> Result<u32, MappingError> {
 fn stage(stage: &'static str, error: impl FmtDisplay) -> MappingError {
     MappingError {
         stage,
+        group_id: None,
         message: error.to_string(),
+    }
+}
+
+fn group_stage(group_id: u32, stage: &'static str, error: impl FmtDisplay) -> MappingError {
+    MappingError {
+        stage,
+        group_id: Some(group_id),
+        message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn group(id: u32, route: MappingRoute) -> MappingGroupRequest {
+        MappingGroupRequest {
+            id,
+            mode: VirtualMode::default(),
+            route,
+        }
+    }
+
+    #[test]
+    fn mixed_plan_preserves_stable_connector_ids() {
+        let plan = MappingPlan::new(vec![
+            group(
+                3,
+                MappingRoute::Mirror {
+                    target: "physical-a".into(),
+                },
+            ),
+            group(1, MappingRoute::StreamOnly),
+        ])
+        .unwrap();
+
+        assert_eq!(plan.groups[0].id, 3);
+        assert_eq!(plan.groups[1].id, 1);
+    }
+
+    #[test]
+    fn invalid_plans_fail_before_starting_hardware() {
+        assert!(MappingPlan::new(Vec::new()).is_err());
+        assert!(
+            MappingPlan::new(vec![
+                group(0, MappingRoute::StreamOnly),
+                group(0, MappingRoute::StreamOnly),
+            ])
+            .is_err()
+        );
+        assert!(
+            MappingPlan::new(vec![
+                group(
+                    0,
+                    MappingRoute::Mirror {
+                        target: "same".into(),
+                    },
+                ),
+                group(
+                    1,
+                    MappingRoute::Mirror {
+                        target: "SAME".into(),
+                    },
+                ),
+            ])
+            .is_err()
+        );
+        assert!(MappingPlan::new(vec![group(8, MappingRoute::StreamOnly)]).is_err());
+    }
+
+    #[test]
+    fn plan_json_is_an_explicit_core_interface() {
+        let json = r#"{
+            "groups": [
+                {
+                    "id": 0,
+                    "mode": {
+                        "width": 3840,
+                        "height": 2160,
+                        "refresh_numerator": 240,
+                        "refresh_denominator": 1
+                    },
+                    "route": { "kind": "stream_only" }
+                }
+            ]
+        }"#;
+
+        let plan: MappingPlan = serde_json::from_str(json).unwrap();
+        plan.validate().unwrap();
+        assert_eq!(plan.groups[0].route, MappingRoute::StreamOnly);
     }
 }

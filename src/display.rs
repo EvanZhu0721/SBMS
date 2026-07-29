@@ -7,8 +7,8 @@ use std::time::Duration;
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DICS_FLAG_GLOBAL, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DIREG_DEV, HDEVINFO,
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
-    SetupDiDestroyDeviceInfoList, SetupDiGetClassDevsW, SetupDiGetDeviceInterfaceDetailW,
-    SetupDiOpenDevRegKey, SetupDiOpenDeviceInterfaceW,
+    SetupDiDestroyDeviceInfoList, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+    SetupDiGetDeviceInterfaceDetailW, SetupDiOpenDevRegKey, SetupDiOpenDeviceInterfaceW,
 };
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
@@ -26,6 +26,10 @@ use windows::Win32::Graphics::Gdi::{
     DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
     DM_POSITION, ENUM_DISPLAY_SETTINGS_FLAGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
 };
+use windows::Win32::Security::Cryptography::{
+    BCRYPT_ALG_HANDLE, BCRYPT_SHA1_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
+    BCryptOpenAlgorithmProvider,
+};
 use windows::Win32::System::Registry::{
     HKEY, KEY_READ, REG_BINARY, REG_VALUE_TYPE, RegCloseKey, RegQueryValueExW,
 };
@@ -37,6 +41,8 @@ use crate::session_gate::VirtualMode;
 #[derive(Clone, Debug)]
 pub struct Display {
     pub id: String,
+    pub connector_index: u32,
+    pub sunshine_id: Option<String>,
     pub name: String,
     pub device_name: String,
     pub rect: RECT,
@@ -278,9 +284,16 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
                 });
             let name = wide_string(&target.monitorFriendlyDeviceName);
             let id = wide_string(&target.monitorDevicePath);
-            let physical_size = physical_dimensions_mm(&id);
+            let monitor_identity = monitor_identity(&id);
+            let physical_size = monitor_identity
+                .as_ref()
+                .and_then(|identity| edid_dimensions_mm(&identity.edid));
+            let sunshine_id =
+                sunshine_display_id(&sunshine_device_id_payload(&id, monitor_identity.as_ref()));
             displays.push(Display {
                 id,
+                connector_index: target.connectorInstance,
+                sunshine_id,
                 name: name.clone(),
                 device_name: source,
                 rect: RECT {
@@ -348,7 +361,13 @@ impl Drop for RegistryKey {
     }
 }
 
-fn physical_dimensions_mm(monitor_device_path: &str) -> Option<(f64, f64)> {
+#[derive(Debug)]
+struct MonitorIdentity {
+    instance_id: String,
+    edid: Vec<u8>,
+}
+
+fn monitor_identity(monitor_device_path: &str) -> Option<MonitorIdentity> {
     let device_path: Vec<u16> = monitor_device_path
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -418,11 +437,39 @@ fn physical_dimensions_mm(monitor_device_path: &str) -> Option<(f64, f64)> {
     }
     .ok()?;
 
+    let instance_id = device_instance_id(device_info_set.0, &device_info).unwrap_or_default();
+    let edid = monitor_edid(device_info_set.0, &device_info).unwrap_or_default();
+    Some(MonitorIdentity { instance_id, edid })
+}
+
+fn device_instance_id(device_info_set: HDEVINFO, device_info: &SP_DEVINFO_DATA) -> Option<String> {
+    let mut required_size = 0;
+    let _ = unsafe {
+        SetupDiGetDeviceInstanceIdW(device_info_set, device_info, None, Some(&mut required_size))
+    };
+    if required_size == 0 {
+        return None;
+    }
+
+    let mut value = vec![0u16; required_size as usize];
+    unsafe {
+        SetupDiGetDeviceInstanceIdW(
+            device_info_set,
+            device_info,
+            Some(&mut value),
+            Some(&mut required_size),
+        )
+    }
+    .ok()?;
+    Some(wide_string(&value[..required_size as usize]))
+}
+
+fn monitor_edid(device_info_set: HDEVINFO, device_info: &SP_DEVINFO_DATA) -> Option<Vec<u8>> {
     let registry_key = RegistryKey(
         unsafe {
             SetupDiOpenDevRegKey(
-                device_info_set.0,
-                &device_info,
+                device_info_set,
+                device_info,
                 DICS_FLAG_GLOBAL.0,
                 0,
                 DIREG_DEV,
@@ -444,7 +491,7 @@ fn physical_dimensions_mm(monitor_device_path: &str) -> Option<(f64, f64)> {
         )
     } != ERROR_SUCCESS
         || value_type != REG_BINARY
-        || byte_count < 128
+        || byte_count == 0
     {
         return None;
     }
@@ -463,7 +510,111 @@ fn physical_dimensions_mm(monitor_device_path: &str) -> Option<(f64, f64)> {
     {
         return None;
     }
-    edid_dimensions_mm(&edid[..byte_count as usize])
+    edid.truncate(byte_count as usize);
+    Some(edid)
+}
+
+fn sunshine_device_id_payload(
+    monitor_device_path: &str,
+    identity: Option<&MonitorIdentity>,
+) -> Vec<u8> {
+    if let Some(identity) = identity
+        && !identity.instance_id.is_empty()
+        && !identity.edid.is_empty()
+        && let Some((stable_prefix, stable_suffix)) =
+            stable_instance_id_parts(&identity.instance_id)
+    {
+        let mut payload = identity.edid.clone();
+        append_utf16le(&mut payload, stable_prefix);
+        append_utf16le(&mut payload, stable_suffix);
+        return payload;
+    }
+
+    utf16le_bytes(monitor_device_path)
+}
+
+fn stable_instance_id_parts(instance_id: &str) -> Option<(&str, &str)> {
+    let mut separators = instance_id.match_indices('&').map(|(index, _)| index);
+    separators.next()?;
+    let unstable_part = separators.next()?;
+    let semi_stable_part = separators.next()?;
+    Some((
+        &instance_id[..unstable_part],
+        &instance_id[semi_stable_part..],
+    ))
+}
+
+fn utf16le_bytes(value: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(value.encode_utf16().count() * size_of::<u16>());
+    append_utf16le(&mut bytes, value);
+    bytes
+}
+
+fn append_utf16le(target: &mut Vec<u8>, value: &str) {
+    for word in value.encode_utf16() {
+        target.extend_from_slice(&word.to_le_bytes());
+    }
+}
+
+struct AlgorithmProvider(BCRYPT_ALG_HANDLE);
+
+impl Drop for AlgorithmProvider {
+    fn drop(&mut self) {
+        let _ = unsafe { BCryptCloseAlgorithmProvider(self.0, 0) };
+    }
+}
+
+fn sunshine_display_id(payload: &[u8]) -> Option<String> {
+    if payload.is_empty() {
+        return None;
+    }
+
+    let mut namespaced_payload = Vec::with_capacity(16 + payload.len());
+    namespaced_payload.resize(16, 0);
+    namespaced_payload.extend_from_slice(payload);
+
+    let mut handle = BCRYPT_ALG_HANDLE(std::ptr::null_mut());
+    if unsafe {
+        BCryptOpenAlgorithmProvider(
+            &mut handle,
+            BCRYPT_SHA1_ALGORITHM,
+            PCWSTR::null(),
+            Default::default(),
+        )
+    }
+    .is_err()
+    {
+        return None;
+    }
+    let provider = AlgorithmProvider(handle);
+    let mut digest = [0u8; 20];
+    if unsafe { BCryptHash(provider.0, None, &namespaced_payload, &mut digest) }.is_err() {
+        return None;
+    }
+
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&digest[..16]);
+    uuid[6] = (uuid[6] & 0x0f) | 0x50;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+    Some(format!(
+        "{{{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+        uuid[0],
+        uuid[1],
+        uuid[2],
+        uuid[3],
+        uuid[4],
+        uuid[5],
+        uuid[6],
+        uuid[7],
+        uuid[8],
+        uuid[9],
+        uuid[10],
+        uuid[11],
+        uuid[12],
+        uuid[13],
+        uuid[14],
+        uuid[15],
+    ))
 }
 
 fn edid_dimensions_mm(edid: &[u8]) -> Option<(f64, f64)> {
@@ -577,7 +728,10 @@ fn win32_error(operation: &str, code: u32) -> DisplayError {
 
 #[cfg(test)]
 mod tests {
-    use super::edid_dimensions_mm;
+    use super::{
+        MonitorIdentity, edid_dimensions_mm, stable_instance_id_parts, sunshine_device_id_payload,
+        sunshine_display_id, utf16le_bytes,
+    };
 
     const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
 
@@ -614,5 +768,46 @@ mod tests {
     fn edid_rejects_missing_or_unidentified_dimensions() {
         assert_eq!(edid_dimensions_mm(&[0; 128]), None);
         assert_eq!(edid_dimensions_mm(&edid()), None);
+    }
+
+    #[test]
+    fn sunshine_payload_keeps_only_stable_instance_id_parts() {
+        let identity = MonitorIdentity {
+            instance_id: r"DISPLAY\ACR1234\5&10a&0&UID4352".into(),
+            edid: vec![0xaa, 0xbb],
+        };
+        let payload = sunshine_device_id_payload(r"\\?\fallback", Some(&identity));
+
+        let mut expected = vec![0xaa, 0xbb];
+        expected.extend_from_slice(&utf16le_bytes(r"DISPLAY\ACR1234\5&10a"));
+        expected.extend_from_slice(&utf16le_bytes("&UID4352"));
+        assert_eq!(payload, expected);
+        assert_eq!(
+            stable_instance_id_parts(&identity.instance_id),
+            Some((r"DISPLAY\ACR1234\5&10a", "&UID4352"))
+        );
+    }
+
+    #[test]
+    fn sunshine_payload_falls_back_to_monitor_path_without_full_identity() {
+        let identity = MonitorIdentity {
+            instance_id: r"DISPLAY\ACR1234\5&10a".into(),
+            edid: vec![0xaa, 0xbb],
+        };
+
+        assert_eq!(
+            sunshine_device_id_payload(r"\\?\DISPLAY#SBMS", Some(&identity)),
+            utf16le_bytes(r"\\?\DISPLAY#SBMS")
+        );
+    }
+
+    #[test]
+    fn sunshine_uuid_matches_libdisplaydevice_known_vector() {
+        let payload = utf16le_bytes(r"MONITOR\ABC");
+
+        assert_eq!(
+            sunshine_display_id(&payload).as_deref(),
+            Some("{b1f86899-5f83-5fa5-97e1-b11b5f9da8ed}")
+        );
     }
 }

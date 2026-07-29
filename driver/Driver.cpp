@@ -22,24 +22,41 @@ namespace
 {
 constexpr UINT kMaximumDimension = 16384;
 constexpr UINT kMaximumRefreshRate = 1000;
-constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v5";
-constexpr UINT kGateMagic = 0x53424735;
-constexpr UINT kProtocolVersion = 5;
+constexpr UINT kMaximumMonitors = 8;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v6";
+constexpr UINT kGateMagic = 0x53424736;
+constexpr UINT kProtocolVersion = 6;
 
 struct GateHeader
 {
     UINT magic;
     UINT version;
+    UINT count;
+    UINT reserved;
+};
+
+struct GateEntry
+{
+    UINT connectorIndex;
     UINT width;
     UINT height;
     UINT refreshNumerator;
     UINT refreshDenominator;
 };
 
-static_assert(sizeof(GateHeader) == 24);
+struct GateConfig
+{
+    GateHeader header;
+    GateEntry entries[kMaximumMonitors];
+};
+
+static_assert(sizeof(GateHeader) == 16);
+static_assert(sizeof(GateEntry) == 20);
+static_assert(sizeof(GateConfig) == 176);
 
 struct ModeConfig
 {
+    UINT connectorIndex;
     UINT width;
     UINT height;
     UINT refreshNumerator;
@@ -50,6 +67,13 @@ struct ModeConfig
 // virtual monitor as new hardware and loses its saved desktop placement.
 constexpr GUID kMonitorContainerId =
     {0x67453031, 0x7ba9, 0x4d45, {0x8f, 0x0b, 0x72, 0x1d, 0xb4, 0x61, 0x62, 0x42}};
+
+GUID MonitorContainerId(UINT connectorIndex)
+{
+    GUID id = kMonitorContainerId;
+    id.Data1 ^= connectorIndex;
+    return id;
+}
 
 struct Drain
 {
@@ -77,13 +101,15 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DeviceState, GetDeviceState);
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(MonitorState, GetMonitorState);
 
 bool ValidateMode(
+    UINT connectorIndex,
     UINT width,
     UINT height,
     UINT refreshNumerator,
     UINT refreshDenominator,
     ModeConfig& mode)
 {
-    if (width == 0 || height == 0 ||
+    if (connectorIndex >= kMaximumMonitors ||
+        width == 0 || height == 0 ||
         width > kMaximumDimension || height > kMaximumDimension ||
         refreshNumerator == 0 || refreshDenominator == 0)
     {
@@ -98,6 +124,7 @@ bool ValidateMode(
         return false;
     }
 
+    mode.connectorIndex = connectorIndex;
     mode.width = width;
     mode.height = height;
     mode.refreshNumerator = refreshNumerator;
@@ -105,29 +132,53 @@ bool ValidateMode(
     return true;
 }
 
-bool ReadSessionConfig(ModeConfig& mode)
+bool ReadSessionConfig(ModeConfig (&modes)[kMaximumMonitors], UINT& count)
 {
     HANDLE gate = OpenFileMappingW(FILE_MAP_READ, FALSE, kSessionGate);
     if (gate == nullptr)
     {
         return false;
     }
-    const auto* header = static_cast<const GateHeader*>(
-        MapViewOfFile(gate, FILE_MAP_READ, 0, 0, sizeof(GateHeader)));
+    const auto* config = static_cast<const GateConfig*>(
+        MapViewOfFile(gate, FILE_MAP_READ, 0, 0, sizeof(GateConfig)));
     bool valid = false;
-    if (header != nullptr &&
-        header->magic == kGateMagic &&
-        header->version == kProtocolVersion &&
-        ValidateMode(
-            header->width,
-            header->height,
-            header->refreshNumerator,
-            header->refreshDenominator,
-            mode))
+    if (config != nullptr &&
+        config->header.magic == kGateMagic &&
+        config->header.version == kProtocolVersion &&
+        config->header.count > 0 &&
+        config->header.count <= kMaximumMonitors)
     {
         valid = true;
+        UINT connectorMask = 0;
+        for (UINT index = 0; index < config->header.count; ++index)
+        {
+            const GateEntry& entry = config->entries[index];
+            if (entry.connectorIndex >= kMaximumMonitors)
+            {
+                valid = false;
+                break;
+            }
+            const UINT connectorBit = 1u << entry.connectorIndex;
+            if ((connectorMask & connectorBit) != 0 ||
+                !ValidateMode(
+                    entry.connectorIndex,
+                    entry.width,
+                    entry.height,
+                    entry.refreshNumerator,
+                    entry.refreshDenominator,
+                    modes[index]))
+            {
+                valid = false;
+                break;
+            }
+            connectorMask |= connectorBit;
+        }
+        if (valid)
+        {
+            count = config->header.count;
+        }
     }
-    if (header != nullptr) UnmapViewOfFile(header);
+    if (config != nullptr) UnmapViewOfFile(config);
     CloseHandle(gate);
     return valid;
 }
@@ -336,14 +387,8 @@ bool StartDrain(
     return true;
 }
 
-NTSTATUS ReportMonitor(DeviceState* state)
+NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode)
 {
-    ModeConfig mode{};
-    if (!ReadSessionConfig(mode))
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-
     WDF_OBJECT_ATTRIBUTES attributes;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorState);
     attributes.EvtCleanupCallback = MonitorCleanup;
@@ -351,8 +396,8 @@ NTSTATUS ReportMonitor(DeviceState* state)
     IDDCX_MONITOR_INFO info{};
     info.Size = sizeof(info);
     info.MonitorType = DISPLAYCONFIG_OUTPUT_TECHNOLOGY_OTHER;
-    info.ConnectorIndex = 0;
-    info.MonitorContainerId = kMonitorContainerId;
+    info.ConnectorIndex = mode.connectorIndex;
+    info.MonitorContainerId = MonitorContainerId(mode.connectorIndex);
     info.MonitorDescription.Size = sizeof(info.MonitorDescription);
     info.MonitorDescription.Type = IDDCX_MONITOR_DESCRIPTION_TYPE_EDID;
     info.MonitorDescription.DataSize = 0;
@@ -384,6 +429,26 @@ NTSTATUS ReportMonitor(DeviceState* state)
     return STATUS_SUCCESS;
 }
 
+NTSTATUS ReportMonitors(DeviceState* state)
+{
+    ModeConfig modes[kMaximumMonitors]{};
+    UINT count = 0;
+    if (!ReadSessionConfig(modes, count))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    for (UINT index = 0; index < count; ++index)
+    {
+        const NTSTATUS status = ReportMonitor(state, modes[index]);
+        if (!NT_SUCCESS(status))
+        {
+            return status;
+        }
+    }
+    return STATUS_SUCCESS;
+}
+
 void InitAdapter(DeviceState* state)
 {
     if (state->adapter != nullptr)
@@ -398,7 +463,7 @@ void InitAdapter(DeviceState* state)
     IDDCX_ADAPTER_CAPS caps{};
     caps.Size = sizeof(caps);
     caps.Flags = IDDCX_ADAPTER_FLAGS_USE_SMALLEST_MODE;
-    caps.MaxMonitorsSupported = 1;
+    caps.MaxMonitorsSupported = kMaximumMonitors;
     caps.EndPointDiagnostics.Size = sizeof(caps.EndPointDiagnostics);
     caps.EndPointDiagnostics.GammaSupport = IDDCX_FEATURE_IMPLEMENTATION_NONE;
     caps.EndPointDiagnostics.TransmissionType = IDDCX_TRANSMISSION_TYPE_WIRED_OTHER;
@@ -503,7 +568,7 @@ NTSTATUS AdapterInitFinished(
 {
     if (NT_SUCCESS(input->AdapterInitStatus))
     {
-        return ReportMonitor(GetDeviceState(adapter));
+        return ReportMonitors(GetDeviceState(adapter));
     }
     return input->AdapterInitStatus;
 }

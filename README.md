@@ -34,7 +34,7 @@ The tray panel is built with Slint. Installation and upgrades use Inno Setup.
 
 More implementation detail is available in
 [Architecture](docs/architecture.md). Frontend developers can use the
-[Geometry API](docs/geometry.md).
+[Geometry API](docs/geometry.md) and [mapping-plan API](docs/mapping-plan.md).
 
 ## Install
 
@@ -60,12 +60,15 @@ administrator terminal:
 ```powershell
 sbms list
 sbms map --target '<monitor-device-path>'
+sbms plan validate examples\two-streams.json
+sbms plan run examples\two-streams.json
 sbms config show
 sbms shutdown
 ```
 
 `sbms list` prints the stable ID used by `--target`. Press Enter to stop a
-foreground `map` session cleanly.
+foreground session cleanly. A mapping plan can contain up to eight mirror and
+stream-only groups; the current tray UI remains a single-group adapter.
 
 ## Build
 

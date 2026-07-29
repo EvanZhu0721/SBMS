@@ -1,6 +1,6 @@
 use std::mem::size_of;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -26,10 +26,15 @@ const MOVE_TIMEOUT: Duration = Duration::from_millis(1500);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
+static NEXT_MIGRATION_ID: AtomicU64 = AtomicU64::new(1);
+static WINDOW_CLAIMS: OnceLock<Mutex<WindowClaimRegistry>> = OnceLock::new();
+
 pub struct WindowMigration {
+    migration_id: u64,
     entries: Arc<Mutex<Vec<WindowSnapshot>>>,
     stop_scanner: Arc<AtomicBool>,
     scanner: Option<JoinHandle<Vec<String>>>,
+    scanner_errors: Vec<String>,
     restore_on_drop: bool,
     target_monitor: HMONITOR,
     target_rect: RECT,
@@ -51,6 +56,79 @@ struct WindowSnapshot {
 // before every operation.
 unsafe impl Send for WindowSnapshot {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WindowIdentity {
+    hwnd: isize,
+    pid: u32,
+    thread_id: u32,
+    class_name: String,
+}
+
+impl WindowIdentity {
+    fn from_snapshot(snapshot: &WindowSnapshot) -> Self {
+        Self {
+            hwnd: snapshot.hwnd.0 as isize,
+            pid: snapshot.pid,
+            thread_id: snapshot.thread_id,
+            class_name: snapshot.class_name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct WindowClaim {
+    owner: u64,
+    identity: WindowIdentity,
+}
+
+#[derive(Default)]
+struct WindowClaimRegistry {
+    claims: Vec<WindowClaim>,
+}
+
+impl WindowClaimRegistry {
+    fn claim(&mut self, owner: u64, identity: WindowIdentity) -> bool {
+        if let Some(claim) = self.claims.iter().find(|claim| claim.identity == identity) {
+            return claim.owner == owner;
+        }
+        self.claims.push(WindowClaim { owner, identity });
+        true
+    }
+
+    fn release(&mut self, owner: u64, identity: &WindowIdentity) {
+        self.claims
+            .retain(|claim| claim.owner != owner || claim.identity != *identity);
+    }
+
+    fn release_owner(&mut self, owner: u64) {
+        self.claims.retain(|claim| claim.owner != owner);
+    }
+}
+
+fn next_migration_id() -> u64 {
+    NEXT_MIGRATION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn with_window_claims<T>(operation: impl FnOnce(&mut WindowClaimRegistry) -> T) -> T {
+    let registry = WINDOW_CLAIMS.get_or_init(|| Mutex::new(WindowClaimRegistry::default()));
+    let mut claims = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation(&mut claims)
+}
+
+fn claim_window(owner: u64, identity: WindowIdentity) -> bool {
+    with_window_claims(|claims| claims.claim(owner, identity))
+}
+
+fn release_window_claim(owner: u64, identity: &WindowIdentity) {
+    with_window_claims(|claims| claims.release(owner, identity));
+}
+
+fn release_owner_claims(owner: u64) {
+    with_window_claims(|claims| claims.release_owner(owner));
+}
+
 struct Enumeration {
     target_monitor: HMONITOR,
     current_pid: u32,
@@ -62,19 +140,32 @@ impl WindowMigration {
     pub fn start(target: &Display, source: &Display) -> Result<Self, String> {
         let target_monitor = monitor_for_rect(target.rect, "target")?;
         let source_monitor = monitor_for_rect(source.rect, "virtual source")?;
-        let mut entries = enumerate_target_windows(target_monitor)?;
-        for entry in &mut entries {
-            if let Err(error) = move_entry(
-                entry,
+        let migration_id = next_migration_id();
+        let mut entries = Vec::new();
+        for mut entry in enumerate_target_windows(target_monitor)? {
+            let identity = WindowIdentity::from_snapshot(&entry);
+            if !claim_window(migration_id, identity.clone()) {
+                continue;
+            }
+            let result = move_entry(
+                &mut entry,
                 target_monitor,
                 source_monitor,
                 target.rect,
                 source.rect,
-            ) {
+            );
+            if entry.moved {
+                entries.push(entry);
+            } else {
+                release_window_claim(migration_id, &identity);
+            }
+            if let Err(error) = result {
                 let mut migration = Self {
+                    migration_id,
                     entries: Arc::new(Mutex::new(entries)),
                     stop_scanner: Arc::new(AtomicBool::new(true)),
                     scanner: None,
+                    scanner_errors: Vec::new(),
                     restore_on_drop: true,
                     target_monitor,
                     target_rect: target.rect,
@@ -92,6 +183,7 @@ impl WindowMigration {
         let entries = Arc::new(Mutex::new(entries));
         let stop_scanner = Arc::new(AtomicBool::new(false));
         let scanner = match spawn_scanner(
+            migration_id,
             Arc::clone(&entries),
             Arc::clone(&stop_scanner),
             target.rect,
@@ -100,9 +192,11 @@ impl WindowMigration {
             Ok(scanner) => scanner,
             Err(error) => {
                 let mut migration = Self {
+                    migration_id,
                     entries,
                     stop_scanner,
                     scanner: None,
+                    scanner_errors: Vec::new(),
                     restore_on_drop: true,
                     target_monitor,
                     target_rect: target.rect,
@@ -117,9 +211,11 @@ impl WindowMigration {
             }
         };
         Ok(Self {
+            migration_id,
             entries,
             stop_scanner,
             scanner: Some(scanner),
+            scanner_errors: Vec::new(),
             restore_on_drop: true,
             target_monitor,
             target_rect: target.rect,
@@ -136,8 +232,16 @@ impl WindowMigration {
         }
     }
 
+    pub(crate) fn prepare_restore(&mut self) {
+        let scanner_errors = self.stop_and_join_scanner();
+        for error in scanner_errors {
+            remember_error(&mut self.scanner_errors, error);
+        }
+    }
+
     pub fn restore(&mut self) -> Result<(), String> {
-        let mut errors = self.stop_and_join_scanner();
+        self.prepare_restore();
+        let mut errors = std::mem::take(&mut self.scanner_errors);
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => {
@@ -241,6 +345,7 @@ impl WindowMigration {
             }
         }
 
+        release_owner_claims(self.migration_id);
         self.restore_on_drop = false;
         if errors.is_empty() {
             Ok(())
@@ -258,7 +363,8 @@ impl WindowMigration {
         })?;
         self.target_rect = target.rect;
         self.target_monitor = monitor_for_rect(self.target_rect, "restored target")?;
-        let mut errors = self.stop_and_join_scanner();
+        self.prepare_restore();
+        let mut errors = std::mem::take(&mut self.scanner_errors);
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => {
@@ -350,6 +456,7 @@ impl Drop for WindowMigration {
 }
 
 fn spawn_scanner(
+    migration_id: u64,
     entries: Arc<Mutex<Vec<WindowSnapshot>>>,
     stop: Arc<AtomicBool>,
     target_rect: RECT,
@@ -399,6 +506,10 @@ fn spawn_scanner(
                     if stop.load(Ordering::Acquire) {
                         break;
                     }
+                    let identity = WindowIdentity::from_snapshot(&candidate);
+                    if !claim_window(migration_id, identity.clone()) {
+                        continue;
+                    }
                     if let Some(existing) = tracked
                         .iter_mut()
                         .find(|entry| same_identity(entry, &candidate))
@@ -416,6 +527,9 @@ fn spawn_scanner(
                         if let Err(error) = result {
                             remember_error(&mut errors, error);
                         }
+                        if !candidate.moved {
+                            release_window_claim(migration_id, &identity);
+                        }
                         continue;
                     }
                     let result = move_entry(
@@ -427,6 +541,8 @@ fn spawn_scanner(
                     );
                     if candidate.moved {
                         tracked.push(candidate);
+                    } else {
+                        release_window_claim(migration_id, &identity);
                     }
                     if let Err(error) = result {
                         remember_error(&mut errors, error);
@@ -917,4 +1033,70 @@ fn describe(entry: &WindowSnapshot, message: &str) -> String {
         "{message} (pid {}, class {}, maximized={})",
         entry.pid, entry.class_name, entry.maximized
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WindowClaimRegistry, WindowIdentity};
+
+    fn identity(hwnd: isize, pid: u32, thread_id: u32, class_name: &str) -> WindowIdentity {
+        WindowIdentity {
+            hwnd,
+            pid,
+            thread_id,
+            class_name: class_name.into(),
+        }
+    }
+
+    #[test]
+    fn a_window_can_only_be_claimed_by_one_owner() {
+        let mut claims = WindowClaimRegistry::default();
+        let window = identity(42, 100, 200, "EditorWindow");
+
+        assert!(claims.claim(1, window.clone()));
+        assert!(claims.claim(1, window.clone()));
+        assert!(!claims.claim(2, window));
+        assert_eq!(claims.claims.len(), 1);
+    }
+
+    #[test]
+    fn reused_hwnd_with_a_different_identity_is_not_blocked() {
+        let mut claims = WindowClaimRegistry::default();
+        assert!(claims.claim(1, identity(42, 100, 200, "EditorWindow")));
+
+        assert!(claims.claim(2, identity(42, 101, 200, "EditorWindow")));
+        assert!(claims.claim(2, identity(42, 100, 201, "EditorWindow")));
+        assert!(claims.claim(2, identity(42, 100, 200, "DialogWindow")));
+    }
+
+    #[test]
+    fn releasing_one_identity_keeps_the_owners_other_claims() {
+        let mut claims = WindowClaimRegistry::default();
+        let first = identity(42, 100, 200, "EditorWindow");
+        let second = identity(43, 100, 200, "EditorWindow");
+        assert!(claims.claim(1, first.clone()));
+        assert!(claims.claim(1, second.clone()));
+
+        claims.release(1, &first);
+
+        assert!(claims.claim(2, first));
+        assert!(!claims.claim(2, second));
+    }
+
+    #[test]
+    fn releasing_an_owner_releases_all_of_its_windows_only() {
+        let mut claims = WindowClaimRegistry::default();
+        let first = identity(42, 100, 200, "EditorWindow");
+        let second = identity(43, 100, 200, "EditorWindow");
+        let other = identity(44, 300, 400, "BrowserWindow");
+        assert!(claims.claim(1, first.clone()));
+        assert!(claims.claim(1, second.clone()));
+        assert!(claims.claim(2, other.clone()));
+
+        claims.release_owner(1);
+
+        assert!(claims.claim(3, first));
+        assert!(claims.claim(3, second));
+        assert!(!claims.claim(3, other));
+    }
 }

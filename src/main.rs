@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use sbms::config::ConfigStore;
 use sbms::display::active_displays;
-use sbms::mapping::{MappingRequest, MappingSession};
+use sbms::mapping::{MappingEvent, MappingPlan, MappingRequest, MappingRoute, MappingSession};
 use sbms::renderer::RendererEvent;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -18,10 +18,82 @@ fn main() -> Result<(), Box<dyn Error>> {
         Some("--version") => version(arguments),
         Some("list") => list(arguments),
         Some("map") => map(arguments),
+        Some("plan") => plan(arguments),
         Some("config") => config(arguments),
         Some("shutdown") => shutdown(arguments),
         Some("ui") => sbms::ui::run_open(),
         _ => usage(),
+    }
+}
+
+fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    match arguments.next().as_deref() {
+        Some("validate") => {
+            let path = arguments
+                .next()
+                .ok_or("plan validate requires a JSON file")?;
+            if arguments.next().is_some() {
+                usage();
+            }
+            let plan = load_plan(&path)?;
+            plan.validate()?;
+            println!("valid_groups={}", plan.groups.len());
+            Ok(())
+        }
+        Some("run") => {
+            let path = arguments.next().ok_or("plan run requires a JSON file")?;
+            let mut hold = None;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--hold-ms" if hold.is_none() => {
+                        let milliseconds = arguments
+                            .next()
+                            .ok_or("--hold-ms requires a value")?
+                            .parse::<u64>()?;
+                        hold = Some(Duration::from_millis(milliseconds));
+                    }
+                    _ => usage(),
+                }
+            }
+            let plan = load_plan(&path)?;
+            let reporter = Arc::new(|event| match event {
+                MappingEvent::GroupReady(group) => println!(
+                    "group_ready={} route={} device={} sunshine={} source={}",
+                    group.id,
+                    route_name(&group.route),
+                    group.source_device_name,
+                    group.sunshine_id.as_deref().unwrap_or("-"),
+                    group.source_id
+                ),
+                MappingEvent::Renderer {
+                    id,
+                    event: RendererEvent::Fps(fps),
+                } => println!("group={id} fps={fps}"),
+                MappingEvent::Renderer {
+                    id,
+                    event: RendererEvent::Failed(error),
+                } => eprintln!("group={id} renderer_error={error}"),
+            });
+            let mut session = MappingSession::start_plan_with_reporter(plan, reporter)?;
+            println!("running_groups={}", session.groups().len());
+            wait(hold)?;
+            session.stop()?;
+            println!("stopped");
+            Ok(())
+        }
+        _ => usage(),
+    }
+}
+
+fn load_plan(path: &str) -> Result<MappingPlan, Box<dyn Error>> {
+    let bytes = std::fs::read(path)?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+
+fn route_name(route: &MappingRoute) -> &'static str {
+    match route {
+        MappingRoute::Mirror { .. } => "mirror",
+        MappingRoute::StreamOnly => "stream_only",
     }
 }
 
@@ -54,10 +126,12 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
     }
     for display in active_displays()? {
         println!(
-            "id={}\tname={}\tdevice={}\trect={},{},{},{}\tnative={}x{}\trefresh={}/{}\t{}{}",
+            "id={}\tname={}\tdevice={}\tconnector={}\tsunshine={}\trect={},{},{},{}\tnative={}x{}\trefresh={}/{}\t{}{}",
             display.id,
             display.name,
             display.device_name,
+            display.connector_index,
+            display.sunshine_id.as_deref().unwrap_or("-"),
             display.rect.left,
             display.rect.top,
             display.rect.right - display.rect.left,
@@ -207,6 +281,8 @@ fn usage() -> ! {
   sbms --version
   sbms list
   sbms map [--target <monitor-device-path>] [--hold-ms <milliseconds>]
+  sbms plan validate <plan.json>
+  sbms plan run <plan.json> [--hold-ms <milliseconds>]
   sbms config path|show|set-target <monitor-device-path>|clear-target|reset
   sbms shutdown
   sbms ui"

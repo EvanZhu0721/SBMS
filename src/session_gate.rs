@@ -3,6 +3,7 @@ use std::ffi::c_void;
 use std::fmt::{Display, Formatter};
 use std::mem::size_of;
 
+use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
     LocalFree,
@@ -20,13 +21,14 @@ use windows::Win32::System::Memory::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{PCWSTR, PWSTR, w};
 
-const GATE_MAGIC: u32 = 0x5342_4735;
-const PROTOCOL_VERSION: u32 = 5;
-const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v5");
+const GATE_MAGIC: u32 = 0x5342_4736;
+const PROTOCOL_VERSION: u32 = 6;
+const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v6");
 const MAX_DIMENSION: u32 = 16_384;
 const MAX_REFRESH_HZ: u64 = 1_000;
+pub const MAX_VIRTUAL_DISPLAYS: usize = 8;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VirtualMode {
     pub width: u32,
     pub height: u32,
@@ -80,6 +82,11 @@ impl VirtualMode {
                 "virtual refresh numerator and denominator must be non-zero".into(),
             ));
         }
+        if self.refresh_numerator < self.refresh_denominator {
+            return Err(SessionGateError(
+                "virtual refresh must be at least 1 Hz".into(),
+            ));
+        }
         if u64::from(self.refresh_numerator) > MAX_REFRESH_HZ * u64::from(self.refresh_denominator)
         {
             return Err(SessionGateError(format!(
@@ -90,14 +97,88 @@ impl VirtualMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct VirtualDisplayConfig {
+    pub connector_index: u32,
+    pub mode: VirtualMode,
+}
+
+impl VirtualDisplayConfig {
+    pub const fn new(connector_index: u32, mode: VirtualMode) -> Self {
+        Self {
+            connector_index,
+            mode,
+        }
+    }
+
+    pub fn validate(self) -> Result<(), SessionGateError> {
+        if self.connector_index >= MAX_VIRTUAL_DISPLAYS as u32 {
+            return Err(SessionGateError(format!(
+                "connector index must be between 0 and {}",
+                MAX_VIRTUAL_DISPLAYS - 1
+            )));
+        }
+        self.mode.validate()
+    }
+}
+
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct GateHeader {
     magic: u32,
     version: u32,
+    count: u32,
+    reserved: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GateEntry {
+    connector_index: u32,
     width: u32,
     height: u32,
     refresh_numerator: u32,
     refresh_denominator: u32,
+}
+
+impl From<VirtualDisplayConfig> for GateEntry {
+    fn from(config: VirtualDisplayConfig) -> Self {
+        Self {
+            connector_index: config.connector_index,
+            width: config.mode.width,
+            height: config.mode.height,
+            refresh_numerator: config.mode.refresh_numerator,
+            refresh_denominator: config.mode.refresh_denominator,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GateConfig {
+    header: GateHeader,
+    entries: [GateEntry; MAX_VIRTUAL_DISPLAYS],
+}
+
+impl GateConfig {
+    fn from_displays(displays: &[VirtualDisplayConfig]) -> Result<Self, SessionGateError> {
+        validate_displays(displays)?;
+
+        let mut entries = [GateEntry::default(); MAX_VIRTUAL_DISPLAYS];
+        for (entry, display) in entries.iter_mut().zip(displays.iter().copied()) {
+            *entry = display.into();
+        }
+
+        Ok(Self {
+            header: GateHeader {
+                magic: GATE_MAGIC,
+                version: PROTOCOL_VERSION,
+                count: displays.len() as u32,
+                reserved: 0,
+            },
+            entries,
+        })
+    }
 }
 
 pub struct SessionGate {
@@ -117,7 +198,11 @@ impl Error for SessionGateError {}
 
 impl SessionGate {
     pub fn create(mode: VirtualMode) -> Result<Self, SessionGateError> {
-        mode.validate()?;
+        Self::create_many(&[VirtualDisplayConfig::new(0, mode)])
+    }
+
+    pub fn create_many(displays: &[VirtualDisplayConfig]) -> Result<Self, SessionGateError> {
+        let config = GateConfig::from_displays(displays)?;
         let descriptor = SecurityDescriptor::for_current_user()?;
         let attributes = descriptor.attributes();
         let gate = unsafe {
@@ -126,7 +211,7 @@ impl SessionGate {
                 Some(&attributes),
                 PAGE_READWRITE,
                 0,
-                size_of::<GateHeader>() as u32,
+                size_of::<GateConfig>() as u32,
                 GATE_MAPPING,
             )
         }
@@ -141,7 +226,7 @@ impl SessionGate {
         }
 
         let gate_view =
-            unsafe { MapViewOfFile(gate, FILE_MAP_WRITE, 0, 0, size_of::<GateHeader>()) };
+            unsafe { MapViewOfFile(gate, FILE_MAP_WRITE, 0, 0, size_of::<GateConfig>()) };
         if gate_view.Value.is_null() {
             unsafe {
                 let _ = CloseHandle(gate);
@@ -149,19 +234,39 @@ impl SessionGate {
             return Err(SessionGateError("map session gate failed".into()));
         }
         unsafe {
-            gate_view.Value.cast::<GateHeader>().write(GateHeader {
-                magic: GATE_MAGIC,
-                version: PROTOCOL_VERSION,
-                width: mode.width,
-                height: mode.height,
-                refresh_numerator: mode.refresh_numerator,
-                refresh_denominator: mode.refresh_denominator,
-            });
+            gate_view.Value.cast::<GateConfig>().write(config);
             let _ = UnmapViewOfFile(gate_view);
         }
 
         Ok(Self { gate })
     }
+}
+
+fn validate_displays(displays: &[VirtualDisplayConfig]) -> Result<(), SessionGateError> {
+    if displays.is_empty() {
+        return Err(SessionGateError(
+            "at least one virtual display is required".into(),
+        ));
+    }
+    if displays.len() > MAX_VIRTUAL_DISPLAYS {
+        return Err(SessionGateError(format!(
+            "at most {MAX_VIRTUAL_DISPLAYS} virtual displays are supported"
+        )));
+    }
+
+    let mut seen_connectors = 0u8;
+    for display in displays {
+        display.validate()?;
+        let connector_bit = 1u8 << display.connector_index;
+        if seen_connectors & connector_bit != 0 {
+            return Err(SessionGateError(format!(
+                "connector index {} is duplicated",
+                display.connector_index
+            )));
+        }
+        seen_connectors |= connector_bit;
+    }
+    Ok(())
 }
 
 const fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
@@ -259,16 +364,23 @@ mod tests {
     #[test]
     fn dynamic_mode_header_matches_4640_by_2610() {
         let mode = VirtualMode::from_millihz(4640, 2610, 240_000).unwrap();
+        let config = GateConfig::from_displays(&[VirtualDisplayConfig::new(0, mode)]).unwrap();
 
         assert_eq!(mode.refresh_numerator, 240);
         assert_eq!(mode.refresh_denominator, 1);
-        assert_eq!(size_of::<GateHeader>(), 24);
+        assert_eq!(size_of::<GateHeader>(), 16);
+        assert_eq!(size_of::<GateEntry>(), 20);
+        assert_eq!(size_of::<GateConfig>(), 176);
+        assert_eq!(config.header.count, 1);
+        assert_eq!(config.entries[0].width, 4640);
+        assert_eq!(config.entries[0].height, 2610);
     }
 
     #[test]
     fn invalid_or_excessive_modes_are_rejected() {
         assert!(VirtualMode::from_millihz(0, 2160, 240_000).is_err());
         assert!(VirtualMode::from_millihz(3840, 2160, 0).is_err());
+        assert!(VirtualMode::from_millihz(3840, 2160, 500).is_err());
         assert!(VirtualMode::from_millihz(16_385, 16_384, 240_000).is_err());
         assert!(
             VirtualMode {
@@ -278,6 +390,85 @@ mod tests {
                 refresh_denominator: 1,
             }
             .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn multiple_connectors_are_encoded_in_caller_order() {
+        let displays = [
+            VirtualDisplayConfig::new(5, VirtualMode::default()),
+            VirtualDisplayConfig::new(
+                2,
+                VirtualMode {
+                    width: 2560,
+                    height: 1440,
+                    refresh_numerator: 165,
+                    refresh_denominator: 1,
+                },
+            ),
+        ];
+
+        let config = GateConfig::from_displays(&displays).unwrap();
+
+        assert_eq!(config.header.magic, GATE_MAGIC);
+        assert_eq!(config.header.version, PROTOCOL_VERSION);
+        assert_eq!(config.header.count, 2);
+        assert_eq!(config.header.reserved, 0);
+        assert_eq!(config.entries[0].connector_index, 5);
+        assert_eq!(config.entries[0].width, 3840);
+        assert_eq!(config.entries[1].connector_index, 2);
+        assert_eq!(config.entries[1].refresh_numerator, 165);
+        assert_eq!(config.entries[2], GateEntry::default());
+    }
+
+    #[test]
+    fn public_display_config_has_stable_json_fields() {
+        let display = VirtualDisplayConfig::new(4, VirtualMode::default());
+
+        let json = serde_json::to_value(display).unwrap();
+
+        assert_eq!(json["connector_index"], 4);
+        assert_eq!(json["mode"]["width"], 3840);
+        assert_eq!(json["mode"]["height"], 2160);
+        assert_eq!(json["mode"]["refresh_numerator"], 240);
+        assert_eq!(json["mode"]["refresh_denominator"], 1);
+        assert_eq!(
+            serde_json::from_value::<VirtualDisplayConfig>(json).unwrap(),
+            display
+        );
+    }
+
+    #[test]
+    fn display_set_validation_rejects_invalid_shapes() {
+        assert!(validate_displays(&[]).is_err());
+
+        let too_many =
+            [VirtualDisplayConfig::new(0, VirtualMode::default()); MAX_VIRTUAL_DISPLAYS + 1];
+        assert!(validate_displays(&too_many).is_err());
+
+        let duplicate = [
+            VirtualDisplayConfig::new(3, VirtualMode::default()),
+            VirtualDisplayConfig::new(3, VirtualMode::default()),
+        ];
+        assert!(validate_displays(&duplicate).is_err());
+
+        assert!(
+            validate_displays(&[VirtualDisplayConfig::new(
+                MAX_VIRTUAL_DISPLAYS as u32,
+                VirtualMode::default()
+            )])
+            .is_err()
+        );
+
+        assert!(
+            validate_displays(&[VirtualDisplayConfig::new(
+                0,
+                VirtualMode {
+                    width: 0,
+                    ..VirtualMode::default()
+                }
+            )])
             .is_err()
         );
     }

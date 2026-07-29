@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnregisterClassW, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT, WNDCLASSW,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
 use crate::display::Display;
 use crate::gpu_renderer::{GpuRendererConfig, run_gpu_renderer};
@@ -19,6 +19,7 @@ use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+static WINDOW_CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
 pub enum RendererEvent {
@@ -111,7 +112,9 @@ fn run(
     let instance = unsafe { GetModuleHandleW(None) }
         .map_err(|error| format!("GetModuleHandleW failed: {error}"))?;
     let instance = HINSTANCE(instance.0);
-    let class_name = w!("SBMSMirrorWindow");
+    let class_name_storage =
+        window_class_name(WINDOW_CLASS_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+    let class_name = PCWSTR(class_name_storage.as_ptr());
     let class = WNDCLASSW {
         style: CS_HREDRAW | CS_VREDRAW,
         lpfnWndProc: Some(window_proc),
@@ -120,7 +123,10 @@ fn run(
         ..Default::default()
     };
     if unsafe { RegisterClassW(&class) } == 0 {
-        return Err("RegisterClassW failed".into());
+        return Err(format!(
+            "RegisterClassW failed: {}",
+            windows::core::Error::from_thread()
+        ));
     }
 
     let width = target.right - target.left;
@@ -245,6 +251,13 @@ fn measured_fps(frames: u32, elapsed: Duration) -> u32 {
     ((frames as f64 / elapsed.as_secs_f64()).round()).clamp(0.0, u32::MAX as f64) as u32
 }
 
+fn window_class_name(sequence: u64) -> Vec<u16> {
+    format!("SBMSMirrorWindow-{}-{sequence}", std::process::id())
+        .encode_utf16()
+        .chain(Some(0))
+        .collect()
+}
+
 fn pump_messages() -> bool {
     let mut message = MSG::default();
     while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
@@ -285,7 +298,7 @@ unsafe extern "system" fn window_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::measured_fps;
+    use super::{measured_fps, window_class_name};
     use std::time::Duration;
 
     #[test]
@@ -298,5 +311,14 @@ mod tests {
     fn fps_reports_idle_and_handles_zero_duration() {
         assert_eq!(measured_fps(0, Duration::from_secs(1)), 0);
         assert_eq!(measured_fps(1, Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn renderer_window_classes_are_unique_and_null_terminated() {
+        let first = window_class_name(7);
+        let second = window_class_name(8);
+        assert_ne!(first, second);
+        assert_eq!(first.last(), Some(&0));
+        assert_eq!(second.last(), Some(&0));
     }
 }

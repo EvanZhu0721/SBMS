@@ -1,0 +1,28 @@
+{
+  "groups": [
+    {
+      "id": 0,
+      "mode": {
+        "width": 3840,
+        "height": 2160,
+        "refresh_numerator": 240,
+        "refresh_denominator": 1
+      },
+      "route": {
+        "kind": "stream_only"
+      }
+    },
+    {
+      "id": 1,
+      "mode": {
+        "width": 2560,
+        "height": 1440,
+        "refresh_numerator": 120,
+        "refresh_denominator": 1
+      },
+      "route": {
+        "kind": "stream_only"
+      }
+    }
+  ]
+}

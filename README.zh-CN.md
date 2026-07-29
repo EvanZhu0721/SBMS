@@ -32,7 +32,7 @@ WDF/IddCx 向 Windows 提供虚拟显示器。镜像链路使用 Desktop Duplica
 托盘控制面板使用 Slint，安装和升级使用 Inno Setup。
 
 实现细节见[架构说明](docs/architecture.md)。GUI 开发可参考
-[尺寸计算接口](docs/geometry.md)。
+[尺寸计算接口](docs/geometry.md)和[多组映射接口](docs/mapping-plan.md)。
 
 ## 安装和使用
 
@@ -55,12 +55,15 @@ SBMS 会随安装用户登录自动启动。可在 Windows“已安装的应用�
 ```powershell
 sbms list
 sbms map --target '<monitor-device-path>'
+sbms plan validate examples\two-streams.json
+sbms plan run examples\two-streams.json
 sbms config show
 sbms shutdown
 ```
 
 `sbms list` 会列出 `--target` 所需的稳定显示器 ID。前台运行 `map` 时按
-Enter，可以正常停止并完成恢复。
+Enter，可以正常停止并完成恢复。映射计划最多可混合八组本地镜像和纯串流
+虚拟桌面；当前托盘 UI 仍只使用其中一组。
 
 ## 构建
 
