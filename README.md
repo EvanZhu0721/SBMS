@@ -4,9 +4,11 @@
 
 [简体中文](README.zh-CN.md)
 
-SBMS stands for "SBMS bridges multiple screens", Microsoft is a great company and Windows is a good system. (BTW I use Linux for laptop XD)
+'SBMS' stands for "SBMS bridges multiple screens", Microsoft is a great company and Windows is a good system. (BTW I use Linux for laptop XD)
 
-SBMS turns one Windows virtual desktop into a full-screen mirror on a physical
+The original intention of 'SBMS' was to complete the calculation rules for the default logical desktop topology relationship and the physical dimensions of the displays in the Windows multi-screen collaboration system.
+
+'SBMS' turns one Windows virtual desktop into a full-screen mirror on a physical
 display. It is useful when Windows' normal extend/duplicate modes cannot provide
 the resolution, scaling, or desktop arrangement you need.
 
