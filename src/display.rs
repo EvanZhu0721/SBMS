@@ -70,9 +70,17 @@ impl FmtDisplay for DisplayError {
 impl Error for DisplayError {}
 
 pub fn active_displays() -> Result<Vec<Display>, DisplayError> {
+    active_displays_with_identity(true)
+}
+
+pub(crate) fn active_display_topology() -> Result<Vec<Display>, DisplayError> {
+    active_displays_with_identity(false)
+}
+
+fn active_displays_with_identity(include_identity: bool) -> Result<Vec<Display>, DisplayError> {
     let mut last_error = None;
     for _ in 0..5 {
-        match read_active_displays() {
+        match read_active_displays(include_identity) {
             Ok(displays) => return Ok(displays),
             Err(error) => last_error = Some(error),
         }
@@ -230,7 +238,7 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
+fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayError> {
     for _ in 0..3 {
         let mut path_count = 0;
         let mut mode_count = 0;
@@ -289,12 +297,20 @@ fn read_active_displays() -> Result<Vec<Display>, DisplayError> {
                 });
             let name = wide_string(&target.monitorFriendlyDeviceName);
             let id = wide_string(&target.monitorDevicePath);
-            let monitor_identity = monitor_identity(&id);
-            let physical_size = monitor_identity
-                .as_ref()
-                .and_then(|identity| edid_dimensions_mm(&identity.edid));
-            let sunshine_id =
-                sunshine_display_id(&sunshine_device_id_payload(&id, monitor_identity.as_ref()));
+            let (physical_size, sunshine_id) = if include_identity {
+                let monitor_identity = monitor_identity(&id);
+                (
+                    monitor_identity
+                        .as_ref()
+                        .and_then(|identity| edid_dimensions_mm(&identity.edid)),
+                    sunshine_display_id(&sunshine_device_id_payload(
+                        &id,
+                        monitor_identity.as_ref(),
+                    )),
+                )
+            } else {
+                (None, None)
+            };
             displays.push(Display {
                 id,
                 connector_index: target.connectorInstance,

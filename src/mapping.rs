@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigStore, GroupRouteConfig};
-use crate::display::{Display, active_displays, apply_display_mode, restore_display_topology};
+use crate::display::{
+    Display, active_display_topology, active_displays, apply_display_mode, restore_display_topology,
+};
 use crate::geometry::Rotation;
 use crate::renderer::{Renderer, RendererEvent, RendererReporter};
 use crate::session_gate::{MAX_VIRTUAL_DISPLAYS, SessionGate, VirtualDisplayConfig, VirtualMode};
@@ -562,7 +564,7 @@ fn wait_for_sources(
     let mut mode_applied = HashSet::new();
     let mut last_snapshot = None;
     loop {
-        let displays = active_displays().map_err(|error| stage("topology", error))?;
+        let displays = active_display_topology().map_err(|error| stage("topology", error))?;
         let sources: Vec<_> = displays
             .iter()
             .filter(|display| display.virtual_display)
@@ -655,7 +657,10 @@ fn wait_for_sources(
             }
         }
         if all_ready && ordered.len() == plan.groups.len() {
-            return Ok(ordered);
+            let hydrated = active_displays().map_err(|error| stage("topology", error))?;
+            if let Some(ordered) = ordered_ready_sources(plan, &hydrated) {
+                return Ok(ordered);
+            }
         }
         if Instant::now() >= deadline {
             let pending = format_pending_topology(plan, &sources);
@@ -670,6 +675,36 @@ fn wait_for_sources(
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn ordered_ready_sources(plan: &MappingPlan, displays: &[Display]) -> Option<Vec<Display>> {
+    let sources: Vec<_> = displays
+        .iter()
+        .filter(|display| display.virtual_display)
+        .collect();
+    if sources.len() != plan.groups.len() {
+        return None;
+    }
+    let mut connector_indices = HashSet::with_capacity(sources.len());
+    let mut device_names = HashSet::with_capacity(sources.len());
+    if sources.iter().any(|source| {
+        !connector_indices.insert(source.connector_index)
+            || !device_names.insert(source.device_name.to_ascii_lowercase())
+    }) {
+        return None;
+    }
+    plan.groups
+        .iter()
+        .map(|group| {
+            sources
+                .iter()
+                .find(|source| {
+                    source.connector_index == group.id
+                        && source_matches_mode(source, group.mode, group.rotation)
+                })
+                .map(|source| (*source).clone())
+        })
+        .collect()
 }
 
 fn format_topology_snapshot(plan: &MappingPlan, sources: &[Display]) -> String {
@@ -752,7 +787,7 @@ fn rotation_degrees(rotation: Rotation) -> u16 {
 fn wait_for_sources_removed(connector_indices: &[u32]) -> Result<(), MappingError> {
     let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
     loop {
-        let displays = active_displays().map_err(|error| stage("remove", error))?;
+        let displays = active_display_topology().map_err(|error| stage("remove", error))?;
         if !displays.iter().any(|display| {
             display.virtual_display && connector_indices.contains(&display.connector_index)
         }) {
@@ -836,6 +871,31 @@ mod tests {
             mode: VirtualMode::default(),
             rotation: Rotation::Deg0,
             route,
+        }
+    }
+
+    fn virtual_source(connector_index: u32) -> Display {
+        Display {
+            id: format!("virtual-{connector_index}"),
+            connector_index,
+            sunshine_id: Some(format!("sunshine-{connector_index}")),
+            name: "SBMS".into(),
+            device_name: format!(r"\\.\DISPLAY{}", connector_index + 20),
+            rect: windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: 3840,
+                bottom: 2160,
+            },
+            native_width: 3840,
+            native_height: 2160,
+            physical_width_mm: None,
+            physical_height_mm: None,
+            rotation: Rotation::Deg0,
+            refresh_numerator: 240,
+            refresh_denominator: 1,
+            primary: false,
+            virtual_display: true,
         }
     }
 
@@ -967,5 +1027,43 @@ mod tests {
             format_topology_snapshot(&plan, &[]),
             "group 1 absent requested=3840x2160@240/1 orientation=0 topology_rotation=0"
         );
+    }
+
+    #[test]
+    fn hydrated_sources_follow_plan_order() {
+        let plan = MappingPlan::new(vec![
+            group(3, MappingRoute::StreamOnly),
+            group(1, MappingRoute::StreamOnly),
+        ])
+        .unwrap();
+        let displays = vec![virtual_source(1), virtual_source(3)];
+
+        let ordered = ordered_ready_sources(&plan, &displays).unwrap();
+
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|display| display.connector_index)
+                .collect::<Vec<_>>(),
+            vec![3, 1]
+        );
+        assert_eq!(ordered[0].sunshine_id.as_deref(), Some("sunshine-3"));
+    }
+
+    #[test]
+    fn hydrated_sources_reject_changed_or_cloned_topology() {
+        let plan = MappingPlan::new(vec![
+            group(0, MappingRoute::StreamOnly),
+            group(1, MappingRoute::StreamOnly),
+        ])
+        .unwrap();
+        let first = virtual_source(0);
+        let mut second = virtual_source(1);
+        second.device_name = first.device_name.clone();
+        assert!(ordered_ready_sources(&plan, &[first.clone(), second]).is_none());
+
+        let mut wrong_mode = virtual_source(1);
+        wrong_mode.rect.right = 1920;
+        assert!(ordered_ready_sources(&plan, &[first, wrong_mode]).is_none());
     }
 }
