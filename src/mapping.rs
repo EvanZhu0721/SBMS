@@ -2,10 +2,12 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display as FmtDisplay, Formatter};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use windows::core::HRESULT;
 
 use crate::config::{ConfigStore, GroupRouteConfig};
 use crate::display::{
@@ -20,6 +22,7 @@ use crate::window_migration::WindowMigration;
 const TOPOLOGY_TIMEOUT: Duration = Duration::from_secs(15);
 const TOPOLOGY_SETTLE: Duration = Duration::from_millis(750);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+const ERROR_CANCELLED_HRESULT: HRESULT = HRESULT(0x800704C7_u32 as i32);
 
 pub const MAX_MAPPING_GROUPS: usize = MAX_VIRTUAL_DISPLAYS;
 
@@ -114,6 +117,10 @@ impl MappingError {
 
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    pub(crate) fn is_clean_cancellation(&self) -> bool {
+        self.stage == "cancelled" && !self.message.contains("rollback was incomplete")
     }
 }
 
@@ -258,8 +265,19 @@ impl MappingSession {
         plan: MappingPlan,
         reporter: MappingReporter,
     ) -> Result<Self, MappingError> {
+        let cancel = AtomicBool::new(false);
+        Self::start_plan_with_reporter_cancellable(plan, reporter, &cancel)
+    }
+
+    pub(crate) fn start_plan_with_reporter_cancellable(
+        plan: MappingPlan,
+        reporter: MappingReporter,
+        cancel: &AtomicBool,
+    ) -> Result<Self, MappingError> {
         plan.validate()?;
+        check_start_cancelled(cancel)?;
         let displays = active_displays().map_err(|error| stage("target", error))?;
+        check_start_cancelled(cancel)?;
         for group in &plan.groups {
             if let MappingRoute::Mirror { target } = &group.route {
                 unique_target(&displays, target).map_err(|error| error.with_group(group.id))?;
@@ -280,9 +298,19 @@ impl MappingSession {
                 mode: group.mode,
             })
             .collect();
+        check_start_cancelled(cancel)?;
         let session_gate = SessionGate::create_many(&gate_configs)
             .map_err(|error| stage("session-gate", error))?;
-        let display = VirtualDisplay::create().map_err(|error| stage("device", error))?;
+        check_start_cancelled(cancel)?;
+        let display = match VirtualDisplay::create_cancellable(cancel) {
+            Ok(display) => display,
+            Err(error)
+                if cancel.load(Ordering::Acquire) && error.code() == ERROR_CANCELLED_HRESULT =>
+            {
+                return Err(start_cancelled());
+            }
+            Err(error) => return Err(stage("device", error)),
+        };
 
         let mut session = Self {
             groups: Vec::with_capacity(plan.groups.len()),
@@ -292,7 +320,10 @@ impl MappingSession {
             physical_topology,
         };
 
-        let sources = match wait_for_sources(&plan, &reporter) {
+        if let Err(error) = check_start_cancelled(cancel) {
+            return Err(rollback_start(session, error));
+        }
+        let sources = match wait_for_sources(&plan, &reporter, cancel) {
             Ok(sources) => sources,
             Err(error) => return Err(rollback_start(session, error)),
         };
@@ -322,6 +353,9 @@ impl MappingSession {
             Err(error) => return Err(rollback_start(session, stage("topology", error))),
         };
         for (index, request) in plan.groups.iter().enumerate() {
+            if let Err(error) = check_start_cancelled(cancel) {
+                return Err(rollback_start(session, error));
+            }
             let MappingRoute::Mirror { target } = &request.route else {
                 continue;
             };
@@ -333,6 +367,9 @@ impl MappingSession {
             };
             let migration = match WindowMigration::start(&physical, &sources[index]) {
                 Ok(migration) => migration,
+                Err(_) if cancel.load(Ordering::Acquire) => {
+                    return Err(rollback_start(session, start_cancelled()));
+                }
                 Err(error) => {
                     return Err(rollback_start(
                         session,
@@ -341,9 +378,15 @@ impl MappingSession {
                 }
             };
             session.groups[index].migration = Some(migration);
+            if let Err(error) = check_start_cancelled(cancel) {
+                return Err(rollback_start(session, error));
+            }
         }
 
         for (index, request) in plan.groups.iter().enumerate() {
+            if let Err(error) = check_start_cancelled(cancel) {
+                return Err(rollback_start(session, error));
+            }
             let MappingRoute::Mirror { target } = &request.route else {
                 continue;
             };
@@ -358,12 +401,22 @@ impl MappingSession {
             let renderer_reporter: RendererReporter = Arc::new(move |event| {
                 group_reporter(MappingEvent::Renderer { id, event });
             });
-            let renderer = match Renderer::start_with_reporter(
+            let renderer = match Renderer::start_with_reporter_cancellable(
                 physical,
                 sources[index].clone(),
                 renderer_reporter,
+                cancel,
             ) {
                 Ok(renderer) => renderer,
+                Err(error) if cancel.load(Ordering::Acquire) => {
+                    let mut cause = start_cancelled();
+                    if error != "renderer startup was cancelled" {
+                        cause.message.push_str(&format!(
+                            "; rollback was incomplete: renderer startup cleanup: {error}"
+                        ));
+                    }
+                    return Err(rollback_start(session, cause));
+                }
                 Err(error) => {
                     return Err(rollback_start(
                         session,
@@ -372,6 +425,9 @@ impl MappingSession {
                 }
             };
             session.groups[index].renderer = Some(renderer);
+            if let Err(error) = check_start_cancelled(cancel) {
+                return Err(rollback_start(session, error));
+            }
         }
 
         for group in &session.groups {
@@ -558,12 +614,14 @@ fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, Mappi
 fn wait_for_sources(
     plan: &MappingPlan,
     reporter: &MappingReporter,
+    cancel: &AtomicBool,
 ) -> Result<Vec<Display>, MappingError> {
     let requested_ids: HashSet<_> = plan.groups.iter().map(|group| group.id).collect();
     let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
     let mut mode_applied = HashSet::new();
     let mut last_snapshot = None;
     loop {
+        check_start_cancelled(cancel)?;
         let displays = active_display_topology().map_err(|error| stage("topology", error))?;
         let sources: Vec<_> = displays
             .iter()
@@ -675,6 +733,18 @@ fn wait_for_sources(
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn check_start_cancelled(cancel: &AtomicBool) -> Result<(), MappingError> {
+    if cancel.load(Ordering::Acquire) {
+        Err(start_cancelled())
+    } else {
+        Ok(())
+    }
+}
+
+fn start_cancelled() -> MappingError {
+    stage("cancelled", "mapping startup was cancelled")
 }
 
 fn ordered_ready_sources(plan: &MappingPlan, displays: &[Display]) -> Option<Vec<Display>> {
@@ -864,6 +934,7 @@ fn group_stage(group_id: u32, stage: &'static str, error: impl FmtDisplay) -> Ma
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     fn group(id: u32, route: MappingRoute) -> MappingGroupRequest {
         MappingGroupRequest {
@@ -944,6 +1015,36 @@ mod tests {
             .is_err()
         );
         assert!(MappingPlan::new(vec![group(8, MappingRoute::StreamOnly)]).is_err());
+    }
+
+    #[test]
+    fn cancelled_start_stops_before_hardware_and_invalid_plan_still_wins() {
+        let cancel = AtomicBool::new(true);
+        let valid = MappingPlan {
+            groups: vec![group(0, MappingRoute::StreamOnly)],
+        };
+        let Err(cancelled) =
+            MappingSession::start_plan_with_reporter_cancellable(valid, Arc::new(|_| {}), &cancel)
+        else {
+            panic!("pre-cancelled mapping unexpectedly started");
+        };
+        assert!(cancelled.is_clean_cancellation());
+        let mut incomplete = start_cancelled();
+        incomplete
+            .message
+            .push_str("; rollback was incomplete: cleanup failed");
+        assert!(!incomplete.is_clean_cancellation());
+
+        let invalid = MappingPlan { groups: Vec::new() };
+        let Err(plan_error) = MappingSession::start_plan_with_reporter_cancellable(
+            invalid,
+            Arc::new(|_| {}),
+            &cancel,
+        ) else {
+            panic!("invalid mapping unexpectedly started");
+        };
+        assert_eq!(plan_error.stage(), "plan");
+        assert!(!plan_error.is_clean_cancellation());
     }
 
     #[test]

@@ -23,6 +23,7 @@ use crate::gpu_renderer::{GpuRendererConfig, run_gpu_renderer};
 use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
+const START_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 static WINDOW_CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -41,11 +42,30 @@ pub struct Renderer {
     thread: Option<JoinHandle<()>>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum StartWait {
+    Ready,
+    Failed(String),
+    Cancelled,
+    TimedOut,
+    Disconnected,
+}
+
 impl Renderer {
     pub fn start_with_reporter(
         target: Display,
         source: Display,
         reporter: RendererReporter,
+    ) -> Result<Self, String> {
+        let cancel = AtomicBool::new(false);
+        Self::start_with_reporter_cancellable(target, source, reporter, &cancel)
+    }
+
+    pub(crate) fn start_with_reporter_cancellable(
+        target: Display,
+        source: Display,
+        reporter: RendererReporter,
+        cancel: &AtomicBool,
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
@@ -72,25 +92,42 @@ impl Renderer {
             }
         });
 
-        match ready_rx.recv_timeout(START_TIMEOUT) {
-            Ok(Ok(())) => Ok(Self {
+        match wait_for_start(&ready_rx, cancel, START_TIMEOUT) {
+            StartWait::Ready => Ok(Self {
                 stop,
                 wake_event,
                 done: done_rx,
                 thread: Some(thread),
             }),
-            Ok(Err(error)) => {
+            StartWait::Failed(error) => {
                 stop.store(true, Ordering::Release);
                 signal_event(&wake_event);
                 let _ = thread.join();
                 Err(error)
             }
-            Err(_) => {
-                stop.store(true, Ordering::Release);
-                signal_event(&wake_event);
-                let _ = done_rx.recv_timeout(STOP_TIMEOUT);
-                drop(thread);
-                Err("renderer did not receive and draw a first frame within 10 seconds".into())
+            StartWait::Cancelled => match abort_start(&stop, &wake_event, &done_rx, thread) {
+                Ok(()) => Err("renderer startup was cancelled".into()),
+                Err(error) => Err(format!(
+                    "renderer startup was cancelled; cleanup was incomplete: {error}"
+                )),
+            },
+            StartWait::TimedOut => {
+                let cleanup = abort_start(&stop, &wake_event, &done_rx, thread)
+                    .err()
+                    .map(|error| format!("; cleanup was incomplete: {error}"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "renderer did not receive and draw a first frame within 10 seconds{cleanup}"
+                ))
+            }
+            StartWait::Disconnected => {
+                let cleanup = abort_start(&stop, &wake_event, &done_rx, thread)
+                    .err()
+                    .map(|error| format!("; cleanup was incomplete: {error}"))
+                    .unwrap_or_default();
+                Err(format!(
+                    "renderer exited before drawing its first frame{cleanup}"
+                ))
             }
         }
     }
@@ -116,6 +153,54 @@ impl Renderer {
             .join()
             .map_err(|_| "renderer thread panicked".to_string())?;
         result
+    }
+}
+
+fn wait_for_start(
+    ready: &mpsc::Receiver<Result<(), String>>,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> StartWait {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match ready.try_recv() {
+            Ok(Ok(())) => return StartWait::Ready,
+            Ok(Err(error)) => return StartWait::Failed(error),
+            Err(mpsc::TryRecvError::Disconnected) => return StartWait::Disconnected,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        if cancel.load(Ordering::Acquire) {
+            return StartWait::Cancelled;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return StartWait::TimedOut;
+        }
+        let wait = (deadline - now).min(START_CANCEL_POLL_INTERVAL);
+        match ready.recv_timeout(wait) {
+            Ok(Ok(())) => return StartWait::Ready,
+            Ok(Err(error)) => return StartWait::Failed(error),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return StartWait::Disconnected,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
+fn abort_start(
+    stop: &AtomicBool,
+    wake_event: &OwnedHandle,
+    done: &mpsc::Receiver<Result<(), String>>,
+    thread: JoinHandle<()>,
+) -> Result<(), String> {
+    stop.store(true, Ordering::Release);
+    signal_event(wake_event);
+    if done.recv_timeout(STOP_TIMEOUT).is_ok() {
+        thread
+            .join()
+            .map_err(|_| "renderer thread panicked while stopping".to_string())
+    } else {
+        drop(thread);
+        Err("renderer did not stop within 2 seconds".into())
     }
 }
 
@@ -357,9 +442,11 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        create_wake_event, measured_fps, signal_event, wait_for_message, window_class_name,
+        StartWait, create_wake_event, measured_fps, signal_event, wait_for_message, wait_for_start,
+        window_class_name,
     };
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -383,6 +470,41 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.last(), Some(&0));
         assert_eq!(second.last(), Some(&0));
+    }
+
+    #[test]
+    fn ready_frame_wins_a_simultaneous_start_cancellation() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        ready_tx.send(Ok(())).unwrap();
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            wait_for_start(&ready_rx, &cancel, Duration::from_secs(1)),
+            StartWait::Ready
+        );
+    }
+
+    #[test]
+    fn renderer_start_wait_distinguishes_cancel_timeout_and_disconnect() {
+        let (_ready_tx, ready_rx) = mpsc::channel();
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            wait_for_start(&ready_rx, &cancel, Duration::from_secs(1)),
+            StartWait::Cancelled
+        );
+
+        let (_ready_tx, ready_rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            wait_for_start(&ready_rx, &cancel, Duration::from_millis(1)),
+            StartWait::TimedOut
+        );
+
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        drop(ready_tx);
+        assert_eq!(
+            wait_for_start(&ready_rx, &cancel, Duration::from_secs(1)),
+            StartWait::Disconnected
+        );
     }
 
     #[test]

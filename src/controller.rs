@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
@@ -66,6 +67,7 @@ pub struct ControllerSender(Sender<Message>);
 
 pub struct Controller {
     sender: ControllerSender,
+    shutdown_requested: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -88,6 +90,8 @@ impl Controller {
         let (tx, rx) = mpsc::channel();
         let sender = ControllerSender(tx);
         let worker_tx = sender.0.clone();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = Arc::clone(&shutdown_requested);
         let worker = thread::spawn(move || {
             let mut session = None;
             let mut active_generation = None;
@@ -153,8 +157,31 @@ impl Controller {
                             }
                             let _ = report_tx.send(Message::Mapping { generation, event });
                         });
-                        match MappingSession::start_plan_with_reporter(plan, reporter) {
-                            Ok(started) => {
+                        match MappingSession::start_plan_with_reporter_cancellable(
+                            plan,
+                            reporter,
+                            &worker_shutdown,
+                        ) {
+                            Ok(mut started) => {
+                                if worker_shutdown.load(Ordering::Acquire) {
+                                    match started.stop() {
+                                        Ok(()) => diagnostics::log(
+                                            Level::Info,
+                                            "controller",
+                                            "shutdown",
+                                            Some(session_id),
+                                            "mapping completed during shutdown and was stopped",
+                                        ),
+                                        Err(error) => diagnostics::log(
+                                            Level::Error,
+                                            "controller",
+                                            error.stage(),
+                                            Some(session_id),
+                                            error.to_string(),
+                                        ),
+                                    }
+                                    continue;
+                                }
                                 session = Some(started);
                                 active_generation = Some(generation);
                                 active_session_id = Some(session_id);
@@ -176,6 +203,29 @@ impl Controller {
                             Err(error) => {
                                 active_generation = None;
                                 active_session_id = None;
+                                if worker_shutdown.load(Ordering::Acquire) {
+                                    let clean_cancel = error.is_clean_cancellation();
+                                    diagnostics::log(
+                                        if clean_cancel {
+                                            Level::Info
+                                        } else {
+                                            Level::Error
+                                        },
+                                        "controller",
+                                        if clean_cancel {
+                                            "shutdown"
+                                        } else {
+                                            error.stage()
+                                        },
+                                        Some(session_id),
+                                        if clean_cancel {
+                                            "mapping startup cancelled during shutdown".into()
+                                        } else {
+                                            error.to_string()
+                                        },
+                                    );
+                                    continue;
+                                }
                                 diagnostics::log(
                                     Level::Error,
                                     "controller",
@@ -259,6 +309,7 @@ impl Controller {
         });
         Self {
             sender,
+            shutdown_requested,
             worker: Some(worker),
         }
     }
@@ -268,6 +319,7 @@ impl Controller {
     }
 
     pub fn shutdown(mut self) {
+        self.shutdown_requested.store(true, Ordering::Release);
         let _ = self.sender.0.send(Message::Command(Command::Shutdown));
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
