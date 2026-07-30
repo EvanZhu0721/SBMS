@@ -6,9 +6,12 @@
 //! resource into CPU memory, or sends pixels through GDI.
 
 use std::fmt;
+use std::mem::size_of;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
+use crate::diagnostics::{self, Level};
 use windows::Win32::Foundation::{HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
@@ -16,7 +19,7 @@ use windows::Win32::Graphics::Direct3D::{
     D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, ID3DBlob, ID3DInclude,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
+    D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_BUFFER_DESC,
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_SAMPLER_DESC,
     D3D11_SDK_VERSION, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_VIEWPORT, D3D11CreateDevice, ID3D11Buffer, ID3D11Device, ID3D11DeviceContext,
@@ -29,13 +32,19 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MWA_NO_ALT_ENTER, DXGI_OUTDUPL_FRAME_INFO,
-    DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory2, IDXGIOutput,
-    IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource, IDXGISwapChain1,
+    DXGI_OUTDUPL_MOVE_RECT, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIFactory1,
+    IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    IDXGISwapChain1,
 };
 use windows::core::{Error as WindowsError, Interface, PCSTR};
 
 const FRAME_WAIT_TIMEOUT_MS: u32 = 50;
+const COPY_MODE_ENV: &str = "SBMS_RENDER_COPY_MODE";
+const MAX_METADATA_BYTES: u32 = 1024 * 1024;
+const MAX_COPY_REGIONS: usize = 128;
+const MAX_PARTIAL_COPY_PERCENT: u64 = 50;
+const COPY_STATS_INTERVAL: Duration = Duration::from_secs(10);
 
 const SHADER: &str = r#"
 Texture2D source_texture : register(t0);
@@ -192,11 +201,61 @@ pub fn run_gpu_renderer(
     mut on_present: impl FnMut() -> Result<(), String>,
 ) -> Result<(), GpuRendererError> {
     validate_config(config)?;
+    let copy_mode = CopyMode::from_environment();
     let (adapter, output) = find_source_output(config.source_rect)?;
     let (device, context) = create_device(&adapter)?;
     let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(classify_windows_error)?;
     let pipeline = Pipeline::new(config, &adapter, device, context)?;
-    pipeline.run(duplication, stop, &mut on_present)
+    pipeline.run(duplication, stop, copy_mode, &mut on_present)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyMode {
+    Full,
+    Dirty,
+}
+
+impl CopyMode {
+    fn from_environment() -> Self {
+        let value = std::env::var_os(COPY_MODE_ENV);
+        match Self::parse(value.as_deref()) {
+            Ok(Self::Dirty) => {
+                diagnostics::log(
+                    Level::Info,
+                    "renderer",
+                    "copy-mode",
+                    None,
+                    "experimental dirty source copy enabled",
+                );
+                Self::Dirty
+            }
+            Ok(Self::Full) => Self::Full,
+            Err(value) => {
+                diagnostics::log(
+                    Level::Warn,
+                    "renderer",
+                    "copy-mode",
+                    None,
+                    format!("invalid {COPY_MODE_ENV}={value}; using full source copy"),
+                );
+                Self::Full
+            }
+        }
+    }
+
+    fn parse(value: Option<&std::ffi::OsStr>) -> Result<Self, String> {
+        let Some(value) = value else {
+            return Ok(Self::Full);
+        };
+        let Some(value) = value.to_str() else {
+            return Err(format!("{value:?}"));
+        };
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "full" => Ok(Self::Full),
+            "dirty" => Ok(Self::Dirty),
+            _ => Err(format!("{value:?}")),
+        }
+    }
 }
 
 fn validate_config(config: GpuRendererConfig) -> Result<(), GpuRendererError> {
@@ -402,11 +461,14 @@ impl Pipeline {
         self,
         duplication: IDXGIOutputDuplication,
         stop: &AtomicBool,
+        copy_mode: CopyMode,
         on_present: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<(), GpuRendererError> {
         let mut source_texture = None;
         let mut source_view = None;
         let mut source_description = None;
+        let mut copy_stats = CopyStats::new();
+        let mut metadata_buffers = FrameMetadataBuffers::default();
 
         while !stop.load(Ordering::Acquire) {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
@@ -436,7 +498,9 @@ impl Pipeline {
                     description.Format.0
                 )));
             }
-            if source_description != Some((description.Width, description.Height)) {
+            let texture_rebuilt =
+                source_description != Some((description.Width, description.Height));
+            if texture_rebuilt {
                 let (texture, view) = self.create_source_texture(description)?;
                 source_texture = Some(texture);
                 source_view = Some(view);
@@ -446,7 +510,18 @@ impl Pipeline {
             let texture = source_texture.as_ref().ok_or_else(|| {
                 GpuRendererError::Failure("source texture was not initialized".into())
             })?;
-            unsafe { self.context.CopyResource(texture, &acquired) };
+            self.copy_source_frame(
+                &duplication,
+                &frame_info,
+                texture,
+                &acquired,
+                description.Width,
+                description.Height,
+                copy_mode,
+                texture_rebuilt,
+                &mut metadata_buffers,
+                &mut copy_stats,
+            );
             drop(frame);
 
             let view = source_view.as_ref().ok_or_else(|| {
@@ -459,8 +534,60 @@ impl Pipeline {
             unsafe {
                 self.context.PSSetShaderResources(0, Some(&[None]));
             }
+            copy_stats.maybe_log(copy_mode, description.Width, description.Height);
         }
         Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_source_frame(
+        &self,
+        duplication: &IDXGIOutputDuplication,
+        frame_info: &DXGI_OUTDUPL_FRAME_INFO,
+        target: &ID3D11Texture2D,
+        acquired: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+        copy_mode: CopyMode,
+        force_full_copy: bool,
+        metadata_buffers: &mut FrameMetadataBuffers,
+        stats: &mut CopyStats,
+    ) {
+        let regions = if copy_mode == CopyMode::Dirty && !force_full_copy {
+            dirty_copy_regions(duplication, frame_info, width, height, metadata_buffers)
+        } else {
+            None
+        };
+
+        let Some(regions) = regions else {
+            unsafe { self.context.CopyResource(target, acquired) };
+            stats.record_full(width, height);
+            return;
+        };
+
+        for region in regions {
+            let source_box = D3D11_BOX {
+                left: region.left as u32,
+                top: region.top as u32,
+                front: 0,
+                right: region.right as u32,
+                bottom: region.bottom as u32,
+                back: 1,
+            };
+            unsafe {
+                self.context.CopySubresourceRegion(
+                    target,
+                    0,
+                    region.left as u32,
+                    region.top as u32,
+                    0,
+                    acquired,
+                    0,
+                    Some(&source_box),
+                );
+            }
+        }
+        stats.record_partial(regions);
     }
 
     fn create_source_texture(
@@ -535,6 +662,205 @@ impl Pipeline {
                 .PSSetShaderResources(0, Some(&[Some(source_view.clone())]));
             self.context.Draw(3, 0);
         }
+    }
+}
+
+fn dirty_copy_regions<'a>(
+    duplication: &IDXGIOutputDuplication,
+    frame_info: &DXGI_OUTDUPL_FRAME_INFO,
+    width: u32,
+    height: u32,
+    buffers: &'a mut FrameMetadataBuffers,
+) -> Option<&'a [RECT]> {
+    let metadata_bytes = frame_info.TotalMetadataBufferSize;
+    if metadata_bytes == 0 {
+        buffers.regions.clear();
+        return Some(&buffers.regions);
+    }
+    if metadata_bytes > MAX_METADATA_BYTES {
+        return None;
+    }
+
+    let FrameMetadataBuffers {
+        moves,
+        dirty,
+        regions,
+    } = buffers;
+    let moves = read_move_rects(duplication, metadata_bytes, moves)?;
+    let dirty = read_dirty_rects(duplication, metadata_bytes, dirty)?;
+    if select_copy_regions(
+        moves.iter().map(|movement| movement.DestinationRect),
+        dirty.iter().copied(),
+        width,
+        height,
+        regions,
+    ) {
+        Some(regions.as_slice())
+    } else {
+        None
+    }
+}
+
+#[derive(Default)]
+struct FrameMetadataBuffers {
+    moves: Vec<DXGI_OUTDUPL_MOVE_RECT>,
+    dirty: Vec<RECT>,
+    regions: Vec<RECT>,
+}
+
+fn read_move_rects<'a>(
+    duplication: &IDXGIOutputDuplication,
+    metadata_bytes: u32,
+    buffer: &'a mut Vec<DXGI_OUTDUPL_MOVE_RECT>,
+) -> Option<&'a [DXGI_OUTDUPL_MOVE_RECT]> {
+    let element_bytes = size_of::<DXGI_OUTDUPL_MOVE_RECT>();
+    let element_count = (metadata_bytes as usize).div_ceil(element_bytes).max(1);
+    buffer.resize(element_count, DXGI_OUTDUPL_MOVE_RECT::default());
+    let buffer_bytes = u32::try_from(buffer.len().checked_mul(element_bytes)?).ok()?;
+    let mut required_bytes = 0;
+    unsafe {
+        duplication
+            .GetFrameMoveRects(buffer_bytes, buffer.as_mut_ptr(), &mut required_bytes)
+            .ok()?;
+    }
+    let required_bytes = required_bytes as usize;
+    if required_bytes > buffer_bytes as usize || !required_bytes.is_multiple_of(element_bytes) {
+        return None;
+    }
+    Some(&buffer[..required_bytes / element_bytes])
+}
+
+fn read_dirty_rects<'a>(
+    duplication: &IDXGIOutputDuplication,
+    metadata_bytes: u32,
+    buffer: &'a mut Vec<RECT>,
+) -> Option<&'a [RECT]> {
+    let element_bytes = size_of::<RECT>();
+    let element_count = (metadata_bytes as usize).div_ceil(element_bytes).max(1);
+    buffer.resize(element_count, RECT::default());
+    let buffer_bytes = u32::try_from(buffer.len().checked_mul(element_bytes)?).ok()?;
+    let mut required_bytes = 0;
+    unsafe {
+        duplication
+            .GetFrameDirtyRects(buffer_bytes, buffer.as_mut_ptr(), &mut required_bytes)
+            .ok()?;
+    }
+    let required_bytes = required_bytes as usize;
+    if required_bytes > buffer_bytes as usize || !required_bytes.is_multiple_of(element_bytes) {
+        return None;
+    }
+    Some(&buffer[..required_bytes / element_bytes])
+}
+
+fn select_copy_regions(
+    moved: impl IntoIterator<Item = RECT>,
+    dirty: impl IntoIterator<Item = RECT>,
+    width: u32,
+    height: u32,
+    regions: &mut Vec<RECT>,
+) -> bool {
+    regions.clear();
+    let Some(source_pixels) = u64::from(width).checked_mul(u64::from(height)) else {
+        return false;
+    };
+    if source_pixels == 0 {
+        return false;
+    }
+
+    let mut copied_pixels = 0_u64;
+    for region in moved.into_iter().chain(dirty) {
+        if region.left < 0
+            || region.top < 0
+            || region.right <= region.left
+            || region.bottom <= region.top
+            || region.right as u32 > width
+            || region.bottom as u32 > height
+        {
+            return false;
+        }
+        if regions.contains(&region) {
+            continue;
+        }
+        if regions.len() == MAX_COPY_REGIONS {
+            return false;
+        }
+        let region_pixels =
+            (region.right - region.left) as u64 * (region.bottom - region.top) as u64;
+        let Some(updated_pixels) = copied_pixels.checked_add(region_pixels) else {
+            return false;
+        };
+        copied_pixels = updated_pixels;
+        if copied_pixels.saturating_mul(100)
+            >= source_pixels.saturating_mul(MAX_PARTIAL_COPY_PERCENT)
+        {
+            return false;
+        }
+        regions.push(region);
+    }
+    true
+}
+
+struct CopyStats {
+    interval_started: Instant,
+    frames: u64,
+    full_frames: u64,
+    partial_frames: u64,
+    copied_regions: u64,
+    copied_pixels: u64,
+}
+
+impl CopyStats {
+    fn new() -> Self {
+        Self {
+            interval_started: Instant::now(),
+            frames: 0,
+            full_frames: 0,
+            partial_frames: 0,
+            copied_regions: 0,
+            copied_pixels: 0,
+        }
+    }
+
+    fn record_full(&mut self, width: u32, height: u32) {
+        self.frames += 1;
+        self.full_frames += 1;
+        self.copied_pixels += u64::from(width) * u64::from(height);
+    }
+
+    fn record_partial(&mut self, regions: &[RECT]) {
+        self.frames += 1;
+        self.partial_frames += 1;
+        self.copied_regions += regions.len() as u64;
+        self.copied_pixels += regions
+            .iter()
+            .map(|region| (region.right - region.left) as u64 * (region.bottom - region.top) as u64)
+            .sum::<u64>();
+    }
+
+    fn maybe_log(&mut self, copy_mode: CopyMode, width: u32, height: u32) {
+        if copy_mode != CopyMode::Dirty || self.interval_started.elapsed() < COPY_STATS_INTERVAL {
+            return;
+        }
+        let available_pixels = self
+            .frames
+            .saturating_mul(u64::from(width))
+            .saturating_mul(u64::from(height));
+        let copied_percent = if available_pixels == 0 {
+            0.0
+        } else {
+            self.copied_pixels as f64 * 100.0 / available_pixels as f64
+        };
+        diagnostics::log(
+            Level::Info,
+            "renderer",
+            "dirty-copy-stats",
+            None,
+            format!(
+                "frames={} partial={} full_fallbacks={} rects={} copied={copied_percent:.2}%",
+                self.frames, self.partial_frames, self.full_frames, self.copied_regions,
+            ),
+        );
+        *self = Self::new();
     }
 }
 
@@ -623,7 +949,9 @@ fn classify_hresult(code: windows::core::HRESULT) -> GpuRendererError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScaleParameters, compile_shader};
+    use super::{CopyMode, MAX_COPY_REGIONS, ScaleParameters, compile_shader, select_copy_regions};
+    use std::ffi::OsStr;
+    use windows::Win32::Foundation::RECT;
 
     #[test]
     fn shaders_compile_with_the_system_d3d_compiler() {
@@ -634,6 +962,67 @@ mod tests {
     #[test]
     fn scale_parameters_obey_constant_buffer_alignment() {
         assert_eq!(size_of::<ScaleParameters>(), 16);
+    }
+
+    #[test]
+    fn dirty_copy_keeps_move_destinations_and_dirty_rects() {
+        let moved = [RECT {
+            left: 1,
+            top: 2,
+            right: 11,
+            bottom: 12,
+        }];
+        let dirty = [RECT {
+            left: 20,
+            top: 30,
+            right: 40,
+            bottom: 50,
+        }];
+        let mut regions = Vec::new();
+        assert!(select_copy_regions(moved, dirty, 100, 100, &mut regions));
+        assert_eq!(regions, [moved[0], dirty[0]]);
+    }
+
+    #[test]
+    fn dirty_copy_falls_back_for_invalid_or_large_metadata() {
+        let invalid = [RECT {
+            left: -1,
+            top: 0,
+            right: 10,
+            bottom: 10,
+        }];
+        let mut regions = Vec::new();
+        assert!(!select_copy_regions([], invalid, 100, 100, &mut regions));
+
+        let half_frame = [RECT {
+            left: 0,
+            top: 0,
+            right: 50,
+            bottom: 100,
+        }];
+        assert!(!select_copy_regions([], half_frame, 100, 100, &mut regions));
+
+        let too_many = (0..=MAX_COPY_REGIONS).map(|column| RECT {
+            left: column as i32,
+            top: 0,
+            right: column as i32 + 1,
+            bottom: 1,
+        });
+        assert!(!select_copy_regions([], too_many, 1000, 1000, &mut regions));
+    }
+
+    #[test]
+    fn full_copy_remains_the_default_and_invalid_values_are_rejected() {
+        assert_eq!(CopyMode::parse(None), Ok(CopyMode::Full));
+        assert_eq!(
+            CopyMode::parse(Some(OsStr::new(" full "))),
+            Ok(CopyMode::Full)
+        );
+        assert_eq!(
+            CopyMode::parse(Some(OsStr::new("DIRTY"))),
+            Ok(CopyMode::Dirty)
+        );
+        assert!(CopyMode::parse(Some(OsStr::new("partial"))).is_err());
     }
 
     #[test]
