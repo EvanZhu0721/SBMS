@@ -12,6 +12,22 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    try {
+        return [BitConverter]::ToString(
+            $algorithm.ComputeHash($stream)
+        ).Replace('-', '')
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+
 $repository = $PSScriptRoot
 $release = Join-Path $repository 'target\release'
 $driver = Join-Path $repository 'target\driver'
@@ -113,6 +129,11 @@ foreach ($binary in @(
         throw "Signature verification failed for $binary"
     }
 }
-$hash = (Get-FileHash -LiteralPath $package -Algorithm SHA256).Hash
+$hash = Get-Sha256Hex -LiteralPath $package
+$hashFile = "$package.sha256"
+$hashLine = "$hash  $([IO.Path]::GetFileName($package))`n"
+$utf8 = New-Object Text.UTF8Encoding($false)
+[IO.File]::WriteAllText($hashFile, $hashLine, $utf8)
 Write-Host "installer_package=$package"
 Write-Host "installer_sha256=$hash"
+Write-Host "installer_sha256_file=$hashFile"
