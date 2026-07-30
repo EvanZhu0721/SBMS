@@ -1,17 +1,20 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WPARAM};
+use windows::Win32::Foundation::{
+    HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WPARAM,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{GetCurrentThreadId, INFINITE};
+use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG,
     MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    PostThreadMessageW, QS_ALLINPUT, RegisterClassW, SW_SHOW, ShowWindow, TranslateMessage,
-    UnregisterClassW, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_QUIT, WNDCLASSW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    QS_ALLINPUT, RegisterClassW, SW_SHOW, ShowWindow, TranslateMessage, UnregisterClassW,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_QUIT, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, w};
 
@@ -21,7 +24,6 @@ use crate::input::{InputGuard, flush_movement, handle_message};
 
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
-const WAKE_MESSAGE: u32 = WM_APP + 0x53;
 static WINDOW_CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
@@ -34,7 +36,7 @@ pub type RendererReporter = Arc<dyn Fn(RendererEvent) + Send + Sync + 'static>;
 
 pub struct Renderer {
     stop: Arc<AtomicBool>,
-    thread_id: Arc<AtomicU32>,
+    wake_event: Arc<OwnedHandle>,
     done: mpsc::Receiver<Result<(), String>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -47,13 +49,19 @@ impl Renderer {
     ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
-        let thread_id = Arc::new(AtomicU32::new(0));
-        let worker_thread_id = Arc::clone(&thread_id);
+        let wake_event = Arc::new(create_wake_event()?);
+        let worker_wake_event = Arc::clone(&wake_event);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
-            worker_thread_id.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
-            let result = run(target.rect, source.rect, &worker_stop, &ready_tx, &reporter);
+            let result = run(
+                target.rect,
+                source.rect,
+                &worker_stop,
+                &worker_wake_event,
+                &ready_tx,
+                &reporter,
+            );
             if let Err(error) = &result {
                 let _ = ready_tx.send(Err(error.clone()));
             }
@@ -67,19 +75,19 @@ impl Renderer {
         match ready_rx.recv_timeout(START_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
                 stop,
-                thread_id,
+                wake_event,
                 done: done_rx,
                 thread: Some(thread),
             }),
             Ok(Err(error)) => {
                 stop.store(true, Ordering::Release);
-                wake_thread(thread_id.load(Ordering::Acquire));
+                signal_event(&wake_event);
                 let _ = thread.join();
                 Err(error)
             }
             Err(_) => {
                 stop.store(true, Ordering::Release);
-                wake_thread(thread_id.load(Ordering::Acquire));
+                signal_event(&wake_event);
                 let _ = done_rx.recv_timeout(STOP_TIMEOUT);
                 drop(thread);
                 Err("renderer did not receive and draw a first frame within 10 seconds".into())
@@ -89,7 +97,7 @@ impl Renderer {
 
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
-        wake_thread(self.thread_id.load(Ordering::Acquire));
+        signal_event(&self.wake_event);
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
@@ -121,6 +129,7 @@ fn run(
     target: RECT,
     source: RECT,
     stop: &AtomicBool,
+    wake_event: &OwnedHandle,
     ready: &mpsc::Sender<Result<(), String>>,
     reporter: &RendererReporter,
 ) -> Result<(), String> {
@@ -185,12 +194,11 @@ fn run(
     let result = thread::scope(|scope| {
         let (draw_done_tx, draw_done_rx) = mpsc::sync_channel(1);
         let window_value = window.0 as usize;
-        let window_thread_id = unsafe { GetCurrentThreadId() };
         let draw_thread = scope.spawn(move || {
             let window = HWND(window_value as *mut _);
             let result = draw_frames(window, width, height, source, stop, ready, reporter);
             let _ = draw_done_tx.send(result);
-            wake_thread(window_thread_id);
+            signal_event(wake_event);
         });
         let draw_result = loop {
             if let Ok(result) = draw_done_rx.try_recv() {
@@ -206,7 +214,11 @@ fn run(
                 continue;
             }
             flush_movement();
-            wait_for_message()?;
+            if let Err(error) = wait_for_message(wake_event) {
+                stop.store(true, Ordering::Release);
+                let _ = draw_done_rx.recv();
+                break Err(error);
+            }
         };
         draw_thread
             .join()
@@ -221,9 +233,22 @@ fn run(
     result
 }
 
-fn wait_for_message() -> Result<(), String> {
-    let result =
-        unsafe { MsgWaitForMultipleObjectsEx(None, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
+fn create_wake_event() -> Result<OwnedHandle, String> {
+    let handle = unsafe { CreateEventW(None, false, false, PCWSTR::null()) }
+        .map_err(|error| format!("CreateEventW(renderer wake) failed: {error}"))?;
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle.0) })
+}
+
+fn wait_for_message(wake_event: &OwnedHandle) -> Result<(), String> {
+    let handle = HANDLE(wake_event.as_raw_handle());
+    let result = unsafe {
+        MsgWaitForMultipleObjectsEx(
+            Some(std::slice::from_ref(&handle)),
+            INFINITE,
+            QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE,
+        )
+    };
     if result == WAIT_FAILED {
         return Err(format!(
             "MsgWaitForMultipleObjectsEx failed: {}",
@@ -233,10 +258,8 @@ fn wait_for_message() -> Result<(), String> {
     Ok(())
 }
 
-fn wake_thread(thread_id: u32) {
-    if thread_id != 0 {
-        let _ = unsafe { PostThreadMessageW(thread_id, WAKE_MESSAGE, WPARAM(0), LPARAM(0)) };
-    }
+fn signal_event(wake_event: &OwnedHandle) {
+    let _ = unsafe { SetEvent(HANDLE(wake_event.as_raw_handle())) };
 }
 
 fn draw_frames(
@@ -333,12 +356,13 @@ unsafe extern "system" fn window_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::{measured_fps, wait_for_message, wake_thread, window_class_name};
+    use super::{
+        create_wake_event, measured_fps, signal_event, wait_for_message, window_class_name,
+    };
+    use std::sync::Arc;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
-    use windows::Win32::System::Threading::GetCurrentThreadId;
-    use windows::Win32::UI::WindowsAndMessaging::{MSG, PM_REMOVE, PeekMessageW};
 
     #[test]
     fn fps_uses_actual_sample_duration() {
@@ -362,17 +386,18 @@ mod tests {
     }
 
     #[test]
-    fn queued_wake_releases_message_wait() {
-        let (thread_id_tx, thread_id_rx) = mpsc::sync_channel(1);
+    fn event_releases_message_wait() {
+        let wake_event = Arc::new(create_wake_event().unwrap());
+        let waiting_event = Arc::clone(&wake_event);
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let (done_tx, done_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
-            let mut message = MSG::default();
-            let _ = unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) };
-            thread_id_tx.send(unsafe { GetCurrentThreadId() }).unwrap();
-            done_tx.send(wait_for_message()).unwrap();
+            ready_tx.send(()).unwrap();
+            done_tx.send(wait_for_message(&waiting_event)).unwrap();
         });
 
-        wake_thread(thread_id_rx.recv().unwrap());
+        ready_rx.recv().unwrap();
+        signal_event(&wake_event);
         assert_eq!(
             done_rx.recv_timeout(Duration::from_millis(200)).unwrap(),
             Ok(())

@@ -186,8 +186,6 @@ impl WindowMigration {
             migration_id,
             Arc::clone(&entries),
             Arc::clone(&stop_scanner),
-            target_monitor.0 as usize,
-            source_monitor.0 as usize,
             target.rect,
             source.rect,
         ) {
@@ -464,22 +462,32 @@ fn spawn_scanner(
     migration_id: u64,
     entries: Arc<Mutex<Vec<WindowSnapshot>>>,
     stop: Arc<AtomicBool>,
-    target_monitor_value: usize,
-    source_monitor_value: usize,
     target_rect: RECT,
     source_rect: RECT,
 ) -> Result<JoinHandle<Vec<String>>, String> {
     thread::Builder::new()
         .name("sbms-window-scanner".into())
         .spawn(move || {
-            let target_monitor = HMONITOR(target_monitor_value as *mut _);
-            let source_monitor = HMONITOR(source_monitor_value as *mut _);
             let mut errors = Vec::new();
             while !stop.load(Ordering::Acquire) {
                 thread::park_timeout(SCAN_INTERVAL);
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
+                let target_monitor = match monitor_for_rect(target_rect, "scanner target") {
+                    Ok(monitor) => monitor,
+                    Err(error) => {
+                        remember_error(&mut errors, error);
+                        continue;
+                    }
+                };
+                let source_monitor = match monitor_for_rect(source_rect, "scanner virtual source") {
+                    Ok(monitor) => monitor,
+                    Err(error) => {
+                        remember_error(&mut errors, error);
+                        continue;
+                    }
+                };
                 let candidates = match enumerate_target_windows(target_monitor) {
                     Ok(candidates) => candidates,
                     Err(error) => {
