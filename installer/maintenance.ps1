@@ -418,8 +418,10 @@ function Install-Sbms {
     catch {
         $failure = $_
         Remove-SbmsTask
-        $added = @(Find-SbmsDriverPackages) |
-            Where-Object { $_.Name -notin $before }
+        $added = @(
+            @(Find-SbmsDriverPackages) |
+                Where-Object { $_.Name -notin $before }
+        )
         if ($added.Count -gt 0) {
             Remove-DriverPackages -Packages $added
         }
