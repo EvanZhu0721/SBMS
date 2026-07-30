@@ -82,3 +82,9 @@ cargo build --release
 ```
 
 The installer is written to `target\installer`.
+
+## Acknowledgments
+
+thanks for all of my friends, especially the "Genius Bar", who shared their ideas and advices with me. thanks for Mr Berti who is my CSA teacher. thanks for my parents who support me. thanks for my brother who lives in the US and help me recharge my openAI account. thanks for Tibo who reset my token for several times. thanks for all of the agents and subagents who change my ideas into the program. 
+
+<span style="color: black;">of course I still love you</span>
