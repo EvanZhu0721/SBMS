@@ -1,0 +1,17 @@
+{
+  "groups": [
+    {
+      "id": 0,
+      "mode": {
+        "width": 1800,
+        "height": 2880,
+        "refresh_numerator": 120,
+        "refresh_denominator": 1
+      },
+      "rotation": "deg90",
+      "route": {
+        "kind": "stream_only"
+      }
+    }
+  ]
+}

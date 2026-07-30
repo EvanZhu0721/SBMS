@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Install', 'Stop', 'PreflightUninstall', 'Uninstall')]
+    [ValidateSet('Install', 'PrepareUpgrade', 'Stop', 'PreflightUninstall', 'Uninstall')]
     [string]$Action,
 
     [Parameter(Mandatory)]
@@ -19,6 +19,7 @@ $tray = Join-Path $InstallRoot 'sbms-tray.exe'
 $cli = Join-Path $InstallRoot 'sbms.exe'
 $driverInf = Join-Path $InstallRoot 'driver\SBMSIndirectDisplay.inf'
 $deviceInstance = 'SWD\SBMS\VirtualDisplay-01'
+$configRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SBMS'
 
 function Get-InteractiveIdentity {
     $sessionId = (Get-Process -Id $PID).SessionId
@@ -125,6 +126,64 @@ function Stop-Sbms {
         Start-Sleep -Milliseconds 200
     }
     throw 'An installed SBMS process did not stop within 30 seconds.'
+}
+
+function Backup-SbmsConfiguration {
+    $persistentNames = @(
+        'config-v1.json'
+        'config-v2.json'
+        'display-overrides-v1.json'
+    )
+    $sources = @(
+        $persistentNames |
+            ForEach-Object { Join-Path $configRoot $_ } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+    )
+    if ($sources.Count -eq 0) {
+        return
+    }
+
+    $backupRoot = Join-Path $configRoot 'upgrade-backups'
+    $stamp = [DateTime]::UtcNow.ToString(
+        'yyyyMMddTHHmmssfffZ',
+        [Globalization.CultureInfo]::InvariantCulture)
+    $snapshot = Join-Path $backupRoot $stamp
+    New-Item -ItemType Directory -Path $snapshot -Force | Out-Null
+
+    $entries = @()
+    foreach ($source in $sources) {
+        $name = Split-Path -Leaf $source
+        $destination = Join-Path $snapshot $name
+        Copy-Item -LiteralPath $source -Destination $destination
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+        $backupHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+        if ($sourceHash -ne $backupHash) {
+            throw "Configuration snapshot verification failed for $name."
+        }
+        $item = Get-Item -LiteralPath $destination
+        $entries += [pscustomobject]@{
+            name = $name
+            bytes = $item.Length
+            sha256 = $backupHash
+        }
+    }
+
+    $manifest = [pscustomobject]@{
+        created_utc = [DateTime]::UtcNow.ToString('o')
+        files = $entries
+    }
+    $manifestPath = Join-Path $snapshot 'manifest.json'
+    $manifestJson = $manifest | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText(
+        $manifestPath,
+        $manifestJson,
+        [Text.UTF8Encoding]::new($false))
+}
+
+function Prepare-SbmsUpgrade {
+    Assert-InstallIdentity | Out-Null
+    Stop-Sbms
+    Backup-SbmsConfiguration
 }
 
 function Get-VerifiedTask {
@@ -409,6 +468,9 @@ function Uninstall-Sbms {
 }
 
 switch ($Action) {
+    'PrepareUpgrade' {
+        Prepare-SbmsUpgrade
+    }
     'Stop' {
         Stop-Sbms
     }

@@ -37,6 +37,25 @@ Each `MappingGroupInfo` exposes:
 `\\.\DISPLAYn` is temporary and must not be persisted. Use the group ID for
 SBMS configuration and the brace GUID for Sunshine's `output_name`.
 
+Each group may also specify `rotation` as `deg0`, `deg90`, `deg180`, or
+`deg270`; omitted values remain `deg0`. `mode.width` and `mode.height` are the
+final native desktop dimensions published by the IDD. SBMS does not swap a
+portrait mode back to landscape: `1800x2880` remains a native `1800x2880`
+display so applications can detect the portrait surface directly.
+
+The rotation value remains the user's orientation and sizing input. Once those
+inputs have produced the final native dimensions, the virtual display is
+published with identity Windows topology rotation. For example, both portrait
+directions produce a native portrait surface rather than applying another
+width/height swap. Content rotation, if needed by a future streaming backend,
+must be an explicit renderer operation rather than an implicit display-mode
+rotation.
+
+The tray UI can use a ready stream-only group's brace GUID to update Sunshine's
+`output_name` and restart `SunshineService`. This is a host-side Sunshine
+action: it requires UAC, interrupts existing Sunshine clients, and does not
+remotely launch Moonlight on another device.
+
 ## JSON interface
 
 The CLI provides a GUI-independent validation and execution surface:
@@ -81,6 +100,12 @@ Example with one local mirror and one streaming desktop:
 }
 ```
 
-The existing `sbms map` and tray controller remain a connector-0 single-mirror
-adapter. The current GUI and version-1 persisted configuration are deliberately
-unchanged; a later GUI can build and persist `MappingPlan` directly.
+The tray UI persists the complete ordered group list in
+`%LOCALAPPDATA%\SBMS\config-v2.json` and builds one `MappingPlan` from it.
+Mirror and stream-only routes keep independent display, sizing, mode, refresh,
+aspect-ratio and rotation settings. The selected tab is persisted as a group
+ID. A valid legacy `config-v1.json` is imported once as mirror group
+`Output 1`; the old file is retained.
+
+The compatibility commands `sbms map` and `sbms config set-target` operate on
+`Output 1` only. They preserve every other configured group.

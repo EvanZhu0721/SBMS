@@ -24,7 +24,7 @@ use windows::core::{PCWSTR, PWSTR, w};
 const GATE_MAGIC: u32 = 0x5342_4736;
 const PROTOCOL_VERSION: u32 = 6;
 const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v6");
-const MAX_DIMENSION: u32 = 16_384;
+pub const MAX_VIRTUAL_DIMENSION: u32 = 16_384;
 const MAX_REFRESH_HZ: u64 = 1_000;
 pub const MAX_VIRTUAL_DISPLAYS: usize = 8;
 
@@ -70,11 +70,11 @@ impl VirtualMode {
     pub fn validate(self) -> Result<(), SessionGateError> {
         if self.width == 0
             || self.height == 0
-            || self.width > MAX_DIMENSION
-            || self.height > MAX_DIMENSION
+            || self.width > MAX_VIRTUAL_DIMENSION
+            || self.height > MAX_VIRTUAL_DIMENSION
         {
             return Err(SessionGateError(format!(
-                "virtual dimensions must be between 1 and {MAX_DIMENSION}"
+                "virtual dimensions must be between 1 and {MAX_VIRTUAL_DIMENSION}"
             )));
         }
         if self.refresh_numerator == 0 || self.refresh_denominator == 0 {

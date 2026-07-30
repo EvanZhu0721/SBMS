@@ -1,6 +1,7 @@
 pub mod config;
 pub mod control;
 mod controller;
+pub mod diagnostics;
 pub mod display;
 pub mod geometry;
 mod gpu_renderer;

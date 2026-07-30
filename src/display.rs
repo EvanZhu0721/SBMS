@@ -23,8 +23,9 @@ use windows::Win32::Devices::Display::{
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH,
-    DM_POSITION, ENUM_DISPLAY_SETTINGS_FLAGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
+    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_DISPLAYORIENTATION,
+    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_DEFAULT, ENUM_DISPLAY_SETTINGS_FLAGS,
+    ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
 };
 use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA1_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -99,7 +100,11 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
             display.device_name, requested.width, requested.height, requested_hz
         ))
     })?;
-    mode.dmFields = DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+    mode.dmPelsWidth = requested.width;
+    mode.dmPelsHeight = requested.height;
+    mode.Anonymous1.Anonymous2.dmDisplayOrientation = DMDO_DEFAULT;
+    mode.dmFields =
+        DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_DISPLAYORIENTATION;
     let result = unsafe {
         ChangeDisplaySettingsExW(
             PCWSTR(device_name.as_ptr()),
@@ -111,7 +116,7 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
     };
     if result != DISP_CHANGE_SUCCESSFUL {
         return Err(DisplayError(format!(
-            "ChangeDisplaySettingsExW({}) rejected {}x{}@{} with status {}",
+            "ChangeDisplaySettingsExW({}) rejected native mode {}x{}@{} with status {}",
             display.device_name, requested.width, requested.height, requested_hz, result.0
         )));
     }

@@ -2,10 +2,14 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
+use crate::diagnostics::{self, Level, MappingSessionId};
 use crate::display::active_displays;
-use crate::geometry::Rotation;
-use crate::mapping::{MappingRequest, MappingSession};
-use crate::renderer::{RendererEvent, RendererReporter};
+use crate::geometry::{AspectRatio, Rotation};
+use crate::mapping::{
+    MappingEvent, MappingGroupInfo, MappingGroupRequest, MappingPlan, MappingReporter,
+    MappingRoute, MappingSession, native_topology_rotation,
+};
+use crate::renderer::RendererEvent;
 
 #[derive(Clone, Debug)]
 pub struct DisplayOption {
@@ -16,15 +20,23 @@ pub struct DisplayOption {
     pub height: i32,
     pub native_width: u32,
     pub native_height: u32,
+    pub detected_physical_width_mm: Option<f64>,
+    pub detected_physical_height_mm: Option<f64>,
     pub physical_width_mm: Option<f64>,
     pub physical_height_mm: Option<f64>,
+    pub physical_override_inches: Option<f64>,
+    pub physical_override_aspect_ratio: Option<AspectRatio>,
     pub rotation: Rotation,
 }
 
 #[derive(Clone, Debug)]
 pub enum ControllerEvent {
     Displays(Vec<DisplayOption>),
-    Fps(u32),
+    GroupReady(MappingGroupInfo),
+    Fps {
+        id: u32,
+        fps: u32,
+    },
     State {
         state: &'static str,
         detail: String,
@@ -36,16 +48,16 @@ pub enum ControllerEvent {
 
 enum Command {
     Refresh,
-    Start(String),
+    Start(MappingPlan),
     Stop,
     Shutdown,
 }
 
 enum Message {
     Command(Command),
-    Renderer {
+    Mapping {
         generation: u64,
-        event: RendererEvent,
+        event: MappingEvent,
     },
 }
 
@@ -62,8 +74,8 @@ impl ControllerSender {
         let _ = self.0.send(Message::Command(Command::Refresh));
     }
 
-    pub fn start(&self, target: String) {
-        let _ = self.0.send(Message::Command(Command::Start(target)));
+    pub fn start(&self, plan: MappingPlan) {
+        let _ = self.0.send(Message::Command(Command::Start(plan)));
     }
 
     pub fn stop(&self) {
@@ -79,16 +91,34 @@ impl Controller {
         let worker = thread::spawn(move || {
             let mut session = None;
             let mut active_generation = None;
+            let mut active_session_id = None;
             let mut next_generation = 0_u64;
             while let Ok(message) = rx.recv() {
                 match message {
                     Message::Command(Command::Refresh) => refresh(&emit),
-                    Message::Command(Command::Start(target)) => {
+                    Message::Command(Command::Start(plan)) => {
                         if session.is_some() {
                             continue;
                         }
                         next_generation = next_generation.wrapping_add(1);
                         let generation = next_generation;
+                        let session_id = diagnostics::new_mapping_session_id();
+                        diagnostics::log(
+                            Level::Info,
+                            "controller",
+                            "start",
+                            Some(session_id),
+                            format!("mapping plan requested with {} group(s)", plan.groups.len()),
+                        );
+                        for group in &plan.groups {
+                            diagnostics::log(
+                                Level::Info,
+                                "controller",
+                                "plan",
+                                Some(session_id),
+                                format_mapping_group_plan(group),
+                            );
+                        }
                         emit(state(
                             "Starting",
                             "Creating virtual display…".into(),
@@ -97,15 +127,44 @@ impl Controller {
                             "",
                         ));
                         let report_tx = worker_tx.clone();
-                        let reporter: RendererReporter = Arc::new(move |event| {
-                            let _ = report_tx.send(Message::Renderer { generation, event });
+                        let reporter: MappingReporter = Arc::new(move |event| {
+                            if let MappingEvent::Topology { message } = &event {
+                                diagnostics::log(
+                                    Level::Debug,
+                                    "mapping",
+                                    "topology",
+                                    Some(session_id),
+                                    message,
+                                );
+                                return;
+                            }
+                            if let MappingEvent::Renderer {
+                                id,
+                                event: RendererEvent::Failed(error),
+                            } = &event
+                            {
+                                diagnostics::log(
+                                    Level::Error,
+                                    "renderer",
+                                    "renderer",
+                                    Some(session_id),
+                                    format!("group {id}: {error}"),
+                                );
+                            }
+                            let _ = report_tx.send(Message::Mapping { generation, event });
                         });
-                        match MappingRequest::configured(target).and_then(|request| {
-                            MappingSession::start_with_reporter(request, reporter)
-                        }) {
+                        match MappingSession::start_plan_with_reporter(plan, reporter) {
                             Ok(started) => {
                                 session = Some(started);
                                 active_generation = Some(generation);
+                                active_session_id = Some(session_id);
+                                diagnostics::log(
+                                    Level::Info,
+                                    "controller",
+                                    "running",
+                                    Some(session_id),
+                                    "mapping is active",
+                                );
                                 emit(state(
                                     "Running",
                                     "Mapping is active".into(),
@@ -116,6 +175,14 @@ impl Controller {
                             }
                             Err(error) => {
                                 active_generation = None;
+                                active_session_id = None;
+                                diagnostics::log(
+                                    Level::Error,
+                                    "controller",
+                                    error.stage(),
+                                    Some(session_id),
+                                    error.to_string(),
+                                );
                                 emit(state(
                                     "Stopped",
                                     "Couldn’t start mapping".into(),
@@ -128,25 +195,47 @@ impl Controller {
                     }
                     Message::Command(Command::Stop) => {
                         active_generation = None;
-                        stop(&mut session, &emit);
+                        stop(&mut session, &mut active_session_id, &emit);
                     }
                     Message::Command(Command::Shutdown) => {
-                        stop(&mut session, &emit);
+                        stop(&mut session, &mut active_session_id, &emit);
                         break;
                     }
-                    Message::Renderer { generation, event }
+                    Message::Mapping { generation, event }
                         if active_generation == Some(generation) && session.is_some() =>
                     {
                         match event {
-                            RendererEvent::Fps(fps) => {
-                                emit(ControllerEvent::Fps(fps.min(999)));
+                            MappingEvent::GroupReady(group) => {
+                                emit(ControllerEvent::GroupReady(group));
                             }
-                            RendererEvent::Failed(error) => {
+                            MappingEvent::Renderer {
+                                id,
+                                event: RendererEvent::Fps(fps),
+                            } => {
+                                emit(ControllerEvent::Fps {
+                                    id,
+                                    fps: fps.min(999),
+                                });
+                            }
+                            MappingEvent::Renderer {
+                                id,
+                                event: RendererEvent::Failed(error),
+                            } => {
                                 active_generation = None;
+                                let session_id = active_session_id.take();
                                 let cleanup_error = session
                                     .take()
                                     .and_then(|mut active| active.stop().err())
-                                    .map(|cleanup| cleanup.to_string());
+                                    .map(|cleanup| {
+                                        diagnostics::log(
+                                            Level::Error,
+                                            "controller",
+                                            cleanup.stage(),
+                                            session_id,
+                                            cleanup.to_string(),
+                                        );
+                                        cleanup.to_string()
+                                    });
                                 let error = match cleanup_error {
                                     Some(cleanup) => {
                                         format!("{error}; cleanup also failed: {cleanup}")
@@ -155,15 +244,16 @@ impl Controller {
                                 };
                                 emit(state(
                                     "Stopped",
-                                    "Mapping stopped unexpectedly".into(),
+                                    format!("Output {} stopped unexpectedly", id + 1),
                                     false,
                                     false,
                                     error,
                                 ));
                             }
+                            MappingEvent::Topology { .. } => {}
                         }
                     }
-                    Message::Renderer { .. } => {}
+                    Message::Mapping { .. } => {}
                 }
             }
         });
@@ -185,6 +275,24 @@ impl Controller {
     }
 }
 
+fn format_mapping_group_plan(group: &MappingGroupRequest) -> String {
+    let route = match &group.route {
+        MappingRoute::Mirror { target } => format!("mirror target={target}"),
+        MappingRoute::StreamOnly => "stream_only".into(),
+    };
+    format!(
+        "group {} route={} native={}x{}@{}/{} orientation={:?} topology_rotation={:?}",
+        group.id,
+        route,
+        group.mode.width,
+        group.mode.height,
+        group.mode.refresh_numerator,
+        group.mode.refresh_denominator,
+        group.rotation,
+        native_topology_rotation(group.rotation)
+    )
+}
+
 fn refresh(emit: &impl Fn(ControllerEvent)) {
     match active_displays() {
         Ok(displays) => {
@@ -198,8 +306,12 @@ fn refresh(emit: &impl Fn(ControllerEvent)) {
                     height: display.rect.bottom - display.rect.top,
                     native_width: display.native_width,
                     native_height: display.native_height,
+                    detected_physical_width_mm: display.physical_width_mm,
+                    detected_physical_height_mm: display.physical_height_mm,
                     physical_width_mm: display.physical_width_mm,
                     physical_height_mm: display.physical_height_mm,
+                    physical_override_inches: None,
+                    physical_override_aspect_ratio: None,
                     rotation: display.rotation,
                     label: format!(
                         "{} · {}×{}{}",
@@ -212,20 +324,35 @@ fn refresh(emit: &impl Fn(ControllerEvent)) {
                 .collect();
             emit(ControllerEvent::Displays(displays));
         }
-        Err(error) => emit(state(
-            "Stopped",
-            "Display discovery failed".into(),
-            false,
-            false,
-            error.to_string(),
-        )),
+        Err(error) => {
+            diagnostics::log(
+                Level::Error,
+                "controller",
+                "display-discovery",
+                None,
+                error.to_string(),
+            );
+            emit(state(
+                "Stopped",
+                "Display discovery failed".into(),
+                false,
+                false,
+                error.to_string(),
+            ));
+        }
     }
 }
 
-fn stop(session: &mut Option<MappingSession>, emit: &impl Fn(ControllerEvent)) {
+fn stop(
+    session: &mut Option<MappingSession>,
+    session_id: &mut Option<MappingSessionId>,
+    emit: &impl Fn(ControllerEvent),
+) {
     let Some(mut active) = session.take() else {
+        *session_id = None;
         return;
     };
+    let stopped_session_id = session_id.take();
     emit(state(
         "Stopping",
         "Restoring windows and display topology…".into(),
@@ -234,20 +361,38 @@ fn stop(session: &mut Option<MappingSession>, emit: &impl Fn(ControllerEvent)) {
         "",
     ));
     match active.stop() {
-        Ok(()) => emit(state(
-            "Stopped",
-            "Choose a display to start".into(),
-            false,
-            false,
-            "",
-        )),
-        Err(error) => emit(state(
-            "Stopped",
-            "Cleanup completed with errors".into(),
-            false,
-            false,
-            error.to_string(),
-        )),
+        Ok(()) => {
+            diagnostics::log(
+                Level::Info,
+                "controller",
+                "stop",
+                stopped_session_id,
+                "mapping stopped",
+            );
+            emit(state(
+                "Stopped",
+                "Choose a display to start".into(),
+                false,
+                false,
+                "",
+            ));
+        }
+        Err(error) => {
+            diagnostics::log(
+                Level::Error,
+                "controller",
+                error.stage(),
+                stopped_session_id,
+                error.to_string(),
+            );
+            emit(state(
+                "Stopped",
+                "Cleanup completed with errors".into(),
+                false,
+                false,
+                error.to_string(),
+            ));
+        }
     }
 }
 

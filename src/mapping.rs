@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigStore;
+use crate::config::{ConfigStore, GroupRouteConfig};
 use crate::display::{Display, active_displays, apply_display_mode, restore_display_topology};
+use crate::geometry::Rotation;
 use crate::renderer::{Renderer, RendererEvent, RendererReporter};
 use crate::session_gate::{MAX_VIRTUAL_DISPLAYS, SessionGate, VirtualDisplayConfig, VirtualMode};
 use crate::virtual_display::VirtualDisplay;
@@ -35,6 +36,8 @@ pub struct MappingGroupRequest {
     /// Stable zero-based output slot. The value is also the IDD connector index.
     pub id: u32,
     pub mode: VirtualMode,
+    #[serde(default)]
+    pub rotation: Rotation,
     pub route: MappingRoute,
 }
 
@@ -49,6 +52,7 @@ pub enum MappingRoute {
 pub struct MappingGroupInfo {
     pub id: u32,
     pub mode: VirtualMode,
+    pub rotation: Rotation,
     pub route: MappingRoute,
     pub source_id: String,
     pub source_device_name: String,
@@ -59,6 +63,7 @@ pub struct MappingGroupInfo {
 pub enum MappingEvent {
     GroupReady(MappingGroupInfo),
     Renderer { id: u32, event: RendererEvent },
+    Topology { message: String },
 }
 
 pub type MappingReporter = Arc<dyn Fn(MappingEvent) + Send + Sync + 'static>;
@@ -190,7 +195,17 @@ impl MappingRequest {
                 message: format!("{warning}; reset or repair the configuration before mapping"),
             });
         }
-        let mode = match outcome.config.sizing {
+        let sizing = outcome.config.groups.iter().find_map(|group| {
+            matches!(
+                &group.route,
+                GroupRouteConfig::Mirror {
+                    target_id: Some(configured_target)
+                } if configured_target.eq_ignore_ascii_case(&target)
+            )
+            .then_some(group.sizing)
+            .flatten()
+        });
+        let mode = match sizing {
             Some(sizing) => {
                 let result = sizing
                     .calculate()
@@ -225,6 +240,7 @@ impl MappingSession {
         let plan = MappingPlan::new(vec![MappingGroupRequest {
             id: 0,
             mode: request.mode,
+            rotation: Rotation::Deg0,
             route: MappingRoute::Mirror {
                 target: request.target,
             },
@@ -274,7 +290,7 @@ impl MappingSession {
             physical_topology,
         };
 
-        let sources = match wait_for_sources(&plan) {
+        let sources = match wait_for_sources(&plan, &reporter) {
             Ok(sources) => sources,
             Err(error) => return Err(rollback_start(session, error)),
         };
@@ -287,6 +303,7 @@ impl MappingSession {
                 info: MappingGroupInfo {
                     id: request.id,
                     mode: request.mode,
+                    rotation: request.rotation,
                     route: request.route.clone(),
                     source_id: source.id.clone(),
                     source_device_name: source.device_name.clone(),
@@ -531,10 +548,14 @@ fn unique_target(displays: &[Display], target_id: &str) -> Result<Display, Mappi
     Ok(target)
 }
 
-fn wait_for_sources(plan: &MappingPlan) -> Result<Vec<Display>, MappingError> {
+fn wait_for_sources(
+    plan: &MappingPlan,
+    reporter: &MappingReporter,
+) -> Result<Vec<Display>, MappingError> {
     let requested_ids: HashSet<_> = plan.groups.iter().map(|group| group.id).collect();
     let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
     let mut mode_applied = HashSet::new();
+    let mut last_snapshot = None;
     loop {
         let displays = active_displays().map_err(|error| stage("topology", error))?;
         let sources: Vec<_> = displays
@@ -542,6 +563,13 @@ fn wait_for_sources(plan: &MappingPlan) -> Result<Vec<Display>, MappingError> {
             .filter(|display| display.virtual_display)
             .cloned()
             .collect();
+        let snapshot = format_topology_snapshot(plan, &sources);
+        if last_snapshot.as_deref() != Some(snapshot.as_str()) {
+            reporter(MappingEvent::Topology {
+                message: snapshot.clone(),
+            });
+            last_snapshot = Some(snapshot.clone());
+        }
         if let Some(source) = sources
             .iter()
             .find(|source| !requested_ids.contains(&source.connector_index))
@@ -588,41 +616,131 @@ fn wait_for_sources(plan: &MappingPlan) -> Result<Vec<Display>, MappingError> {
                 all_ready = false;
                 continue;
             };
-            if source_matches_mode(source, group.mode) {
+            if source_matches_mode(source, group.mode, group.rotation) {
                 ordered.push(source.clone());
                 continue;
             }
             all_ready = false;
             if mode_applied.insert(group.id) {
-                apply_display_mode(source, group.mode)
-                    .map_err(|error| group_stage(group.id, "mode", error))?;
+                reporter(MappingEvent::Topology {
+                    message: format!(
+                        "group {} applying mode on device={} requested={}",
+                        group.id,
+                        source.device_name,
+                        format_requested_mode(group.mode, group.rotation)
+                    ),
+                });
+                match apply_display_mode(source, group.mode) {
+                    Ok(()) => reporter(MappingEvent::Topology {
+                        message: format!(
+                            "group {} mode apply accepted on device={}; waiting for topology",
+                            group.id, source.device_name
+                        ),
+                    }),
+                    Err(error) => {
+                        reporter(MappingEvent::Topology {
+                            message: format!(
+                                "group {} mode apply rejected on device={}: {}",
+                                group.id, source.device_name, error
+                            ),
+                        });
+                        return Err(group_stage(group.id, "mode", error));
+                    }
+                }
             }
         }
         if all_ready && ordered.len() == plan.groups.len() {
             return Ok(ordered);
         }
         if Instant::now() >= deadline {
-            let pending = plan
-                .groups
-                .iter()
-                .filter(|group| {
-                    !sources.iter().any(|source| {
-                        source.connector_index == group.id
-                            && source_matches_mode(source, group.mode)
-                    })
-                })
-                .map(|group| group.id.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
+            let pending = format_pending_topology(plan, &sources);
+            reporter(MappingEvent::Topology {
+                message: format!("timeout after 15 seconds; {snapshot}"),
+            });
             return Err(MappingError {
                 stage: "topology",
                 group_id: None,
-                message: format!(
-                    "virtual connectors [{pending}] did not become active at their requested modes within 15 seconds"
-                ),
+                message: format!("virtual displays were not ready after 15 seconds; {pending}"),
             });
         }
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn format_topology_snapshot(plan: &MappingPlan, sources: &[Display]) -> String {
+    plan.groups
+        .iter()
+        .map(|group| format_group_topology(group, sources))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_pending_topology(plan: &MappingPlan, sources: &[Display]) -> String {
+    plan.groups
+        .iter()
+        .filter(|group| {
+            !sources.iter().any(|source| {
+                source.connector_index == group.id
+                    && source_matches_mode(source, group.mode, group.rotation)
+            })
+        })
+        .map(|group| format_group_topology(group, sources))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn format_group_topology(group: &MappingGroupRequest, sources: &[Display]) -> String {
+    let requested = format_requested_mode(group.mode, group.rotation);
+    let Some(source) = sources
+        .iter()
+        .find(|source| source.connector_index == group.id)
+    else {
+        return format!("group {} absent requested={requested}", group.id);
+    };
+    let state = if source_matches_mode(source, group.mode, group.rotation) {
+        "ready"
+    } else {
+        "observed"
+    };
+    format!(
+        "group {} {} device={} actual={} requested={}",
+        group.id,
+        state,
+        source.device_name,
+        format_observed_mode(source),
+        requested
+    )
+}
+
+fn format_requested_mode(mode: VirtualMode, rotation: Rotation) -> String {
+    format!(
+        "{}x{}@{}/{} orientation={} topology_rotation={}",
+        mode.width,
+        mode.height,
+        mode.refresh_numerator,
+        mode.refresh_denominator,
+        rotation_degrees(rotation),
+        rotation_degrees(native_topology_rotation(rotation))
+    )
+}
+
+fn format_observed_mode(source: &Display) -> String {
+    format!(
+        "{}x{}@{}/{} rotation={}",
+        source.rect.right - source.rect.left,
+        source.rect.bottom - source.rect.top,
+        source.refresh_numerator,
+        source.refresh_denominator,
+        rotation_degrees(source.rotation)
+    )
+}
+
+fn rotation_degrees(rotation: Rotation) -> u16 {
+    match rotation {
+        Rotation::Deg0 => 0,
+        Rotation::Deg90 => 90,
+        Rotation::Deg180 => 180,
+        Rotation::Deg270 => 270,
     }
 }
 
@@ -646,11 +764,20 @@ fn wait_for_sources_removed(connector_indices: &[u32]) -> Result<(), MappingErro
     }
 }
 
-fn source_matches_mode(source: &Display, requested: VirtualMode) -> bool {
+pub(crate) fn native_topology_rotation(_rotation: Rotation) -> Rotation {
+    Rotation::Deg0
+}
+
+fn source_matches_mode(
+    source: &Display,
+    requested: VirtualMode,
+    requested_rotation: Rotation,
+) -> bool {
     let width = source.rect.right - source.rect.left;
     let height = source.rect.bottom - source.rect.top;
     width == requested.width as i32
         && height == requested.height as i32
+        && source.rotation == native_topology_rotation(requested_rotation)
         && u64::from(source.refresh_numerator) * u64::from(requested.refresh_denominator)
             == u64::from(requested.refresh_numerator) * u64::from(source.refresh_denominator)
 }
@@ -702,6 +829,7 @@ mod tests {
         MappingGroupRequest {
             id,
             mode: VirtualMode::default(),
+            rotation: Rotation::Deg0,
             route,
         }
     }
@@ -773,5 +901,66 @@ mod tests {
         let plan: MappingPlan = serde_json::from_str(json).unwrap();
         plan.validate().unwrap();
         assert_eq!(plan.groups[0].route, MappingRoute::StreamOnly);
+        assert_eq!(plan.groups[0].rotation, Rotation::Deg0);
+    }
+
+    #[test]
+    fn native_modes_keep_final_dimensions_and_rebase_orientation() {
+        let native = VirtualMode {
+            width: 1800,
+            height: 2880,
+            refresh_numerator: 120,
+            refresh_denominator: 1,
+        };
+        assert_eq!(native.width, 1800);
+        assert_eq!(native.height, 2880);
+        assert_eq!(native_topology_rotation(Rotation::Deg0), Rotation::Deg0);
+        assert_eq!(native_topology_rotation(Rotation::Deg90), Rotation::Deg0);
+        assert_eq!(native_topology_rotation(Rotation::Deg180), Rotation::Deg0);
+        assert_eq!(native_topology_rotation(Rotation::Deg270), Rotation::Deg0);
+    }
+
+    #[test]
+    fn native_portrait_source_satisfies_a_270_degree_request() {
+        let requested = VirtualMode {
+            width: 1800,
+            height: 2880,
+            refresh_numerator: 120,
+            refresh_denominator: 1,
+        };
+        let source = Display {
+            id: "virtual".into(),
+            connector_index: 1,
+            sunshine_id: None,
+            name: "SBMS".into(),
+            device_name: r"\\.\DISPLAY73".into(),
+            rect: windows::Win32::Foundation::RECT {
+                left: 0,
+                top: 0,
+                right: 1800,
+                bottom: 2880,
+            },
+            native_width: 1800,
+            native_height: 2880,
+            physical_width_mm: None,
+            physical_height_mm: None,
+            rotation: Rotation::Deg0,
+            refresh_numerator: 120,
+            refresh_denominator: 1,
+            primary: false,
+            virtual_display: true,
+        };
+
+        assert!(source_matches_mode(&source, requested, Rotation::Deg270));
+    }
+
+    #[test]
+    fn topology_snapshot_explains_an_absent_connector() {
+        let plan = MappingPlan::new(vec![group(1, MappingRoute::StreamOnly)]).unwrap();
+
+        assert_eq!(
+            format_topology_snapshot(&plan, &[]),
+            "group 1 absent requested=3840x2160@240/1 orientation=0 topology_rotation=0"
+        );
     }
 }

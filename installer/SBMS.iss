@@ -36,11 +36,13 @@ Source: "..\target\driver\SBMSIndirectDisplay.inf"; DestDir: "{app}\driver"; Fla
 Source: "..\target\driver\SBMSIndirectDisplay.dll"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "..\target\driver\SBMSIndirectDisplay.cat"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "maintenance.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "restart-sunshine.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSES\MS-PL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "maintenance.ps1"; DestName: "sbms-maintenance.ps1"; Flags: dontcopy
 
 [InstallDelete]
+; User state under {localappdata}\SBMS is intentionally preserved during upgrades.
 Type: files; Name: "{app}\diagnose-sbms.ps1"
 Type: files; Name: "{app}\install-sbms-driver.ps1"
 Type: files; Name: "{app}\install-sbms-program-files.ps1"
@@ -54,6 +56,8 @@ Type: files; Name: "{app}\driver\IddSampleDriver.cer"
 Type: filesandordirs; Name: "{app}\driver\IddSampleDriver"
 
 [UninstallDelete]
+; A deliberate uninstall removes configuration, display overrides, and diagnostics.
+Type: filesandordirs; Name: "{localappdata}\SBMS"
 Type: files; Name: "{app}\diagnose-sbms.ps1"
 Type: files; Name: "{app}\install-sbms-driver.ps1"
 Type: files; Name: "{app}\install-sbms-program-files.ps1"
@@ -123,12 +127,12 @@ begin
     ScriptPath := ExpandConstant('{tmp}\sbms-maintenance.ps1');
     if not RunMaintenanceScript(
       ScriptPath,
-      'Stop',
+      'PrepareUpgrade',
       ExpandConstant('{app}'),
       ResultCode) then
-      Result := 'Could not start the SBMS upgrade shutdown helper.'
+      Result := 'Could not start the SBMS upgrade preparation helper.'
     else if ResultCode <> 0 then
-      Result := 'The existing SBMS session could not be stopped safely. Setup was cancelled.';
+      Result := 'The existing SBMS session or configuration could not be preserved safely. Setup was cancelled.';
   end;
 end;
 
