@@ -85,6 +85,8 @@ The installer is written to `target\installer`.
 
 ## Acknowledgments
 
-thanks for all of my friends, especially the "Genius Bar", who shared their ideas and advices with me. thanks for Mr Berti who is my CSA teacher. thanks for my parents who support me. thanks for my brother who lives in the US and help me recharge my openAI account. thanks for Tibo who reset my token for several times. thanks for all of the agents and subagents who change my ideas into the program. 
+this is my first github repo which release to public and hope that can help you
 
-<span style="color: black;">of course I still love you</span>
+thanks for all of my friends, especially Jerry & Tony, who shared their ideas and advices with me. thanks for Mr Berti who is my CSA teacher. thanks for my parents who support me. thanks for my brother Eason who lives in the US and help me recharge my openAI account. thanks for Tibo who reset my token for several times. thanks for all of the agents and subagents who change my ideas into the program. 
+
+$${\color{black}of \space course \space I \space still \space love \space you}$$
