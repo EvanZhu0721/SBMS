@@ -43,7 +43,7 @@ More implementation detail is available in
 
 ## Install
 
-1. Download `SBMS-Setup-1.3.2-x64.exe` from the latest GitHub release.
+1. Download `SBMS-Setup-1.4.0-x64.exe` from the latest GitHub release.
 2. Run it and approve the administrator prompt.
 3. Open SBMS from the tray, choose a target display, and select **Start**.
 4. Select **Stop** before disconnecting or rearranging displays.

@@ -236,9 +236,7 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             }
             let output_one = outcome
                 .config
-                .groups
-                .iter()
-                .find(|group| group.id == 0)
+                .group(0)
                 .ok_or("Output 1 is not present in the saved configuration")?;
             match &output_one.route {
                 GroupRouteConfig::Mirror {
@@ -345,9 +343,7 @@ fn config(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
             }
             let mut config = outcome.config;
             let output_one = config
-                .groups
-                .iter_mut()
-                .find(|group| group.id == 0)
+                .group_mut(0)
                 .ok_or("Output 1 is not present in the saved configuration")?;
             output_one.route = GroupRouteConfig::Mirror {
                 target_id: Some(target),
@@ -365,9 +361,7 @@ fn config(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
             }
             let mut config = outcome.config;
             let output_one = config
-                .groups
-                .iter_mut()
-                .find(|group| group.id == 0)
+                .group_mut(0)
                 .ok_or("Output 1 is not present in the saved configuration")?;
             output_one.route = GroupRouteConfig::Mirror { target_id: None };
             store.save(&config)?;

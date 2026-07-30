@@ -171,6 +171,14 @@ impl Default for GroupConfig {
 }
 
 impl AppConfig {
+    pub fn group(&self, id: u32) -> Option<&GroupConfig> {
+        self.groups.iter().find(|group| group.id == id)
+    }
+
+    pub fn group_mut(&mut self, id: u32) -> Option<&mut GroupConfig> {
+        self.groups.iter_mut().find(|group| group.id == id)
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.version != CONFIG_VERSION {
             return Err(ConfigError(format!(
@@ -474,12 +482,7 @@ fn validate_override(
 
 impl ConfigStore {
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        let local_app_data = env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| ConfigError("LOCALAPPDATA is not available".into()))?;
-        Ok(PathBuf::from(local_app_data)
-            .join(CONFIG_DIRECTORY)
-            .join(CONFIG_FILE))
+        local_config_path(CONFIG_FILE)
     }
 
     pub fn default_store() -> Result<Self, ConfigError> {
@@ -563,35 +566,7 @@ impl ConfigStore {
 
     pub fn save(&self, config: &AppConfig) -> Result<(), ConfigError> {
         config.validate()?;
-
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| ConfigError("config path has no parent directory".into()))?;
-        fs::create_dir_all(parent).map_err(|error| {
-            ConfigError(format!("could not create {}: {error}", parent.display()))
-        })?;
-        let (temporary_path, mut temporary) = create_temporary(parent, &self.path)?;
-        let result = (|| {
-            let bytes = serde_json::to_vec_pretty(config)
-                .map_err(|error| ConfigError(format!("could not serialize config: {error}")))?;
-            temporary
-                .write_all(&bytes)
-                .and_then(|_| temporary.write_all(b"\n"))
-                .and_then(|_| temporary.sync_all())
-                .map_err(|error| {
-                    ConfigError(format!(
-                        "could not write temporary config {}: {error}",
-                        temporary_path.display()
-                    ))
-                })?;
-            drop(temporary);
-            atomic_replace(&temporary_path, &self.path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        result
+        save_json_atomically(&self.path, config, "config", "config")
     }
 
     pub fn reset(&self) -> Result<(), ConfigError> {
@@ -669,12 +644,7 @@ impl ConfigStore {
 
 impl DisplayOverrideStore {
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        let local_app_data = env::var_os("LOCALAPPDATA")
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| ConfigError("LOCALAPPDATA is not available".into()))?;
-        Ok(PathBuf::from(local_app_data)
-            .join(CONFIG_DIRECTORY)
-            .join(DISPLAY_OVERRIDES_FILE))
+        local_config_path(DISPLAY_OVERRIDES_FILE)
     }
 
     pub fn default_store() -> Result<Self, ConfigError> {
@@ -730,36 +700,57 @@ impl DisplayOverrideStore {
 
     pub fn save(&self, overrides: &DisplayOverrides) -> Result<(), ConfigError> {
         overrides.validate()?;
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| ConfigError("display override path has no parent directory".into()))?;
-        fs::create_dir_all(parent).map_err(|error| {
-            ConfigError(format!("could not create {}: {error}", parent.display()))
-        })?;
-        let (temporary_path, mut temporary) = create_temporary(parent, &self.path)?;
-        let result = (|| {
-            let bytes = serde_json::to_vec_pretty(overrides).map_err(|error| {
-                ConfigError(format!("could not serialize display overrides: {error}"))
-            })?;
-            temporary
-                .write_all(&bytes)
-                .and_then(|_| temporary.write_all(b"\n"))
-                .and_then(|_| temporary.sync_all())
-                .map_err(|error| {
-                    ConfigError(format!(
-                        "could not write temporary display overrides {}: {error}",
-                        temporary_path.display()
-                    ))
-                })?;
-            drop(temporary);
-            atomic_replace(&temporary_path, &self.path)
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        result
+        save_json_atomically(
+            &self.path,
+            overrides,
+            "display override",
+            "display overrides",
+        )
     }
+}
+
+fn local_config_path(file_name: &str) -> Result<PathBuf, ConfigError> {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ConfigError("LOCALAPPDATA is not available".into()))?;
+    Ok(PathBuf::from(local_app_data)
+        .join(CONFIG_DIRECTORY)
+        .join(file_name))
+}
+
+fn save_json_atomically<T: Serialize>(
+    destination: &Path,
+    value: &T,
+    path_kind: &str,
+    artifact_name: &str,
+) -> Result<(), ConfigError> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ConfigError(format!("{path_kind} path has no parent directory")))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| ConfigError(format!("could not create {}: {error}", parent.display())))?;
+    let (temporary_path, mut temporary) = create_temporary(parent, destination)?;
+    let result = (|| {
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+            ConfigError(format!("could not serialize {artifact_name}: {error}"))
+        })?;
+        temporary
+            .write_all(&bytes)
+            .and_then(|_| temporary.write_all(b"\n"))
+            .and_then(|_| temporary.sync_all())
+            .map_err(|error| {
+                ConfigError(format!(
+                    "could not write temporary {artifact_name} {}: {error}",
+                    temporary_path.display()
+                ))
+            })?;
+        drop(temporary);
+        atomic_replace(&temporary_path, destination)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary_path);
+    }
+    result
 }
 
 fn create_temporary(parent: &Path, destination: &Path) -> Result<(PathBuf, File), ConfigError> {
@@ -1442,5 +1433,72 @@ mod tests {
         assert!(outcome.warning.is_some());
         assert_eq!(fs::read(&store.path).unwrap(), before);
         fs::remove_file(store.path).unwrap();
+    }
+
+    #[test]
+    fn group_lookup_and_mutation_preserve_collection_state() {
+        let mut config = AppConfig {
+            version: CONFIG_VERSION,
+            groups: vec![
+                GroupConfig::default(),
+                GroupConfig {
+                    id: 3,
+                    route: GroupRouteConfig::StreamOnly {
+                        screen: StreamScreenConfig {
+                            width: 1920,
+                            height: 1080,
+                            diagonal_inches: None,
+                            refresh_millihz: 60_000,
+                            aspect_ratio: AspectRatio {
+                                width: 16,
+                                height: 9,
+                            },
+                            rotation: Rotation::Deg0,
+                        },
+                    },
+                    reference_source: None,
+                    sizing: None,
+                },
+            ],
+            selected_group_id: Some(3),
+        };
+        let other_group = config.group(3).unwrap().clone();
+
+        config.group_mut(0).unwrap().route = GroupRouteConfig::Mirror {
+            target_id: Some("replacement-target".into()),
+        };
+
+        assert_eq!(config.groups.len(), 2);
+        assert_eq!(config.groups[0].id, 0);
+        assert_eq!(config.groups[1], other_group);
+        assert_eq!(config.selected_group_id, Some(3));
+        assert!(config.group(99).is_none());
+        assert!(config.group_mut(99).is_none());
+    }
+
+    #[test]
+    fn failed_atomic_save_removes_temporary_file() {
+        let root = env::temp_dir().join(format!(
+            "sbms-config-atomic-failure-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let destination = root.join(CONFIG_FILE);
+        fs::create_dir_all(&destination).unwrap();
+        let store = ConfigStore::new(destination);
+
+        assert!(store.save(&AppConfig::default()).is_err());
+        let temporary_prefix = format!(".{CONFIG_FILE}.");
+        assert!(
+            fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&temporary_prefix))
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
