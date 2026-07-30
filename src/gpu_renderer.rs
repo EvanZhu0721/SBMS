@@ -35,6 +35,8 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::{Error as WindowsError, Interface, PCSTR};
 
+const FRAME_WAIT_TIMEOUT_MS: u32 = 50;
+
 const SHADER: &str = r#"
 Texture2D source_texture : register(t0);
 SamplerState source_sampler : register(s0);
@@ -409,8 +411,13 @@ impl Pipeline {
         while !stop.load(Ordering::Acquire) {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
-            match unsafe { duplication.AcquireNextFrame(4, &mut frame_info, &mut desktop_resource) }
-            {
+            match unsafe {
+                duplication.AcquireNextFrame(
+                    FRAME_WAIT_TIMEOUT_MS,
+                    &mut frame_info,
+                    &mut desktop_resource,
+                )
+            } {
                 Ok(()) => {}
                 Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
                 Err(error) => return Err(classify_windows_error(error)),

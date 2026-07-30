@@ -390,6 +390,11 @@ impl MappingSession {
         }
 
         let mut errors = Vec::new();
+        for group in self.groups.iter().rev() {
+            if let Some(renderer) = group.renderer.as_ref() {
+                renderer.request_stop();
+            }
+        }
         for group in self.groups.iter_mut().rev() {
             if let Some(mut renderer) = group.renderer.take()
                 && let Err(error) = renderer.stop()
