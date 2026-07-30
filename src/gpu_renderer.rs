@@ -202,11 +202,18 @@ pub fn run_gpu_renderer(
 ) -> Result<(), GpuRendererError> {
     validate_config(config)?;
     let copy_mode = CopyMode::from_environment();
+    let copy_stats_enabled = CopyMode::diagnostics_requested();
     let (adapter, output) = find_source_output(config.source_rect)?;
     let (device, context) = create_device(&adapter)?;
     let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(classify_windows_error)?;
     let pipeline = Pipeline::new(config, &adapter, device, context)?;
-    pipeline.run(duplication, stop, copy_mode, &mut on_present)
+    pipeline.run(
+        duplication,
+        stop,
+        copy_mode,
+        copy_stats_enabled,
+        &mut on_present,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,13 +227,15 @@ impl CopyMode {
         let value = std::env::var_os(COPY_MODE_ENV);
         match Self::parse(value.as_deref()) {
             Ok(Self::Dirty) => {
-                diagnostics::log(
-                    Level::Info,
-                    "renderer",
-                    "copy-mode",
-                    None,
-                    "experimental dirty source copy enabled",
-                );
+                if value.is_some() {
+                    diagnostics::log(
+                        Level::Info,
+                        "renderer",
+                        "copy-mode",
+                        None,
+                        "dirty source copy diagnostics enabled",
+                    );
+                }
                 Self::Dirty
             }
             Ok(Self::Full) => Self::Full,
@@ -245,7 +254,7 @@ impl CopyMode {
 
     fn parse(value: Option<&std::ffi::OsStr>) -> Result<Self, String> {
         let Some(value) = value else {
-            return Ok(Self::Full);
+            return Ok(Self::Dirty);
         };
         let Some(value) = value.to_str() else {
             return Err(format!("{value:?}"));
@@ -255,6 +264,11 @@ impl CopyMode {
             "dirty" => Ok(Self::Dirty),
             _ => Err(format!("{value:?}")),
         }
+    }
+
+    fn diagnostics_requested() -> bool {
+        let value = std::env::var_os(COPY_MODE_ENV);
+        value.is_some() && Self::parse(value.as_deref()) == Ok(Self::Dirty)
     }
 }
 
@@ -462,6 +476,7 @@ impl Pipeline {
         duplication: IDXGIOutputDuplication,
         stop: &AtomicBool,
         copy_mode: CopyMode,
+        copy_stats_enabled: bool,
         on_present: &mut impl FnMut() -> Result<(), String>,
     ) -> Result<(), GpuRendererError> {
         let mut source_texture = None;
@@ -534,7 +549,12 @@ impl Pipeline {
             unsafe {
                 self.context.PSSetShaderResources(0, Some(&[None]));
             }
-            copy_stats.maybe_log(copy_mode, description.Width, description.Height);
+            copy_stats.maybe_log(
+                copy_mode,
+                copy_stats_enabled,
+                description.Width,
+                description.Height,
+            );
         }
         Ok(())
     }
@@ -837,8 +857,11 @@ impl CopyStats {
             .sum::<u64>();
     }
 
-    fn maybe_log(&mut self, copy_mode: CopyMode, width: u32, height: u32) {
-        if copy_mode != CopyMode::Dirty || self.interval_started.elapsed() < COPY_STATS_INTERVAL {
+    fn maybe_log(&mut self, copy_mode: CopyMode, enabled: bool, width: u32, height: u32) {
+        if !enabled
+            || copy_mode != CopyMode::Dirty
+            || self.interval_started.elapsed() < COPY_STATS_INTERVAL
+        {
             return;
         }
         let available_pixels = self
@@ -1013,7 +1036,7 @@ mod tests {
 
     #[test]
     fn full_copy_remains_the_default_and_invalid_values_are_rejected() {
-        assert_eq!(CopyMode::parse(None), Ok(CopyMode::Full));
+        assert_eq!(CopyMode::parse(None), Ok(CopyMode::Dirty));
         assert_eq!(
             CopyMode::parse(Some(OsStr::new(" full "))),
             Ok(CopyMode::Full)
