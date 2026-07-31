@@ -51,10 +51,13 @@ width/height swap. Content rotation, if needed by a future streaming backend,
 must be an explicit renderer operation rather than an implicit display-mode
 rotation.
 
-The tray UI can use a ready stream-only group's brace GUID to update Sunshine's
-`output_name` and restart `SunshineService`. This is a host-side Sunshine
-action: it requires UAC, interrupts existing Sunshine clients, and does not
-remotely launch Moonlight on another device.
+For each ready stream-only group, the tray starts a separate managed Sunshine
+instance bound to that group's brace GUID. Instances use independent port
+families, so several virtual desktops can be streamed at the same time without
+rewriting the global Sunshine configuration or interrupting another group.
+The tray exposes each instance's LAN address and Web panel. Stopping the mapping
+also stops the instances that SBMS created. Moonlight pairing and connection
+still happen from the client device.
 
 ## JSON interface
 

@@ -634,7 +634,11 @@ export component QuickAccess inherits Window {
     in property <string> stream-result: "Configure the streaming screen";
     in property <string> stream-result-detail: "Reference geometry determines the virtual mode";
     in property <string> stream-error: "";
-    in property <bool> sunshine-action-enabled: false;
+    in property <bool> sunshine-panel-enabled: false;
+    // Sunshine deployment state: 0 unavailable, 1 starting, 2 ready, 3 failed.
+    in property <int> sunshine-state: 0;
+    in property <int> sunshine-port: 0;
+    in property <string> sunshine-lan-ip: "--";
 
     callback start();
     callback stop();
@@ -659,7 +663,7 @@ export component QuickAccess inherits Window {
     callback close-stream-config();
     callback stream-edited();
     callback save-stream-config();
-    callback restart-sunshine();
+    callback open-sunshine-panel();
     callback open-screen-size();
     callback close-screen-size();
     callback screen-size-edited();
@@ -1080,7 +1084,11 @@ export component QuickAccess inherits Window {
                             }
 
                             Text {
-                                text: root.geometry-configured ? "Saved geometry" : "Using driver default";
+                                text: root.stream-only
+                                    ? "LAN endpoint"
+                                    : (root.geometry-configured
+                                        ? "Saved geometry"
+                                        : "Using driver default");
                                 color: MdTokens.on-surface-variant;
                                 font-size: MdTokens.type-body-small;
                                 overflow: elide;
@@ -1088,7 +1096,7 @@ export component QuickAccess inherits Window {
                         }
 
                         VerticalLayout {
-                            width: 144px;
+                            width: root.stream-only ? 184px : 144px;
                             alignment: center;
                             spacing: 3px;
 
@@ -1102,9 +1110,26 @@ export component QuickAccess inherits Window {
                             }
 
                             Text {
-                                text: root.geometry-summary-detail;
-                                color: MdTokens.on-surface-variant;
+                                text: root.stream-only
+                                    ? (root.sunshine-state == 2 && root.sunshine-port > 0
+                                        ? (root.sunshine-lan-ip == "--"
+                                            ? "LAN unavailable"
+                                            : root.sunshine-lan-ip + ":" + root.sunshine-port)
+                                        : (root.sunshine-state == 1
+                                            ? "Starting"
+                                            : (root.sunshine-state == 3
+                                                ? "Unavailable"
+                                                : "--")))
+                                    : root.geometry-summary-detail;
+                                color: root.stream-only && root.sunshine-state == 3
+                                    ? MdTokens.error
+                                    : (root.stream-only && root.sunshine-state == 2
+                                        ? MdTokens.primary
+                                        : MdTokens.on-surface-variant);
                                 font-size: MdTokens.type-body-small;
+                                font-weight: root.stream-only && root.sunshine-state == 2
+                                    ? MdTokens.weight-medium
+                                    : 400;
                                 horizontal-alignment: right;
                                 overflow: elide;
                             }
@@ -1116,12 +1141,12 @@ export component QuickAccess inherits Window {
 
                 if root.stream-only && root.running : Button {
                     height: MdTokens.target;
-                    text: root.sunshine-action-enabled
-                        ? "Stream this display"
-                        : "Waiting for display ID";
-                    enabled: root.sunshine-action-enabled && !root.busy;
-                    accessible-label: "Use this virtual display in Sunshine and restart streaming";
-                    clicked => { root.restart-sunshine(); }
+                    text: root.sunshine-panel-enabled
+                        ? "Open Sunshine"
+                        : "Waiting for Sunshine";
+                    enabled: root.sunshine-panel-enabled && !root.busy;
+                    accessible-label: "Open this Sunshine instance's web configuration panel";
+                    clicked => { root.open-sunshine-panel(); }
                 }
 
                 FullWidthPrimaryButton {

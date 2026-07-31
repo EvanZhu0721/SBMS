@@ -36,7 +36,7 @@ Source: "..\target\driver\SBMSIndirectDisplay.inf"; DestDir: "{app}\driver"; Fla
 Source: "..\target\driver\SBMSIndirectDisplay.dll"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "..\target\driver\SBMSIndirectDisplay.cat"; DestDir: "{app}\driver"; Flags: ignoreversion
 Source: "maintenance.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
-Source: "restart-sunshine.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
+Source: "manage-sunshine-instance.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSES\MS-PL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "maintenance.ps1"; DestName: "sbms-maintenance.ps1"; Flags: dontcopy

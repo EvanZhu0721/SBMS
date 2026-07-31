@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::path::PathBuf;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,17 +17,34 @@ use crate::geometry::{
     SizingResult, SizingStrategy,
 };
 use crate::mapping::{MAX_MAPPING_GROUPS, MappingGroupRequest, MappingPlan, MappingRoute};
+use crate::network::preferred_lan_ipv4;
 use crate::session_gate::{MAX_VIRTUAL_DIMENSION, VirtualMode};
 use crate::win32_flyout;
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
-use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-use windows::core::{PCWSTR, w};
-
 slint::include_modules!();
 
 const STREAM_ONLY_ID: &str = "__stream_only__";
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SunshineState {
+    #[default]
+    Unavailable,
+    Starting,
+    Ready,
+    Failed,
+}
+
+impl SunshineState {
+    fn as_i32(self) -> i32 {
+        match self {
+            Self::Unavailable => 0,
+            Self::Starting => 1,
+            Self::Ready => 2,
+            Self::Failed => 3,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct GroupDraft {
@@ -44,6 +60,8 @@ struct GroupDraft {
     stream_aspect_ratio_index: i32,
     stream_rotation_index: i32,
     sunshine_id: Option<String>,
+    sunshine_port: Option<u16>,
+    sunshine_state: SunshineState,
     fps: Option<u32>,
     ready: bool,
     error: bool,
@@ -70,6 +88,8 @@ impl GroupDraft {
             stream_aspect_ratio_index: 0,
             stream_rotation_index: 0,
             sunshine_id: None,
+            sunshine_port: None,
+            sunshine_state: SunshineState::Unavailable,
             fps: None,
             ready: false,
             error: false,
@@ -260,6 +280,9 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
                         group.fps = None;
                         group.ready = false;
                         group.error = false;
+                        group.sunshine_id = None;
+                        group.sunshine_port = None;
+                        group.sunshine_state = SunshineState::Unavailable;
                     }
                     project_group_telemetry(&ui, &groups, active);
                     start_sender.start(plan);
@@ -279,35 +302,37 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
     let flyout_weak = flyout.as_weak();
     let sunshine_groups = groups.clone();
     let sunshine_active_group = active_group.clone();
-    flyout.on_restart_sunshine(move || {
+    let sunshine_error_revision = error_revision.clone();
+    flyout.on_open_sunshine_panel(move || {
         let Some(ui) = flyout_weak.upgrade() else {
             return;
         };
         let groups = sunshine_groups.lock().expect("group drafts poisoned");
         let active = *sunshine_active_group.lock().expect("active group poisoned");
-        let Some(display_id) = groups
+        let Some(port) = groups
             .get(active)
-            .filter(|group| group.stream_only && group.ready)
-            .and_then(|group| group.sunshine_id.as_deref())
+            .filter(|group| {
+                group.stream_only && group.ready && group.sunshine_state == SunshineState::Ready
+            })
+            .and_then(|group| group.sunshine_port)
         else {
-            ui.set_error_text("The virtual display ID is not ready yet".into());
+            surface_transient_error(
+                &ui,
+                &sunshine_error_revision,
+                "This Sunshine instance is not ready yet",
+            );
             return;
         };
-        match launch_sunshine_restart(display_id) {
-            Ok(()) => {
-                diagnostics::log(
-                    Level::Info,
-                    "ui",
-                    "restart-sunshine",
-                    None,
-                    format!("requested Sunshine output switch to {display_id}"),
-                );
-                ui.set_state_detail("Approve UAC to restart Sunshine on this display".into());
-            }
-            Err(error) => {
-                diagnostics::log(Level::Error, "ui", "restart-sunshine", None, error.as_str());
-                ui.set_error_text(error.into());
-            }
+        drop(groups);
+        if let Err(error) = open_sunshine_panel(port) {
+            diagnostics::log(
+                Level::Warn,
+                "ui",
+                "open-sunshine-panel",
+                None,
+                error.as_str(),
+            );
+            surface_transient_error(&ui, &sunshine_error_revision, &error);
         }
     });
 
@@ -788,6 +813,11 @@ fn apply_event(
             if let Some(group) = groups.iter_mut().find(|group| group.id == info.id) {
                 group.ready = true;
                 group.sunshine_id = info.sunshine_id;
+                group.sunshine_state = if group.sunshine_id.as_deref().is_some_and(is_guid) {
+                    SunshineState::Starting
+                } else {
+                    SunshineState::Failed
+                };
             }
             let active = *active_group.lock().expect("active group poisoned");
             project_group_telemetry(ui, &groups, active);
@@ -799,6 +829,49 @@ fn apply_event(
             }
             let active = *active_group.lock().expect("active group poisoned");
             project_group_telemetry(ui, &groups, active);
+        }
+        ControllerEvent::Sunshine {
+            id,
+            display_id,
+            requested_port,
+            port,
+            error,
+        } => {
+            let mut groups = group_state.lock().expect("group drafts poisoned");
+            let mut group_number = id + 1;
+            if let Some(group) = groups.iter_mut().find(|group| {
+                group.id == id && group.sunshine_id.as_deref() == Some(display_id.as_str())
+            }) {
+                group_number = group.id + 1;
+                group.sunshine_port = Some(port.unwrap_or(requested_port));
+                if error.is_some() {
+                    group.sunshine_state = SunshineState::Failed;
+                    group.error = true;
+                } else {
+                    group.sunshine_state = SunshineState::Ready;
+                    group.error = false;
+                }
+            }
+            let active = *active_group.lock().expect("active group poisoned");
+            project_group_telemetry(ui, &groups, active);
+            drop(groups);
+
+            if let Some(error) = error {
+                let message = format!("Output {group_number} Sunshine: {error}");
+                let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
+                ui.set_error_text(message.as_str().into());
+                ui.set_diagnostic_summary(message.as_str().into());
+                let ui = ui.as_weak();
+                let error_revision = error_revision.clone();
+                slint::Timer::single_shot(Duration::from_secs(12), move || {
+                    if error_revision.load(Ordering::Relaxed) != revision {
+                        return;
+                    }
+                    if let Some(ui) = ui.upgrade() {
+                        ui.set_error_text("".into());
+                    }
+                });
+            }
         }
         ControllerEvent::State {
             state,
@@ -816,6 +889,16 @@ fn apply_event(
             ui.set_running(running);
             ui.set_busy(busy);
             ui.set_error_text(error.as_str().into());
+            if !running && !busy {
+                let mut groups = group_state.lock().expect("group drafts poisoned");
+                for group in groups.iter_mut() {
+                    group.fps = None;
+                    group.ready = false;
+                    group.sunshine_id = None;
+                    group.sunshine_port = None;
+                    group.sunshine_state = SunshineState::Unavailable;
+                }
+            }
             if !error.is_empty() {
                 let mut groups = group_state.lock().expect("group drafts poisoned");
                 for group in groups.iter_mut() {
@@ -847,10 +930,7 @@ fn apply_event(
                 let mut groups = group_state.lock().expect("group drafts poisoned");
                 if !running {
                     for group in groups.iter_mut() {
-                        group.fps = None;
-                        group.ready = false;
                         group.error = false;
-                        group.sunshine_id = None;
                     }
                 }
                 let active = *active_group.lock().expect("active group poisoned");
@@ -946,51 +1026,46 @@ fn open_log_folder() -> Result<(), String> {
         .map_err(|error| format!("Couldn’t open the log folder: {error}"))
 }
 
-fn launch_sunshine_restart(display_id: &str) -> Result<(), String> {
-    if !is_guid(display_id) {
-        return Err("Sunshine reported an invalid virtual display ID".into());
-    }
-    let script = sunshine_script_path()?;
-    let parameters = format!(
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" -DisplayId \"{}\"",
-        script.display(),
-        display_id
-    );
-    let parameters = wide_null(&parameters);
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            w!("runas"),
-            w!("powershell.exe"),
-            PCWSTR(parameters.as_ptr()),
-            None,
-            SW_SHOWNORMAL,
-        )
-    };
-    if result.0 as isize <= 32 {
-        return Err(format!(
-            "Couldn’t launch the Sunshine restart helper (ShellExecute status {})",
-            result.0 as isize
-        ));
-    }
-    Ok(())
+fn sunshine_web_url(base_port: u16) -> Result<String, String> {
+    let web_port = base_port
+        .checked_add(1)
+        .ok_or_else(|| "The Sunshine Web port is outside the valid range".to_string())?;
+    Ok(format!("https://localhost:{web_port}/"))
 }
 
-fn sunshine_script_path() -> Result<PathBuf, String> {
-    let installed = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("installer")))
-        .map(|path| path.join("restart-sunshine.ps1"));
-    let development =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("installer/restart-sunshine.ps1");
-    installed
-        .filter(|path| path.is_file())
-        .or_else(|| development.is_file().then_some(development))
-        .ok_or_else(|| "The Sunshine restart helper is missing from this installation".into())
+fn open_sunshine_panel(base_port: u16) -> Result<(), String> {
+    let url = sunshine_web_url(base_port)?;
+    Command::new("explorer.exe")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Couldn’t open the Sunshine Web panel: {error}"))
 }
 
-fn wide_null(value: &str) -> Vec<u16> {
-    value.encode_utf16().chain(std::iter::once(0)).collect()
+fn refresh_lan_ip(ui: &QuickAccess) {
+    match preferred_lan_ipv4() {
+        Ok(Some(address)) => ui.set_sunshine_lan_ip(address.to_string().into()),
+        Ok(None) => ui.set_sunshine_lan_ip("--".into()),
+        Err(error) => {
+            diagnostics::log(Level::Warn, "ui", "lan-ip", None, error);
+            ui.set_sunshine_lan_ip("--".into());
+        }
+    }
+}
+
+fn surface_transient_error(ui: &QuickAccess, error_revision: &Arc<AtomicU64>, message: &str) {
+    let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
+    ui.set_error_text(message.into());
+    let ui = ui.as_weak();
+    let error_revision = error_revision.clone();
+    slint::Timer::single_shot(Duration::from_secs(12), move || {
+        if error_revision.load(Ordering::Relaxed) != revision {
+            return;
+        }
+        if let Some(ui) = ui.upgrade() {
+            ui.set_error_text("".into());
+        }
+    });
 }
 
 fn is_guid(value: &str) -> bool {
@@ -1035,8 +1110,13 @@ fn project_group_telemetry(ui: &QuickAccess, groups: &[GroupDraft], active: usiz
     ui.set_mapping_fps_valid(group.fps.is_some());
     ui.set_mapping_fps_error(group.error);
     ui.set_mapping_fps_nan(ui.get_stream_only() && !group.error);
-    ui.set_sunshine_action_enabled(
-        group.stream_only && group.ready && group.sunshine_id.as_deref().is_some_and(is_guid),
+    ui.set_sunshine_state(group.sunshine_state.as_i32());
+    ui.set_sunshine_port(group.sunshine_port.unwrap_or_default().into());
+    ui.set_sunshine_panel_enabled(
+        group.ready
+            && group.sunshine_state == SunshineState::Ready
+            && group.sunshine_port.is_some()
+            && group.stream_only,
     );
 }
 
@@ -2400,6 +2480,7 @@ fn reposition_after_layout(ui: slint::Weak<QuickAccess>) {
 }
 
 fn show_flyout(ui: &QuickAccess) {
+    refresh_lan_ip(ui);
     win32_flyout::position(ui.window());
 
     // Slint 1.17's winit software renderer can retain a reused-buffer cache
@@ -2426,7 +2507,7 @@ mod tests {
         is_guid, reference_candidate_indices, reference_selection_index, resolution_suggestion,
         rotation_from_index, rotation_index, rotation_label, scaled_dimension_suggestion,
         screen_override_aspect_ratio, sizing_strategy_from_index, sizing_strategy_index,
-        stream_aspect_ratio, stream_target_geometry,
+        stream_aspect_ratio, stream_target_geometry, sunshine_web_url,
     };
     use crate::config::ReferenceSource;
     use crate::controller::DisplayOption;
@@ -2478,6 +2559,15 @@ mod tests {
         assert_eq!(group_tab_detail(&group, &[]), "--");
         group.stream_diagonal = "24.4".into();
         assert_eq!(group_tab_detail(&group, &[]), "24″");
+    }
+
+    #[test]
+    fn sunshine_web_panel_uses_the_https_port_after_the_base_port() {
+        assert_eq!(
+            sunshine_web_url(54_321).unwrap(),
+            "https://localhost:54322/"
+        );
+        assert!(sunshine_web_url(u16::MAX).is_err());
     }
 
     #[test]

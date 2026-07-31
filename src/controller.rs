@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
@@ -11,6 +12,7 @@ use crate::mapping::{
     MappingRoute, MappingSession, native_topology_rotation,
 };
 use crate::renderer::RendererEvent;
+use crate::sunshine::{self, DeploymentEvent};
 
 #[derive(Clone, Debug)]
 pub struct DisplayOption {
@@ -38,6 +40,13 @@ pub enum ControllerEvent {
         id: u32,
         fps: u32,
     },
+    Sunshine {
+        id: u32,
+        display_id: String,
+        requested_port: u16,
+        port: Option<u16>,
+        error: Option<String>,
+    },
     State {
         state: &'static str,
         detail: String,
@@ -51,6 +60,10 @@ enum Command {
     Refresh,
     Start(MappingPlan),
     Stop,
+    // Kept as a controller capability even though the tray action now opens
+    // Sunshine's Web panel instead of restarting the managed instance.
+    #[allow(dead_code)]
+    RestartSunshine(u32),
     Shutdown,
 }
 
@@ -60,6 +73,7 @@ enum Message {
         generation: u64,
         event: MappingEvent,
     },
+    Sunshine(DeploymentEvent),
 }
 
 #[derive(Clone)]
@@ -83,6 +97,13 @@ impl ControllerSender {
     pub fn stop(&self) {
         let _ = self.0.send(Message::Command(Command::Stop));
     }
+
+    #[allow(dead_code)]
+    pub fn restart_sunshine(&self, group_id: u32) {
+        let _ = self
+            .0
+            .send(Message::Command(Command::RestartSunshine(group_id)));
+    }
 }
 
 impl Controller {
@@ -93,10 +114,18 @@ impl Controller {
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown_requested);
         let worker = thread::spawn(move || {
+            let sunshine_tx = worker_tx.clone();
+            let sunshine = sunshine::Supervisor::spawn(move |event| {
+                let _ = sunshine_tx.send(Message::Sunshine(event));
+            });
+            let sunshine_sender = sunshine.sender();
+            sunshine_sender.stop_all();
             let mut session = None;
             let mut active_generation = None;
             let mut active_session_id = None;
             let mut next_generation = 0_u64;
+            let mut sunshine_ports = HashMap::<u32, u16>::new();
+            let mut sunshine_instances = HashMap::<u32, (String, u16)>::new();
             while let Ok(message) = rx.recv() {
                 match message {
                     Message::Command(Command::Refresh) => refresh(&emit),
@@ -104,6 +133,35 @@ impl Controller {
                         if session.is_some() {
                             continue;
                         }
+                        sunshine_ports = match plan
+                            .groups
+                            .iter()
+                            .enumerate()
+                            .map(|(slot, group)| {
+                                sunshine::default_port_for_slot(slot).map(|port| (group.id, port))
+                            })
+                            .collect::<Result<HashMap<_, _>, _>>()
+                        {
+                            Ok(ports) => ports,
+                            Err(error) => {
+                                diagnostics::log(
+                                    Level::Error,
+                                    "controller",
+                                    "sunshine-ports",
+                                    None,
+                                    error.as_str(),
+                                );
+                                emit(state(
+                                    "Stopped",
+                                    "Couldn’t reserve streaming ports".into(),
+                                    false,
+                                    false,
+                                    error,
+                                ));
+                                continue;
+                            }
+                        };
+                        sunshine_instances.clear();
                         next_generation = next_generation.wrapping_add(1);
                         let generation = next_generation;
                         let session_id = diagnostics::new_mapping_session_id();
@@ -203,6 +261,8 @@ impl Controller {
                             Err(error) => {
                                 active_generation = None;
                                 active_session_id = None;
+                                sunshine_ports.clear();
+                                sunshine_instances.clear();
                                 if worker_shutdown.load(Ordering::Acquire) {
                                     let clean_cancel = error.is_clean_cancellation();
                                     diagnostics::log(
@@ -245,9 +305,23 @@ impl Controller {
                     }
                     Message::Command(Command::Stop) => {
                         active_generation = None;
+                        sunshine_sender.stop_all();
+                        sunshine_ports.clear();
+                        sunshine_instances.clear();
                         stop(&mut session, &mut active_session_id, &emit);
                     }
+                    Message::Command(Command::RestartSunshine(group_id)) => {
+                        if let Some(generation) = active_generation
+                            && let Some((display_id, port)) =
+                                sunshine_instances.get(&group_id).cloned()
+                        {
+                            sunshine_sender.restart(generation, group_id, display_id, port);
+                        }
+                    }
                     Message::Command(Command::Shutdown) => {
+                        sunshine_sender.stop_all();
+                        sunshine_ports.clear();
+                        sunshine_instances.clear();
                         stop(&mut session, &mut active_session_id, &emit);
                         break;
                     }
@@ -256,6 +330,13 @@ impl Controller {
                     {
                         match event {
                             MappingEvent::GroupReady(group) => {
+                                if let (Some(display_id), Some(port)) = (
+                                    group.sunshine_id.clone(),
+                                    sunshine_ports.get(&group.id).copied(),
+                                ) {
+                                    sunshine_instances.insert(group.id, (display_id.clone(), port));
+                                    sunshine_sender.start(generation, group.id, display_id, port);
+                                }
                                 emit(ControllerEvent::GroupReady(group));
                             }
                             MappingEvent::Renderer {
@@ -272,6 +353,9 @@ impl Controller {
                                 event: RendererEvent::Failed(error),
                             } => {
                                 active_generation = None;
+                                sunshine_sender.stop_all();
+                                sunshine_ports.clear();
+                                sunshine_instances.clear();
                                 let session_id = active_session_id.take();
                                 let cleanup_error = session
                                     .take()
@@ -303,9 +387,28 @@ impl Controller {
                             MappingEvent::Topology { .. } => {}
                         }
                     }
+                    Message::Sunshine(event)
+                        if active_generation == Some(event.generation) && session.is_some() =>
+                    {
+                        if let Some(port) = event.port
+                            && event.error.is_none()
+                        {
+                            sunshine_instances
+                                .insert(event.group_id, (event.display_id.clone(), port));
+                        }
+                        emit(ControllerEvent::Sunshine {
+                            id: event.group_id,
+                            display_id: event.display_id,
+                            requested_port: event.requested_port,
+                            port: event.port,
+                            error: event.error,
+                        });
+                    }
+                    Message::Sunshine(_) => {}
                     Message::Mapping { .. } => {}
                 }
             }
+            sunshine.shutdown();
         });
         Self {
             sender,

@@ -73,7 +73,7 @@ $required = @(
     (Join-Path $driver 'SBMSIndirectDisplay.dll'),
     (Join-Path $driver 'SBMSIndirectDisplay.cat'),
     $manifest,
-    (Join-Path $repository 'installer\restart-sunshine.ps1'),
+    (Join-Path $repository 'installer\manage-sunshine-instance.ps1'),
     $InnoCompiler
 )
 foreach ($path in $required) {

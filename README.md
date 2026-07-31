@@ -28,6 +28,15 @@ display, sizing, resolution, refresh-rate, aspect-ratio and rotation settings
 survive normal restarts and installer upgrades. Existing single-output
 configuration is imported automatically as **Output 1**.
 
+## Streaming
+
+Set an output to **Stream only**, choose its resolution, refresh rate and
+orientation, then start the mapping. SBMS creates the virtual desktop without
+mirroring it to a physical display and starts a dedicated Sunshine instance for
+that output. The tray shows the LAN address and port; use them to connect from
+Moonlight. **Open Sunshine** opens that instance's web panel for pairing and
+other Sunshine settings. Stopping the mapping also stops the managed instance.
+
 ## How it works
 
 The application and lifecycle code are written in Rust. A small C++ UMDF

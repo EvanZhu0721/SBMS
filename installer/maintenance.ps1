@@ -128,6 +128,43 @@ function Stop-Sbms {
     throw 'An installed SBMS process did not stop within 30 seconds.'
 }
 
+function Stop-ManagedSunshineInstances {
+    $manager = Join-Path $InstallRoot 'installer\manage-sunshine-instance.ps1'
+    if (-not (Test-Path -LiteralPath $manager -PathType Leaf)) {
+        return
+    }
+
+    $powershell = Join-Path $PSHOME 'powershell.exe'
+    $managerArgs = @(
+        '-NoLogo'
+        '-NoProfile'
+        '-NonInteractive'
+        '-ExecutionPolicy'
+        'Bypass'
+        '-File'
+        $manager
+        '-Action'
+        'StopAll'
+    )
+    $output = @(& $powershell @managerArgs 2>&1)
+    $exitCode = $LASTEXITCODE
+    $jsonLine = $output |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Select-Object -Last 1
+    if ($exitCode -ne 0 -or $null -eq $jsonLine) {
+        throw "Managed Sunshine cleanup failed with exit code $exitCode."
+    }
+
+    try {
+        $result = [string]$jsonLine | ConvertFrom-Json
+    } catch {
+        throw "Managed Sunshine cleanup returned an invalid result: $jsonLine"
+    }
+    if (-not [bool]$result.ok) {
+        throw "Managed Sunshine cleanup failed: $($result.message)"
+    }
+}
+
 function Backup-SbmsConfiguration {
     $persistentNames = @(
         'config-v1.json'
@@ -447,6 +484,7 @@ function Install-Sbms {
 function Uninstall-Sbms {
     Test-UninstallPreflight
     Stop-Sbms
+    Stop-ManagedSunshineInstances
     $taskSnapshots = @(Get-OwnedTaskSnapshots)
     Remove-SbmsTask
     try {
