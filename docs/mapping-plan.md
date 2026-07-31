@@ -1,7 +1,7 @@
 # Mapping plan interface
 
-The Rust core supports one process-level mapping plan containing up to eight
-groups. A group ID is a stable zero-based IDD connector index (`0..=7`); list
+The Rust core supports one process-level mapping plan containing up to sixteen
+groups. A group ID is a stable zero-based IDD connector index (`0..=15`); list
 order is not identity.
 
 ```rust
@@ -18,7 +18,7 @@ from the physical target, and starts the GPU mirror and input endpoint.
 It does not create a renderer, migrate windows, or capture input. This is the
 route intended for Sunshine or another external capturer.
 
-Startup rejects an empty plan, more than eight groups, duplicate/out-of-range
+Startup rejects an empty plan, more than sixteen groups, duplicate/out-of-range
 group IDs, duplicate physical targets, invalid modes, missing targets, cloned
 GDI targets, and attempts to use an SBMS virtual display as a physical target.
 The plan is atomic: a failure rolls back all groups and restores physical
@@ -51,13 +51,26 @@ width/height swap. Content rotation, if needed by a future streaming backend,
 must be an explicit renderer operation rather than an implicit display-mode
 rotation.
 
-For each ready stream-only group, the tray starts a separate managed Sunshine
-instance bound to that group's brace GUID. Instances use independent port
-families, so several virtual desktops can be streamed at the same time without
-rewriting the global Sunshine configuration or interrupting another group.
-The tray exposes each instance's LAN address and Web panel. Stopping the mapping
-also stops the instances that SBMS created. Moonlight pairing and connection
-still happen from the client device.
+For each ready group, the tray starts a separate managed Sunshine instance bound
+to that group's brace GUID. Instances use independent port families, so several
+virtual desktops can be streamed at the same time without rewriting the global
+Sunshine configuration or interrupting another group. The tray exposes the
+stream-only instances' LAN address and Web panel. Stopping the mapping also
+stops every instance that SBMS created. Moonlight pairing and connection still
+happen from the client device.
+
+At plan start, the tray projects Windows Desktop Duplication consumers as one
+process per managed Sunshine instance plus one process when any mirror renderer
+is present. If that total exceeds Windows' four-process DDA limit, the entire
+Sunshine batch starts with the WGC capture backend; otherwise Sunshine keeps its
+automatic backend selection. This is a runtime launch override and is not
+written into the global or per-instance Sunshine configuration.
+
+The projection covers only processes owned by the current SBMS plan; Windows
+does not expose a reliable list of external DDA consumers such as OBS or another
+Sunshine installation. Sunshine's WGC selection also does not change the SBMS
+mirror renderer: its Desktop Duplication dirty/move-rectangle copy path remains
+enabled independently.
 
 ## JSON interface
 

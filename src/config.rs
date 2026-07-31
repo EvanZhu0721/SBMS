@@ -24,7 +24,7 @@ const CONFIG_DIRECTORY: &str = "SBMS";
 const CONFIG_FILE: &str = "config-v2.json";
 const LEGACY_CONFIG_FILE: &str = "config-v1.json";
 const DISPLAY_OVERRIDES_FILE: &str = "display-overrides-v1.json";
-const MAX_CONFIG_GROUPS: usize = 8;
+const MAX_CONFIG_GROUPS: usize = crate::mapping::MAX_MAPPING_GROUPS;
 const MAX_VIRTUAL_DIMENSION: u32 = 16_384;
 const MAX_REFRESH_MILLIHZ: u32 = 1_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -1274,9 +1274,9 @@ mod tests {
     }
 
     #[test]
-    fn exactly_eight_groups_round_trip_in_tab_order() {
-        let store = test_store("eight-groups");
-        let order = [4, 0, 7, 2, 6, 1, 5, 3];
+    fn exactly_sixteen_groups_round_trip_in_tab_order() {
+        let store = test_store("sixteen-groups");
+        let order = [12, 4, 0, 15, 7, 2, 10, 6, 1, 14, 5, 9, 3, 13, 8, 11];
         let config = AppConfig {
             version: CONFIG_VERSION,
             groups: order
@@ -1286,7 +1286,7 @@ mod tests {
                     ..GroupConfig::default()
                 })
                 .collect(),
-            selected_group_id: Some(7),
+            selected_group_id: Some(15),
         };
         store.save(&config).unwrap();
         let loaded = store.load().unwrap().config;

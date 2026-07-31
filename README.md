@@ -23,7 +23,7 @@ Start a mapping from the tray, choose the physical display, and SBMS will:
 New windows are picked up while the mapping is running. Press **F8** to release
 mouse capture.
 
-The tray can keep up to eight independent mirror or stream-only groups. Their
+The tray can keep up to sixteen independent mirror or stream-only groups. Their
 display, sizing, resolution, refresh-rate, aspect-ratio and rotation settings
 survive normal restarts and installer upgrades. Existing single-output
 configuration is imported automatically as **Output 1**.
@@ -52,7 +52,7 @@ More implementation detail is available in
 
 ## Install
 
-1. Download `SBMS-Setup-1.4.0-x64.exe` from the latest GitHub release.
+1. Download `SBMS-Setup-1.4.1-x64.exe` from the latest GitHub release.
 2. Run it and approve the administrator prompt.
 3. Open SBMS from the tray, choose a target display, and select **Start**.
 4. Select **Stop** before disconnecting or rearranging displays.
@@ -81,7 +81,7 @@ sbms shutdown
 ```
 
 `sbms list` prints the stable ID used by `--target`. Press Enter to stop a
-foreground session cleanly. A mapping plan can contain up to eight mirror and
+foreground session cleanly. A mapping plan can contain up to sixteen mirror and
 stream-only groups.
 
 ## Build

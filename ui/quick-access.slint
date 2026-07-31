@@ -566,6 +566,7 @@ export component QuickAccess inherits Window {
     in-out property <[int]> tab-indices;
     in property <int> active-group-index: 0;
     in property <int> group-count: 1;
+    in property <int> max-group-count: 1;
     in-out property <int> pending-remove-index: -1;
     in-out property <[string]> reference-names;
     in-out property <[string]> reference-labels;
@@ -821,7 +822,7 @@ export component QuickAccess inherits Window {
                     MaterialIconButton {
                         icon-kind: 0;
                         compact: true;
-                        control-enabled: !root.running && !root.busy && root.group-count < 8;
+                        control-enabled: !root.running && !root.busy && root.group-count < root.max-group-count;
                         field-label: "Add mapping group";
                         clicked => { root.add-group(); }
                     }

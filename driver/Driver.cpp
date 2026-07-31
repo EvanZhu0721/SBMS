@@ -22,10 +22,10 @@ namespace
 {
 constexpr UINT kMaximumDimension = 16384;
 constexpr UINT kMaximumRefreshRate = 1000;
-constexpr UINT kMaximumMonitors = 8;
-constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v6";
-constexpr UINT kGateMagic = 0x53424736;
-constexpr UINT kProtocolVersion = 6;
+constexpr UINT kMaximumMonitors = 16;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v7";
+constexpr UINT kGateMagic = 0x53424737;
+constexpr UINT kProtocolVersion = 7;
 
 struct GateHeader
 {
@@ -52,7 +52,7 @@ struct GateConfig
 
 static_assert(sizeof(GateHeader) == 16);
 static_assert(sizeof(GateEntry) == 20);
-static_assert(sizeof(GateConfig) == 176);
+static_assert(sizeof(GateConfig) == 336);
 
 struct ModeConfig
 {

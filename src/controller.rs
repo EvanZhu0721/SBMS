@@ -12,7 +12,9 @@ use crate::mapping::{
     MappingRoute, MappingSession, native_topology_rotation,
 };
 use crate::renderer::RendererEvent;
-use crate::sunshine::{self, DeploymentEvent};
+use crate::sunshine::{self, CaptureBackend, DeploymentEvent};
+
+const DESKTOP_DUPLICATION_PROCESS_LIMIT: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct DisplayOption {
@@ -85,6 +87,13 @@ pub struct Controller {
     worker: Option<JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+struct SunshineInstance {
+    display_id: String,
+    port: u16,
+    capture: CaptureBackend,
+}
+
 impl ControllerSender {
     pub fn refresh(&self) {
         let _ = self.0.send(Message::Command(Command::Refresh));
@@ -125,7 +134,8 @@ impl Controller {
             let mut active_session_id = None;
             let mut next_generation = 0_u64;
             let mut sunshine_ports = HashMap::<u32, u16>::new();
-            let mut sunshine_instances = HashMap::<u32, (String, u16)>::new();
+            let mut sunshine_instances = HashMap::<u32, SunshineInstance>::new();
+            let mut sunshine_capture = CaptureBackend::Auto;
             while let Ok(message) = rx.recv() {
                 match message {
                     Message::Command(Command::Refresh) => refresh(&emit),
@@ -161,6 +171,7 @@ impl Controller {
                                 continue;
                             }
                         };
+                        sunshine_capture = capture_backend_for_plan(&plan);
                         sunshine_instances.clear();
                         next_generation = next_generation.wrapping_add(1);
                         let generation = next_generation;
@@ -171,6 +182,19 @@ impl Controller {
                             "start",
                             Some(session_id),
                             format!("mapping plan requested with {} group(s)", plan.groups.len()),
+                        );
+                        diagnostics::log(
+                            Level::Info,
+                            "controller",
+                            "sunshine-capture",
+                            Some(session_id),
+                            format!(
+                                "selected capture={} for {} managed Sunshine instance(s); projected DDA processes={} (limit={})",
+                                sunshine_capture.as_str(),
+                                plan.groups.len(),
+                                projected_desktop_duplication_processes(&plan),
+                                DESKTOP_DUPLICATION_PROCESS_LIMIT,
+                            ),
                         );
                         for group in &plan.groups {
                             diagnostics::log(
@@ -312,10 +336,15 @@ impl Controller {
                     }
                     Message::Command(Command::RestartSunshine(group_id)) => {
                         if let Some(generation) = active_generation
-                            && let Some((display_id, port)) =
-                                sunshine_instances.get(&group_id).cloned()
+                            && let Some(instance) = sunshine_instances.get(&group_id).cloned()
                         {
-                            sunshine_sender.restart(generation, group_id, display_id, port);
+                            sunshine_sender.restart(
+                                generation,
+                                group_id,
+                                instance.display_id,
+                                instance.port,
+                                instance.capture,
+                            );
                         }
                     }
                     Message::Command(Command::Shutdown) => {
@@ -334,8 +363,21 @@ impl Controller {
                                     group.sunshine_id.clone(),
                                     sunshine_ports.get(&group.id).copied(),
                                 ) {
-                                    sunshine_instances.insert(group.id, (display_id.clone(), port));
-                                    sunshine_sender.start(generation, group.id, display_id, port);
+                                    sunshine_instances.insert(
+                                        group.id,
+                                        SunshineInstance {
+                                            display_id: display_id.clone(),
+                                            port,
+                                            capture: sunshine_capture,
+                                        },
+                                    );
+                                    sunshine_sender.start(
+                                        generation,
+                                        group.id,
+                                        display_id,
+                                        port,
+                                        sunshine_capture,
+                                    );
                                 }
                                 emit(ControllerEvent::GroupReady(group));
                             }
@@ -392,9 +434,10 @@ impl Controller {
                     {
                         if let Some(port) = event.port
                             && event.error.is_none()
+                            && let Some(instance) = sunshine_instances.get_mut(&event.group_id)
                         {
-                            sunshine_instances
-                                .insert(event.group_id, (event.display_id.clone(), port));
+                            instance.display_id = event.display_id.clone();
+                            instance.port = port;
                         }
                         emit(ControllerEvent::Sunshine {
                             id: event.group_id,
@@ -446,6 +489,23 @@ fn format_mapping_group_plan(group: &MappingGroupRequest) -> String {
         group.rotation,
         native_topology_rotation(group.rotation)
     )
+}
+
+fn capture_backend_for_plan(plan: &MappingPlan) -> CaptureBackend {
+    if projected_desktop_duplication_processes(plan) > DESKTOP_DUPLICATION_PROCESS_LIMIT {
+        CaptureBackend::Wgc
+    } else {
+        CaptureBackend::Auto
+    }
+}
+
+fn projected_desktop_duplication_processes(plan: &MappingPlan) -> usize {
+    let renderer_processes = usize::from(
+        plan.groups
+            .iter()
+            .any(|group| matches!(group.route, MappingRoute::Mirror { .. })),
+    );
+    renderer_processes + plan.groups.len()
 }
 
 fn refresh(emit: &impl Fn(ControllerEvent)) {
@@ -564,5 +624,78 @@ fn state(
         running,
         busy,
         error: error.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_gate::VirtualMode;
+
+    fn plan(routes: Vec<MappingRoute>) -> MappingPlan {
+        MappingPlan {
+            groups: routes
+                .into_iter()
+                .enumerate()
+                .map(|(id, route)| MappingGroupRequest {
+                    id: id as u32,
+                    mode: VirtualMode::default(),
+                    rotation: crate::geometry::Rotation::Deg0,
+                    route,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn stays_on_auto_at_the_desktop_duplication_limit() {
+        let plan = plan(vec![
+            MappingRoute::Mirror {
+                target: "display-a".into(),
+            },
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+        ]);
+
+        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Auto);
+    }
+
+    #[test]
+    fn uses_wgc_when_a_mirror_renderer_pushes_four_sunshine_instances_over_the_limit() {
+        let plan = plan(vec![
+            MappingRoute::Mirror {
+                target: "display-a".into(),
+            },
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+        ]);
+
+        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Wgc);
+    }
+
+    #[test]
+    fn uses_wgc_for_five_stream_only_instances() {
+        let plan = plan(vec![
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+        ]);
+
+        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Wgc);
+    }
+
+    #[test]
+    fn keeps_four_stream_only_instances_on_auto() {
+        let plan = plan(vec![
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+            MappingRoute::StreamOnly,
+        ]);
+
+        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Auto);
     }
 }

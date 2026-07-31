@@ -99,11 +99,22 @@ $fakeSource = @'
 use std::env;
 use std::fs;
 use std::net::TcpListener;
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 fn main() {
-    let configuration = env::args().nth(1).unwrap_or_else(|| {
+    let arguments: Vec<String> = env::args().skip(1).collect();
+    let configuration = arguments.first().cloned().unwrap_or_else(|| {
+        std::process::exit(2);
+    });
+    let argument_log = Path::new(&configuration)
+        .parent()
+        .unwrap_or_else(|| {
+            std::process::exit(2);
+        })
+        .join("argv.txt");
+    fs::write(argument_log, arguments.join("\n")).unwrap_or_else(|_| {
         std::process::exit(2);
     });
     let contents = fs::read_to_string(configuration).unwrap_or_else(|_| {
@@ -245,6 +256,151 @@ Describe 'manage-sunshine-instance.ps1' {
         $second.ExitCode | Should Be 0
         $second.Json.status | Should Be 'already_running'
         $second.Json.pid | Should Be $first.Json.pid
+
+        $null = Invoke-Manager -ManagerArguments @(
+            '-Action'
+            'Stop'
+            '-GroupId'
+            $groupId
+        )
+    }
+
+    It 'passes capture only as an exact runtime argument' {
+        $cases = @(
+            [pscustomobject]@{ Capture = 'auto'; Expected = $null }
+            [pscustomobject]@{ Capture = 'ddx'; Expected = 'capture=ddx' }
+            [pscustomobject]@{ Capture = 'wgc'; Expected = 'capture=wgc' }
+        )
+
+        foreach ($case in $cases) {
+            $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+            $displayId = '{23f8cce0-fefe-4a5b-9e14-aabbccddeeff}'
+            $port = Get-FreeSunshineBasePort
+            $start = Invoke-Manager -ManagerArguments @(
+                '-Action'
+                'Start'
+                '-GroupId'
+                $groupId
+                '-DisplayId'
+                $displayId
+                '-Port'
+                [string]$port
+                '-Capture'
+                $case.Capture
+            )
+
+            $start.ExitCode | Should Be 0
+            $instance = Join-Path `
+                $env:LOCALAPPDATA `
+                "SBMS\sunshine\group-$groupId"
+            $arguments = @(
+                Get-Content `
+                    -LiteralPath (Join-Path $instance 'argv.txt') `
+                    -Encoding UTF8
+            )
+            $arguments[0] | Should Be (Join-Path $instance 'sunshine.conf')
+            if ($null -eq $case.Expected) {
+                $arguments.Count | Should Be 1
+            } else {
+                $arguments.Count | Should Be 2
+                $arguments[1] | Should Be $case.Expected
+            }
+
+            $configuration = Get-Content `
+                -LiteralPath (Join-Path $instance 'sunshine.conf') `
+                -Encoding UTF8 `
+                -Raw
+            $configuration | Should Not Match '(?m)^\s*capture\s*='
+            $manifest = Get-Content `
+                -LiteralPath (Join-Path $instance 'instance.json') `
+                -Encoding UTF8 `
+                -Raw |
+                ConvertFrom-Json
+            ($manifest.PSObject.Properties.Name -contains 'capture') |
+                Should Be $false
+            [IO.File]::ReadAllText(
+                $script:FakeGlobalConfiguration,
+                [Text.Encoding]::UTF8
+            ) | Should Be 'global-config-sentinel'
+
+            $stop = Invoke-Manager -ManagerArguments @(
+                '-Action'
+                'Stop'
+                '-GroupId'
+                $groupId
+            )
+            $stop.ExitCode | Should Be 0
+        }
+    }
+
+    It 'uses capture mode when matching or restarting a managed instance' {
+        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+        $displayId = '{23f8cce0-fefe-4a5b-9e14-ffeeddccbbaa}'
+        $port = Get-FreeSunshineBasePort
+        $wgcArguments = @(
+            '-Action'
+            'Start'
+            '-GroupId'
+            $groupId
+            '-DisplayId'
+            $displayId
+            '-Port'
+            [string]$port
+            '-Capture'
+            'wgc'
+        )
+        $first = Invoke-Manager -ManagerArguments $wgcArguments
+        $matching = Invoke-Manager -ManagerArguments $wgcArguments
+
+        $first.ExitCode | Should Be 0
+        $matching.ExitCode | Should Be 0
+        $matching.Json.status | Should Be 'already_running'
+        $matching.Json.pid | Should Be $first.Json.pid
+
+        $mismatch = Invoke-Manager -ManagerArguments @(
+            '-Action'
+            'Start'
+            '-GroupId'
+            $groupId
+            '-DisplayId'
+            $displayId
+            '-Port'
+            [string]$port
+            '-Capture'
+            'auto'
+        )
+        $mismatch.ExitCode | Should Not Be 0
+        $mismatch.Json.message | Should Match 'use Restart'
+        (Get-Process -Id ([int]$first.Json.pid) -ErrorAction Stop).HasExited |
+            Should Be $false
+
+        $restart = Invoke-Manager -ManagerArguments @(
+            '-Action'
+            'Restart'
+            '-GroupId'
+            $groupId
+            '-DisplayId'
+            $displayId
+            '-Port'
+            [string]$port
+            '-Capture'
+            'auto'
+        )
+        $restart.ExitCode | Should Be 0
+        $restart.Json.pid | Should Not Be $first.Json.pid
+        $restart.Json.port | Should Be $first.Json.port
+        Get-CimInstance `
+            -ClassName Win32_Process `
+            -Filter "ProcessId = $([int]$first.Json.pid)" `
+            -ErrorAction Stop |
+            Should BeNullOrEmpty
+        (Get-Process -Id ([int]$restart.Json.pid) -ErrorAction Stop).HasExited |
+            Should Be $false
+        $instance = Join-Path `
+            $env:LOCALAPPDATA `
+            "SBMS\sunshine\group-$groupId"
+        @(Get-Content -LiteralPath (Join-Path $instance 'argv.txt') -Encoding UTF8).Count |
+            Should Be 1
 
         $null = Invoke-Manager -ManagerArguments @(
             '-Action'

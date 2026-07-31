@@ -11,7 +11,10 @@ param(
     [string]$DisplayId,
 
     [ValidateRange(0, 65514)]
-    [int]$Port = 0
+    [int]$Port = 0,
+
+    [ValidateSet('auto', 'ddx', 'wgc')]
+    [string]$Capture = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -359,6 +362,30 @@ function Get-ManagedProcessRecord {
     return $record
 }
 
+function Get-CaptureBackendFromCommandLine {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CommandLine
+    )
+
+    $captureArguments = [regex]::Matches(
+        $CommandLine,
+        '(?i)(?:^|\s)"?capture=([^\s"]+)"?(?=\s|$)'
+    )
+    if ($captureArguments.Count -eq 0) {
+        return 'auto'
+    }
+    if ($captureArguments.Count -ne 1) {
+        throw 'The managed Sunshine process has multiple capture overrides.'
+    }
+
+    $capture = $captureArguments[0].Groups[1].Value.ToLowerInvariant()
+    if ($capture -notin @('auto', 'ddx', 'wgc')) {
+        throw "The managed Sunshine process has an unknown capture override: $capture"
+    }
+    return $capture
+}
+
 function Remove-StaleManifest {
     param(
         [Parameter(Mandatory)]
@@ -591,6 +618,27 @@ function Find-AvailableSunshinePort {
     throw "No complete Sunshine port family is available from base port $PreferredPort in +27 increments."
 }
 
+function Format-SunshineArguments {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Configuration,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('auto', 'ddx', 'wgc')]
+        [string]$CaptureBackend
+    )
+
+    if ($Configuration.Contains('"')) {
+        throw 'The Sunshine configuration path contains an unsupported quote.'
+    }
+
+    $arguments = '"' + $Configuration + '"'
+    if ($CaptureBackend -ne 'auto') {
+        $arguments += ' capture=' + $CaptureBackend
+    }
+    return $arguments
+}
+
 function Start-HiddenSunshine {
     param(
         [Parameter(Mandatory)]
@@ -600,7 +648,11 @@ function Start-HiddenSunshine {
         [string]$Configuration,
 
         [Parameter(Mandatory)]
-        [string]$WorkingDirectory
+        [string]$WorkingDirectory,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('auto', 'ddx', 'wgc')]
+        [string]$CaptureBackend
     )
 
     $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -610,12 +662,11 @@ function Start-HiddenSunshine {
     $startInfo.WindowStyle = [Diagnostics.ProcessWindowStyle]::Hidden
     $startInfo.ErrorDialog = $false
 
-    # Windows PowerShell 5.1 has no ProcessStartInfo.ArgumentList. The managed
-    # path cannot contain a quote, so one explicitly quoted argument is exact.
-    if ($Configuration.Contains('"')) {
-        throw 'The Sunshine configuration path contains an unsupported quote.'
-    }
-    $startInfo.Arguments = '"' + $Configuration + '"'
+    # Windows PowerShell 5.1 has no ProcessStartInfo.ArgumentList. Build the
+    # native argument string once so the configuration remains one exact arg.
+    $startInfo.Arguments = Format-SunshineArguments `
+        -Configuration $Configuration `
+        -CaptureBackend $CaptureBackend
 
     $process = [Diagnostics.Process]::Start($startInfo)
     if ($null -eq $process) {
@@ -723,6 +774,10 @@ function Start-ManagedInstance {
         [Parameter(Mandatory)]
         [string]$SunshineExecutable,
 
+        [Parameter(Mandatory)]
+        [ValidateSet('auto', 'ddx', 'wgc')]
+        [string]$CaptureBackend,
+
         [switch]$AllowAlreadyRunning
     )
 
@@ -738,7 +793,15 @@ function Start-ManagedInstance {
                 $existingPort -ge $BasePort -and
                 (($existingPort - $BasePort) % 27) -eq 0
             )
-            if ($AllowAlreadyRunning -and $sameDisplay -and $isRequestedSequence) {
+            $existingCapture = Get-CaptureBackendFromCommandLine `
+                -CommandLine ([string]$record.CommandLine)
+            $sameCapture = $existingCapture -eq $CaptureBackend
+            if (
+                $AllowAlreadyRunning -and
+                $sameDisplay -and
+                $isRequestedSequence -and
+                $sameCapture
+            ) {
                 return [ordered]@{
                     status     = 'already_running'
                     pid        = [int]$existing.pid
@@ -769,7 +832,8 @@ function Start-ManagedInstance {
         $process = Start-HiddenSunshine `
             -SunshineExecutable $SunshineExecutable `
             -Configuration $Layout.Config `
-            -WorkingDirectory (Split-Path -Parent $SunshineExecutable)
+            -WorkingDirectory (Split-Path -Parent $SunshineExecutable) `
+            -CaptureBackend $CaptureBackend
         Write-InstanceManifest `
             -Layout $Layout `
             -Id $Id `
@@ -852,6 +916,7 @@ try {
                 NormalizedDisplayId = $normalizedDisplayId
                 BasePort            = $Port
                 SunshineExecutable  = $sunshineExecutable
+                CaptureBackend      = $Capture.ToLowerInvariant()
                 AllowAlreadyRunning = ($Action -eq 'Start')
             }
             $operation = Start-ManagedInstance @startParameters

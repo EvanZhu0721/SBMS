@@ -181,6 +181,7 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         });
     })?;
     let flyout = QuickAccess::new()?;
+    flyout.set_max_group_count(MAX_MAPPING_GROUPS as i32);
     let tray = SbmsTray::new()?;
     let loaded = load_group_config(&flyout);
     let override_store = DisplayOverrideStore::default_store()?;

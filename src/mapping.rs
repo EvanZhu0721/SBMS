@@ -19,7 +19,8 @@ use crate::session_gate::{MAX_VIRTUAL_DISPLAYS, SessionGate, VirtualDisplayConfi
 use crate::virtual_display::VirtualDisplay;
 use crate::window_migration::WindowMigration;
 
-const TOPOLOGY_TIMEOUT: Duration = Duration::from_secs(15);
+const BASE_TOPOLOGY_TIMEOUT_SECS: u64 = 15;
+const TOPOLOGY_TIMEOUT_SECS_PER_GROUP_OVER_EIGHT: u64 = 2;
 const TOPOLOGY_SETTLE: Duration = Duration::from_millis(750);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const ERROR_CANCELLED_HRESULT: HRESULT = HRESULT(0x800704C7_u32 as i32);
@@ -617,7 +618,8 @@ fn wait_for_sources(
     cancel: &AtomicBool,
 ) -> Result<Vec<Display>, MappingError> {
     let requested_ids: HashSet<_> = plan.groups.iter().map(|group| group.id).collect();
-    let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
+    let topology_timeout = topology_timeout(plan.groups.len());
+    let deadline = Instant::now() + topology_timeout;
     let mut mode_applied = HashSet::new();
     let mut last_snapshot = None;
     loop {
@@ -723,16 +725,29 @@ fn wait_for_sources(
         if Instant::now() >= deadline {
             let pending = format_pending_topology(plan, &sources);
             reporter(MappingEvent::Topology {
-                message: format!("timeout after 15 seconds; {snapshot}"),
+                message: format!(
+                    "timeout after {} seconds; {snapshot}",
+                    topology_timeout.as_secs()
+                ),
             });
             return Err(MappingError {
                 stage: "topology",
                 group_id: None,
-                message: format!("virtual displays were not ready after 15 seconds; {pending}"),
+                message: format!(
+                    "virtual displays were not ready after {} seconds; {pending}",
+                    topology_timeout.as_secs()
+                ),
             });
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn topology_timeout(group_count: usize) -> Duration {
+    let extra_groups = group_count.saturating_sub(8) as u64;
+    Duration::from_secs(
+        BASE_TOPOLOGY_TIMEOUT_SECS + extra_groups * TOPOLOGY_TIMEOUT_SECS_PER_GROUP_OVER_EIGHT,
+    )
 }
 
 fn check_start_cancelled(cancel: &AtomicBool) -> Result<(), MappingError> {
@@ -855,7 +870,7 @@ fn rotation_degrees(rotation: Rotation) -> u16 {
 }
 
 fn wait_for_sources_removed(connector_indices: &[u32]) -> Result<(), MappingError> {
-    let deadline = Instant::now() + TOPOLOGY_TIMEOUT;
+    let deadline = Instant::now() + topology_timeout(connector_indices.len());
     loop {
         let displays = active_display_topology().map_err(|error| stage("remove", error))?;
         if !displays.iter().any(|display| {
@@ -1014,7 +1029,13 @@ mod tests {
             ])
             .is_err()
         );
-        assert!(MappingPlan::new(vec![group(8, MappingRoute::StreamOnly)]).is_err());
+        assert!(
+            MappingPlan::new(vec![group(
+                MAX_MAPPING_GROUPS as u32,
+                MappingRoute::StreamOnly,
+            )])
+            .is_err()
+        );
     }
 
     #[test]
@@ -1118,6 +1139,14 @@ mod tests {
         };
 
         assert!(source_matches_mode(&source, requested, Rotation::Deg270));
+    }
+
+    #[test]
+    fn topology_timeout_scales_only_above_the_previous_eight_group_limit() {
+        assert_eq!(topology_timeout(1), Duration::from_secs(15));
+        assert_eq!(topology_timeout(8), Duration::from_secs(15));
+        assert_eq!(topology_timeout(9), Duration::from_secs(17));
+        assert_eq!(topology_timeout(16), Duration::from_secs(31));
     }
 
     #[test]

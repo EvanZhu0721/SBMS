@@ -12,7 +12,7 @@ tray / CLI
   -> stream-only groups: virtual desktop stays available to an external capturer
 ```
 
-The v6 gate contains up to eight connector-indexed modes. Its ACL permits the
+The v7 gate contains up to sixteen connector-indexed modes. Its ACL permits the
 launching user, SYSTEM, LocalService and Administrators. One IDD adapter
 publishes every requested connector and drains their IddCx swap chains; it does
 not copy frames into shared memory. Connector indexes are stable identities and
