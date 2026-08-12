@@ -7,9 +7,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     sbms::diagnostics::log(
         sbms::diagnostics::Level::Info,
         "tray",
-        "startup",
+        "process-start",
         None,
-        "SBMS tray started",
+        "SBMS tray process started",
     );
     unsafe {
         windows::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(

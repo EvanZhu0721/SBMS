@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use crate::mapping::{MAX_MAPPING_GROUPS, MappingGroupRequest, MappingPlan, Mappi
 use crate::network::preferred_lan_ipv4;
 use crate::session_gate::{MAX_VIRTUAL_DIMENSION, VirtualMode};
 use crate::win32_flyout;
+use crate::win32_tray::{NativeTray, TrayAction, TrayHandle};
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 slint::include_modules!();
@@ -176,13 +177,19 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
     listen_for_shutdown(|| {
+        diagnostics::log(
+            Level::Info,
+            "tray",
+            "external-shutdown",
+            None,
+            "shutdown signal received",
+        );
         let _ = slint::invoke_from_event_loop(|| {
             let _ = slint::quit_event_loop();
         });
     })?;
     let flyout = QuickAccess::new()?;
     flyout.set_max_group_count(MAX_MAPPING_GROUPS as i32);
-    let tray = SbmsTray::new()?;
     let loaded = load_group_config(&flyout);
     let override_store = DisplayOverrideStore::default_store()?;
     let override_outcome = override_store.load()?;
@@ -201,36 +208,54 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         loaded.active,
     );
 
+    let flyout_focus = Arc::new(AtomicBool::new(false));
     let flyout_weak = flyout.as_weak();
-    tray.on_tray_clicked(move || {
-        if let Some(flyout) = flyout_weak.upgrade() {
-            if flyout.window().is_visible() {
-                let _ = flyout.hide();
-            } else {
-                show_flyout(&flyout);
+    let action_focus = flyout_focus.clone();
+    let tray = NativeTray::new(move |action| {
+        let flyout_weak = flyout_weak.clone();
+        let focus = action_focus.clone();
+        if let Err(error) = slint::invoke_from_event_loop(move || match action {
+            TrayAction::Toggle => {
+                if let Some(flyout) = flyout_weak.upgrade() {
+                    if flyout.window().is_visible() {
+                        focus.store(false, Ordering::Relaxed);
+                        let _ = flyout.hide();
+                    } else {
+                        show_flyout(&flyout, &focus);
+                    }
+                }
             }
+            TrayAction::Open => {
+                if let Some(flyout) = flyout_weak.upgrade() {
+                    show_flyout(&flyout, &focus);
+                }
+            }
+            TrayAction::Quit => {
+                diagnostics::log(Level::Info, "tray", "action", None, "quit");
+                let _ = slint::quit_event_loop();
+            }
+        }) {
+            diagnostics::log(
+                Level::Warn,
+                "tray",
+                "action-dispatch",
+                None,
+                error.to_string(),
+            );
         }
-    });
+    })?;
+    let tray_handle = tray.handle();
 
     let flyout_weak = flyout.as_weak();
-    tray.on_open_panel(move || {
-        if let Some(flyout) = flyout_weak.upgrade() {
-            show_flyout(&flyout);
-        }
-    });
-    tray.on_quit(|| {
-        let _ = slint::quit_event_loop();
-    });
-
-    let flyout_weak = flyout.as_weak();
+    let dismiss_focus = flyout_focus.clone();
     flyout.on_dismiss(move || {
         if let Some(flyout) = flyout_weak.upgrade() {
+            dismiss_focus.store(false, Ordering::Relaxed);
             let _ = flyout.hide();
         }
     });
 
     let ui = flyout.as_weak();
-    let tray_weak = tray.as_weak();
     let error_revision = Arc::new(AtomicU64::new(0));
     let event_error_revision = error_revision.clone();
     let event_displays = displays.clone();
@@ -239,7 +264,7 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
     let event_display_overrides = display_overrides.clone();
     let controller = Controller::spawn(move |event| {
         let ui = ui.clone();
-        let tray = tray_weak.clone();
+        let tray = tray_handle.clone();
         let error_revision = event_error_revision.clone();
         let displays = event_displays.clone();
         let groups = event_groups.clone();
@@ -249,7 +274,7 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
             if let Some(ui) = ui.upgrade() {
                 apply_event(
                     &ui,
-                    tray.upgrade().as_ref(),
+                    tray,
                     &error_revision,
                     (&displays, &display_overrides),
                     &groups,
@@ -731,24 +756,47 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
 
     let dismiss_timer = slint::Timer::default();
     let dismiss_flyout = flyout.as_weak();
+    let timer_focus = flyout_focus.clone();
     dismiss_timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(150),
         move || {
-            if let Some(flyout) = dismiss_flyout.upgrade()
-                && win32_flyout::lost_focus(flyout.window())
-            {
-                let _ = flyout.hide();
+            if let Some(flyout) = dismiss_flyout.upgrade() {
+                if !flyout.window().is_visible() {
+                    timer_focus.store(false, Ordering::Relaxed);
+                } else if timer_focus.load(Ordering::Relaxed) {
+                    if win32_flyout::lost_focus(flyout.window()) {
+                        timer_focus.store(false, Ordering::Relaxed);
+                        let _ = flyout.hide();
+                    }
+                } else if win32_flyout::has_focus(flyout.window()) {
+                    timer_focus.store(true, Ordering::Relaxed);
+                }
             }
         },
     );
 
     sender.refresh();
-    tray.show()?;
     if open_on_start {
-        show_flyout(&flyout);
+        show_flyout(&flyout, &flyout_focus);
     }
-    slint::run_event_loop()?;
+    diagnostics::log(
+        Level::Info,
+        "tray",
+        "event-loop-start",
+        None,
+        "Slint event loop started",
+    );
+    // The tray host is a native Win32 window, so Slint cannot count it when deciding
+    // whether the app is still alive. Only the explicit tray Exit action should quit.
+    slint::run_event_loop_until_quit()?;
+    diagnostics::log(
+        Level::Info,
+        "tray",
+        "event-loop-stop",
+        None,
+        "Slint event loop stopped",
+    );
     {
         let displays = displays.lock().expect("display metadata poisoned");
         let mut groups = groups.lock().expect("group drafts poisoned");
@@ -773,7 +821,7 @@ fn active_after_removal(current: usize, removed: usize, remaining: usize) -> usi
 
 fn apply_event(
     ui: &QuickAccess,
-    tray: Option<&SbmsTray>,
+    tray: TrayHandle,
     error_revision: &Arc<AtomicU64>,
     display_state: (
         &Arc<Mutex<Vec<DisplayOption>>>,
@@ -882,9 +930,7 @@ fn apply_event(
             error,
         } => {
             let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(tray) = tray {
-                tray.set_status(state.into());
-            }
+            tray.set_status(state);
             ui.set_state(state.into());
             ui.set_state_detail(detail.into());
             ui.set_running(running);
@@ -2480,7 +2526,8 @@ fn reposition_after_layout(ui: slint::Weak<QuickAccess>) {
     });
 }
 
-fn show_flyout(ui: &QuickAccess) {
+fn show_flyout(ui: &QuickAccess, focus: &Arc<AtomicBool>) {
+    focus.store(false, Ordering::Relaxed);
     refresh_lan_ip(ui);
     win32_flyout::position(ui.window());
 
@@ -2489,12 +2536,34 @@ fn show_flyout(ui: &QuickAccess) {
     // Taking a snapshot temporarily selects a new repaint buffer and clears
     // that cache, so the visible frame below is rendered in full.
     let _ = ui.window().take_snapshot();
-    let _ = ui.show();
+    if let Err(error) = ui.show() {
+        diagnostics::log(Level::Warn, "ui", "flyout-show", None, error.to_string());
+        return;
+    }
+
+    let activated = win32_flyout::activate(ui.window());
+    focus.store(activated, Ordering::Relaxed);
+    diagnostics::log(
+        Level::Debug,
+        "ui",
+        "flyout-activate",
+        None,
+        format!("attempt=immediate foreground={activated}"),
+    );
 
     let ui = ui.as_weak();
+    let focus = focus.clone();
     slint::Timer::single_shot(Duration::ZERO, move || {
         if let Some(ui) = ui.upgrade() {
-            win32_flyout::activate(ui.window());
+            let activated = focus.load(Ordering::Relaxed) || win32_flyout::activate(ui.window());
+            focus.store(activated, Ordering::Relaxed);
+            diagnostics::log(
+                Level::Debug,
+                "ui",
+                "flyout-activate",
+                None,
+                format!("attempt=deferred foreground={activated}"),
+            );
             ui.window().request_redraw();
         }
     });

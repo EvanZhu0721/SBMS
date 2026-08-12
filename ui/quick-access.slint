@@ -1887,26 +1887,3 @@ export component QuickAccess inherits Window {
         }
     }
 }
-
-export component SbmsTray inherits SystemTrayIcon {
-    icon: @image-url("tray-icon.svg");
-    in property <string> status: "Stopped";
-    tooltip: "SBMS · " + root.status;
-    title: "SBMS";
-    callback tray-clicked();
-    callback open-panel();
-    callback quit();
-    clicked => { root.tray-clicked(); }
-
-    Menu {
-        MenuItem {
-            title: "Open SBMS";
-            activated => { root.open-panel(); }
-        }
-        MenuSeparator {}
-        MenuItem {
-            title: "Exit";
-            activated => { root.quit(); }
-        }
-    }
-}

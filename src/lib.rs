@@ -14,4 +14,5 @@ mod sunshine;
 pub mod ui;
 pub mod virtual_display;
 mod win32_flyout;
+mod win32_tray;
 mod window_migration;

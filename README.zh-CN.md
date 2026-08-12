@@ -48,7 +48,7 @@ WDF/IddCx 向 Windows 提供虚拟显示器。镜像链路使用 Desktop Duplica
 
 ## 安装和使用
 
-1. 从最新 GitHub Release 下载 `SBMS-Setup-1.4.1-x64.exe`。
+1. 从最新 GitHub Release 下载 `SBMS-Setup-1.4.2-x64.exe`。
 2. 运行安装包并批准管理员权限。
 3. 从系统托盘打开 SBMS，选择目标显示器，然后点击 **Start**。
 4. 断开或重新排列显示器前，先点击 **Stop**。

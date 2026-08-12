@@ -1,6 +1,6 @@
 [package]
 name = "sbms"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2024"
 publish = false
 default-run = "sbms"
@@ -19,7 +19,6 @@ slint = { version = "1.17.1", default-features = false, features = [
     "raw-window-handle-06",
     "software-renderer-systemfonts",
     "std",
-    "system-tray",
     "unstable-winit-030",
 ] }
 raw-window-handle = "0.6.2"

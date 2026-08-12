@@ -7,19 +7,13 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::Shell::{NOTIFYICONIDENTIFIER, Shell_NotifyIconGetRect};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, HWND_MESSAGE,
-    SetForegroundWindow,
+    GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
 };
-use windows::core::{GUID, PCWSTR, w};
-
-const TRAY_WINDOW_CLASS: PCWSTR = w!("SlintSystemTrayWindow");
-const SLINT_TRAY_ICON_ID: u32 = 1;
 const FLYOUT_GAP: i32 = 8;
 
 pub fn position(window: &Window) {
-    let anchor = tray_icon_rect().or_else(cursor_rect);
+    let anchor = crate::win32_tray::icon_rect().or_else(cursor_rect);
     let Some(anchor) = anchor else {
         return;
     };
@@ -54,30 +48,39 @@ pub fn position(window: &Window) {
             center.y - height / 2,
         ),
     };
-    let x = x.clamp(info.rcWork.left, info.rcWork.right - width);
-    let y = y.clamp(info.rcWork.top, info.rcWork.bottom - height);
+    let max_x = (info.rcWork.right - width).max(info.rcWork.left);
+    let max_y = (info.rcWork.bottom - height).max(info.rcWork.top);
+    let x = x.clamp(info.rcWork.left, max_x);
+    let y = y.clamp(info.rcWork.top, max_y);
     window.set_position(PhysicalPosition::new(x, y));
 }
 
-pub fn activate(window: &Window) {
+pub fn activate(window: &Window) -> bool {
     if let Some(hwnd) = hwnd(window) {
-        unsafe {
-            let _ = SetForegroundWindow(hwnd);
-        }
+        return unsafe { SetForegroundWindow(hwnd) }.as_bool();
     }
+    false
 }
 
 pub fn lost_focus(window: &Window) -> bool {
     if !window.is_visible() {
         return false;
     }
+    matches!(foreground_belongs_to_current_process(), Some(false))
+}
+
+pub fn has_focus(window: &Window) -> bool {
+    window.is_visible() && matches!(foreground_belongs_to_current_process(), Some(true))
+}
+
+fn foreground_belongs_to_current_process() -> Option<bool> {
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.0.is_null() {
-        return false;
+        return None;
     }
     let mut process_id = 0;
     unsafe { GetWindowThreadProcessId(foreground, Some(&mut process_id)) };
-    process_id != unsafe { GetCurrentProcessId() }
+    Some(process_id == unsafe { GetCurrentProcessId() })
 }
 
 fn hwnd(window: &Window) -> Option<HWND> {
@@ -86,33 +89,6 @@ fn hwnd(window: &Window) -> Option<HWND> {
     match handle.as_raw() {
         RawWindowHandle::Win32(handle) => Some(HWND(handle.hwnd.get() as *mut _)),
         _ => None,
-    }
-}
-
-fn tray_icon_rect() -> Option<RECT> {
-    let mut previous = None;
-    loop {
-        let tray_window = unsafe {
-            FindWindowExW(
-                Some(HWND_MESSAGE),
-                previous,
-                TRAY_WINDOW_CLASS,
-                PCWSTR::null(),
-            )
-        }
-        .ok()?;
-        let mut process_id = 0;
-        unsafe { GetWindowThreadProcessId(tray_window, Some(&mut process_id)) };
-        if process_id == unsafe { GetCurrentProcessId() } {
-            let identifier = NOTIFYICONIDENTIFIER {
-                cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
-                hWnd: tray_window,
-                uID: SLINT_TRAY_ICON_ID,
-                guidItem: GUID::zeroed(),
-            };
-            return unsafe { Shell_NotifyIconGetRect(&identifier) }.ok();
-        }
-        previous = Some(tray_window);
     }
 }
 
