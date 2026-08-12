@@ -1,4 +1,4 @@
-![SBMS banner](assets/sbms-banner.png)
+![SBMS banner](assets/sbms-banner.png?v=4c8d729)
 
 # SBMS
 
