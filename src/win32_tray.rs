@@ -36,9 +36,10 @@ const NIN_SELECT: u32 = 0x0400;
 const NIN_KEYSELECT: u32 = NIN_SELECT + 1;
 const OPEN_COMMAND: u32 = 1;
 const EXIT_COMMAND: u32 = 2;
-const RETRY_TIMER_ID: usize = 1;
+const MAINTENANCE_TIMER_ID: usize = 1;
 const RETRY_DELAYS_MS: [u32; 6] = [250, 500, 1_000, 2_000, 4_000, 8_000];
 const RECOVERY_RETRY_MS: u32 = 30_000;
+const HEALTH_CHECK_MS: u32 = 5_000;
 
 static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
@@ -185,7 +186,7 @@ impl Drop for NativeTray {
         let mut state = lock_state(&self.inner.state);
         state.hwnd = 0;
         unsafe {
-            let _ = KillTimer(Some(self.inner.hwnd), RETRY_TIMER_ID);
+            let _ = KillTimer(Some(self.inner.hwnd), MAINTENANCE_TIMER_ID);
             let _ = Shell_NotifyIconW(NIM_DELETE, &identity_data(self.inner.hwnd));
             SetWindowLongPtrW(self.inner.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyMenu(self.inner.hmenu);
@@ -204,7 +205,7 @@ impl Drop for NativeTray {
 
 impl Inner {
     fn begin_registration(&self, reason: &'static str) {
-        let _ = unsafe { KillTimer(Some(self.hwnd), RETRY_TIMER_ID) };
+        let _ = unsafe { KillTimer(Some(self.hwnd), MAINTENANCE_TIMER_ID) };
         self.registration_reason.set(reason);
         self.next_retry.set(0);
         self.recovery_announced.set(false);
@@ -259,6 +260,7 @@ impl Inner {
             None,
             format!("native tray icon registered reason={reason} attempt={attempt}"),
         );
+        self.arm_timer(HEALTH_CHECK_MS, "health-check");
         true
     }
 
@@ -283,27 +285,39 @@ impl Inner {
             }
             RECOVERY_RETRY_MS
         };
-        let timer = unsafe { SetTimer(Some(self.hwnd), RETRY_TIMER_ID, delay, None) };
+        self.arm_timer(delay, "registration-retry");
+    }
+
+    fn arm_timer(&self, delay: u32, purpose: &'static str) {
+        let timer = unsafe { SetTimer(Some(self.hwnd), MAINTENANCE_TIMER_ID, delay, None) };
         if timer == 0 {
             diagnostics::log(
                 Level::Error,
                 "tray",
-                "retry-timer-failed",
+                "maintenance-timer-failed",
                 None,
-                format!("reason={} delay_ms={delay}", self.registration_reason.get()),
+                format!("purpose={purpose} delay_ms={delay}"),
             );
         }
     }
 
     fn retry_registration(&self) {
-        let _ = unsafe { KillTimer(Some(self.hwnd), RETRY_TIMER_ID) };
+        let _ = unsafe { KillTimer(Some(self.hwnd), MAINTENANCE_TIMER_ID) };
         let attempt = self.next_retry.get() + 1;
         if !self.try_register(attempt) {
             self.schedule_retry();
         }
     }
 
-    fn update_status(&self) {
+    fn maintain_registration(&self) {
+        if !self.registered.get() {
+            self.retry_registration();
+        } else {
+            self.update_status("health-check");
+        }
+    }
+
+    fn update_status(&self, reason: &'static str) {
         if !self.registered.get() {
             return;
         }
@@ -315,11 +329,11 @@ impl Inner {
             diagnostics::log(
                 Level::Warn,
                 "tray",
-                "tooltip-update-failed",
+                "icon-update-failed",
                 None,
-                "tray icon was unavailable while updating status; re-registering",
+                format!("reason={reason}; tray icon is unavailable; registering it again"),
             );
-            self.begin_registration("tooltip-update");
+            self.begin_registration(reason);
         }
     }
 }
@@ -379,14 +393,14 @@ unsafe extern "system" fn wnd_proc(
 
     if message == WM_TRAY_STATUS {
         if let Some(inner) = unsafe { inner(hwnd) } {
-            inner.update_status();
+            inner.update_status("status-update");
         }
         return LRESULT(0);
     }
 
-    if message == WM_TIMER && wparam.0 == RETRY_TIMER_ID {
+    if message == WM_TIMER && wparam.0 == MAINTENANCE_TIMER_ID {
         if let Some(inner) = unsafe { inner(hwnd) } {
-            inner.retry_registration();
+            inner.maintain_registration();
         }
         return LRESULT(0);
     }

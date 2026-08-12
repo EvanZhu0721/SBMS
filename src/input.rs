@@ -10,7 +10,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
     MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
-    SendInput, VK_F8, VK_LSHIFT, VK_LWIN, VK_RSHIFT, VK_RWIN, VK_SNAPSHOT,
+    SendInput, VK_LSHIFT, VK_LWIN, VK_RSHIFT, VK_RWIN, VK_SNAPSHOT,
 };
 use windows::Win32::UI::Input::{
     GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RID_INPUT,
@@ -20,9 +20,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, ClipCursor, GetClipCursor, GetSystemMetrics, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
     LLMHF_INJECTED, MSLLHOOKSTRUCT, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SetCursorPos, SetWindowsHookExW, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_INPUT, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use crate::geometry::{CoordinateTransform, PixelPoint, PixelRect, Rotation};
@@ -113,7 +113,6 @@ struct InputMapper {
     cursor: POINT,
     move_pending: bool,
     captured: bool,
-    swallow_f8_up: bool,
     pressed: u8,
     tag: usize,
     window: HWND,
@@ -179,7 +178,6 @@ impl InputGuard {
                 },
                 move_pending: false,
                 captured: false,
-                swallow_f8_up: false,
                 pressed: 0,
                 tag,
                 window,
@@ -408,36 +406,20 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
     let message = wparam.0 as u32;
     let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-    let action = INPUT_STATE.with(|cell| {
-        let mut state = cell.borrow_mut();
-        let state = state.as_mut()?;
+    let release_window = INPUT_STATE.with(|cell| {
+        let state = cell.borrow();
+        let state = state.as_ref()?;
         let active = ACTIVE_INPUT_ENDPOINT.owns(window_key(state.window));
-        if state.swallow_f8_up
-            && event.vkCode == VK_F8.0 as u32
-            && matches!(message, WM_KEYUP | WM_SYSKEYUP)
-        {
-            state.swallow_f8_up = false;
-            return active.then_some((true, false, state.window));
-        }
         if !active || !state.captured || !matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
             return None;
         }
-        if event.vkCode == VK_F8.0 as u32 {
-            state.swallow_f8_up = true;
-            return Some((true, true, state.window));
-        }
         if event.vkCode == VK_SNAPSHOT.0 as u32 || is_snipping_shortcut(event.vkCode) {
-            return Some((false, true, state.window));
+            return Some(state.window);
         }
         None
     });
-    if let Some((swallow, release, window)) = action {
-        if release {
-            post_release(window, RELEASE_NORMAL);
-        }
-        if swallow {
-            return LRESULT(1);
-        }
+    if let Some(window) = release_window {
+        post_release(window, RELEASE_NORMAL);
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }

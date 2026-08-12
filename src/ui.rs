@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -208,26 +208,22 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         loaded.active,
     );
 
-    let flyout_focus = Arc::new(AtomicBool::new(false));
     let flyout_weak = flyout.as_weak();
-    let action_focus = flyout_focus.clone();
     let tray = NativeTray::new(move |action| {
         let flyout_weak = flyout_weak.clone();
-        let focus = action_focus.clone();
         if let Err(error) = slint::invoke_from_event_loop(move || match action {
             TrayAction::Toggle => {
                 if let Some(flyout) = flyout_weak.upgrade() {
                     if flyout.window().is_visible() {
-                        focus.store(false, Ordering::Relaxed);
                         let _ = flyout.hide();
                     } else {
-                        show_flyout(&flyout, &focus);
+                        show_flyout(&flyout);
                     }
                 }
             }
             TrayAction::Open => {
                 if let Some(flyout) = flyout_weak.upgrade() {
-                    show_flyout(&flyout, &focus);
+                    show_flyout(&flyout);
                 }
             }
             TrayAction::Quit => {
@@ -247,10 +243,8 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
     let tray_handle = tray.handle();
 
     let flyout_weak = flyout.as_weak();
-    let dismiss_focus = flyout_focus.clone();
     flyout.on_dismiss(move || {
         if let Some(flyout) = flyout_weak.upgrade() {
-            dismiss_focus.store(false, Ordering::Relaxed);
             let _ = flyout.hide();
         }
     });
@@ -754,31 +748,9 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let dismiss_timer = slint::Timer::default();
-    let dismiss_flyout = flyout.as_weak();
-    let timer_focus = flyout_focus.clone();
-    dismiss_timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(150),
-        move || {
-            if let Some(flyout) = dismiss_flyout.upgrade() {
-                if !flyout.window().is_visible() {
-                    timer_focus.store(false, Ordering::Relaxed);
-                } else if timer_focus.load(Ordering::Relaxed) {
-                    if win32_flyout::lost_focus(flyout.window()) {
-                        timer_focus.store(false, Ordering::Relaxed);
-                        let _ = flyout.hide();
-                    }
-                } else if win32_flyout::has_focus(flyout.window()) {
-                    timer_focus.store(true, Ordering::Relaxed);
-                }
-            }
-        },
-    );
-
     sender.refresh();
     if open_on_start {
-        show_flyout(&flyout, &flyout_focus);
+        show_flyout(&flyout);
     }
     diagnostics::log(
         Level::Info,
@@ -2526,8 +2498,7 @@ fn reposition_after_layout(ui: slint::Weak<QuickAccess>) {
     });
 }
 
-fn show_flyout(ui: &QuickAccess, focus: &Arc<AtomicBool>) {
-    focus.store(false, Ordering::Relaxed);
+fn show_flyout(ui: &QuickAccess) {
     refresh_lan_ip(ui);
     win32_flyout::position(ui.window());
 
@@ -2542,7 +2513,6 @@ fn show_flyout(ui: &QuickAccess, focus: &Arc<AtomicBool>) {
     }
 
     let activated = win32_flyout::activate(ui.window());
-    focus.store(activated, Ordering::Relaxed);
     diagnostics::log(
         Level::Debug,
         "ui",
@@ -2550,23 +2520,7 @@ fn show_flyout(ui: &QuickAccess, focus: &Arc<AtomicBool>) {
         None,
         format!("attempt=immediate foreground={activated}"),
     );
-
-    let ui = ui.as_weak();
-    let focus = focus.clone();
-    slint::Timer::single_shot(Duration::ZERO, move || {
-        if let Some(ui) = ui.upgrade() {
-            let activated = focus.load(Ordering::Relaxed) || win32_flyout::activate(ui.window());
-            focus.store(activated, Ordering::Relaxed);
-            diagnostics::log(
-                Level::Debug,
-                "ui",
-                "flyout-activate",
-                None,
-                format!("attempt=deferred foreground={activated}"),
-            );
-            ui.window().request_redraw();
-        }
-    });
+    ui.window().request_redraw();
 }
 
 #[cfg(test)]

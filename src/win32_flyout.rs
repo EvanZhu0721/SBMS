@@ -6,10 +6,7 @@ use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
-use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, SetForegroundWindow};
 const FLYOUT_GAP: i32 = 8;
 
 pub fn position(window: &Window) {
@@ -60,27 +57,6 @@ pub fn activate(window: &Window) -> bool {
         return unsafe { SetForegroundWindow(hwnd) }.as_bool();
     }
     false
-}
-
-pub fn lost_focus(window: &Window) -> bool {
-    if !window.is_visible() {
-        return false;
-    }
-    matches!(foreground_belongs_to_current_process(), Some(false))
-}
-
-pub fn has_focus(window: &Window) -> bool {
-    window.is_visible() && matches!(foreground_belongs_to_current_process(), Some(true))
-}
-
-fn foreground_belongs_to_current_process() -> Option<bool> {
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.0.is_null() {
-        return None;
-    }
-    let mut process_id = 0;
-    unsafe { GetWindowThreadProcessId(foreground, Some(&mut process_id)) };
-    Some(process_id == unsafe { GetCurrentProcessId() })
 }
 
 fn hwnd(window: &Window) -> Option<HWND> {

@@ -20,8 +20,7 @@ Start a mapping from the tray, choose the physical display, and SBMS will:
 - forward mouse input to the real Windows pointer on the virtual desktop; and
 - restore the windows and physical display layout when mapping stops.
 
-New windows are picked up while the mapping is running. Press **F8** to release
-mouse capture.
+New windows are picked up while the mapping is running.
 
 The tray can keep up to sixteen independent mirror or stream-only groups. Their
 display, sizing, resolution, refresh-rate, aspect-ratio and rotation settings
@@ -52,7 +51,7 @@ More implementation detail is available in
 
 ## Install
 
-1. Download `SBMS-Setup-1.4.2-x64.exe` from the latest GitHub release.
+1. Download `SBMS-Setup-1.4.3-x64.exe` from the latest GitHub release.
 2. Run it and approve the administrator prompt.
 3. Open SBMS from the tray, choose a target display, and select **Start**.
 4. Select **Stop** before disconnecting or rearranging displays.
