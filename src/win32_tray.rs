@@ -18,11 +18,12 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
-    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    HICON, HMENU, ICONINFO, KillTimer, MF_SEPARATOR, MF_STRING, MSGFLT_ALLOW, PostMessageW,
-    RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
-    WM_CONTEXTMENU, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+    DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, FindWindowW, GWLP_USERDATA,
+    GetWindowLongPtrW, HICON, HMENU, ICONINFO, KillTimer, MF_SEPARATOR, MF_STRING, MSGFLT_ALLOW,
+    PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_APP, WM_CONTEXTMENU, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -43,6 +44,7 @@ const HEALTH_CHECK_MS: u32 = 5_000;
 
 static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED_MESSAGE: AtomicU32 = AtomicU32::new(0);
+static OPEN_MESSAGE: AtomicU32 = AtomicU32::new(0);
 static CURRENT_HWND: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,6 +107,10 @@ impl NativeTray {
         if taskbar_created == 0 {
             return Err(io::Error::last_os_error().into());
         }
+        let open_message = open_message();
+        if open_message == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
 
         let hinstance = unsafe { GetModuleHandleW(None) }?;
         // TaskbarCreated is a broadcast and does not reach HWND_MESSAGE windows. A hidden
@@ -127,7 +133,7 @@ impl NativeTray {
         }?;
         // The tray runs elevated, while Explorer normally does not. Explicitly allow the
         // shell callback and recreation messages through UIPI for this process-owned window.
-        for message in [taskbar_created, WM_TRAY_ICON] {
+        for message in [taskbar_created, WM_TRAY_ICON, open_message] {
             if let Err(error) =
                 unsafe { ChangeWindowMessageFilterEx(hwnd, message, MSGFLT_ALLOW, None) }
             {
@@ -346,6 +352,18 @@ pub fn icon_rect() -> Option<RECT> {
     icon_rect_for_hwnd(HWND(raw as *mut _))
 }
 
+pub(crate) fn find_host_window() -> Option<HWND> {
+    unsafe { FindWindowW(CLASS_NAME, PCWSTR::null()) }.ok()
+}
+
+pub(crate) fn request_open(hwnd: HWND) -> windows::core::Result<()> {
+    let message = open_message();
+    if message == 0 {
+        return Err(windows::core::Error::from_thread());
+    }
+    unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) }
+}
+
 fn icon_rect_for_hwnd(hwnd: HWND) -> Option<RECT> {
     let identifier = NOTIFYICONIDENTIFIER {
         cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
@@ -394,6 +412,20 @@ unsafe extern "system" fn wnd_proc(
     if message == WM_TRAY_STATUS {
         if let Some(inner) = unsafe { inner(hwnd) } {
             inner.update_status("status-update");
+        }
+        return LRESULT(0);
+    }
+
+    if message == open_message() && message != 0 {
+        if let Some(inner) = unsafe { inner(hwnd) } {
+            diagnostics::log(
+                Level::Debug,
+                "tray",
+                "action",
+                None,
+                "external open request",
+            );
+            (inner.action)(TrayAction::Open);
         }
         return LRESULT(0);
     }
@@ -517,6 +549,16 @@ fn taskbar_created_message() -> u32 {
     }
     let message = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
     TASKBAR_CREATED_MESSAGE.store(message, Ordering::Release);
+    message
+}
+
+fn open_message() -> u32 {
+    let cached = OPEN_MESSAGE.load(Ordering::Acquire);
+    if cached != 0 {
+        return cached;
+    }
+    let message = unsafe { RegisterWindowMessageW(w!("SBMS.Tray.Open.v1")) };
+    OPEN_MESSAGE.store(message, Ordering::Release);
     message
 }
 

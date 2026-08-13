@@ -237,9 +237,18 @@ function Get-VerifiedTask {
     if (-not $task) {
         return $null
     }
+    $action = $task.Actions[0]
+    $ownedArguments = [string]::IsNullOrEmpty($action.Arguments) -or
+        $action.Arguments -ceq '--background'
     if ($task.Actions.Count -ne 1 -or
-        -not $task.Actions[0].Execute.Equals(
+        -not [string]::Equals(
+            $action.Execute,
             $tray,
+            [StringComparison]::OrdinalIgnoreCase) -or
+        -not $ownedArguments -or
+        -not [string]::Equals(
+            $action.WorkingDirectory,
+            $InstallRoot,
             [StringComparison]::OrdinalIgnoreCase)) {
         throw "Scheduled task collision at $Path$Name."
     }
@@ -330,6 +339,7 @@ function Install-SbmsTask {
         throw "Owned scheduled task already exists at $taskPath$taskName."
     }
     $taskAction = New-ScheduledTaskAction -Execute $tray `
+        -Argument '--background' `
         -WorkingDirectory $InstallRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $interactive.Sid
     $principal = New-ScheduledTaskPrincipal `
@@ -350,10 +360,18 @@ function Install-SbmsTask {
         -Settings $settings `
         -Description 'Starts the SBMS tray with the privileges required by its protected session gate.' |
         Out-Null
+    $existingProcessIds = @(
+        Get-InstalledSbmsProcesses |
+            ForEach-Object { $_.Id }
+    )
     Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ([DateTime]::UtcNow -lt $deadline) {
-        if (@(Get-InstalledSbmsProcesses).Count -gt 0) {
+        $started = @(
+            Get-InstalledSbmsProcesses |
+                Where-Object { $_.Id -notin $existingProcessIds }
+        )
+        if ($started.Count -gt 0) {
             return
         }
         Start-Sleep -Milliseconds 200

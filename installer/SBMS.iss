@@ -71,7 +71,7 @@ Type: files; Name: "{app}\driver\IddSampleDriver.cer"
 Type: filesandordirs; Name: "{app}\driver\IddSampleDriver"
 
 [Icons]
-Name: "{group}\SBMS"; Filename: "{app}\sbms-tray.exe"
+Name: "{group}\SBMS"; Filename: "{app}\sbms-tray.exe"; Parameters: "--open"; WorkingDir: "{app}"
 Name: "{group}\Uninstall SBMS"; Filename: "{uninstallexe}"
 
 [Code]

@@ -6,6 +6,7 @@ use std::time::Duration;
 use sbms::config::{ConfigStore, GroupRouteConfig};
 use sbms::diagnostics::{self, Level, MappingSessionId};
 use sbms::display::active_displays;
+use sbms::launch_broker::{self, LaunchDisposition};
 use sbms::mapping::{
     MappingError, MappingEvent, MappingPlan, MappingRequest, MappingRoute, MappingSession,
 };
@@ -36,7 +37,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("plan") => plan(arguments),
         Some("config") => config(arguments),
         Some("shutdown") => shutdown(arguments),
-        Some("ui") => sbms::ui::run_open(),
+        Some("ui") if arguments.next().is_none() => match launch_broker::route_tray(true)? {
+            LaunchDisposition::Exit => Ok(()),
+            LaunchDisposition::RunHere => sbms::ui::run_open(),
+        },
         _ => usage(),
     }
 }

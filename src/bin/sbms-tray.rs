@@ -1,6 +1,22 @@
 #![windows_subsystem = "windows"]
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+use sbms::launch_broker::{self, LaunchDisposition};
+
+fn main() {
+    if let Err(error) = run() {
+        sbms::diagnostics::log(
+            sbms::diagnostics::Level::Error,
+            "tray",
+            "startup",
+            None,
+            error.to_string(),
+        );
+        launch_broker::show_launch_error(&*error);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = sbms::diagnostics::init() {
         eprintln!("warning: diagnostics initialization failed: {error}");
     }
@@ -16,5 +32,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
         )
     }?;
-    sbms::ui::run()
+    let mut arguments = std::env::args_os().skip(1);
+    let open_requested = match arguments.next() {
+        None => true,
+        Some(argument) if argument == "--open" && arguments.next().is_none() => true,
+        Some(argument) if argument == "--background" && arguments.next().is_none() => false,
+        Some(argument) => {
+            return Err(format!(
+                "unsupported SBMS tray argument: {}",
+                argument.to_string_lossy()
+            )
+            .into());
+        }
+    };
+    match launch_broker::route_tray(open_requested)? {
+        LaunchDisposition::Exit => Ok(()),
+        LaunchDisposition::RunHere if open_requested => sbms::ui::run_open(),
+        LaunchDisposition::RunHere => sbms::ui::run(),
+    }
 }
