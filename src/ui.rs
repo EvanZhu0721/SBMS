@@ -21,7 +21,9 @@ use crate::network::preferred_lan_ipv4;
 use crate::session_gate::{MAX_VIRTUAL_DIMENSION, VirtualMode};
 use crate::win32_flyout;
 use crate::win32_tray::{NativeTray, TrayAction, TrayHandle};
+use slint::winit_030::winit::event::WindowEvent;
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
+use slint::winit_030::{EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 slint::include_modules!();
 
@@ -189,6 +191,31 @@ fn run_inner(open_on_start: bool) -> Result<(), Box<dyn Error>> {
         });
     })?;
     let flyout = QuickAccess::new()?;
+    let dismiss_flyout = flyout.as_weak();
+    flyout.window().on_winit_window_event(move |_, event| {
+        if matches!(event, WindowEvent::Focused(false)) {
+            let flyout = dismiss_flyout.clone();
+            slint::Timer::single_shot(Duration::from_millis(50), move || {
+                if let Some(flyout) = flyout.upgrade()
+                    && flyout.window().is_visible()
+                    && flyout
+                        .window()
+                        .with_winit_window(|window| !window.has_focus())
+                        .unwrap_or(false)
+                {
+                    diagnostics::log(
+                        Level::Debug,
+                        "ui",
+                        "flyout-dismiss",
+                        None,
+                        "window lost focus",
+                    );
+                    let _ = flyout.hide();
+                }
+            });
+        }
+        WinitEventResult::Propagate
+    });
     flyout.set_max_group_count(MAX_MAPPING_GROUPS as i32);
     let loaded = load_group_config(&flyout);
     let override_store = DisplayOverrideStore::default_store()?;
