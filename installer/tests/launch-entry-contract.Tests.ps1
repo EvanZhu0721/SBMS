@@ -6,9 +6,7 @@ $repository = [IO.Path]::GetFullPath(
 )
 $installerScript = Join-Path $repository 'installer\SBMS.iss'
 $maintenanceScript = Join-Path $repository 'installer\maintenance.ps1'
-$trayMain = Join-Path $repository 'src\bin\sbms-tray.rs'
-$cliMain = Join-Path $repository 'src\main.rs'
-$uiSource = Join-Path $repository 'src\ui.rs'
+$launchBroker = Join-Path $repository 'src\launch_broker.rs'
 
 function Get-InnoSection {
     param(
@@ -39,18 +37,25 @@ Describe 'SBMS launch entry contract' {
             $maintenanceScript,
             [Text.Encoding]::UTF8
         )
-        $script:trayMainSource = [IO.File]::ReadAllText(
-            $trayMain,
+        $script:launchBrokerSource = [IO.File]::ReadAllText(
+            $launchBroker,
             [Text.Encoding]::UTF8
         )
-        $script:cliMainSource = [IO.File]::ReadAllText(
-            $cliMain,
-            [Text.Encoding]::UTF8
+
+        $dispatchMarker = 'switch ($Action) {'
+        $dispatchIndex = $script:maintenanceSource.LastIndexOf(
+            $dispatchMarker,
+            [StringComparison]::Ordinal
         )
-        $script:uiSourceText = [IO.File]::ReadAllText(
-            $uiSource,
-            [Text.Encoding]::UTF8
-        )
+        if ($dispatchIndex -lt 0) {
+            throw 'maintenance.ps1 action dispatcher was not found.'
+        }
+        $definitions = $script:maintenanceSource.Substring(0, $dispatchIndex)
+        $script:loadRoot = Join-Path $TestDrive 'install-root'
+        New-Item -ItemType Directory -Path $script:loadRoot -Force | Out-Null
+        . ([scriptblock]::Create($definitions)) `
+            -Action Stop `
+            -InstallRoot $script:loadRoot
     }
 
     It 'marks the Start menu launch as an explicit open request' {
@@ -71,61 +76,137 @@ Describe 'SBMS launch entry contract' {
         )
     }
 
-    It 'registers an interactive highest-privilege tray task in its install directory' {
-        $script:maintenanceSource | Should Match (
-            '(?s)function\s+Install-SbmsTask\b.*?' +
-            'New-ScheduledTaskAction\s+-Execute\s+\$tray\s+`\s*' +
-            '-Argument\s+''--background''\s+`\s*' +
-            '-WorkingDirectory\s+\$InstallRoot'
-        )
-        $script:maintenanceSource | Should Match (
-            '(?s)function\s+Install-SbmsTask\b.*?' +
-            'New-ScheduledTaskPrincipal\b.*?' +
-            '-LogonType\s+Interactive\b.*?' +
-            '-RunLevel\s+Highest\b'
-        )
+    It 'registers an interactive highest-privilege background tray task' {
+        $script:mockTaskAction =
+            [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction')
+        $script:mockTrigger =
+            [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger')
+        $script:mockPrincipal =
+            [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal')
+        $script:mockSettings =
+            [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings')
+        $script:startedProcess = [pscustomobject]@{ Id = 4242 }
+        $script:processScan = 0
+        $script:taskRegistered = $false
+        Mock Assert-InstallIdentity {
+            [pscustomobject]@{ Sid = 'S-1-5-21-test' }
+        }
+        Mock Get-ScheduledTask { $null }
+        Mock New-ScheduledTaskAction { $script:mockTaskAction }
+        Mock New-ScheduledTaskTrigger { $script:mockTrigger }
+        Mock New-ScheduledTaskPrincipal { $script:mockPrincipal }
+        Mock New-ScheduledTaskSettingsSet { $script:mockSettings }
+        Mock Register-ScheduledTask {
+            $script:taskRegistered = $true
+        }
+        Mock Start-ScheduledTask {}
+        Mock Start-Sleep {}
+        Mock Get-InstalledSbmsProcesses {
+            $script:processScan++
+            if ($script:taskRegistered) {
+                $script:startedProcess
+            }
+        }
+
+        Install-SbmsTask
+
+        Assert-MockCalled New-ScheduledTaskAction -Times 1 -Exactly `
+            -ParameterFilter {
+                $Execute -eq $script:tray -and
+                    $Argument -ceq '--background' -and
+                    $WorkingDirectory -eq $script:loadRoot
+            }
+        Assert-MockCalled New-ScheduledTaskTrigger -Times 1 -Exactly `
+            -ParameterFilter {
+                $AtLogOn -and $User -eq 'S-1-5-21-test'
+            }
+        Assert-MockCalled New-ScheduledTaskPrincipal -Times 1 -Exactly `
+            -ParameterFilter {
+                $UserId -eq 'S-1-5-21-test' -and
+                    $LogonType -eq 'Interactive' -and
+                    $RunLevel -eq 'Highest'
+            }
+        Assert-MockCalled New-ScheduledTaskSettingsSet -Times 1 -Exactly `
+            -ParameterFilter {
+                $AllowStartIfOnBatteries -and
+                    $DontStopIfGoingOnBatteries -and
+                    $ExecutionTimeLimit -eq [TimeSpan]::Zero -and
+                    $MultipleInstances.ToString() -eq 'IgnoreNew'
+            }
+        Assert-MockCalled Register-ScheduledTask -Times 1 -Exactly `
+            -ParameterFilter {
+                $TaskPath -eq '\SBMS\' -and
+                    $TaskName -eq 'Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A' -and
+                    $Action.Count -eq 1 -and
+                    [object]::ReferenceEquals($Action[0], $script:mockTaskAction) -and
+                    $Trigger.Count -eq 1 -and
+                    [object]::ReferenceEquals($Trigger[0], $script:mockTrigger) -and
+                    [object]::ReferenceEquals($Principal, $script:mockPrincipal) -and
+                    [object]::ReferenceEquals($Settings, $script:mockSettings)
+            }
+        Assert-MockCalled Start-ScheduledTask -Times 1 -Exactly `
+            -ParameterFilter {
+                $TaskPath -eq '\SBMS\' -and
+                    $TaskName -eq 'Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A'
+            }
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly `
+            -ParameterFilter { $Milliseconds -eq 200 }
+        $script:processScan | Should Be 2
     }
 
     It 'accepts the legacy empty task arguments during an upgrade' {
-        $script:maintenanceSource | Should Match (
-            '(?s)\$ownedArguments\s*=\s*\[string\]::IsNullOrEmpty' +
-            '\(\$action\.Arguments\)\s+-or\s*' +
-            '\$action\.Arguments\s+-ceq\s+''--background'''
-        )
-        $script:maintenanceSource | Should Match '-not\s+\$ownedArguments'
+        Mock Get-ScheduledTask {
+            [pscustomobject]@{
+                Actions = @(
+                    [pscustomobject]@{
+                        Execute = $script:tray
+                        Arguments = ''
+                        WorkingDirectory = $script:loadRoot
+                    }
+                )
+            }
+        }
+
+        $task = Get-VerifiedTask -Path '\SBMS\' -Name 'test'
+
+        $task | Should Not BeNullOrEmpty
     }
 
-    It 'routes every tray entry through the launch broker before starting the UI' {
-        $brokerIndex = $script:trayMainSource.IndexOf(
-            'launch_broker::route_tray(',
-            [StringComparison]::Ordinal
+    It 'rejects an unexpected action count before indexing the task action' {
+        Mock Get-ScheduledTask {
+            [pscustomobject]@{ Actions = @() }
+        }
+
+        $failure = $null
+        try {
+            Get-VerifiedTask -Path '\SBMS\' -Name 'test'
+        }
+        catch {
+            $failure = $_
+        }
+
+        $failure | Should Not BeNullOrEmpty
+        $failure.Exception.Message | Should Match 'Scheduled task collision'
+    }
+
+    It 'keeps the registered task name identical in Rust and PowerShell' {
+        $rustName = [regex]::Match(
+            $script:launchBrokerSource,
+            '(?ms)pub const REGISTERED_TASK_NAME:\s*&str\s*=\s*r"([^"]+)";'
         )
-        $uiIndex = $script:trayMainSource.IndexOf(
-            'ui::run()',
-            [StringComparison]::Ordinal
+        $powerShellPath = [regex]::Match(
+            $script:maintenanceSource,
+            '(?m)^\$taskPath\s*=\s*''([^'']+)'''
+        )
+        $powerShellName = [regex]::Match(
+            $script:maintenanceSource,
+            '(?m)^\$taskName\s*=\s*''([^'']+)'''
         )
 
-        ($brokerIndex -ge 0) | Should Be $true
-        ($uiIndex -gt $brokerIndex) | Should Be $true
-
-        $uiCommandIndex = $script:cliMainSource.IndexOf(
-            'Some("ui")',
-            [StringComparison]::Ordinal
-        )
-        $cliBrokerIndex = $script:cliMainSource.IndexOf(
-            'launch_broker::route_tray(true)',
-            $uiCommandIndex,
-            [StringComparison]::Ordinal
-        )
-        $cliUiIndex = $script:cliMainSource.IndexOf(
-            'ui::run',
-            $uiCommandIndex,
-            [StringComparison]::Ordinal
-        )
-
-        ($uiCommandIndex -ge 0) | Should Be $true
-        ($cliBrokerIndex -gt $uiCommandIndex) | Should Be $true
-        ($cliUiIndex -gt $cliBrokerIndex) | Should Be $true
-        $script:uiSourceText | Should Match 'TrayInstance::acquire\(\)'
+        $rustName.Success | Should Be $true
+        $powerShellPath.Success | Should Be $true
+        $powerShellName.Success | Should Be $true
+        ($powerShellPath.Groups[1].Value + $powerShellName.Groups[1].Value) |
+            Should Be $rustName.Groups[1].Value
     }
 }

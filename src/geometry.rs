@@ -4,6 +4,10 @@ use std::fmt::{Display, Formatter};
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::limits::{
+    MAX_PHYSICAL_MILLIMETERS, MIN_PHYSICAL_MILLIMETERS, valid_physical_millimeters,
+};
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct PixelSize {
@@ -349,9 +353,9 @@ const fn default_alignment() -> u32 {
 }
 
 fn validate_measurement(value: f64, name: &str) -> Result<(), GeometryError> {
-    if !value.is_finite() || !(10.0..=10_000.0).contains(&value) {
+    if !valid_physical_millimeters(value) {
         return Err(GeometryError(format!(
-            "{name} must be finite and between 10 and 10000 mm"
+            "{name} must be finite and between {MIN_PHYSICAL_MILLIMETERS:.0} and {MAX_PHYSICAL_MILLIMETERS:.0} mm"
         )));
     }
     Ok(())

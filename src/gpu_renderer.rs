@@ -972,7 +972,10 @@ fn classify_hresult(code: windows::core::HRESULT) -> GpuRendererError {
 
 #[cfg(test)]
 mod tests {
-    use super::{CopyMode, MAX_COPY_REGIONS, ScaleParameters, compile_shader, select_copy_regions};
+    use super::{
+        CopyMode, DXGI_ERROR_ACCESS_LOST, GpuRendererError, MAX_COPY_REGIONS, ScaleParameters,
+        classify_hresult, compile_shader, select_copy_regions,
+    };
     use std::ffi::OsStr;
     use windows::Win32::Foundation::RECT;
 
@@ -980,6 +983,14 @@ mod tests {
     fn shaders_compile_with_the_system_d3d_compiler() {
         assert!(!compile_shader("vertex_main", "vs_5_0").unwrap().is_empty());
         assert!(!compile_shader("pixel_main", "ps_5_0").unwrap().is_empty());
+    }
+
+    #[test]
+    fn dxgi_access_lost_is_a_recoverable_topology_loss() {
+        assert!(matches!(
+            classify_hresult(DXGI_ERROR_ACCESS_LOST),
+            GpuRendererError::AccessLost
+        ));
     }
 
     #[test]

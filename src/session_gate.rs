@@ -21,12 +21,11 @@ use windows::Win32::System::Memory::{
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::{PCWSTR, PWSTR, w};
 
+use crate::limits::{MAX_OUTPUTS, MAX_REFRESH_HZ, MAX_VIRTUAL_DIMENSION, MIN_REFRESH_HZ};
+
 const GATE_MAGIC: u32 = 0x5342_4737;
 const PROTOCOL_VERSION: u32 = 7;
 const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v7");
-pub const MAX_VIRTUAL_DIMENSION: u32 = 16_384;
-const MAX_REFRESH_HZ: u64 = 1_000;
-pub const MAX_VIRTUAL_DISPLAYS: usize = 16;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VirtualMode {
@@ -82,10 +81,11 @@ impl VirtualMode {
                 "virtual refresh numerator and denominator must be non-zero".into(),
             ));
         }
-        if self.refresh_numerator < self.refresh_denominator {
-            return Err(SessionGateError(
-                "virtual refresh must be at least 1 Hz".into(),
-            ));
+        if u64::from(self.refresh_numerator) < MIN_REFRESH_HZ * u64::from(self.refresh_denominator)
+        {
+            return Err(SessionGateError(format!(
+                "virtual refresh must be at least {MIN_REFRESH_HZ} Hz"
+            )));
         }
         if u64::from(self.refresh_numerator) > MAX_REFRESH_HZ * u64::from(self.refresh_denominator)
         {
@@ -112,10 +112,10 @@ impl VirtualDisplayConfig {
     }
 
     pub fn validate(self) -> Result<(), SessionGateError> {
-        if self.connector_index >= MAX_VIRTUAL_DISPLAYS as u32 {
+        if self.connector_index >= MAX_OUTPUTS as u32 {
             return Err(SessionGateError(format!(
                 "connector index must be between 0 and {}",
-                MAX_VIRTUAL_DISPLAYS - 1
+                MAX_OUTPUTS - 1
             )));
         }
         self.mode.validate()
@@ -157,14 +157,14 @@ impl From<VirtualDisplayConfig> for GateEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GateConfig {
     header: GateHeader,
-    entries: [GateEntry; MAX_VIRTUAL_DISPLAYS],
+    entries: [GateEntry; MAX_OUTPUTS],
 }
 
 impl GateConfig {
     fn from_displays(displays: &[VirtualDisplayConfig]) -> Result<Self, SessionGateError> {
         validate_displays(displays)?;
 
-        let mut entries = [GateEntry::default(); MAX_VIRTUAL_DISPLAYS];
+        let mut entries = [GateEntry::default(); MAX_OUTPUTS];
         for (entry, display) in entries.iter_mut().zip(displays.iter().copied()) {
             *entry = display.into();
         }
@@ -248,9 +248,9 @@ fn validate_displays(displays: &[VirtualDisplayConfig]) -> Result<(), SessionGat
             "at least one virtual display is required".into(),
         ));
     }
-    if displays.len() > MAX_VIRTUAL_DISPLAYS {
+    if displays.len() > MAX_OUTPUTS {
         return Err(SessionGateError(format!(
-            "at most {MAX_VIRTUAL_DISPLAYS} virtual displays are supported"
+            "at most {MAX_OUTPUTS} virtual displays are supported"
         )));
     }
 
@@ -443,8 +443,7 @@ mod tests {
     fn display_set_validation_rejects_invalid_shapes() {
         assert!(validate_displays(&[]).is_err());
 
-        let too_many =
-            [VirtualDisplayConfig::new(0, VirtualMode::default()); MAX_VIRTUAL_DISPLAYS + 1];
+        let too_many = [VirtualDisplayConfig::new(0, VirtualMode::default()); MAX_OUTPUTS + 1];
         assert!(validate_displays(&too_many).is_err());
 
         let duplicate = [
@@ -455,7 +454,7 @@ mod tests {
 
         assert!(
             validate_displays(&[VirtualDisplayConfig::new(
-                MAX_VIRTUAL_DISPLAYS as u32,
+                MAX_OUTPUTS as u32,
                 VirtualMode::default()
             )])
             .is_err()
@@ -475,14 +474,14 @@ mod tests {
 
     #[test]
     fn sixteen_distinct_connectors_are_supported() {
-        let displays: [VirtualDisplayConfig; MAX_VIRTUAL_DISPLAYS] =
+        let displays: [VirtualDisplayConfig; MAX_OUTPUTS] =
             std::array::from_fn(|connector_index| {
                 VirtualDisplayConfig::new(connector_index as u32, VirtualMode::default())
             });
 
         let config = GateConfig::from_displays(&displays).unwrap();
 
-        assert_eq!(config.header.count, MAX_VIRTUAL_DISPLAYS as u32);
+        assert_eq!(config.header.count, MAX_OUTPUTS as u32);
         assert_eq!(config.entries[15].connector_index, 15);
     }
 }

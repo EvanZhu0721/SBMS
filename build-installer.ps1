@@ -1,8 +1,11 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Signed')]
 param(
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Signed')]
     [ValidatePattern('^[0-9A-Fa-f]{40}$')]
     [string]$SigningCertificateThumbprint,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Unsigned')]
+    [switch]$Unsigned,
 
     [string]$InnoCompiler = (
         Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'
@@ -43,25 +46,36 @@ if (-not $versionMatch.Success) {
     throw 'The package version could not be read from Cargo.toml.'
 }
 $version = $versionMatch.Groups[1].Value
-$kitsRoot = (Get-ItemProperty -LiteralPath `
-    'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots').KitsRoot10
-$signTool = Get-ChildItem -LiteralPath (Join-Path $kitsRoot 'bin') -Directory |
-    Where-Object { [version]::TryParse($_.Name, [ref]([version]$null)) } |
-    Sort-Object { [version]$_.Name } -Descending |
-    ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
-    Where-Object { Test-Path -LiteralPath $_ } |
-    Select-Object -First 1
-if (-not $signTool) {
-    throw 'signtool.exe was not found in the Windows SDK.'
+$signedBuild = $PSCmdlet.ParameterSetName -eq 'Signed'
+if (-not $signedBuild -and -not $Unsigned) {
+    throw 'Unsigned packaging must be explicitly enabled with -Unsigned.'
+}
+$signTool = $null
+if ($signedBuild) {
+    $kitsRoot = (Get-ItemProperty -LiteralPath `
+        'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots').KitsRoot10
+    $signTool = Get-ChildItem -LiteralPath (Join-Path $kitsRoot 'bin') -Directory |
+        Where-Object { [version]::TryParse($_.Name, [ref]([version]$null)) } |
+        Sort-Object { [version]$_.Name } -Descending |
+        ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ } |
+        Select-Object -First 1
+    if (-not $signTool) {
+        throw 'signtool.exe was not found in the Windows SDK.'
+    }
 }
 
-& cargo.exe build --release --bins
+& cargo.exe build --release --bins --locked
 if ($LASTEXITCODE -ne 0) {
     throw "cargo build failed with exit code $LASTEXITCODE"
 }
 
-& (Join-Path $repository 'build-driver.ps1') `
-    -SigningCertificateThumbprint $SigningCertificateThumbprint
+$driverArguments = @{}
+if ($signedBuild) {
+    $driverArguments.SigningCertificateThumbprint =
+        $SigningCertificateThumbprint
+}
+& (Join-Path $repository 'build-driver.ps1') @driverArguments
 if ($LASTEXITCODE -ne 0) {
     throw "build-driver.ps1 failed with exit code $LASTEXITCODE"
 }
@@ -93,25 +107,38 @@ if ($infText -notmatch (
     throw "Driver version does not match Cargo package version $version."
 }
 
-foreach ($binary in @(
-    (Join-Path $release 'sbms.exe'),
-    (Join-Path $release 'sbms-tray.exe')
-)) {
-    & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $binary
-    if ($LASTEXITCODE -ne 0) {
-        throw "Signing $binary failed with exit code $LASTEXITCODE"
+if ($signedBuild) {
+    foreach ($binary in @(
+        (Join-Path $release 'sbms.exe'),
+        (Join-Path $release 'sbms-tray.exe')
+    )) {
+        & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $binary
+        if ($LASTEXITCODE -ne 0) {
+            throw "Signing $binary failed with exit code $LASTEXITCODE"
+        }
     }
 }
 
 New-Item -ItemType Directory -Path $installer -Force | Out-Null
-$package = Join-Path $installer "SBMS-Setup-$version-x64.exe"
+$packageSuffix = if ($signedBuild) { '' } else { '-unsigned' }
+$package = Join-Path $installer "SBMS-Setup-$version-x64$packageSuffix.exe"
 if (Test-Path -LiteralPath $package) {
     Remove-Item -LiteralPath $package -Force
 }
-$signDefinition = '/Ssbmssign=$q{0}$q sign /sha1 {1} /fd SHA256 $f' -f `
-    $signTool, $SigningCertificateThumbprint
 $versionDefinition = "/DAppVersion=$version"
-& $InnoCompiler $signDefinition $versionDefinition $manifest
+$compilerArguments = @($versionDefinition)
+if ($signedBuild) {
+    $compilerArguments += (
+        '/Ssbmssign=$q{0}$q sign /sha1 {1} /fd SHA256 $f' -f
+            $signTool, $SigningCertificateThumbprint
+    )
+}
+else {
+    $compilerArguments += '/DUnsignedBuild=1'
+    $compilerArguments += '/DOutputSuffix=-unsigned'
+}
+$compilerArguments += $manifest
+& $InnoCompiler @compilerArguments
 if ($LASTEXITCODE -ne 0) {
     throw "ISCC failed with exit code $LASTEXITCODE"
 }
@@ -119,14 +146,16 @@ if ($LASTEXITCODE -ne 0) {
 if (-not (Test-Path -LiteralPath $package)) {
     throw "Installer output is missing: $package"
 }
-foreach ($binary in @(
-    (Join-Path $release 'sbms.exe'),
-    (Join-Path $release 'sbms-tray.exe'),
-    $package
-)) {
-    & $signTool verify /pa $binary
-    if ($LASTEXITCODE -ne 0) {
-        throw "Signature verification failed for $binary"
+if ($signedBuild) {
+    foreach ($binary in @(
+        (Join-Path $release 'sbms.exe'),
+        (Join-Path $release 'sbms-tray.exe'),
+        $package
+    )) {
+        & $signTool verify /pa $binary
+        if ($LASTEXITCODE -ne 0) {
+            throw "Signature verification failed for $binary"
+        }
     }
 }
 $hash = Get-Sha256Hex -LiteralPath $package
@@ -135,5 +164,6 @@ $hashLine = "$hash  $([IO.Path]::GetFileName($package))`n"
 $utf8 = New-Object Text.UTF8Encoding($false)
 [IO.File]::WriteAllText($hashFile, $hashLine, $utf8)
 Write-Host "installer_package=$package"
+Write-Host "installer_signed=$signedBuild"
 Write-Host "installer_sha256=$hash"
 Write-Host "installer_sha256_file=$hashFile"

@@ -51,10 +51,12 @@ More implementation detail is available in
 
 ## Install
 
-1. Download `SBMS-Setup-1.4.5-x64.exe` from the latest GitHub release.
+1. Download `SBMS-Setup-1.4.514-x64.exe` from the latest GitHub release.
 2. Run it and approve the administrator prompt.
-3. Open SBMS from the tray, choose a target display, and select **Start**.
-4. Select **Stop** before disconnecting or rearranging displays.
+3. Open SBMS from the tray, choose a target display, and select **Start mapping**.
+4. Select **Stop and restore** when you want to end the mapping and restore the
+   original display layout. If the display topology changes unexpectedly, SBMS
+   attempts to reconnect automatically.
 
 SBMS starts automatically when the installing user signs in. Remove it from
 Windows **Installed apps**; the uninstaller also removes the driver and startup
@@ -75,26 +77,36 @@ sbms list
 sbms map --target '<monitor-device-path>'
 sbms plan validate examples\two-streams.json
 sbms plan run examples\two-streams.json
+sbms config list
 sbms config show
+sbms config import gaming .\gaming.json --activate
 sbms shutdown
 ```
 
 `sbms list` prints the stable ID used by `--target`. Press Enter to stop a
 foreground session cleanly. A mapping plan can contain up to sixteen mirror and
-stream-only groups.
+stream-only groups. Up to three persistent configuration profiles can coexist;
+see [Configuration profiles](docs/configuration.md) for import, export,
+activation and hot-reload interfaces.
 
 ## Build
 
 Requirements: Rust, Visual Studio C++ Build Tools, a matching Windows Driver
-Kit, Inno Setup 6, and a code-signing certificate.
+Kit, Inno Setup 6, and a code-signing certificate for release packages.
 
 ```powershell
-cargo build --release
-.\build-driver.ps1 -SigningCertificateThumbprint <thumbprint>
 .\build-installer.ps1 -SigningCertificateThumbprint <thumbprint>
 ```
 
-The installer is written to `target\installer`.
+This is the complete release entry point: it builds the locked Rust binaries,
+builds and signs the driver, creates the installer, verifies every signature,
+and writes the installer plus its SHA-256 file to `target\installer`.
+
+For component development, use `cargo build --release --locked --bins` or
+`.\build-driver.ps1` separately. The complete unsigned build and packaging chain
+can be checked explicitly with `.\build-installer.ps1 -Unsigned`; it still
+compiles and validates the driver, then produces an `-unsigned` smoke artifact
+which must not be distributed.
 
 ## Acknowledgments
 

@@ -32,22 +32,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             windows::Win32::UI::HiDpi::DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
         )
     }?;
-    let mut arguments = std::env::args_os().skip(1);
-    let open_requested = match arguments.next() {
-        None => true,
-        Some(argument) if argument == "--open" && arguments.next().is_none() => true,
-        Some(argument) if argument == "--background" && arguments.next().is_none() => false,
-        Some(argument) => {
-            return Err(format!(
-                "unsupported SBMS tray argument: {}",
-                argument.to_string_lossy()
-            )
-            .into());
-        }
-    };
+    let open_requested = launch_broker::tray_open_requested(std::env::args_os().skip(1))?;
     match launch_broker::route_tray(open_requested)? {
         LaunchDisposition::Exit => Ok(()),
-        LaunchDisposition::RunHere if open_requested => sbms::ui::run_open(),
-        LaunchDisposition::RunHere => sbms::ui::run(),
+        LaunchDisposition::RunHere(instance) => sbms::ui::run_host(instance, open_requested),
     }
 }

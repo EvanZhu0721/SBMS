@@ -2,6 +2,9 @@
 #ifndef AppVersion
 #define AppVersion "0.0.0-dev"
 #endif
+#ifndef OutputSuffix
+#define OutputSuffix ""
+#endif
 #define AppPublisher "SBMS"
 #define AppExeName "sbms-tray.exe"
 
@@ -17,7 +20,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequired=admin
 OutputDir=..\target\installer
-OutputBaseFilename=SBMS-Setup-{#AppVersion}-x64
+OutputBaseFilename=SBMS-Setup-{#AppVersion}-x64{#OutputSuffix}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -26,8 +29,10 @@ CloseApplications=no
 RestartApplications=no
 ChangesEnvironment=no
 SetupLogging=yes
+#ifndef UnsignedBuild
 SignTool=sbmssign
 SignedUninstaller=yes
+#endif
 
 [Files]
 Source: "..\target\release\sbms.exe"; DestDir: "{app}"; Flags: ignoreversion

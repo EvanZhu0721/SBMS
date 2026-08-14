@@ -1,0 +1,83 @@
+import { DialogActionButton } from "controls.slint";
+import { MdTokens } from "theme.slint";
+
+export component RemoveGroupDialog inherits FocusScope {
+    in-out property <int> pending-remove-index: -1;
+    callback remove-group(int);
+
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.pending-remove-index = -1;
+                    return accept;
+                }
+                return reject;
+            }
+    
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: #66000000;
+    
+                TouchArea {
+                    accessible-role: none;
+                    clicked => { root.pending-remove-index = -1; }
+                }
+    
+                dialog := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 320px;
+                    height: 184px;
+                    background: MdTokens.surface;
+                    border-width: 1px;
+                    border-color: MdTokens.outline-variant;
+                    border-radius: 28px;
+    
+                    TouchArea {
+                        accessible-role: none;
+                    }
+    
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: MdTokens.space-1;
+    
+                        Text {
+                            height: 28px;
+                            text: "Remove mapping group?";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                        }
+    
+                        Text {
+                            height: 52px;
+                            text: "Its target, sizing and stream settings will be discarded.";
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-medium;
+                            wrap: word-wrap;
+                        }
+    
+                        HorizontalLayout {
+                            height: MdTokens.target;
+                            spacing: MdTokens.space-1;
+                            Rectangle { horizontal-stretch: 1; }
+                            DialogActionButton {
+                                text: "Cancel";
+                                field-label: "Cancel removing mapping group";
+                                clicked => { root.pending-remove-index = -1; }
+                            }
+                            DialogActionButton {
+                                text: "Remove";
+                                field-label: "Confirm removing mapping group";
+                                destructive: true;
+                                clicked => {
+                                    root.remove-group(root.pending-remove-index);
+                                    root.pending-remove-index = -1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+}

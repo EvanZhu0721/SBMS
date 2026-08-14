@@ -1,0 +1,256 @@
+import { MdTokens } from "theme.slint";
+
+// Software rendering has no blurred shadows. Two enlarged translucent glyphs
+// provide a compact, deterministic glow without changing renderers.
+component GlowLetter inherits Rectangle {
+    in property <string> glyph;
+
+    background: transparent;
+
+    Text {
+        x: -5px;
+        y: -5px;
+        width: parent.width + 10px;
+        height: parent.height + 10px;
+        text: root.glyph;
+        color: #ff2b20;
+        opacity: 0.24;
+        font-family: "Segoe UI";
+        font-size: 100px;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    Text {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        text: root.glyph;
+        color: #ff2418;
+        opacity: 0.5;
+        font-family: "Segoe UI";
+        font-size: 96px;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.glyph;
+        color: #f01414;
+        font-family: "Segoe UI";
+        font-size: 92px;
+        font-weight: 800;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component IntroAction inherits Rectangle {
+    in property <string> label;
+    in property <bool> emphasized: false;
+    callback clicked();
+
+    background: root.emphasized ? MdTokens.primary-container : MdTokens.surface-container;
+    border-width: 1px;
+    border-color: MdTokens.outline-variant;
+    border-radius: MdTokens.shape-medium;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: root.emphasized ? MdTokens.on-primary-container : MdTokens.on-surface;
+        opacity: action-touch.pressed ? 0.12 : (action-touch.has-hover ? 0.08 : 0);
+        animate opacity { duration: 100ms; easing: ease-in-out; }
+    }
+
+    Text {
+        x: 14px;
+        y: 8px;
+        width: parent.width - 28px;
+        height: parent.height - 16px;
+        text: root.label;
+        color: root.emphasized ? MdTokens.on-primary-container : MdTokens.on-surface;
+        font-size: 13px;
+        font-weight: 600;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        accessible-role: none;
+    }
+
+    action-touch := TouchArea {
+        accessible-role: button;
+        accessible-label: root.label;
+        clicked => { root.clicked(); }
+    }
+}
+
+// Cold-start brand animation. The software renderer cannot animate transforms,
+// so the motion is expressed with position, opacity, and nested offsets.
+export component LaunchIntro inherits Rectangle {
+    in property <bool> active: false;
+    in property <int> stage: 0;
+    callback disable-forever();
+    callback open-project-home();
+
+    visible: root.active;
+    opacity: root.stage >= 26 ? 0 : 1;
+    background: MdTokens.surface;
+    clip: true;
+
+    animate opacity {
+        duration: 240ms;
+        easing: ease-in-out;
+    }
+
+    // The banner's four-color MS mark. It begins as four solid tiles; black
+    // geometric cuts then carve the M across the left column and the S across
+    // the right column before the complete mark moves into its final position.
+    grid := Rectangle {
+        // Start moving while the black mask is still fading in, about 0.5s
+        // before the original stage-9 trigger.
+        x: root.stage >= 15 ? 188px : (parent.width - self.width) / 2;
+        y: 192px;
+        width: 136px;
+        height: 136px;
+        background: transparent;
+
+        animate x {
+            duration: 460ms;
+            easing: cubic-bezier(0.2, 0, 0, 1);
+        }
+
+        Rectangle { x: 0; y: 0; width: 64px; height: 64px; background: #f25022; }
+        Rectangle { x: 72px; y: 0; width: 64px; height: 64px; background: #7fba00; }
+        Rectangle { x: 0; y: 72px; width: 64px; height: 64px; background: #00a4ef; }
+        Rectangle { x: 72px; y: 72px; width: 64px; height: 64px; background: #ffb900; }
+
+        carving := Rectangle {
+            width: parent.width;
+            height: parent.height;
+            visible: root.stage > 0;
+            background: transparent;
+            opacity: root.stage >= 16 ? 1
+                : root.stage >= 15 ? 0.9375
+                : root.stage >= 14 ? 0.875
+                : root.stage >= 13 ? 0.8125
+                : root.stage >= 12 ? 0.75
+                : root.stage >= 11 ? 0.6875
+                : root.stage >= 10 ? 0.625
+                : root.stage >= 9 ? 0.5625
+                : root.stage >= 8 ? 0.5
+                : root.stage >= 7 ? 0.4375
+                : root.stage >= 6 ? 0.375
+                : root.stage >= 5 ? 0.3125
+                : root.stage >= 4 ? 0.25
+                : root.stage >= 3 ? 0.1875
+                : root.stage >= 2 ? 0.125
+                : root.stage >= 1 ? 0.0625
+                : 0;
+
+            animate opacity {
+                duration: 150ms;
+                easing: linear;
+            }
+
+            // The black cross turns the four independent tiles into one mark.
+            Rectangle { x: 64px; y: 0; width: 8px; height: 136px; background: #050505; }
+            Rectangle { x: 0; y: 64px; width: 136px; height: 8px; background: #050505; }
+
+            // M: one deep top notch and two lower converging cuts.
+            // S: opposed right-angle cuts across the green and yellow tiles.
+            Path {
+                width: 136px;
+                height: 136px;
+                viewbox-width: 136;
+                viewbox-height: 136;
+                commands: "M 26 0 L 39 0 L 32 48 Z M 22 72 L 32 121 L 32 136 L 22 136 Z M 42 72 L 42 136 L 32 136 L 32 121 Z M 102 24 L 109 24 L 109 48 L 136 48 L 136 57 L 102 57 Z M 72 80 L 108 80 L 108 128 L 101 128 L 101 89 L 72 89 Z";
+                fill: #050505;
+            }
+        }
+    }
+
+    // B enters first. The inner Text provides a small damped positional wobble.
+    b-entry := Rectangle {
+        x: root.stage >= 19 ? 112px : -96px;
+        y: 212px;
+        width: 60px;
+        height: 96px;
+        background: transparent;
+        opacity: root.stage >= 19 ? 1 : 0;
+
+        animate x {
+            duration: 260ms;
+            easing: cubic-bezier(0.05, 0.7, 0.1, 1);
+        }
+
+        animate opacity { duration: 80ms; }
+
+        GlowLetter {
+            x: root.stage == 20 ? 4px : root.stage == 21 ? -2px : 0;
+            y: root.stage == 20 ? -1px : root.stage == 21 ? 1px : 0;
+            width: parent.width;
+            height: parent.height;
+            glyph: "B";
+
+            animate x, y {
+                duration: 90ms;
+                easing: ease-in-out;
+            }
+        }
+    }
+
+    // S follows B from the same left edge and settles at the front of the word.
+    s-entry := Rectangle {
+        x: root.stage >= 20 ? 52px : -96px;
+        y: 212px;
+        width: 60px;
+        height: 96px;
+        background: transparent;
+        opacity: root.stage >= 20 ? 1 : 0;
+
+        animate x {
+            duration: 250ms;
+            easing: cubic-bezier(0.05, 0.7, 0.1, 1);
+        }
+
+        animate opacity { duration: 80ms; }
+
+        GlowLetter {
+            x: root.stage == 22 ? 4px : root.stage == 23 ? -2px : 0;
+            y: root.stage == 22 ? 1px : root.stage == 23 ? -1px : 0;
+            width: parent.width;
+            height: parent.height;
+            glyph: "S";
+
+            animate x, y {
+                duration: 90ms;
+                easing: ease-in-out;
+            }
+        }
+    }
+
+    IntroAction {
+        x: 16px;
+        y: 352px;
+        width: parent.width - 32px;
+        height: 56px;
+        label: "Never show me again this IDIOT logo and fuck off";
+        clicked => { root.disable-forever(); }
+    }
+
+    IntroAction {
+        x: 16px;
+        y: 420px;
+        width: parent.width - 32px;
+        height: 104px;
+        emphasized: true;
+        label: "What a masterpiece this developer design!!!\nI'm gonna give you a star on github IMMEDIATELY";
+        clicked => { root.open-project-home(); }
+    }
+}

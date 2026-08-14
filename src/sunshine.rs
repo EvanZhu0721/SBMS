@@ -12,21 +12,6 @@ pub const PORT_STRIDE: u16 = 27;
 const LAST_FAMILY_OFFSET: u16 = 21;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InstanceAction {
-    Start,
-    Restart,
-}
-
-impl InstanceAction {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Start => "Start",
-            Self::Restart => "Restart",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CaptureBackend {
     Auto,
     Wgc,
@@ -53,7 +38,6 @@ pub struct DeploymentEvent {
 
 enum SupervisorCommand {
     Deploy {
-        action: InstanceAction,
         generation: u64,
         group_id: u32,
         display_id: String,
@@ -82,25 +66,6 @@ impl SupervisorSender {
         capture: CaptureBackend,
     ) {
         let _ = self.0.send(SupervisorCommand::Deploy {
-            action: InstanceAction::Start,
-            generation,
-            group_id,
-            display_id,
-            requested_port,
-            capture,
-        });
-    }
-
-    pub fn restart(
-        &self,
-        generation: u64,
-        group_id: u32,
-        display_id: String,
-        requested_port: u16,
-        capture: CaptureBackend,
-    ) {
-        let _ = self.0.send(SupervisorCommand::Deploy {
-            action: InstanceAction::Restart,
             generation,
             group_id,
             display_id,
@@ -122,15 +87,13 @@ impl Supervisor {
             while let Ok(command) = rx.recv() {
                 match command {
                     SupervisorCommand::Deploy {
-                        action,
                         generation,
                         group_id,
                         display_id,
                         requested_port,
                         capture,
                     } => {
-                        let result =
-                            invoke_deploy(action, group_id, &display_id, requested_port, capture);
+                        let result = invoke_deploy(group_id, &display_id, requested_port, capture);
                         let event = match result {
                             Ok(result) => {
                                 diagnostics::log(
@@ -139,8 +102,7 @@ impl Supervisor {
                                     "instance",
                                     None,
                                     format!(
-                                        "{} group {} on port {} (pid {}, capture={})",
-                                        action.as_str().to_ascii_lowercase(),
+                                        "started group {} on port {} (pid {}, capture={})",
                                         group_id,
                                         result.port,
                                         result.pid,
@@ -163,8 +125,7 @@ impl Supervisor {
                                     "instance",
                                     None,
                                     format!(
-                                        "{} group {} with capture={} failed: {error}",
-                                        action.as_str().to_ascii_lowercase(),
+                                        "starting group {} with capture={} failed: {error}",
                                         group_id,
                                         capture.as_str()
                                     ),
@@ -246,23 +207,15 @@ struct DeployResult {
 }
 
 fn invoke_deploy(
-    action: InstanceAction,
     group_id: u32,
     display_id: &str,
     requested_port: u16,
     capture: CaptureBackend,
 ) -> Result<DeployResult, String> {
     let script = manager_script_path()?;
-    let output = deploy_command(
-        &script,
-        action,
-        group_id,
-        display_id,
-        requested_port,
-        capture,
-    )
-    .output()
-    .map_err(|error| format!("Couldn’t launch the Sunshine manager: {error}"))?;
+    let output = deploy_command(&script, group_id, display_id, requested_port, capture)
+        .output()
+        .map_err(|error| format!("Couldn’t launch the Sunshine manager: {error}"))?;
     let response = parse_response(&output.stdout, &output.stderr)?;
     if !output.status.success() || !response.ok {
         return Err(response.message.unwrap_or_else(|| {
@@ -283,7 +236,6 @@ fn invoke_deploy(
 
 fn deploy_command(
     script: &PathBuf,
-    action: InstanceAction,
     group_id: u32,
     display_id: &str,
     requested_port: u16,
@@ -292,7 +244,7 @@ fn deploy_command(
     let mut command = powershell_command(script);
     command
         .arg("-Action")
-        .arg(action.as_str())
+        .arg("Start")
         .arg("-GroupId")
         .arg(group_id.to_string())
         .arg("-DisplayId")
@@ -408,18 +360,11 @@ mod tests {
 
     #[test]
     fn deploy_command_passes_capture_as_a_separate_manager_argument() {
-        for (action, capture, expected_action, expected_capture) in [
-            (InstanceAction::Start, CaptureBackend::Auto, "Start", "auto"),
-            (
-                InstanceAction::Restart,
-                CaptureBackend::Wgc,
-                "Restart",
-                "wgc",
-            ),
-        ] {
+        for (capture, expected_capture) in
+            [(CaptureBackend::Auto, "auto"), (CaptureBackend::Wgc, "wgc")]
+        {
             let command = deploy_command(
                 &PathBuf::from(r"C:\Program Files\SBMS\installer\manage-sunshine-instance.ps1"),
-                action,
                 2,
                 "{01234567-89ab-cdef-0123-456789abcdef}",
                 54_375,
@@ -434,7 +379,7 @@ mod tests {
                 &arguments[arguments.len() - 10..],
                 [
                     "-Action",
-                    expected_action,
+                    "Start",
                     "-GroupId",
                     "2",
                     "-DisplayId",

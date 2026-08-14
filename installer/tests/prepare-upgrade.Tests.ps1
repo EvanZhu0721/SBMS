@@ -97,10 +97,11 @@ Describe 'PrepareUpgrade maintenance contract' {
         ) | Should Be $false
     }
 
-    It 'copies only v1 v2 and display override configuration' {
+    It 'copies only persistent SBMS configuration files' {
         $expected = @{
             'config-v1.json' = '{"version":1,"target":"legacy"}'
             'config-v2.json' = '{"version":2,"groups":[{"id":0}]}'
+            'config-profiles-v1.json' = '{"version":1,"active_profile":"default","profiles":[]}'
             'display-overrides-v1.json' = '{"version":1,"displays":{}}'
         }
         foreach ($entry in $expected.GetEnumerator()) {
@@ -136,52 +137,55 @@ Describe 'PrepareUpgrade maintenance contract' {
         ) | Should Be $false
     }
 
-    It 'records length and SHA256 for every copied file' {
-        $files = @(
-            'config-v1.json',
-            'config-v2.json',
-            'display-overrides-v1.json'
+    It 'computes SHA256 without depending on PowerShell module discovery' {
+        $inputFile = Join-Path $script:userStateRoot 'hash-input.txt'
+        [IO.File]::WriteAllText(
+            $inputFile,
+            'abc',
+            [Text.UTF8Encoding]::new($false)
         )
-        foreach ($name in $files) {
-            [IO.File]::WriteAllText(
-                (Join-Path $script:userStateRoot $name),
-                "content-$name",
-                [Text.UTF8Encoding]::new($false)
-            )
-        }
+
+        Get-Sha256Hex -LiteralPath $inputFile | Should Be (
+            'BA7816BF8F01CFEA414140DE5DAE2223' +
+            'B00361A396177A9CB410FF61F20015AD'
+        )
+    }
+
+    It 'verifies and marks each snapshot without creating an unused manifest' {
+        $source = Join-Path $script:userStateRoot 'config-v2.json'
+        [IO.File]::WriteAllText(
+            $source,
+            '{"version":2}',
+            [Text.UTF8Encoding]::new($false)
+        )
 
         Backup-SbmsConfiguration
         $snapshot = @(
             Get-ChildItem -LiteralPath (
                 Join-Path $script:userStateRoot 'upgrade-backups'
             ) -Directory
-        )
-        $snapshot.Count | Should Be 1
-        $snapshot = $snapshot[0]
+        )[0]
+        $copy = Join-Path $snapshot.FullName 'config-v2.json'
 
-        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (
+        Get-Sha256Hex -LiteralPath $copy |
+            Should Be (Get-Sha256Hex -LiteralPath $source)
+        [IO.File]::ReadAllText(
+            (Join-Path $snapshot.FullName '.sbms-upgrade-snapshot-v1'),
+            [Text.Encoding]::UTF8
+        ) | Should Be 'SBMS upgrade snapshot v1'
+        Test-OwnedUpgradeSnapshot -Snapshot $snapshot -BackupRoot (
+            Join-Path $script:userStateRoot 'upgrade-backups'
+        ) | Should Be $true
+        Test-Path -LiteralPath (
             Join-Path $snapshot.FullName 'manifest.json'
-        ) | ConvertFrom-Json
-        @($manifest.files).Count | Should Be 3
-
-        foreach ($name in $files) {
-            $source = Join-Path $script:userStateRoot $name
-            $record = @($manifest.files) |
-                Where-Object name -eq $name
-            @($record).Count | Should Be 1
-            $record.bytes | Should Be (Get-Item -LiteralPath $source).Length
-            $record.sha256.ToLowerInvariant() |
-                Should Be (
-                    (Get-FileHash -LiteralPath $source -Algorithm SHA256).
-                        Hash.ToLowerInvariant()
-                )
-        }
+        ) | Should Be $false
     }
 
-    It 'adds a fresh snapshot on repeat upgrade and preserves the old one' {
+    It 'adds a fresh snapshot on repeat upgrade and preserves retained history' {
         foreach ($name in @(
             'config-v1.json',
             'config-v2.json',
+            'config-profiles-v1.json',
             'display-overrides-v1.json'
         )) {
             [IO.File]::WriteAllText(
@@ -209,15 +213,17 @@ Describe 'PrepareUpgrade maintenance contract' {
             'second-config-v2',
             [Text.UTF8Encoding]::new($false)
         )
-        Start-Sleep -Milliseconds 5
 
         Backup-SbmsConfiguration
         $snapshots = @(
-            Get-ChildItem -LiteralPath $backupRoot -Directory |
-                Sort-Object CreationTime
+            Get-ChildItem -LiteralPath $backupRoot -Directory
         )
         $snapshots.Count | Should Be 2
-        $secondSnapshot = $snapshots[-1]
+        $secondSnapshots = @(
+            $snapshots | Where-Object Name -ne $firstSnapshot.Name
+        )
+        $secondSnapshots.Count | Should Be 1
+        $secondSnapshot = $secondSnapshots[0]
 
         Test-Path -LiteralPath (
             Join-Path $secondSnapshot.FullName 'config-v1.json'
@@ -230,16 +236,51 @@ Describe 'PrepareUpgrade maintenance contract' {
             [Text.Encoding]::UTF8
         ) | Should Be 'second-config-v2'
 
-        $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath (
-            Join-Path $secondSnapshot.FullName 'manifest.json'
-        ) | ConvertFrom-Json
-        @($manifest.files).Count | Should Be 1
-        $manifest.files.name | Should Be 'config-v2.json'
         Test-Path -LiteralPath (
             Join-Path $firstSnapshot.FullName 'config-v1.json'
         ) -PathType Leaf | Should Be $true
         Test-Path -LiteralPath (
             Join-Path $firstSnapshot.FullName 'display-overrides-v1.json'
         ) -PathType Leaf | Should Be $true
+    }
+
+    It 'deletes only the oldest owned snapshot and preserves unmarked directories' {
+        [IO.File]::WriteAllText(
+            (Join-Path $script:userStateRoot 'config-v2.json'),
+            '{"version":2}',
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        $backupRoot = Join-Path $script:userStateRoot 'upgrade-backups'
+        New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+        1..5 | ForEach-Object {
+            $ownedSnapshot = New-Item -ItemType Directory -Path (
+                Join-Path $backupRoot ("20200101T00000000{0}Z" -f $_)
+            ) -Force
+            [IO.File]::WriteAllText(
+                (Join-Path $ownedSnapshot.FullName '.sbms-upgrade-snapshot-v1'),
+                'SBMS upgrade snapshot v1',
+                [Text.UTF8Encoding]::new($false)
+            )
+        }
+        $unmarked = Join-Path $backupRoot '20200101T000000000Z'
+        New-Item -ItemType Directory -Path $unmarked -Force | Out-Null
+
+        Backup-SbmsConfiguration
+
+        $ownedSnapshots = @(
+            Get-ChildItem -LiteralPath $backupRoot -Directory |
+                Where-Object {
+                Test-OwnedUpgradeSnapshot -Snapshot $_ -BackupRoot $backupRoot
+            }
+        )
+        $ownedSnapshots.Count | Should Be 5
+        Test-Path -LiteralPath $unmarked -PathType Container | Should Be $true
+        Test-Path -LiteralPath (
+            Join-Path $backupRoot '20200101T000000001Z'
+        ) | Should Be $false
+        Test-Path -LiteralPath (
+            Join-Path $backupRoot '20200101T000000002Z'
+        ) -PathType Container | Should Be $true
     }
 }

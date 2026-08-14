@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Show pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
+
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Rust lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --all-targets --locked
+
+      - name: Install compatible Pester for PowerShell 7
+        shell: pwsh
+        run: |
+          Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: PowerShell 7 tests
+        shell: pwsh
+        run: .\.github\scripts\invoke-pester.ps1
+
+      - name: Windows PowerShell 5.1 tests
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module Pester -RequiredVersion 4.10.1 -Scope CurrentUser -Force -SkipPublisherCheck
+          .\.github\scripts\invoke-pester.ps1
+
+      - name: Install Inno Setup for packaging smoke
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Unsigned driver and installer build smoke
+        shell: pwsh
+        run: |
+          $compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source
+          .\build-installer.ps1 -Unsigned -InnoCompiler $compiler
+          $package = Get-Item '.\target\installer\SBMS-Setup-*-x64-unsigned.exe'
+          $hashFile = Get-Item "$($package.FullName).sha256"
+          if ($package.Length -eq 0 -or $hashFile.Length -eq 0) {
+            throw 'Unsigned installer smoke artifact is empty.'
+          }

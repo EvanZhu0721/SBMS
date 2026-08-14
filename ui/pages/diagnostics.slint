@@ -1,0 +1,126 @@
+import { TextEdit } from "std-widgets.slint";
+import { BackButton, FullWidthPrimaryButton } from "../controls.slint";
+import { MdTokens } from "../theme.slint";
+
+export component DiagnosticsPage inherits FocusScope {
+    in property <string> diagnostic-summary: "";
+    in property <string> diagnostic-text: "No diagnostic records are available.";
+    in property <string> diagnostic-path: "";
+    in property <string> diagnostic-action-error: "";
+    
+    callback close-diagnostics();
+    callback open-log-folder();
+
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.close-diagnostics();
+                    return accept;
+                }
+                return reject;
+            }
+    
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: MdTokens.surface;
+    
+                VerticalLayout {
+                    padding: MdTokens.space-2;
+                    spacing: MdTokens.space-1;
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+    
+                        BackButton {
+                            accessible-label: "Back to quick access";
+                            clicked => { root.close-diagnostics(); }
+                        }
+    
+                        Text {
+                            text: "Diagnostics";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                        }
+                    }
+    
+                    if root.diagnostic-summary != "" : Rectangle {
+                        height: 88px;
+                        background: MdTokens.error-container;
+                        border-radius: MdTokens.shape-medium;
+    
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 4px;
+    
+                            Text {
+                                text: "Last recorded error";
+                                color: MdTokens.on-error-container;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+    
+                            Text {
+                                text: root.diagnostic-summary;
+                                color: MdTokens.on-error-container;
+                                font-size: MdTokens.type-body-small;
+                                wrap: word-wrap;
+                                overflow: clip;
+                            }
+                        }
+                    }
+    
+                    HorizontalLayout {
+                        height: 24px;
+                        spacing: MdTokens.space-1;
+    
+                        Text {
+                            horizontal-stretch: 1;
+                            text: "Recent activity";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-body-medium;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                        }
+    
+                        Text {
+                            width: 176px;
+                            text: root.diagnostic-path;
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-small;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            accessible-label: "Log file " + root.diagnostic-path;
+                        }
+                    }
+    
+                    TextEdit {
+                        vertical-stretch: 1;
+                        text: root.diagnostic-text;
+                        read-only: true;
+                        font-size: MdTokens.type-body-small;
+                        font-family: "Cascadia Mono";
+                        wrap: word-wrap;
+                        accessible-label: "Recent diagnostic records. Text can be selected and copied.";
+                    }
+    
+                    Text {
+                        height: root.diagnostic-action-error == "" ? 0px : 18px;
+                        visible: root.diagnostic-action-error != "";
+                        text: root.diagnostic-action-error;
+                        color: MdTokens.error;
+                        font-size: MdTokens.type-body-small;
+                        overflow: elide;
+                    }
+    
+                    FullWidthPrimaryButton {
+                        text: "Open log folder";
+                        accessible-label: "Open the SBMS diagnostic log folder";
+                        clicked => { root.open-log-folder(); }
+                    }
+                }
+            }
+}

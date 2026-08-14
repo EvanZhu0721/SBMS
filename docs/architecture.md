@@ -28,13 +28,14 @@ releases all input capture and rendering, restores migrated windows, closes the
 single software-device handle, waits for every planned connector to disappear,
 and restores the saved physical topology once.
 
-User configuration is stored in `%LOCALAPPDATA%\SBMS\config-v2.json`. It keeps
-the ordered mapping-group array, selected group, route, display identities,
-sizing inputs, mode, refresh rate, aspect ratio and rotation for every group.
-Writes replace the file atomically. When no v2 file exists, a valid legacy
-`config-v1.json` is imported as mirror group `Output 1`; the legacy file is
-left in place. An invalid or unsupported v2 file is reported instead of being
-silently replaced or downgraded.
+User configuration is stored as at most three named profiles in
+`%LOCALAPPDATA%\SBMS\config-profiles-v1.json`. The collection, active profile
+and per-profile revisions are committed atomically under a cross-process lock.
+On first use, the existing `config-v2.json` is preserved and imported as the
+`default` profile. The tray supports revision-checked live reloads without
+changing a mapping that is already running. See
+[configuration.md](configuration.md) for the storage, CLI, JSON and Rust API
+contracts.
 
 An overwrite upgrade first asks the installed tray to exit cleanly so its
 in-memory edits are persisted. Setup then copies the current configuration and

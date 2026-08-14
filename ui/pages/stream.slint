@@ -1,0 +1,197 @@
+import { LineEdit } from "std-widgets.slint";
+import {
+    BackButton,
+    CompactComboBox,
+    FullWidthPrimaryButton,
+    ResolutionLineEdit,
+} from "../controls.slint";
+import { MdTokens } from "../theme.slint";
+
+export component StreamPage inherits FocusScope {
+    in-out property <string> stream-width: "3840";
+    in-out property <string> stream-height: "2160";
+    in-out property <string> stream-diagonal: "";
+    in-out property <string> stream-refresh: "60";
+    in-out property <int> stream-aspect-ratio-index: 1;
+    in-out property <int> stream-rotation: 0;
+    in property <string> stream-width-suggestion: "";
+    in property <string> stream-width-suffix: "";
+    in property <string> stream-height-suggestion: "";
+    in property <string> stream-height-suffix: "";
+    in property <string> stream-aspect-ratio: "";
+    in property <string> stream-result: "Configure the streaming screen";
+    in property <string> stream-result-detail: "Reference geometry determines the virtual mode";
+    in property <string> stream-error: "";
+    
+    callback close-stream-config();
+    callback stream-edited();
+    callback save-stream-config();
+
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.close-stream-config();
+                    return accept;
+                }
+                return reject;
+            }
+    
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: MdTokens.surface;
+    
+                VerticalLayout {
+                    padding: MdTokens.space-2;
+                    spacing: MdTokens.space-1;
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+                        BackButton {
+                            accessible-label: "Back to mapping group";
+                            clicked => { root.close-stream-config(); }
+                        }
+                        Text {
+                            text: "Streaming screen";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                        }
+                    }
+    
+                    Rectangle {
+                        height: 260px;
+                        background: MdTokens.surface-container;
+                        border-radius: MdTokens.shape-medium;
+    
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: MdTokens.space-1;
+                            Text {
+                                text: "Screen mode";
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-body-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+                            HorizontalLayout {
+                                height: 48px;
+                                spacing: MdTokens.space-1;
+                                ResolutionLineEdit {
+                                    text <=> root.stream-width;
+                                    placeholder-text: "Width px";
+                                    field-label: "Streaming screen width in pixels";
+                                    suggestion: root.stream-width-suggestion;
+                                    suggestion-suffix: root.stream-width-suffix;
+                                    edited => { root.stream-edited(); }
+                                }
+                                ResolutionLineEdit {
+                                    text <=> root.stream-height;
+                                    placeholder-text: "Height px";
+                                    field-label: "Streaming screen height in pixels";
+                                    suggestion: root.stream-height-suggestion;
+                                    suggestion-suffix: root.stream-height-suffix;
+                                    edited => { root.stream-edited(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                height: 48px;
+                                spacing: MdTokens.space-1;
+                                LineEdit {
+                                    text <=> root.stream-diagonal;
+                                    placeholder-text: "Diagonal in";
+                                    input-type: InputType.decimal;
+                                    accessible-label: "Streaming screen diagonal in inches";
+                                    edited => { root.stream-edited(); }
+                                }
+                                LineEdit {
+                                    text <=> root.stream-refresh;
+                                    placeholder-text: "Refresh Hz";
+                                    input-type: InputType.decimal;
+                                    accessible-label: "Streaming screen refresh rate in hertz";
+                                    edited => { root.stream-edited(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                height: 48px;
+                                spacing: MdTokens.space-2;
+                                Text {
+                                    width: 132px;
+                                    text: "Screen ratio";
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-medium;
+                                    vertical-alignment: center;
+                                }
+                                CompactComboBox {
+                                    model: ["16:9", "16:10", "3:2", "4:3", "21:9", "32:9"];
+                                    current-index <=> root.stream-aspect-ratio-index;
+                                    field-label: "Streaming screen physical aspect ratio";
+                                    selected => { root.stream-edited(); }
+                                }
+                            }
+                            HorizontalLayout {
+                                height: 48px;
+                                spacing: MdTokens.space-2;
+                                Text {
+                                    width: 132px;
+                                    text: "Direction";
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-medium;
+                                    vertical-alignment: center;
+                                }
+                                CompactComboBox {
+                                    model: [
+                                        "Landscape",
+                                        "Landscape (flipped)",
+                                        "Portrait (clockwise)",
+                                        "Portrait (counter-clockwise)",
+                                    ];
+                                    current-index <=> root.stream-rotation;
+                                    field-label: "Streaming screen orientation";
+                                    selected => { root.stream-edited(); }
+                                }
+                            }
+                        }
+                    }
+    
+                    Rectangle {
+                        height: 76px;
+                        background: root.stream-error == ""
+                            ? MdTokens.primary-container : MdTokens.error-container;
+                        border-radius: MdTokens.shape-medium;
+                        VerticalLayout {
+                            padding: 12px;
+                            alignment: center;
+                            spacing: 3px;
+                            Text {
+                                text: root.stream-error == ""
+                                    ? root.stream-result
+                                    : "Check the values";
+                                color: root.stream-error == ""
+                                    ? MdTokens.on-primary-container : MdTokens.on-error-container;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+                            Text {
+                                text: root.stream-error == ""
+                                    ? root.stream-result-detail
+                                    : root.stream-error;
+                                color: root.stream-error == ""
+                                    ? MdTokens.on-primary-container : MdTokens.on-error-container;
+                                font-size: MdTokens.type-body-small;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+    
+                    Rectangle { vertical-stretch: 1; }
+    
+                    FullWidthPrimaryButton {
+                        text: "Save screen";
+                        enabled: root.stream-error == "";
+                        accessible-label: "Save stream-only screen mode";
+                        clicked => { root.save-stream-config(); }
+                    }
+                }
+            }
+}

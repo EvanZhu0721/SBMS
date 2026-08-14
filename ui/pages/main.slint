@@ -1,0 +1,567 @@
+import { Button, ProgressIndicator } from "std-widgets.slint";
+import {
+    CompactComboBox,
+    FullWidthSettingsButton,
+    FullWidthPrimaryButton,
+    MaterialIconButton,
+} from "../controls.slint";
+import { SevenSegmentDisplay } from "../seven-segment.slint";
+import { MdTokens } from "../theme.slint";
+
+export component MainPage inherits FocusScope {
+    in-out property <[string]> display-names;
+    in-out property <[string]> display-labels;
+    in-out property <[string]> display-ids;
+    in-out property <int> selected-display: -1;
+    in property <bool> stream-only: false;
+    in-out property <[string]> tab-labels;
+    in-out property <[string]> tab-details;
+    in-out property <[int]> tab-indices;
+    in property <int> active-group-index: 0;
+    in property <int> group-count: 1;
+    in property <int> max-group-count: 1;
+    in-out property <int> pending-remove-index: -1;
+    in-out property <[string]> reference-names;
+    in-out property <[string]> reference-labels;
+    in-out property <[string]> reference-ids;
+    in-out property <int> selected-reference: -1;
+    in property <bool> reference-manual: false;
+    in property <bool> reference-action-enabled: false;
+    in-out property <int> sizing-strategy: 0;
+    in property <string> state: "Stopped";
+    in property <string> state-detail: "Choose a target screen to begin";
+    in property <bool> running: false;
+    in property <bool> busy: false;
+    in property <bool> restart-available: false;
+    in property <string> error-text: "";
+    in property <int> mapping-fps: 0;
+    in property <bool> mapping-fps-valid: false;
+    in property <bool> mapping-fps-error: false;
+    in property <bool> mapping-fps-nan: false;
+    in property <bool> geometry-configured: false;
+    in property <string> geometry-summary: "3840 × 2160";
+    in property <string> geometry-summary-detail: "Driver · 240 Hz";
+    in property <bool> sunshine-panel-enabled: false;
+    in property <int> sunshine-state: 0;
+    in property <int> sunshine-port: 0;
+    in property <string> sunshine-lan-ip: "--";
+    
+    callback start();
+    callback stop();
+    callback restart-mapping();
+    callback display-selected();
+    callback reference-selected();
+    callback strategy-selected();
+    callback calculate-geometry();
+    callback open-manual-geometry();
+    callback dismiss();
+    callback open-diagnostics();
+    callback tab-selected(int);
+    callback tab-wheel(int);
+    callback add-group();
+    callback open-stream-config();
+    callback open-sunshine-panel();
+    callback open-display-settings();
+    callback open-screen-size();
+
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.dismiss();
+                    return accept;
+                }
+                return reject;
+            }
+    
+            Rectangle {
+                x: 0;
+                y: 0;
+                width: parent.width;
+                height: parent.height;
+                background: MdTokens.surface;
+    
+                VerticalLayout {
+                    padding: MdTokens.space-2;
+                    spacing: MdTokens.space-1;
+    
+                    HorizontalLayout {
+                        height: 40px;
+                        spacing: MdTokens.space-1;
+    
+                        tabs-viewport := Rectangle {
+                            width: root.tab-labels.length * 96px
+                                + Math.max(root.tab-labels.length - 1, 0) * 4px;
+                            clip: true;
+                            background: transparent;
+    
+                            HorizontalLayout {
+                                spacing: 4px;
+    
+                                for tab[index] in root.tab-labels : Rectangle {
+                                    width: 96px;
+                                    background: root.tab-indices[index] == root.active-group-index
+                                        ? MdTokens.primary-container
+                                        : MdTokens.surface-container;
+                                    border-radius: 12px;
+    
+                                    tab-touch := TouchArea {
+                                        enabled: !root.busy;
+                                        accessible-role: button;
+                                        accessible-label: "Open mapping group " + tab + ", " + root.tab-details[index];
+                                        clicked => { root.tab-selected(root.tab-indices[index]); }
+                                        scroll-event(event) => {
+                                            if event.delta-y < -1px || event.delta-x < -1px {
+                                                root.tab-wheel(1);
+                                                return accept;
+                                            }
+                                            if event.delta-y > 1px || event.delta-x > 1px {
+                                                root.tab-wheel(-1);
+                                                return accept;
+                                            }
+                                            return reject;
+                                        }
+                                    }
+    
+                                    Rectangle {
+                                        x: 4px;
+                                        y: 6px;
+                                        width: 28px;
+                                        height: 28px;
+                                        border-radius: 10px;
+                                        background: MdTokens.primary;
+    
+                                        Text {
+                                            width: parent.width;
+                                            height: parent.height;
+                                            text: tab;
+                                            color: MdTokens.on-primary;
+                                            font-family: "Bahnschrift";
+                                            font-size: 16px;
+                                            font-weight: 600;
+                                            horizontal-alignment: center;
+                                            vertical-alignment: center;
+                                            accessible-role: none;
+                                        }
+                                    }
+    
+                                    Text {
+                                        x: 36px;
+                                        width: 30px;
+                                        height: parent.height;
+                                        color: root.tab-indices[index] == root.active-group-index
+                                            ? MdTokens.on-primary-container
+                                            : MdTokens.on-surface-variant;
+                                        font-family: "Bahnschrift";
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        text: root.tab-details[index];
+                                        overflow: elide;
+                                        accessible-role: none;
+                                    }
+    
+                                    Rectangle {
+                                        x: 68px;
+                                        y: 0px;
+                                        width: 28px;
+                                        height: parent.height;
+                                        background: transparent;
+                                        opacity: root.group-count <= 1 ? 0
+                                            : (!root.running && !root.busy ? 1 : 0.38);
+    
+                                        Rectangle {
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 28px;
+                                            height: 28px;
+                                            border-radius: MdTokens.shape-full;
+                                            background: root.tab-indices[index] == root.active-group-index
+                                                ? MdTokens.on-primary-container : MdTokens.on-surface-variant;
+                                            opacity: close-touch.pressed
+                                                ? 0.12 : (close-touch.has-hover ? 0.08 : 0);
+                                            animate opacity { duration: 100ms; easing: ease-in-out; }
+                                        }
+    
+                                        Path {
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                            width: 18px;
+                                            height: 18px;
+                                            viewbox-width: 24;
+                                            viewbox-height: 24;
+                                            commands: "M18.3 5.71L12 12L5.7 5.71L4.29 7.12L10.59 13.41L4.29 19.71L5.7 21.12L12 14.83L18.3 21.12L19.71 19.71L13.41 13.41L19.71 7.12L18.3 5.71Z";
+                                            fill: root.tab-indices[index] == root.active-group-index
+                                                ? MdTokens.on-primary-container : MdTokens.on-surface-variant;
+                                            accessible-role: none;
+                                        }
+    
+                                        close-touch := TouchArea {
+                                            enabled: root.group-count > 1 && !root.running && !root.busy;
+                                            accessible-role: button;
+                                            accessible-label: "Remove mapping group " + tab;
+                                            clicked => {
+                                                if root.group-count > 1 {
+                                                    root.pending-remove-index = root.tab-indices[index];
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+    
+                        MaterialIconButton {
+                            icon-kind: 0;
+                            compact: true;
+                            control-enabled: !root.running && !root.busy && root.group-count < root.max-group-count;
+                            field-label: "Add mapping group";
+                            clicked => { root.add-group(); }
+                        }
+    
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+    
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
+                            spacing: 2px;
+                            Text {
+                                text: "SBMS";
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-title-large;
+                                font-weight: MdTokens.weight-medium;
+                            }
+                            Text {
+                                text: "Display mapping";
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-small;
+                            }
+                        }
+    
+                        SevenSegmentDisplay {
+                            fps: root.mapping-fps;
+                            valid: root.mapping-fps-valid;
+                            running: root.running;
+                            error: root.mapping-fps-error;
+                            not-a-number: root.mapping-fps-nan;
+                        }
+                    }
+    
+                    Rectangle {
+                        height: root.error-text != "" || root.restart-available ? 80px : 64px;
+                        background: root.error-text != ""
+                            ? MdTokens.error-container
+                            : (root.running ? MdTokens.primary-container : MdTokens.surface-container);
+                        border-radius: MdTokens.shape-medium;
+    
+                        HorizontalLayout {
+                            padding: MdTokens.space-2;
+                            spacing: 12px;
+    
+                            Rectangle {
+                                width: 12px;
+                                background: transparent;
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: MdTokens.shape-full;
+                                    background: root.error-text != ""
+                                        ? MdTokens.on-error-container
+                                        : (root.running ? MdTokens.primary : MdTokens.outline-variant);
+                                }
+                            }
+    
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 3px;
+                                Text {
+                                    text: root.error-text != ""
+                                        ? "Action failed"
+                                        : (root.state == "Reconnecting" ? "正在重连" : root.state);
+                                    color: root.error-text != ""
+                                        ? MdTokens.on-error-container
+                                        : (root.running ? MdTokens.on-primary-container : MdTokens.on-surface);
+                                    font-size: MdTokens.type-title-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                }
+                                Text {
+                                    text: root.state-detail;
+                                    color: root.error-text != ""
+                                        ? MdTokens.on-error-container
+                                        : (root.running ? MdTokens.on-primary-container : MdTokens.on-surface-variant);
+                                    font-size: MdTokens.type-body-small;
+                                    overflow: elide;
+                                }
+                            }
+    
+                            MaterialIconButton {
+                                icon-kind: 1;
+                                visible: root.restart-available;
+                                field-label: "Restart display mapping";
+                                clicked => { root.restart-mapping(); }
+                            }
+
+                            if root.busy && root.error-text == "" : Rectangle {
+                                width: 24px;
+                                background: transparent;
+                                ProgressIndicator {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 24px;
+                                    height: 24px;
+                                    indeterminate: true;
+                                }
+                            }
+    
+                            MaterialIconButton {
+                                icon-kind: 4;
+                                visible: root.error-text != "";
+                                field-label: "Show error diagnostics";
+                                clicked => { root.open-diagnostics(); }
+                            }
+                        }
+    
+                        animate background { duration: 150ms; easing: ease-in-out; }
+                    }
+    
+                    Text {
+                        text: "Target screen";
+                        height: 20px;
+                        color: MdTokens.on-surface-variant;
+                        font-size: MdTokens.type-body-medium;
+                        font-weight: MdTokens.weight-medium;
+                        vertical-alignment: bottom;
+                    }
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+    
+                        CompactComboBox {
+                            horizontal-stretch: 1;
+                            height: MdTokens.target;
+                            model: root.display-labels;
+                            collapsed-model: root.display-names;
+                            current-index <=> root.selected-display;
+                            control-enabled: !root.running && !root.busy && root.display-labels.length > 0;
+                            field-label: "Target screen";
+                            popup-width: 352px;
+                            selected => { root.display-selected(); }
+                        }
+    
+                        MaterialIconButton {
+                            icon-kind: root.stream-only ? 2 : 3;
+                            control-enabled: !root.running && !root.busy;
+                            field-label: root.stream-only
+                                ? "Configure stream-only screen"
+                                : "Configure target screen size";
+                            clicked => {
+                                if root.stream-only { root.open-stream-config(); }
+                                else { root.open-screen-size(); }
+                            }
+                        }
+                    }
+    
+                    VerticalLayout {
+                        height: 72px;
+                        spacing: 4px;
+    
+                        HorizontalLayout {
+                            height: 20px;
+                            spacing: MdTokens.space-1;
+    
+                            Text {
+                                text: "Reference display";
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-medium;
+                                font-weight: MdTokens.weight-medium;
+                                vertical-alignment: bottom;
+                            }
+    
+                            Text {
+                                width: 144px;
+                                text: "Sizing";
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-medium;
+                                font-weight: MdTokens.weight-medium;
+                                vertical-alignment: bottom;
+                            }
+    
+                            Rectangle {
+                                width: MdTokens.target;
+                                background: transparent;
+                            }
+                        }
+    
+                        HorizontalLayout {
+                            height: MdTokens.target;
+                            spacing: MdTokens.space-1;
+    
+                            CompactComboBox {
+                                horizontal-stretch: 1;
+                                height: MdTokens.target;
+                                model: root.reference-labels;
+                                collapsed-model: root.reference-names;
+                                current-index <=> root.selected-reference;
+                                control-enabled: !root.running && !root.busy && root.reference-labels.length > 0;
+                                field-label: "Reference display";
+                                popup-width: 352px;
+                                selected => { root.reference-selected(); }
+                            }
+    
+                            CompactComboBox {
+                                width: 144px;
+                                height: MdTokens.target;
+                                model: [
+                                    "Physical",
+                                    "Rounded",
+                                    "Integer",
+                                ];
+                                current-index <=> root.sizing-strategy;
+                                control-enabled: !root.running && !root.busy;
+                                field-label: "Virtual display sizing strategy";
+                                selected => { root.strategy-selected(); }
+                            }
+    
+                            MaterialIconButton {
+                                icon-kind: root.reference-manual ? 2 : 5;
+                                control-enabled: root.reference-action-enabled
+                                    && !root.running && !root.busy;
+                                field-label: root.reference-manual
+                                    ? "Configure manual reference display"
+                                    : "Calculate virtual display geometry";
+                                clicked => {
+                                    if root.reference-manual {
+                                        root.open-manual-geometry();
+                                    } else {
+                                        root.calculate-geometry();
+                                    }
+                                }
+                            }
+                        }
+                    }
+    
+                    Rectangle {
+                        height: 64px;
+                        background: MdTokens.surface-container;
+                        border-radius: MdTokens.shape-medium;
+    
+                        HorizontalLayout {
+                            padding: MdTokens.space-2;
+                            spacing: 12px;
+    
+                            Rectangle {
+                                width: 12px;
+                                background: transparent;
+    
+                                Rectangle {
+                                    y: (parent.height - self.height) / 2;
+                                    width: 12px;
+                                    height: 12px;
+                                    border-radius: MdTokens.shape-full;
+                                    background: root.geometry-configured
+                                        ? MdTokens.primary
+                                        : MdTokens.outline-variant;
+                                }
+                            }
+    
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 3px;
+    
+                                Text {
+                                    text: "Virtual display";
+                                    color: MdTokens.on-surface;
+                                    font-size: MdTokens.type-title-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                }
+    
+                                Text {
+                                    text: root.stream-only
+                                        ? "LAN endpoint"
+                                        : (root.geometry-configured
+                                            ? "Saved geometry"
+                                            : "Using driver default");
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-small;
+                                    overflow: elide;
+                                }
+                            }
+    
+                            VerticalLayout {
+                                width: root.stream-only ? 184px : 144px;
+                                alignment: center;
+                                spacing: 3px;
+    
+                                Text {
+                                    text: root.geometry-summary;
+                                    color: MdTokens.on-surface;
+                                    font-size: MdTokens.type-title-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                    horizontal-alignment: right;
+                                    overflow: elide;
+                                }
+    
+                                Text {
+                                    text: root.stream-only
+                                        ? (root.sunshine-state == 2 && root.sunshine-port > 0
+                                            ? (root.sunshine-lan-ip == "--"
+                                                ? "LAN unavailable"
+                                                : root.sunshine-lan-ip + ":" + root.sunshine-port)
+                                            : (root.sunshine-state == 1
+                                                ? "Starting"
+                                                : (root.sunshine-state == 3
+                                                    ? "Unavailable"
+                                                    : "--")))
+                                        : root.geometry-summary-detail;
+                                    color: root.stream-only && root.sunshine-state == 3
+                                        ? MdTokens.error
+                                        : (root.stream-only && root.sunshine-state == 2
+                                            ? MdTokens.primary
+                                            : MdTokens.on-surface-variant);
+                                    font-size: MdTokens.type-body-small;
+                                    font-weight: root.stream-only && root.sunshine-state == 2
+                                        ? MdTokens.weight-medium
+                                        : 400;
+                                    horizontal-alignment: right;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+    
+                    Rectangle { vertical-stretch: 1; }
+    
+                    if root.stream-only && root.running : Button {
+                        height: MdTokens.target;
+                        text: root.sunshine-panel-enabled
+                            ? "Open Sunshine"
+                            : "Waiting for Sunshine";
+                        enabled: root.sunshine-panel-enabled && !root.busy;
+                        accessible-label: "Open this Sunshine instance's web configuration panel";
+                        clicked => { root.open-sunshine-panel(); }
+                    }
+
+                    FullWidthSettingsButton {
+                        control-enabled: !root.busy;
+                        field-label: "Open Windows display settings";
+                        clicked => { root.open-display-settings(); }
+                    }
+    
+                    FullWidthPrimaryButton {
+                        text: root.running ? "Stop and restore" : (root.busy ? root.state : "Start mapping");
+                        enabled: !root.busy && (root.running || root.selected-display >= 0);
+                        accessible-label: root.running ? "Stop mapping and restore windows" : "Start mapping";
+                        clicked => {
+                            if root.running { root.stop(); } else { root.start(); }
+                        }
+                    }
+    
+                }
+            }
+}

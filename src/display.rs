@@ -73,6 +73,49 @@ pub fn active_displays() -> Result<Vec<Display>, DisplayError> {
     active_displays_with_identity(true)
 }
 
+pub fn unique_physical_display(
+    displays: &[Display],
+    display_id: &str,
+) -> Result<Display, DisplayError> {
+    let matches: Vec<_> = displays
+        .iter()
+        .filter(|display| display.id.eq_ignore_ascii_case(display_id))
+        .collect();
+    let display = match matches.as_slice() {
+        [display] => (*display).clone(),
+        [] => {
+            return Err(DisplayError(format!(
+                "active display id not found: {display_id}"
+            )));
+        }
+        _ => {
+            return Err(DisplayError(format!(
+                "display id is ambiguous: {display_id}"
+            )));
+        }
+    };
+    if display.virtual_display {
+        return Err(DisplayError(
+            "the physical output cannot be the SBMS virtual display".into(),
+        ));
+    }
+    if displays
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .device_name
+                .eq_ignore_ascii_case(&display.device_name)
+        })
+        .count()
+        != 1
+    {
+        return Err(DisplayError(
+            "cloned outputs sharing one GDI display name are not supported".into(),
+        ));
+    }
+    Ok(display)
+}
+
 pub(crate) fn active_display_topology() -> Result<Vec<Display>, DisplayError> {
     active_displays_with_identity(false)
 }
@@ -750,9 +793,11 @@ fn win32_error(operation: &str, code: u32) -> DisplayError {
 #[cfg(test)]
 mod tests {
     use super::{
-        MonitorIdentity, edid_dimensions_mm, stable_instance_id_parts, sunshine_device_id_payload,
-        sunshine_display_id, utf16le_bytes,
+        Display, MonitorIdentity, edid_dimensions_mm, stable_instance_id_parts,
+        sunshine_device_id_payload, sunshine_display_id, unique_physical_display, utf16le_bytes,
     };
+    use crate::geometry::Rotation;
+    use windows::Win32::Foundation::RECT;
 
     const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
 
@@ -760,6 +805,62 @@ mod tests {
         let mut value = vec![0u8; 128];
         value[..8].copy_from_slice(&HEADER);
         value
+    }
+
+    fn display(id: &str, device_name: &str, virtual_display: bool) -> Display {
+        Display {
+            id: id.into(),
+            connector_index: 0,
+            sunshine_id: None,
+            name: id.into(),
+            device_name: device_name.into(),
+            rect: RECT::default(),
+            native_width: 1920,
+            native_height: 1080,
+            physical_width_mm: None,
+            physical_height_mm: None,
+            rotation: Rotation::Deg0,
+            refresh_numerator: 60,
+            refresh_denominator: 1,
+            primary: false,
+            virtual_display,
+        }
+    }
+
+    #[test]
+    fn unique_physical_display_enforces_identity_and_physical_output() {
+        let physical = display("physical", r"\\.\DISPLAY1", false);
+        assert_eq!(
+            unique_physical_display(std::slice::from_ref(&physical), "PHYSICAL")
+                .unwrap()
+                .id,
+            "physical"
+        );
+        assert!(unique_physical_display(&[], "missing").is_err());
+        assert!(
+            unique_physical_display(
+                &[
+                    physical.clone(),
+                    display("duplicate", r"\\.\DISPLAY1", false),
+                ],
+                "physical",
+            )
+            .is_err()
+        );
+        assert!(
+            unique_physical_display(
+                &[
+                    display("same", r"\\.\DISPLAY1", false),
+                    display("SAME", r"\\.\DISPLAY2", false),
+                ],
+                "same",
+            )
+            .is_err()
+        );
+        assert!(
+            unique_physical_display(&[display("virtual", r"\\.\DISPLAY2", true)], "virtual",)
+                .is_err()
+        );
     }
 
     #[test]

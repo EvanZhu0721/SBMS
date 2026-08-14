@@ -4,7 +4,7 @@ Class=Display
 ClassGuid={4D36E968-E325-11CE-BFC1-08002BE10318}
 ClassVer=2.0
 Provider=%Provider%
-DriverVer=08/13/2026,1.4.5.0
+DriverVer=08/14/2026,1.4.514.0
 CatalogFile=SBMSIndirectDisplay.cat
 PnpLockDown=1
 

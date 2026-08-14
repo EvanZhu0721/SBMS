@@ -48,10 +48,11 @@ WDF/IddCx 向 Windows 提供虚拟显示器。镜像链路使用 Desktop Duplica
 
 ## 安装和使用
 
-1. 从最新 GitHub Release 下载 `SBMS-Setup-1.4.5-x64.exe`。
+1. 从最新 GitHub Release 下载 `SBMS-Setup-1.4.514-x64.exe`。
 2. 运行安装包并批准管理员权限。
-3. 从系统托盘打开 SBMS，选择目标显示器，然后点击 **Start**。
-4. 断开或重新排列显示器前，先点击 **Stop**。
+3. 从系统托盘打开 SBMS，选择目标显示器，然后点击 **Start mapping**。
+4. 需要结束映射并恢复原始显示布局时，点击 **Stop and restore**。显示器拓扑意外
+   变化时，SBMS 会自动尝试重连。
 
 SBMS 会随安装用户登录自动启动。可在 Windows“已安装的应用”中卸载，
 卸载器会同时移除驱动和自启动任务。
@@ -69,26 +70,34 @@ sbms list
 sbms map --target '<monitor-device-path>'
 sbms plan validate examples\two-streams.json
 sbms plan run examples\two-streams.json
+sbms config list
 sbms config show
+sbms config import gaming .\gaming.json --activate
 sbms shutdown
 ```
 
 `sbms list` 会列出 `--target` 所需的稳定显示器 ID。前台运行 `map` 时按
 Enter，可以正常停止并完成恢复。映射计划最多可混合十六组本地镜像和纯串流
-虚拟桌面。
+虚拟桌面。最多可以同时保存三套配置；导入、导出、激活和热加载接口见
+[配置档案接口](docs/configuration.md)。
 
 ## 构建
 
 需要 Rust、Visual Studio C++ Build Tools、匹配的 Windows Driver Kit、
-Inno Setup 6 和代码签名证书。
+Inno Setup 6；构建发布包还需要代码签名证书。
 
 ```powershell
-cargo build --release
-.\build-driver.ps1 -SigningCertificateThumbprint <thumbprint>
 .\build-installer.ps1 -SigningCertificateThumbprint <thumbprint>
 ```
 
-安装包输出到 `target\installer`。
+这是完整且唯一的发布入口：它会按锁文件构建 Rust 二进制、构建并签名驱动、
+生成安装包、验证所有签名，并把安装包及其 SHA-256 文件输出到
+`target\installer`。
+
+开发单个组件时，可分别使用 `cargo build --release --locked --bins` 或
+`.\build-driver.ps1`。需要检查完整的未签名构建与打包链时，必须显式使用
+`.\build-installer.ps1 -Unsigned`；它仍会编译并验证驱动，然后生成带
+`-unsigned` 后缀的冒烟测试产物，不得对外发布。
 
 ## 致谢
 这是我第一个公开发布的 GitHub 项目，希望对您有所帮助。

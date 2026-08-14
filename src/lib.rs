@@ -7,6 +7,7 @@ pub mod geometry;
 mod gpu_renderer;
 mod input;
 pub mod launch_broker;
+pub mod limits;
 pub mod mapping;
 mod network;
 pub mod renderer;

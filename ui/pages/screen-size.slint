@@ -1,0 +1,200 @@
+import { LineEdit } from "std-widgets.slint";
+import {
+    BackButton,
+    CompactComboBox,
+    PageActionButton,
+} from "../controls.slint";
+import { MdTokens } from "../theme.slint";
+
+export component ScreenSizePage inherits FocusScope {
+    in property <string> screen-size-target: "";
+    in property <string> screen-size-native-mode: "";
+    in property <string> screen-size-detected-mm: "Not reported";
+    in property <string> screen-size-detected-inches: "";
+    in-out property <string> screen-size-manual-inches: "";
+    in-out property <int> screen-size-aspect-ratio: 0;
+    in property <string> screen-size-effective-mm: "";
+    in property <string> screen-size-effective-inches: "";
+    in property <string> screen-size-source: "";
+    in property <string> screen-size-error: "";
+    in property <bool> screen-size-valid: true;
+    in property <bool> screen-size-save-blocked: false;
+    
+    callback close-screen-size();
+    callback screen-size-edited();
+    callback reset-screen-size();
+    callback reread-screen-size();
+    callback save-screen-size();
+
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.close-screen-size();
+                    return accept;
+                }
+                return reject;
+            }
+    
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: MdTokens.surface;
+    
+                VerticalLayout {
+                    padding: MdTokens.space-2;
+                    spacing: MdTokens.space-1;
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+                        BackButton {
+                            accessible-label: "Back to mapping group";
+                            clicked => { root.close-screen-size(); }
+                        }
+                        Text {
+                            text: "Screen size";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                        }
+                    }
+    
+                    Rectangle {
+                        height: 92px;
+                        background: MdTokens.surface-container;
+                        border-radius: MdTokens.shape-medium;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 3px;
+                            Text {
+                                text: root.screen-size-target;
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: "EDID · " + root.screen-size-detected-mm;
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-medium;
+                            }
+                            Text {
+                                text: root.screen-size-detected-inches + " · " + root.screen-size-native-mode;
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-small;
+                                overflow: elide;
+                            }
+                        }
+                    }
+    
+                    Rectangle {
+                        height: 136px;
+                        background: MdTokens.surface-container;
+                        border-radius: MdTokens.shape-medium;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: MdTokens.space-1;
+                            Text {
+                                text: "Manual override";
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-body-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+                            HorizontalLayout {
+                                height: MdTokens.target;
+                                spacing: MdTokens.space-1;
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    height: MdTokens.target;
+                                    text <=> root.screen-size-manual-inches;
+                                    placeholder-text: "Diagonal in";
+                                    input-type: InputType.decimal;
+                                    accessible-label: "Target display diagonal in inches";
+                                    edited => { root.screen-size-edited(); }
+                                }
+                                CompactComboBox {
+                                    width: 112px;
+                                    height: MdTokens.target;
+                                    model: ["Native", "16:9", "16:10", "3:2", "4:3", "21:9", "32:9"];
+                                    current-index <=> root.screen-size-aspect-ratio;
+                                    control-enabled: root.screen-size-manual-inches != "";
+                                    field-label: "Target display physical aspect ratio";
+                                    selected => { root.screen-size-edited(); }
+                                }
+                            }
+                            Text {
+                                text: "Diagonal and ratio determine the effective dimensions";
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-small;
+                                overflow: elide;
+                            }
+                        }
+                    }
+    
+                    Rectangle {
+                        height: 72px;
+                        background: root.screen-size-error == ""
+                            ? MdTokens.primary-container : MdTokens.error-container;
+                        border-radius: MdTokens.shape-medium;
+                        VerticalLayout {
+                            padding: 12px;
+                            alignment: center;
+                            spacing: 3px;
+                            Text {
+                                text: root.screen-size-error == ""
+                                    ? "Effective · " + root.screen-size-effective-mm
+                                    : "Check the value";
+                                color: root.screen-size-error == ""
+                                    ? MdTokens.on-primary-container : MdTokens.on-error-container;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.screen-size-error == ""
+                                    ? root.screen-size-effective-inches + " · " + root.screen-size-source
+                                    : root.screen-size-error;
+                                color: root.screen-size-error == ""
+                                    ? MdTokens.on-primary-container : MdTokens.on-error-container;
+                                font-size: MdTokens.type-body-small;
+                                overflow: elide;
+                            }
+                        }
+                    }
+    
+                    Text {
+                        height: 32px;
+                        text: "Only virtual-resolution calculations use this value.";
+                        color: MdTokens.on-surface-variant;
+                        font-size: MdTokens.type-body-small;
+                        wrap: word-wrap;
+                    }
+    
+                    Rectangle { vertical-stretch: 1; }
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+                        PageActionButton {
+                            text: "Reset";
+                            enabled: !root.screen-size-save-blocked;
+                            accessible-label: "Use detected EDID size";
+                            clicked => { root.reset-screen-size(); }
+                        }
+                        PageActionButton {
+                            text: "Re-read";
+                            accessible-label: "Read display EDID again";
+                            clicked => { root.reread-screen-size(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        PageActionButton {
+                            text: "Save";
+                            enabled: root.screen-size-valid && !root.screen-size-save-blocked;
+                            primary: true;
+                            accessible-label: "Save target display physical size";
+                            clicked => { root.save-screen-size(); }
+                        }
+                    }
+                }
+            }
+}

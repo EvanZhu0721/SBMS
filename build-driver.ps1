@@ -64,19 +64,16 @@ $signTool = Join-Path $kitsRoot "bin\$sdkVersion\x64\signtool.exe"
 
 $required = @(
     $vcvars, $wdfInclude, $iddInclude, $wdfLibrary, $iddLibrary,
-    $apiValidator, $apiContract, $infVerifier
+    $apiValidator, $apiContract, $infVerifier, $inf2Cat
 )
 foreach ($path in $required) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required build input is missing: $path"
     }
 }
-if ($SigningCertificateThumbprint) {
-    foreach ($path in @($inf2Cat, $signTool)) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            throw "Required signing tool is missing: $path"
-        }
-    }
+if ($SigningCertificateThumbprint -and
+    -not (Test-Path -LiteralPath $signTool)) {
+    throw "Required signing tool is missing: $signTool"
 }
 
 if (Test-Path -LiteralPath $output) {
@@ -133,15 +130,15 @@ foreach ($mode in '/w', '/u', '/h') {
     }
 }
 
+& $inf2Cat "/driver:$output" /os:10_X64
+if ($LASTEXITCODE -ne 0) {
+    throw "Inf2Cat failed with exit code $LASTEXITCODE"
+}
+
 if ($SigningCertificateThumbprint) {
     & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $binary
     if ($LASTEXITCODE -ne 0) {
         throw "Signing the driver DLL failed with exit code $LASTEXITCODE"
-    }
-
-    & $inf2Cat "/driver:$output" /os:10_X64
-    if ($LASTEXITCODE -ne 0) {
-        throw "Inf2Cat failed with exit code $LASTEXITCODE"
     }
 
     $catalog = Join-Path $output 'SBMSIndirectDisplay.cat'

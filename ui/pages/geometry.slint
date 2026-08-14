@@ -1,0 +1,209 @@
+import { LineEdit, ScrollView } from "std-widgets.slint";
+import {
+    BackButton,
+    CompactComboBox,
+    FullWidthPrimaryButton,
+    ResolutionLineEdit,
+} from "../controls.slint";
+import { MdTokens } from "../theme.slint";
+
+export component GeometryPage inherits FocusScope {
+    in property <bool> stream-only: false;
+    in property <bool> geometry-valid: false;
+    in property <bool> geometry-save-blocked: false;
+    in property <string> geometry-result: "Enter display measurements";
+    in property <string> geometry-result-detail: "All values use pixels or millimetres";
+    in property <string> geometry-error: "";
+    in-out property <string> reference-width: "";
+    in-out property <string> reference-height: "";
+    in-out property <string> reference-diagonal: "";
+    in-out property <int> reference-aspect-ratio: 0;
+    in-out property <int> reference-rotation: 0;
+    in property <string> reference-width-suggestion: "";
+    in property <string> reference-width-suffix: "";
+    in property <string> reference-height-suggestion: "";
+    in property <string> reference-height-suffix: "";
+    in-out property <int> sizing-strategy: 0;
+    
+    callback close-geometry();
+    callback geometry-edited();
+    callback strategy-selected();
+    callback save-geometry();
+
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.close-geometry();
+                    return accept;
+                }
+                return reject;
+            }
+    
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: MdTokens.surface;
+    
+                VerticalLayout {
+                    padding: MdTokens.space-2;
+                    spacing: MdTokens.space-1;
+    
+                    HorizontalLayout {
+                        height: MdTokens.target;
+                        spacing: MdTokens.space-1;
+    
+                        BackButton {
+                            accessible-label: "Back to quick access";
+                            clicked => { root.close-geometry(); }
+                        }
+    
+                        Text {
+                            text: "Manual reference";
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                        }
+                    }
+    
+                    ScrollView {
+                        vertical-stretch: 1;
+    
+                        VerticalLayout {
+                            spacing: 12px;
+    
+                            Rectangle {
+                                height: 200px;
+                                background: MdTokens.surface-container;
+                                border-radius: MdTokens.shape-medium;
+    
+                                VerticalLayout {
+                                    padding: 12px;
+                                    spacing: 4px;
+    
+                                    Text {
+                                        text: "Reference display";
+                                        height: 20px;
+                                        color: MdTokens.on-surface;
+                                        font-size: MdTokens.type-body-medium;
+                                        font-weight: MdTokens.weight-medium;
+                                    }
+    
+                                    HorizontalLayout {
+                                        height: 48px;
+                                        spacing: MdTokens.space-1;
+                                        ResolutionLineEdit {
+                                            text <=> root.reference-width;
+                                            placeholder-text: "Width px";
+                                            field-label: "Reference display width in pixels";
+                                            suggestion: root.reference-width-suggestion;
+                                            suggestion-suffix: root.reference-width-suffix;
+                                            edited => { root.geometry-edited(); }
+                                        }
+                                        ResolutionLineEdit {
+                                            text <=> root.reference-height;
+                                            placeholder-text: "Height px";
+                                            field-label: "Reference display height in pixels";
+                                            suggestion: root.reference-height-suggestion;
+                                            suggestion-suffix: root.reference-height-suffix;
+                                            edited => { root.geometry-edited(); }
+                                        }
+                                    }
+    
+                                    HorizontalLayout {
+                                        height: 48px;
+                                        spacing: MdTokens.space-1;
+                                        LineEdit {
+                                            text <=> root.reference-diagonal;
+                                            placeholder-text: "Diagonal in";
+                                            input-type: InputType.decimal;
+                                            accessible-label: "Reference display diagonal in inches";
+                                            edited => { root.geometry-edited(); }
+                                        }
+                                        CompactComboBox {
+                                            model: ["16:9", "16:10", "3:2", "4:3", "21:9", "32:9"];
+                                            current-index <=> root.reference-aspect-ratio;
+                                            field-label: "Reference display physical aspect ratio";
+                                            selected => { root.geometry-edited(); }
+                                        }
+                                    }
+    
+                                    HorizontalLayout {
+                                        height: 48px;
+                                        spacing: MdTokens.space-1;
+    
+                                        CompactComboBox {
+                                            model: [
+                                                "Landscape",
+                                                "Landscape (flipped)",
+                                                "Portrait (clockwise)",
+                                                "Portrait (counter-clockwise)",
+                                            ];
+                                            current-index <=> root.reference-rotation;
+                                            field-label: "Reference display orientation";
+                                            selected => { root.geometry-edited(); }
+                                        }
+    
+                                        CompactComboBox {
+                                            model: [
+                                                "Physical",
+                                                "Rounded",
+                                                "Integer",
+                                            ];
+                                            current-index <=> root.sizing-strategy;
+                                            field-label: "Virtual display sizing strategy";
+                                            selected => {
+                                                root.strategy-selected();
+                                                root.geometry-edited();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+    
+                    Rectangle {
+                        height: root.geometry-error == "" ? 64px : 84px;
+                        background: root.geometry-error == ""
+                            ? MdTokens.primary-container
+                            : MdTokens.error-container;
+                        border-radius: MdTokens.shape-medium;
+    
+                        VerticalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: center;
+                            spacing: 2px;
+    
+                            Text {
+                                text: root.geometry-result;
+                                color: root.geometry-error == ""
+                                    ? MdTokens.on-primary-container
+                                    : MdTokens.on-error-container;
+                                font-size: MdTokens.type-title-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+                            Text {
+                                text: root.geometry-error == ""
+                                    ? root.geometry-result-detail
+                                    : root.geometry-error;
+                                color: root.geometry-error == ""
+                                    ? MdTokens.on-primary-container
+                                    : MdTokens.on-error-container;
+                                font-size: MdTokens.type-body-small;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+    
+                    FullWidthPrimaryButton {
+                        text: root.stream-only ? "Save reference" : "Save plan";
+                        enabled: root.geometry-valid && !root.geometry-save-blocked;
+                        accessible-label: root.stream-only
+                            ? "Save manual streaming reference display"
+                            : "Save planned virtual display geometry";
+                        clicked => { root.save-geometry(); }
+                    }
+                }
+            }
+}

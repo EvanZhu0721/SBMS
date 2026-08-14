@@ -117,7 +117,8 @@ Example with one local mirror and one streaming desktop:
 ```
 
 The tray UI persists the complete ordered group list in
-`%LOCALAPPDATA%\SBMS\config-v2.json` and builds one `MappingPlan` from it.
+the active profile in `%LOCALAPPDATA%\SBMS\config-profiles-v1.json` and builds
+one `MappingPlan` from it.
 Mirror and stream-only routes keep independent display, sizing, mode, refresh,
 aspect-ratio and rotation settings. The selected tab is persisted as a group
 ID. A valid legacy `config-v1.json` is imported once as mirror group

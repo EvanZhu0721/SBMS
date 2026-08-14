@@ -20,6 +20,25 @@ $cli = Join-Path $InstallRoot 'sbms.exe'
 $driverInf = Join-Path $InstallRoot 'driver\SBMSIndirectDisplay.inf'
 $deviceInstance = 'SWD\SBMS\VirtualDisplay-01'
 $configRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SBMS'
+$backupRetention = 5
+$backupOwnershipMarker = '.sbms-upgrade-snapshot-v1'
+$backupOwnershipContent = 'SBMS upgrade snapshot v1'
+
+function Get-Sha256Hex {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    try {
+        return [BitConverter]::ToString(
+            $algorithm.ComputeHash($stream)
+        ).Replace('-', '')
+    }
+    finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
 
 function Get-InteractiveIdentity {
     $sessionId = (Get-Process -Id $PID).SessionId
@@ -165,10 +184,57 @@ function Stop-ManagedSunshineInstances {
     }
 }
 
+function Test-OwnedUpgradeSnapshot {
+    param(
+        [Parameter(Mandatory)]
+        [IO.DirectoryInfo]$Snapshot,
+
+        [Parameter(Mandatory)]
+        [string]$BackupRoot
+    )
+
+    if ($Snapshot.Name -notmatch '^\d{8}T\d{9}Z$' -or
+        ($Snapshot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return $false
+    }
+
+    $rootPath = [IO.Path]::GetFullPath((Join-Path $BackupRoot '.'))
+    $snapshotPath = [IO.Path]::GetFullPath($Snapshot.FullName)
+    $parent = [IO.Directory]::GetParent($snapshotPath)
+    if (-not $parent -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath($parent.FullName),
+            $rootPath,
+            [StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals(
+            $snapshotPath,
+            [IO.Path]::GetFullPath((Join-Path $rootPath $Snapshot.Name)),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $markerPath = Join-Path $snapshotPath $backupOwnershipMarker
+    $marker = Get-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+    if (-not $marker -or
+        $marker.PSIsContainer -or
+        ($marker.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        return $false
+    }
+
+    try {
+        [IO.File]::ReadAllText($marker.FullName, [Text.Encoding]::UTF8) -ceq
+            $backupOwnershipContent
+    }
+    catch {
+        $false
+    }
+}
+
 function Backup-SbmsConfiguration {
     $persistentNames = @(
         'config-v1.json'
         'config-v2.json'
+        'config-profiles-v1.json'
         'display-overrides-v1.json'
     )
     $sources = @(
@@ -187,34 +253,41 @@ function Backup-SbmsConfiguration {
     $snapshot = Join-Path $backupRoot $stamp
     New-Item -ItemType Directory -Path $snapshot -Force | Out-Null
 
-    $entries = @()
     foreach ($source in $sources) {
         $name = Split-Path -Leaf $source
         $destination = Join-Path $snapshot $name
         Copy-Item -LiteralPath $source -Destination $destination
-        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
-        $backupHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+        $sourceHash = Get-Sha256Hex -LiteralPath $source
+        $backupHash = Get-Sha256Hex -LiteralPath $destination
         if ($sourceHash -ne $backupHash) {
             throw "Configuration snapshot verification failed for $name."
         }
-        $item = Get-Item -LiteralPath $destination
-        $entries += [pscustomobject]@{
-            name = $name
-            bytes = $item.Length
-            sha256 = $backupHash
-        }
     }
 
-    $manifest = [pscustomobject]@{
-        created_utc = [DateTime]::UtcNow.ToString('o')
-        files = $entries
-    }
-    $manifestPath = Join-Path $snapshot 'manifest.json'
-    $manifestJson = $manifest | ConvertTo-Json -Depth 4
     [IO.File]::WriteAllText(
-        $manifestPath,
-        $manifestJson,
+        (Join-Path $snapshot $backupOwnershipMarker),
+        $backupOwnershipContent,
         [Text.UTF8Encoding]::new($false))
+
+    $staleSnapshots = @(
+        Get-ChildItem -LiteralPath $backupRoot -Directory -Force |
+            Where-Object {
+                Test-OwnedUpgradeSnapshot -Snapshot $_ -BackupRoot $backupRoot
+            } |
+            Sort-Object Name -Descending |
+            Select-Object -Skip $backupRetention
+    )
+    foreach ($staleSnapshot in $staleSnapshots) {
+        $current = Get-Item -LiteralPath $staleSnapshot.FullName -Force `
+            -ErrorAction SilentlyContinue
+        if (-not $current -or
+            -not (Test-OwnedUpgradeSnapshot `
+                -Snapshot $current `
+                -BackupRoot $backupRoot)) {
+            throw "Upgrade snapshot ownership changed before retention cleanup."
+        }
+        Remove-Item -LiteralPath $current.FullName -Recurse -Force
+    }
 }
 
 function Prepare-SbmsUpgrade {
@@ -237,11 +310,13 @@ function Get-VerifiedTask {
     if (-not $task) {
         return $null
     }
+    if ($task.Actions.Count -ne 1) {
+        throw "Scheduled task collision at $Path$Name."
+    }
     $action = $task.Actions[0]
     $ownedArguments = [string]::IsNullOrEmpty($action.Arguments) -or
         $action.Arguments -ceq '--background'
-    if ($task.Actions.Count -ne 1 -or
-        -not [string]::Equals(
+    if (-not [string]::Equals(
             $action.Execute,
             $tray,
             [StringComparison]::OrdinalIgnoreCase) -or
@@ -263,8 +338,8 @@ function Get-LegacyOwnedTask {
     Get-VerifiedTask -Path $legacyTaskPath -Name $legacyTaskName
 }
 
-function Remove-SbmsTask {
-    $tasks = @(
+function Get-OwnedTaskEntries {
+    @(
         [pscustomobject]@{
             Task = Get-OwnedTask
             Path = $taskPath
@@ -276,7 +351,10 @@ function Remove-SbmsTask {
             Name = $legacyTaskName
         }
     )
-    foreach ($entry in $tasks) {
+}
+
+function Remove-SbmsTask {
+    foreach ($entry in (Get-OwnedTaskEntries)) {
         if (-not $entry.Task) {
             continue
         }
@@ -288,19 +366,7 @@ function Remove-SbmsTask {
 }
 
 function Get-OwnedTaskSnapshots {
-    $entries = @(
-        [pscustomobject]@{
-            Task = Get-OwnedTask
-            Path = $taskPath
-            Name = $taskName
-        },
-        [pscustomobject]@{
-            Task = Get-LegacyOwnedTask
-            Path = $legacyTaskPath
-            Name = $legacyTaskName
-        }
-    )
-    foreach ($entry in $entries) {
+    foreach ($entry in (Get-OwnedTaskEntries)) {
         if (-not $entry.Task) {
             continue
         }
@@ -351,6 +417,12 @@ function Install-SbmsTask {
         -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) `
         -MultipleInstances IgnoreNew
+    # A current-session logon trigger may fire as soon as the task is registered.
+    # Snapshot existing processes first so that immediate start counts as the new tray.
+    $existingProcessIds = @(
+        Get-InstalledSbmsProcesses |
+            ForEach-Object { $_.Id }
+    )
     Register-ScheduledTask `
         -TaskPath $taskPath `
         -TaskName $taskName `
@@ -360,10 +432,6 @@ function Install-SbmsTask {
         -Settings $settings `
         -Description 'Starts the SBMS tray with the privileges required by its protected session gate.' |
         Out-Null
-    $existingProcessIds = @(
-        Get-InstalledSbmsProcesses |
-            ForEach-Object { $_.Id }
-    )
     Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     while ([DateTime]::UtcNow -lt $deadline) {

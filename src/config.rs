@@ -9,24 +9,32 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
     ReplaceFileW,
 };
-use windows::core::PCWSTR;
+use windows::Win32::System::Threading::{
+    CreateMutexW, INFINITE, ReleaseMutex, WaitForSingleObject,
+};
+use windows::core::{PCWSTR, w};
 
 use crate::geometry::{AspectRatio, Rotation, SizingRequest};
+use crate::limits::{
+    MAX_OUTPUTS, MAX_REFRESH_MILLIHZ, MAX_VIRTUAL_DIMENSION, MILLIMETERS_PER_INCH,
+    MIN_REFRESH_MILLIHZ, valid_physical_millimeters, valid_refresh_millihz,
+};
 
 const CONFIG_VERSION: u32 = 2;
 const LEGACY_CONFIG_VERSION: u32 = 1;
+const CONFIG_PROFILES_VERSION: u32 = 1;
+pub const MAX_CONFIG_PROFILES: usize = 3;
 const DISPLAY_OVERRIDES_VERSION: u32 = 1;
 const CONFIG_DIRECTORY: &str = "SBMS";
 const CONFIG_FILE: &str = "config-v2.json";
+const CONFIG_PROFILES_FILE: &str = "config-profiles-v1.json";
 const LEGACY_CONFIG_FILE: &str = "config-v1.json";
 const DISPLAY_OVERRIDES_FILE: &str = "display-overrides-v1.json";
-const MAX_CONFIG_GROUPS: usize = crate::mapping::MAX_MAPPING_GROUPS;
-const MAX_VIRTUAL_DIMENSION: u32 = 16_384;
-const MAX_REFRESH_MILLIHZ: u32 = 1_000_000;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -87,6 +95,48 @@ pub struct ConfigStore {
     legacy_path: Option<PathBuf>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigProfile {
+    pub id: String,
+    pub revision: u64,
+    pub config: AppConfig,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigProfiles {
+    pub version: u32,
+    pub active_profile: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub launch_intro_disabled: bool,
+    pub profiles: Vec<ConfigProfile>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProfileRevision {
+    pub id: String,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileSnapshot {
+    pub profile: ProfileRevision,
+    pub config: AppConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigProfileStore {
+    path: PathBuf,
+    legacy_config_path: PathBuf,
+}
+
+struct CrossProcessConfigGuard(HANDLE);
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LegacyAppConfig {
@@ -141,6 +191,12 @@ pub struct LoadOutcome {
 #[derive(Debug)]
 pub struct ConfigError(String);
 
+impl ConfigError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
 impl Display for ConfigError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(&self.0)
@@ -180,6 +236,10 @@ impl AppConfig {
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
+        self.validate_with_sizing(true)
+    }
+
+    fn validate_with_sizing(&self, validate_sizing: bool) -> Result<(), ConfigError> {
         if self.version != CONFIG_VERSION {
             return Err(ConfigError(format!(
                 "refusing unsupported config version {}",
@@ -191,14 +251,14 @@ impl AppConfig {
                 "configuration must contain at least one mapping group".into(),
             ));
         }
-        if self.groups.len() > MAX_CONFIG_GROUPS {
+        if self.groups.len() > MAX_OUTPUTS {
             return Err(ConfigError(format!(
-                "configuration may contain at most {MAX_CONFIG_GROUPS} mapping groups"
+                "configuration may contain at most {MAX_OUTPUTS} mapping groups"
             )));
         }
 
         for (index, group) in self.groups.iter().enumerate() {
-            group.validate()?;
+            group.validate(validate_sizing)?;
             if self.groups[..index]
                 .iter()
                 .any(|other| other.id == group.id)
@@ -238,12 +298,12 @@ impl AppConfig {
 }
 
 impl GroupConfig {
-    fn validate(&self) -> Result<(), ConfigError> {
-        if self.id >= MAX_CONFIG_GROUPS as u32 {
+    fn validate(&self, validate_sizing: bool) -> Result<(), ConfigError> {
+        if self.id >= MAX_OUTPUTS as u32 {
             return Err(ConfigError(format!(
                 "mapping group id {} must be between 0 and {}",
                 self.id,
-                MAX_CONFIG_GROUPS - 1
+                MAX_OUTPUTS - 1
             )));
         }
         match &self.route {
@@ -267,7 +327,7 @@ impl GroupConfig {
                 self.id
             )));
         }
-        if let Some(sizing) = self.sizing {
+        if validate_sizing && let Some(sizing) = self.sizing {
             sizing.calculate().map_err(|error| {
                 ConfigError(format!(
                     "mapping group {} has invalid sizing parameters: {error}",
@@ -290,9 +350,9 @@ impl StreamScreenConfig {
                 "mapping group {group_id} stream dimensions must be between 1 and {MAX_VIRTUAL_DIMENSION}"
             )));
         }
-        if self.refresh_millihz == 0 || self.refresh_millihz > MAX_REFRESH_MILLIHZ {
+        if !valid_refresh_millihz(self.refresh_millihz) {
             return Err(ConfigError(format!(
-                "mapping group {group_id} stream refresh must be between 1 and {MAX_REFRESH_MILLIHZ} millihertz"
+                "mapping group {group_id} stream refresh must be between {MIN_REFRESH_MILLIHZ} and {MAX_REFRESH_MILLIHZ} millihertz"
             )));
         }
         if self.aspect_ratio.width == 0 || self.aspect_ratio.height == 0 {
@@ -301,8 +361,8 @@ impl StreamScreenConfig {
             )));
         }
         if let Some(diagonal_inches) = self.diagonal_inches {
-            let diagonal_mm = diagonal_inches * 25.4;
-            if !diagonal_inches.is_finite() || !(10.0..=10_000.0).contains(&diagonal_mm) {
+            let diagonal_mm = diagonal_inches * MILLIMETERS_PER_INCH;
+            if !valid_physical_millimeters(diagonal_mm) {
                 return Err(ConfigError(format!(
                     "mapping group {group_id} stream diagonal must be between 10 and 10000 millimetres"
                 )));
@@ -466,8 +526,8 @@ fn validate_override(
     if display_id.trim().is_empty() {
         return Err(ConfigError("display override id cannot be empty".into()));
     }
-    let diagonal_mm = diagonal_inches * 25.4;
-    if !diagonal_inches.is_finite() || !(10.0..=10_000.0).contains(&diagonal_mm) {
+    let diagonal_mm = diagonal_inches * MILLIMETERS_PER_INCH;
+    if !valid_physical_millimeters(diagonal_mm) {
         return Err(ConfigError(
             "display diagonal must be between 10 and 10000 millimetres".into(),
         ));
@@ -564,9 +624,28 @@ impl ConfigStore {
         })
     }
 
+    pub fn load_strict(&self) -> Result<AppConfig, ConfigError> {
+        let bytes = fs::read(&self.path).map_err(|error| {
+            ConfigError(format!("could not read {}: {error}", self.path.display()))
+        })?;
+        let config = serde_json::from_slice::<AppConfig>(&bytes).map_err(|error| {
+            ConfigError(format!(
+                "{} is not a valid SBMS configuration: {error}",
+                self.path.display()
+            ))
+        })?;
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn save(&self, config: &AppConfig) -> Result<(), ConfigError> {
         config.validate()?;
         save_json_atomically(&self.path, config, "config", "config")
+    }
+
+    pub fn save_new(&self, config: &AppConfig) -> Result<(), ConfigError> {
+        config.validate()?;
+        save_json_atomically_new(&self.path, config, "config", "config")
     }
 
     pub fn reset(&self) -> Result<(), ConfigError> {
@@ -640,6 +719,449 @@ impl ConfigStore {
             warning: None,
         })
     }
+}
+
+impl ConfigProfiles {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.version != CONFIG_PROFILES_VERSION {
+            return Err(ConfigError(format!(
+                "unsupported config profiles version {}",
+                self.version
+            )));
+        }
+        if self.profiles.is_empty() {
+            return Err(ConfigError(
+                "config profiles must contain at least one profile".into(),
+            ));
+        }
+        if self.profiles.len() > MAX_CONFIG_PROFILES {
+            return Err(ConfigError(format!(
+                "config profiles may contain at most {MAX_CONFIG_PROFILES} profiles"
+            )));
+        }
+        validate_profile_id(&self.active_profile)?;
+        for (index, profile) in self.profiles.iter().enumerate() {
+            validate_profile_id(&profile.id)?;
+            if profile.revision == 0 {
+                return Err(ConfigError(format!(
+                    "config profile {} has an invalid zero revision",
+                    profile.id
+                )));
+            }
+            if self.profiles[..index]
+                .iter()
+                .any(|other| other.id.eq_ignore_ascii_case(&profile.id))
+            {
+                return Err(ConfigError(format!(
+                    "config profile id {} is duplicated",
+                    profile.id
+                )));
+            }
+            profile.config.validate()?;
+        }
+        if !self
+            .profiles
+            .iter()
+            .any(|profile| profile.id.eq_ignore_ascii_case(&self.active_profile))
+        {
+            return Err(ConfigError(format!(
+                "active config profile {} does not exist",
+                self.active_profile
+            )));
+        }
+        Ok(())
+    }
+
+    fn profile(&self, id: &str) -> Option<&ConfigProfile> {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id.eq_ignore_ascii_case(id))
+    }
+
+    fn profile_mut(&mut self, id: &str) -> Option<&mut ConfigProfile> {
+        self.profiles
+            .iter_mut()
+            .find(|profile| profile.id.eq_ignore_ascii_case(id))
+    }
+
+    fn active(&self) -> &ConfigProfile {
+        self.profile(&self.active_profile)
+            .expect("validated config profiles contain the active profile")
+    }
+}
+
+impl ConfigProfileStore {
+    pub fn default_path() -> Result<PathBuf, ConfigError> {
+        local_config_path(CONFIG_PROFILES_FILE)
+    }
+
+    pub fn default_store() -> Result<Self, ConfigError> {
+        Ok(Self {
+            path: Self::default_path()?,
+            legacy_config_path: ConfigStore::default_path()?,
+        })
+    }
+
+    pub fn new(path: PathBuf, legacy_config_path: PathBuf) -> Self {
+        Self {
+            path,
+            legacy_config_path,
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn list(&self) -> Result<ConfigProfiles, ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        self.load_or_initialize_locked()
+    }
+
+    pub fn load_active(&self) -> Result<ProfileSnapshot, ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let profiles = self.load_or_initialize_locked()?;
+        Ok(snapshot(profiles.active()))
+    }
+
+    pub fn set_launch_intro_disabled(&self, disabled: bool) -> Result<(), ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        profiles.launch_intro_disabled = disabled;
+        self.save_locked(&profiles)
+    }
+
+    pub fn load_profile(&self, id: &str) -> Result<ProfileSnapshot, ConfigError> {
+        validate_profile_id(id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let profiles = self.load_or_initialize_locked()?;
+        profiles
+            .profile(id)
+            .map(snapshot)
+            .ok_or_else(|| ConfigError(format!("config profile {id} does not exist")))
+    }
+
+    pub fn update_active(
+        &self,
+        update: impl FnOnce(&mut AppConfig) -> Result<(), ConfigError>,
+    ) -> Result<ProfileSnapshot, ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        let active_id = profiles.active_profile.clone();
+        let profile = profiles
+            .profile_mut(&active_id)
+            .expect("validated config profiles contain the active profile");
+        update(&mut profile.config)?;
+        profile.config.validate()?;
+        profile.revision = next_revision(profile.revision)?;
+        let result = snapshot(profile);
+        self.save_locked(&profiles)?;
+        Ok(result)
+    }
+
+    pub fn save_active_if_revision(
+        &self,
+        expected: &ProfileRevision,
+        config: &AppConfig,
+    ) -> Result<ProfileSnapshot, ConfigError> {
+        self.save_active_if_revision_inner(expected, config, true)
+    }
+
+    fn save_active_if_revision_inner(
+        &self,
+        expected: &ProfileRevision,
+        config: &AppConfig,
+        validate_sizing: bool,
+    ) -> Result<ProfileSnapshot, ConfigError> {
+        config.validate_with_sizing(validate_sizing)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        if !profiles.active_profile.eq_ignore_ascii_case(&expected.id) {
+            return Err(ConfigError(format!(
+                "active config profile changed from {} to {}; reload before saving",
+                expected.id, profiles.active_profile
+            )));
+        }
+        let profile = profiles
+            .profile_mut(&expected.id)
+            .expect("validated config profiles contain the active profile");
+        if profile.revision != expected.revision {
+            return Err(ConfigError(format!(
+                "config profile {} changed from revision {} to {}; reload before saving",
+                profile.id, expected.revision, profile.revision
+            )));
+        }
+        profile.config = config.clone();
+        profile.revision = next_revision(profile.revision)?;
+        let result = snapshot(profile);
+        self.save_locked(&profiles)?;
+        Ok(result)
+    }
+
+    pub fn save_profile(
+        &self,
+        id: &str,
+        config: &AppConfig,
+        replace: bool,
+        activate: bool,
+    ) -> Result<(ProfileSnapshot, bool), ConfigError> {
+        validate_profile_id(id)?;
+        config.validate()?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        let profile_index = profiles
+            .profiles
+            .iter()
+            .position(|profile| profile.id.eq_ignore_ascii_case(id));
+        let index = if let Some(index) = profile_index {
+            if !replace {
+                return Err(ConfigError(format!(
+                    "config profile {} already exists; use --replace to overwrite it",
+                    profiles.profiles[index].id
+                )));
+            }
+            profiles.profiles[index].config = config.clone();
+            profiles.profiles[index].revision = next_revision(profiles.profiles[index].revision)?;
+            index
+        } else {
+            if profiles.profiles.len() >= MAX_CONFIG_PROFILES {
+                return Err(ConfigError(format!(
+                    "cannot create config profile {id}; the {MAX_CONFIG_PROFILES}-profile limit is reached"
+                )));
+            }
+            profiles.profiles.push(ConfigProfile {
+                id: id.into(),
+                revision: 1,
+                config: config.clone(),
+            });
+            profiles.profiles.len() - 1
+        };
+        if activate {
+            profiles.active_profile = profiles.profiles[index].id.clone();
+        }
+        let result = snapshot(&profiles.profiles[index]);
+        let is_active = profiles
+            .active_profile
+            .eq_ignore_ascii_case(&result.profile.id);
+        self.save_locked(&profiles)?;
+        Ok((result, is_active))
+    }
+
+    pub fn save_active_as(&self, id: &str) -> Result<ProfileSnapshot, ConfigError> {
+        validate_profile_id(id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        if profiles.active_profile.eq_ignore_ascii_case(id) {
+            return Ok(snapshot(profiles.active()));
+        }
+        let config = profiles.active().config.clone();
+        if let Some(profile) = profiles.profile_mut(id) {
+            profile.config = config;
+            profile.revision = next_revision(profile.revision)?;
+            let result = snapshot(profile);
+            self.save_locked(&profiles)?;
+            return Ok(result);
+        }
+        if profiles.profiles.len() >= MAX_CONFIG_PROFILES {
+            return Err(ConfigError(format!(
+                "cannot create config profile {id}; the {MAX_CONFIG_PROFILES}-profile limit is reached"
+            )));
+        }
+        profiles.profiles.push(ConfigProfile {
+            id: id.into(),
+            revision: 1,
+            config,
+        });
+        let result = snapshot(profiles.profiles.last().expect("profile was pushed"));
+        self.save_locked(&profiles)?;
+        Ok(result)
+    }
+
+    pub fn activate(&self, id: &str) -> Result<ProfileSnapshot, ConfigError> {
+        validate_profile_id(id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        let profile = profiles
+            .profile(id)
+            .ok_or_else(|| ConfigError(format!("config profile {id} does not exist")))?;
+        let result = snapshot(profile);
+        profiles.active_profile = result.profile.id.clone();
+        self.save_locked(&profiles)?;
+        Ok(result)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<(), ConfigError> {
+        validate_profile_id(id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        if profiles.active_profile.eq_ignore_ascii_case(id) {
+            return Err(ConfigError(format!(
+                "cannot delete active config profile {}",
+                profiles.active_profile
+            )));
+        }
+        let before = profiles.profiles.len();
+        profiles
+            .profiles
+            .retain(|profile| !profile.id.eq_ignore_ascii_case(id));
+        if profiles.profiles.len() == before {
+            return Err(ConfigError(format!("config profile {id} does not exist")));
+        }
+        self.save_locked(&profiles)
+    }
+
+    pub fn reset_active(&self) -> Result<ProfileSnapshot, ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = if self.path.exists() {
+            self.load_or_initialize_locked()?
+        } else {
+            ConfigProfiles {
+                version: CONFIG_PROFILES_VERSION,
+                active_profile: "default".into(),
+                launch_intro_disabled: false,
+                profiles: vec![ConfigProfile {
+                    id: "default".into(),
+                    revision: 1,
+                    config: AppConfig::default(),
+                }],
+            }
+        };
+        let active_id = profiles.active_profile.clone();
+        let profile = profiles
+            .profile_mut(&active_id)
+            .expect("validated config profiles contain the active profile");
+        profile.config = AppConfig::default();
+        profile.revision = next_revision(profile.revision)?;
+        let result = snapshot(profile);
+        self.save_locked(&profiles)?;
+        Ok(result)
+    }
+
+    fn load_or_initialize_locked(&self) -> Result<ConfigProfiles, ConfigError> {
+        match fs::read(&self.path) {
+            Ok(bytes) => {
+                let profiles =
+                    serde_json::from_slice::<ConfigProfiles>(&bytes).map_err(|error| {
+                        ConfigError(format!(
+                            "{} is not a valid SBMS config profile store: {error}",
+                            self.path.display()
+                        ))
+                    })?;
+                profiles.validate()?;
+                Ok(profiles)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let legacy_store = ConfigStore {
+                    path: self.legacy_config_path.clone(),
+                    legacy_path: Some(
+                        self.legacy_config_path
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(LEGACY_CONFIG_FILE),
+                    ),
+                };
+                let config = match legacy_store.load() {
+                    Ok(outcome) => {
+                        if let Some(warning) = outcome.warning {
+                            return Err(ConfigError(format!(
+                                "cannot initialize config profiles: {warning}"
+                            )));
+                        }
+                        outcome.config
+                    }
+                    Err(error) => return Err(error),
+                };
+                let profiles = ConfigProfiles {
+                    version: CONFIG_PROFILES_VERSION,
+                    active_profile: "default".into(),
+                    launch_intro_disabled: false,
+                    profiles: vec![ConfigProfile {
+                        id: "default".into(),
+                        revision: 1,
+                        config,
+                    }],
+                };
+                self.save_locked(&profiles)?;
+                Ok(profiles)
+            }
+            Err(error) => Err(ConfigError(format!(
+                "could not read {}: {error}",
+                self.path.display()
+            ))),
+        }
+    }
+
+    fn save_locked(&self, profiles: &ConfigProfiles) -> Result<(), ConfigError> {
+        profiles.validate()?;
+        save_json_atomically(&self.path, profiles, "config profiles", "config profiles")
+    }
+}
+
+impl CrossProcessConfigGuard {
+    fn acquire() -> Result<Self, ConfigError> {
+        let handle = unsafe { CreateMutexW(None, false, w!("Local\\SBMSConfigProfiles-v1")) }
+            .map_err(|error| {
+                ConfigError(format!("could not create config profiles lock: {error}"))
+            })?;
+        let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            return Ok(Self(handle));
+        }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        if wait == WAIT_FAILED {
+            Err(ConfigError(format!(
+                "could not acquire config profiles lock: {}",
+                std::io::Error::last_os_error()
+            )))
+        } else {
+            Err(ConfigError(format!(
+                "unexpected config profiles lock wait result: {}",
+                wait.0
+            )))
+        }
+    }
+}
+
+impl Drop for CrossProcessConfigGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+fn snapshot(profile: &ConfigProfile) -> ProfileSnapshot {
+    ProfileSnapshot {
+        profile: ProfileRevision {
+            id: profile.id.clone(),
+            revision: profile.revision,
+        },
+        config: profile.config.clone(),
+    }
+}
+
+fn validate_profile_id(id: &str) -> Result<(), ConfigError> {
+    if id.is_empty()
+        || id.len() > 32
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(ConfigError(
+            "config profile id must contain 1-32 ASCII letters, digits, underscores, or hyphens"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn next_revision(revision: u64) -> Result<u64, ConfigError> {
+    revision
+        .checked_add(1)
+        .ok_or_else(|| ConfigError("config profile revision overflow".into()))
 }
 
 impl DisplayOverrideStore {
@@ -724,6 +1246,25 @@ fn save_json_atomically<T: Serialize>(
     path_kind: &str,
     artifact_name: &str,
 ) -> Result<(), ConfigError> {
+    save_json_atomically_inner(destination, value, path_kind, artifact_name, true)
+}
+
+fn save_json_atomically_new<T: Serialize>(
+    destination: &Path,
+    value: &T,
+    path_kind: &str,
+    artifact_name: &str,
+) -> Result<(), ConfigError> {
+    save_json_atomically_inner(destination, value, path_kind, artifact_name, false)
+}
+
+fn save_json_atomically_inner<T: Serialize>(
+    destination: &Path,
+    value: &T,
+    path_kind: &str,
+    artifact_name: &str,
+    replace: bool,
+) -> Result<(), ConfigError> {
     let parent = destination
         .parent()
         .ok_or_else(|| ConfigError(format!("{path_kind} path has no parent directory")))?;
@@ -745,12 +1286,34 @@ fn save_json_atomically<T: Serialize>(
                 ))
             })?;
         drop(temporary);
-        atomic_replace(&temporary_path, destination)
+        if replace {
+            atomic_replace(&temporary_path, destination)
+        } else {
+            atomic_install_new(&temporary_path, destination)
+        }
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary_path);
     }
     result
+}
+
+fn atomic_install_new(temporary: &Path, destination: &Path) -> Result<(), ConfigError> {
+    let temporary_wide = wide(temporary.as_os_str());
+    let destination_wide = wide(destination.as_os_str());
+    unsafe {
+        MoveFileExW(
+            PCWSTR(temporary_wide.as_ptr()),
+            PCWSTR(destination_wide.as_ptr()),
+            MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|error| {
+        ConfigError(format!(
+            "could not atomically create {}: {error}",
+            destination.display()
+        ))
+    })
 }
 
 fn create_temporary(parent: &Path, destination: &Path) -> Result<(PathBuf, File), ConfigError> {
@@ -875,6 +1438,24 @@ mod tests {
             alignment: 2,
             preferred_refresh_millihz: Some(120_000),
         }
+    }
+
+    fn stream_config(refresh_millihz: u32) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.groups[0].route = GroupRouteConfig::StreamOnly {
+            screen: StreamScreenConfig {
+                width: 1920,
+                height: 1080,
+                diagonal_inches: Some(24.0),
+                refresh_millihz,
+                aspect_ratio: AspectRatio {
+                    width: 16,
+                    height: 9,
+                },
+                rotation: Rotation::Deg0,
+            },
+        };
+        config
     }
 
     fn test_override_store(name: &str) -> DisplayOverrideStore {
@@ -1261,7 +1842,7 @@ mod tests {
         assert!(store.save(&missing_selection).is_err());
 
         let too_many = AppConfig {
-            groups: (0..=MAX_CONFIG_GROUPS as u32)
+            groups: (0..=MAX_OUTPUTS as u32)
                 .map(|id| GroupConfig {
                     id,
                     ..GroupConfig::default()
@@ -1336,6 +1917,39 @@ mod tests {
             },
         };
         assert!(store.save(&config).is_err());
+    }
+
+    #[test]
+    fn stream_refresh_boundaries_round_trip() {
+        for refresh_millihz in [MIN_REFRESH_MILLIHZ, MAX_REFRESH_MILLIHZ] {
+            let store = test_store(&format!("refresh-{refresh_millihz}"));
+            let config = stream_config(refresh_millihz);
+            store.save(&config).unwrap();
+            let outcome = store.load().unwrap();
+            assert_eq!(outcome.warning, None);
+            assert_eq!(outcome.config, config);
+            store.reset().unwrap();
+        }
+    }
+
+    #[test]
+    fn sub_hertz_stream_refresh_is_rejected_on_save_and_load() {
+        let store = test_store("sub-hertz-refresh");
+        let config = stream_config(MIN_REFRESH_MILLIHZ - 1);
+        assert!(store.save(&config).is_err());
+
+        let bytes = serde_json::to_vec_pretty(&config).unwrap();
+        fs::write(store.path(), &bytes).unwrap();
+        let outcome = store.load().unwrap();
+        assert_eq!(outcome.config, AppConfig::default());
+        assert!(
+            outcome
+                .warning
+                .as_deref()
+                .is_some_and(|warning| warning.contains("stream refresh"))
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), bytes);
+        store.reset().unwrap();
     }
 
     #[test]
@@ -1499,6 +2113,137 @@ mod tests {
                     .starts_with(&temporary_prefix))
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn test_profile_store(name: &str) -> (PathBuf, ConfigProfileStore) {
+        let root = env::temp_dir().join(format!(
+            "sbms-config-profiles-{name}-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let store =
+            ConfigProfileStore::new(root.join(CONFIG_PROFILES_FILE), root.join(CONFIG_FILE));
+        (root, store)
+    }
+
+    fn config_with_target(target: &str) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.group_mut(0).unwrap().route = GroupRouteConfig::Mirror {
+            target_id: Some(target.into()),
+        };
+        config
+    }
+
+    #[test]
+    fn profile_store_migrates_existing_config_without_removing_it() {
+        let (root, profiles) = test_profile_store("migration");
+        let legacy = ConfigStore::new(root.join(CONFIG_FILE));
+        let expected = config_with_target("legacy-target");
+        legacy.save(&expected).unwrap();
+        let original = fs::read(legacy.path()).unwrap();
+
+        let snapshot = profiles.load_active().unwrap();
+
+        assert_eq!(snapshot.profile.id, "default");
+        assert_eq!(snapshot.profile.revision, 1);
+        assert_eq!(snapshot.config, expected);
+        assert_eq!(fs::read(legacy.path()).unwrap(), original);
+        assert!(profiles.path().is_file());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launch_intro_preference_is_global_and_does_not_touch_profile_revision() {
+        let (root, profiles) = test_profile_store("launch-intro-preference");
+        let before = profiles.load_active().unwrap();
+        assert!(!profiles.list().unwrap().launch_intro_disabled);
+
+        profiles.set_launch_intro_disabled(true).unwrap();
+
+        let stored = profiles.list().unwrap();
+        let after = profiles.load_active().unwrap();
+        assert!(stored.launch_intro_disabled);
+        assert_eq!(after, before);
+
+        profiles.set_launch_intro_disabled(false).unwrap();
+        assert!(!profiles.list().unwrap().launch_intro_disabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_store_enforces_three_profile_limit() {
+        let (root, profiles) = test_profile_store("limit");
+        profiles.load_active().unwrap();
+        profiles
+            .save_profile("second", &config_with_target("second"), false, false)
+            .unwrap();
+        profiles
+            .save_profile("third", &config_with_target("third"), false, false)
+            .unwrap();
+
+        let error = profiles
+            .save_profile("fourth", &AppConfig::default(), false, false)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("3-profile limit"));
+        assert_eq!(profiles.list().unwrap().profiles.len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_activation_persists_and_active_profile_cannot_be_deleted() {
+        let (root, profiles) = test_profile_store("activate");
+        profiles.load_active().unwrap();
+        profiles
+            .save_profile("gaming", &config_with_target("gaming"), false, false)
+            .unwrap();
+
+        let active = profiles.activate("gaming").unwrap();
+
+        assert_eq!(active.profile.id, "gaming");
+        assert_eq!(profiles.load_active().unwrap().config, active.config);
+        assert!(profiles.delete("gaming").is_err());
+        profiles.delete("default").unwrap();
+        assert_eq!(profiles.list().unwrap().profiles.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_profile_revision_cannot_overwrite_reloaded_config() {
+        let (root, profiles) = test_profile_store("revision");
+        let stale = profiles.load_active().unwrap();
+        let updated = profiles
+            .update_active(|config| {
+                *config = config_with_target("new-target");
+                Ok(())
+            })
+            .unwrap();
+
+        let error = profiles
+            .save_active_if_revision(&stale.profile, &config_with_target("stale-target"))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("changed from revision"));
+        assert_eq!(profiles.load_active().unwrap(), updated);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_ids_are_bounded_and_case_insensitively_unique() {
+        let (root, profiles) = test_profile_store("ids");
+        profiles.load_active().unwrap();
+        assert!(
+            profiles
+                .save_profile("bad name", &AppConfig::default(), false, false)
+                .is_err()
+        );
+        assert!(
+            profiles
+                .save_profile("DEFAULT", &AppConfig::default(), false, false)
+                .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

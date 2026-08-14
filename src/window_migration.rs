@@ -235,6 +235,48 @@ impl WindowMigration {
         }
     }
 
+    pub(crate) fn refresh_topology(
+        &mut self,
+        target: &Display,
+        source: &Display,
+    ) -> Result<(), String> {
+        let target_monitor = monitor_for_rect(target.rect, "updated target")?;
+        monitor_for_rect(source.rect, "updated virtual source")?;
+
+        // A display-layout mutation invalidates the rectangles captured by the
+        // scanner. Stop it before publishing the replacement rectangles; errors
+        // produced by that expected transition must not poison eventual cleanup.
+        let _ = self.stop_and_join_scanner();
+        let dx = target
+            .rect
+            .left
+            .checked_sub(self.target_rect.left)
+            .ok_or_else(|| "updated target horizontal offset overflowed".to_string())?;
+        let dy = target
+            .rect
+            .top
+            .checked_sub(self.target_rect.top)
+            .ok_or_else(|| "updated target vertical offset overflowed".to_string())?;
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        shift_saved_rectangles(&mut entries, dx, dy)?;
+        drop(entries);
+        self.target_monitor = target_monitor;
+        self.target_rect = target.rect;
+        self.stop_scanner = Arc::new(AtomicBool::new(false));
+        let scanner = spawn_scanner(
+            self.migration_id,
+            Arc::clone(&self.entries),
+            Arc::clone(&self.stop_scanner),
+            target.rect,
+            source.rect,
+        )?;
+        self.scanner = Some(scanner);
+        Ok(())
+    }
+
     pub(crate) fn prepare_restore(&mut self) {
         let scanner_errors = self.stop_and_join_scanner();
         for error in scanner_errors {
@@ -364,8 +406,17 @@ impl WindowMigration {
         let target = target.ok_or_else(|| {
             "restored target display could not be resolved by stable ID".to_string()
         })?;
-        self.target_rect = target.rect;
-        self.target_monitor = monitor_for_rect(self.target_rect, "restored target")?;
+        let dx = target
+            .rect
+            .left
+            .checked_sub(self.target_rect.left)
+            .ok_or_else(|| "restored target horizontal offset overflowed".to_string())?;
+        let dy = target
+            .rect
+            .top
+            .checked_sub(self.target_rect.top)
+            .ok_or_else(|| "restored target vertical offset overflowed".to_string())?;
+        let target_monitor = monitor_for_rect(target.rect, "restored target")?;
         self.prepare_restore();
         let mut errors = std::mem::take(&mut self.scanner_errors);
         let mut entries = match self.entries.lock() {
@@ -375,6 +426,9 @@ impl WindowMigration {
                 poisoned.into_inner()
             }
         };
+        shift_saved_rectangles(&mut entries, dx, dy)?;
+        self.target_rect = target.rect;
+        self.target_monitor = target_monitor;
         for entry in entries.iter_mut().rev() {
             if !same_window(entry) {
                 entry.moved = false;
@@ -434,8 +488,69 @@ impl WindowMigration {
             if !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
                 || !wait_for_monitor(entry, self.target_monitor)
             {
-                errors.push(describe(entry, "final window placement was not restored"));
-                continue;
+                // Some app frameworks retain their virtual-display rectangle
+                // after the physical topology returns even though placement APIs
+                // report success. Reapply the saved restored rectangle first,
+                // then restore the original show state.
+                unsafe {
+                    let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
+                }
+                if !wait_for_zoomed_state(entry, false) {
+                    errors.push(describe(
+                        entry,
+                        "final window could not be restored for retry",
+                    ));
+                    continue;
+                }
+                if let Err(error) = set_window_rect(
+                    entry,
+                    entry.outer_rect.left,
+                    entry.outer_rect.top,
+                    entry.outer_rect.right - entry.outer_rect.left,
+                    entry.outer_rect.bottom - entry.outer_rect.top,
+                ) {
+                    errors.push(describe(
+                        entry,
+                        &format!("final fallback move failed: {error}"),
+                    ));
+                    continue;
+                }
+                if let Err(error) = align_normal_rect(entry, entry.placement.rcNormalPosition) {
+                    errors.push(error);
+                    continue;
+                }
+                if !wait_for_monitor(entry, self.target_monitor) {
+                    errors.push(describe(
+                        entry,
+                        "final fallback move missed the target monitor",
+                    ));
+                    continue;
+                }
+                if let Err(error) = unsafe { SetWindowPlacement(entry.hwnd, &entry.placement) } {
+                    errors.push(describe(
+                        entry,
+                        &format!("final fallback placement failed: {error}"),
+                    ));
+                    continue;
+                }
+                unsafe {
+                    let _ = ShowWindowAsync(
+                        entry.hwnd,
+                        SHOW_WINDOW_CMD(entry.placement.showCmd as i32),
+                    );
+                }
+                let state_restored = if entry.maximized {
+                    wait_for_zoomed_state(entry, true)
+                } else {
+                    wait_for_window_state(entry, false) && wait_for_zoomed_state(entry, false)
+                };
+                if !state_restored
+                    || !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
+                    || !wait_for_monitor(entry, self.target_monitor)
+                {
+                    errors.push(describe(entry, "final window placement was not restored"));
+                    continue;
+                }
             }
             entry.moved = false;
         }
@@ -446,6 +561,44 @@ impl WindowMigration {
             Err(errors.join("; "))
         }
     }
+}
+
+fn shift_saved_rectangles(entries: &mut [WindowSnapshot], dx: i32, dy: i32) -> Result<(), String> {
+    let shifted: Result<Vec<(RECT, RECT)>, String> = entries
+        .iter()
+        .map(|entry| {
+            Ok((
+                offset_rect(entry.outer_rect, dx, dy)?,
+                offset_rect(entry.placement.rcNormalPosition, dx, dy)?,
+            ))
+        })
+        .collect();
+    for (entry, (outer_rect, normal_rect)) in entries.iter_mut().zip(shifted?) {
+        entry.outer_rect = outer_rect;
+        entry.placement.rcNormalPosition = normal_rect;
+    }
+    Ok(())
+}
+
+fn offset_rect(rect: RECT, dx: i32, dy: i32) -> Result<RECT, String> {
+    Ok(RECT {
+        left: rect
+            .left
+            .checked_add(dx)
+            .ok_or_else(|| "window rectangle left coordinate overflowed".to_string())?,
+        top: rect
+            .top
+            .checked_add(dy)
+            .ok_or_else(|| "window rectangle top coordinate overflowed".to_string())?,
+        right: rect
+            .right
+            .checked_add(dx)
+            .ok_or_else(|| "window rectangle right coordinate overflowed".to_string())?,
+        bottom: rect
+            .bottom
+            .checked_add(dy)
+            .ok_or_else(|| "window rectangle bottom coordinate overflowed".to_string())?,
+    })
 }
 
 impl Drop for WindowMigration {
@@ -715,25 +868,46 @@ fn move_entry(
             let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
         }
         if !wait_for_monitor(entry, source_monitor) {
-            let actual = current_rect(entry).unwrap_or_default();
-            let normal = window_placement(entry)
-                .map(|placement| placement.rcNormalPosition)
-                .unwrap_or_default();
-            return Err(describe(
+            // Chromium windows can report success from SetWindowPlacement while
+            // leaving both their outer and normal rectangles unchanged. Force the
+            // restored window across with the same SetWindowPos/alignment sequence
+            // used by the return path before treating the migration as failed.
+            let moved_outer = translated_rect(entry, current, target_rect, source_rect)?;
+            set_window_rect(
                 entry,
-                &format!(
-                    "restored window did not move to the virtual display \
-                     (outer={},{},{},{}, normal={},{},{},{})",
-                    actual.left,
-                    actual.top,
-                    actual.right,
-                    actual.bottom,
-                    normal.left,
-                    normal.top,
-                    normal.right,
-                    normal.bottom,
-                ),
-            ));
+                moved_outer.left,
+                moved_outer.top,
+                moved_outer.right - moved_outer.left,
+                moved_outer.bottom - moved_outer.top,
+            )
+            .map_err(|error| {
+                describe(
+                    entry,
+                    &format!("restored window fallback move failed: {error}"),
+                )
+            })?;
+            align_normal_rect(entry, virtual_placement.rcNormalPosition)?;
+            if !wait_for_monitor(entry, source_monitor) {
+                let actual = current_rect(entry).unwrap_or_default();
+                let normal = window_placement(entry)
+                    .map(|placement| placement.rcNormalPosition)
+                    .unwrap_or_default();
+                return Err(describe(
+                    entry,
+                    &format!(
+                        "restored window did not move to the virtual display \
+                         (outer={},{},{},{}, normal={},{},{},{})",
+                        actual.left,
+                        actual.top,
+                        actual.right,
+                        actual.bottom,
+                        normal.left,
+                        normal.top,
+                        normal.right,
+                        normal.bottom,
+                    ),
+                ));
+            }
         }
         virtual_placement.flags = entry.placement.flags;
         virtual_placement.showCmd = entry.placement.showCmd;
@@ -1040,7 +1214,7 @@ fn describe(entry: &WindowSnapshot, message: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{WindowClaimRegistry, WindowIdentity};
+    use super::{RECT, WindowClaimRegistry, WindowIdentity, offset_rect};
 
     fn identity(hwnd: isize, pid: u32, thread_id: u32, class_name: &str) -> WindowIdentity {
         WindowIdentity {
@@ -1101,5 +1275,25 @@ mod tests {
         assert!(claims.claim(3, first));
         assert!(claims.claim(3, second));
         assert!(!claims.claim(3, other));
+    }
+
+    #[test]
+    fn saved_window_rectangles_follow_target_position_changes() {
+        let shifted = offset_rect(
+            RECT {
+                left: -100,
+                top: 50,
+                right: 900,
+                bottom: 650,
+            },
+            -1920,
+            1080,
+        )
+        .unwrap();
+
+        assert_eq!(shifted.left, -2020);
+        assert_eq!(shifted.top, 1130);
+        assert_eq!(shifted.right, -1020);
+        assert_eq!(shifted.bottom, 1730);
     }
 }
