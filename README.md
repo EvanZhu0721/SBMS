@@ -5,7 +5,9 @@
 [简体中文](README.zh-CN.md)
 
 BrainController
+
 ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+
 ● ChatGPT&Codex 100%
 
 
