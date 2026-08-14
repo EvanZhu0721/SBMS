@@ -4,6 +4,11 @@
 
 [简体中文](README.zh-CN.md)
 
+BrainController
+▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+● ChatGPT&Codex 100%
+
+
 'SBMS' stands for "SBMS bridges multiple screens", Microsoft is a great company and Windows is a good system. (BTW I use Linux for laptop XD)
 
 The original intention of 'SBMS' was to complete the calculation rules for the default logical desktop topology relationship and the physical dimensions of the displays in the Windows multi-screen collaboration system.
