@@ -462,7 +462,7 @@ pub(super) fn set_geometry_result(ui: &QuickAccess, result: SizingResult, config
         ui.set_geometry_configured(true);
         ui.set_geometry_summary(mode.as_str().into());
         ui.set_geometry_summary_detail(format!("Planned · {refresh}").into());
-        ui.set_state_detail(format!("Planned {mode} · Preview only").into());
+        ui.set_state_detail("Ready to start".into());
     }
 }
 

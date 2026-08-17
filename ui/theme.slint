@@ -1,21 +1,25 @@
 import { Palette } from "std-widgets.slint";
 
-// Material 3 semantic roles. Keeping colors behind roles makes the panel
-// automatically follow the platform light/dark palette without styling
-// individual controls ad hoc.
+// Stable Material 3 semantic roles. The platform palette selects only the
+// light/dark scheme; every SBMS semantic brush is fixed so Windows accent-color
+// refreshes cannot change the application's colors after startup.
 export global MdTokens {
-    out property <brush> surface: Palette.background;
-    out property <brush> on-surface: Palette.foreground;
-    out property <brush> surface-container: Palette.alternate-background;
-    out property <brush> on-surface-variant: Palette.alternate-foreground;
-    out property <brush> primary: Palette.accent-background;
-    out property <brush> on-primary: Palette.accent-foreground;
-    out property <brush> primary-container: Palette.color-scheme == ColorScheme.dark ? #4f378b : #eaddff;
-    out property <brush> on-primary-container: Palette.color-scheme == ColorScheme.dark ? #eaddff : #21005d;
-    out property <brush> error: Palette.color-scheme == ColorScheme.dark ? #ffb4ab : #ba1a1a;
-    out property <brush> error-container: Palette.color-scheme == ColorScheme.dark ? #93000a : #ffdad6;
-    out property <brush> on-error-container: Palette.color-scheme == ColorScheme.dark ? #ffdad6 : #410002;
-    out property <brush> outline-variant: Palette.border;
+    private property <bool> dark-color-scheme: Palette.color-scheme == ColorScheme.dark;
+
+    out property <brush> surface: dark-color-scheme ? #2a282d : #f8f3f9;
+    out property <brush> on-surface: dark-color-scheme ? #e6e1e5 : #1c1b1f;
+    out property <brush> surface-container: dark-color-scheme ? #1c1b1f : #fffbfe;
+    out property <brush> on-surface-variant: dark-color-scheme ? #e6e1e5 : #1c1b1f;
+    out property <brush> primary: dark-color-scheme ? #cacaca : #343236;
+    out property <brush> on-primary: dark-color-scheme ? #343236 : #ffffff;
+    out property <brush> primary-container: dark-color-scheme ? #4f378b : #eaddff;
+    out property <brush> on-primary-container: dark-color-scheme ? #eaddff : #21005d;
+    out property <brush> error: dark-color-scheme ? #ffb4ab : #ba1a1a;
+    out property <brush> error-container: dark-color-scheme ? #93000a : #ffdad6;
+    out property <brush> on-error-container: dark-color-scheme ? #ffdad6 : #410002;
+    out property <brush> success-container: dark-color-scheme ? #173824 : #d5f5df;
+    out property <brush> on-success-container: dark-color-scheme ? #8fdaa5 : #155c2d;
+    out property <brush> outline-variant: dark-color-scheme ? #938f99 : #79747e;
 
     out property <length> space-1: 8px;
     out property <length> space-2: 16px;

@@ -106,6 +106,10 @@ export component QuickAccess inherits Window {
     in property <int> sunshine-state: 0;
     in property <int> sunshine-port: 0;
     in property <string> sunshine-lan-ip: "--";
+    in property <[string]> profile-names;
+    in property <string> active-profile-name: "default";
+    in property <bool> profile-saving: false;
+    in property <int> max-profile-count: 3;
 
     callback start();
     callback stop();
@@ -134,14 +138,20 @@ export component QuickAccess inherits Window {
     callback open-display-settings();
     callback disable-launch-intro();
     callback open-project-home();
+    callback open-profile-directory();
     callback open-screen-size();
     callback close-screen-size();
     callback screen-size-edited();
     callback reset-screen-size();
     callback reread-screen-size();
     callback save-screen-size();
+    callback create-profile(string);
+    callback rename-profile(string, string);
+    callback delete-profile(string);
+    callback activate-profile(string);
 
     if root.page == QuickAccessPage.main : MainPage {
+        visible: !root.intro-active;
         width: parent.width;
         height: parent.height;
         display-names: root.display-names;
@@ -180,6 +190,10 @@ export component QuickAccess inherits Window {
         sunshine-state: root.sunshine-state;
         sunshine-port: root.sunshine-port;
         sunshine-lan-ip: root.sunshine-lan-ip;
+        profile-names: root.profile-names;
+        active-profile-name: root.active-profile-name;
+        profile-saving: root.profile-saving;
+        max-profile-count: root.max-profile-count;
 
         start => { root.start(); }
         stop => { root.stop(); }
@@ -197,7 +211,12 @@ export component QuickAccess inherits Window {
         open-stream-config => { root.open-stream-config(); }
         open-sunshine-panel => { root.open-sunshine-panel(); }
         open-display-settings => { root.open-display-settings(); }
+        open-profile-directory => { root.open-profile-directory(); }
         open-screen-size => { root.open-screen-size(); }
+        create-profile(name) => { root.create-profile(name); }
+        rename-profile(old-name, new-name) => { root.rename-profile(old-name, new-name); }
+        delete-profile(name) => { root.delete-profile(name); }
+        activate-profile(name) => { root.activate-profile(name); }
     }
 
     if root.page == QuickAccessPage.screen-size : ScreenSizePage {
@@ -292,6 +311,7 @@ export component QuickAccess inherits Window {
     }
 
     LaunchIntro {
+        z: 100;
         width: parent.width;
         height: parent.height;
         active: root.intro-active;

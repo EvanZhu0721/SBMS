@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{
-    AppConfig, ConfigProfileStore, DisplayOverrideStore, DisplayOverrides, ProfileRevision,
-    ReferenceSource,
+    AppConfig, ConfigProfileStore, ConfigProfiles, DisplayOverrideStore, DisplayOverrides,
+    MAX_CONFIG_PROFILES, ProfileRevision, ReferenceSource,
 };
 use crate::control::{TrayInstance, listen_for_config_reload, listen_for_shutdown};
 use crate::controller::{Controller, ControllerEvent, DisplayOption};
@@ -34,6 +34,7 @@ const STREAM_ONLY_ID: &str = "__stream_only__";
 const DISPLAY_SETTINGS_URI: &str = "ms-settings:display";
 const PROJECT_HOME_URL: &str = "https://github.com/EvanZhu0721/SBMS";
 static INTRO_GENERATION: AtomicU64 = AtomicU64::new(0);
+static PROFILE_SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 mod diagnostic_view;
 mod geometry_view;
@@ -47,8 +48,8 @@ use diagnostic_view::{open_log_folder, populate_diagnostics};
 use geometry_view::*;
 use handlers::{
     HandlerState, register_diagnostics_handlers, register_geometry_handlers,
-    register_group_handlers, register_lifecycle_handlers, register_screen_size_handlers,
-    register_stream_handlers,
+    register_group_handlers, register_lifecycle_handlers, register_profile_handlers,
+    register_screen_size_handlers, register_stream_handlers,
 };
 use projection::{hydrate_group, project_group_telemetry, snapshot_group, update_tab_projection};
 use state::{
@@ -61,6 +62,7 @@ type ConfigStateRefs<'a> = (
     &'a Arc<Mutex<Vec<GroupDraft>>>,
     &'a Arc<Mutex<usize>>,
     &'a Arc<Mutex<ProfileRevision>>,
+    &'a Arc<AtomicBool>,
     &'a Arc<AtomicBool>,
 );
 
@@ -181,6 +183,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let ui = flyout.as_weak();
     let error_revision = Arc::new(AtomicU64::new(0));
     let pending_config_reload = Arc::new(AtomicBool::new(false));
+    let pending_profile_restart = Arc::new(AtomicBool::new(false));
     {
         let ui = flyout.as_weak();
         let displays = displays.clone();
@@ -238,6 +241,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let event_display_overrides = display_overrides.clone();
     let event_profile_revision = profile_revision.clone();
     let event_pending_config_reload = pending_config_reload.clone();
+    let event_pending_profile_restart = pending_profile_restart.clone();
     let controller = Controller::spawn(move |event| {
         let ui = ui.clone();
         let tray = tray_handle.clone();
@@ -248,6 +252,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         let display_overrides = event_display_overrides.clone();
         let profile_revision = event_profile_revision.clone();
         let pending_config_reload = event_pending_config_reload.clone();
+        let pending_profile_restart = event_pending_profile_restart.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui.upgrade() {
                 apply_event(
@@ -260,6 +265,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
                         &active_group,
                         &profile_revision,
                         &pending_config_reload,
+                        &pending_profile_restart,
                     ),
                     event,
                 );
@@ -281,6 +287,14 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     register_screen_size_handlers(&flyout, &sender, &handler_state, &override_store);
     register_group_handlers(&flyout, &handler_state);
     register_diagnostics_handlers(&flyout);
+    register_profile_handlers(
+        &flyout,
+        &sender,
+        &handler_state,
+        &error_revision,
+        &pending_config_reload,
+        &pending_profile_restart,
+    );
     {
         let flyout_weak = flyout.as_weak();
         let intro_disabled = intro_disabled.clone();
@@ -312,6 +326,23 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         flyout.on_open_project_home(move || {
             if let Err(error) = open_project_home() {
                 diagnostics::log(Level::Warn, "ui", "open-project-home", None, error.as_str());
+                if let Some(ui) = flyout_weak.upgrade() {
+                    ui.set_error_text(error.into());
+                }
+            }
+        });
+    }
+    {
+        let flyout_weak = flyout.as_weak();
+        flyout.on_open_profile_directory(move || {
+            if let Err(error) = open_profile_directory() {
+                diagnostics::log(
+                    Level::Warn,
+                    "ui",
+                    "open-profile-directory",
+                    None,
+                    error.as_str(),
+                );
                 if let Some(ui) = flyout_weak.upgrade() {
                     ui.set_error_text(error.into());
                 }
@@ -375,7 +406,13 @@ fn apply_event(
     event: ControllerEvent,
 ) {
     let (display_metadata, display_overrides) = display_state;
-    let (group_state, active_group, profile_revision, pending_config_reload) = config_state;
+    let (
+        group_state,
+        active_group,
+        profile_revision,
+        pending_config_reload,
+        pending_profile_restart,
+    ) = config_state;
     match event {
         ControllerEvent::Displays(mut displays) => {
             apply_display_overrides(
@@ -544,7 +581,8 @@ fn apply_event(
                 project_group_telemetry(ui, &groups, active);
             }
             if !running && !busy && pending_config_reload.swap(false, Ordering::AcqRel) {
-                apply_config_reload(
+                let restart = pending_profile_restart.swap(false, Ordering::AcqRel);
+                let reloaded = apply_config_reload(
                     ui,
                     display_metadata,
                     group_state,
@@ -552,6 +590,9 @@ fn apply_event(
                     profile_revision,
                     error_revision,
                 );
+                if reloaded && restart {
+                    ui.invoke_start();
+                }
             }
         }
     }
@@ -587,6 +628,26 @@ fn open_project_home() -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("Couldn’t open the SBMS repository: {error}"))
+}
+
+fn open_profile_directory() -> Result<(), String> {
+    let profile_path = ConfigProfileStore::default_path()
+        .map_err(|error| format!("Couldn’t locate the profile folder: {error}"))?;
+    let directory = profile_path
+        .parent()
+        .ok_or_else(|| "Couldn’t locate the profile folder".to_string())?;
+
+    let mut explorer = Command::new("explorer.exe");
+    if profile_path.is_file() {
+        explorer.arg(format!("/select,{}", profile_path.display()));
+    } else {
+        explorer.arg(directory);
+    }
+
+    explorer
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("Couldn’t open the profile folder: {error}"))
 }
 
 fn refresh_lan_ip(ui: &QuickAccess) {
@@ -1128,7 +1189,7 @@ fn apply_config_reload(
     active_group: &Arc<Mutex<usize>>,
     profile_revision: &Arc<Mutex<ProfileRevision>>,
     error_revision: &Arc<AtomicU64>,
-) {
+) -> bool {
     let snapshot = match ConfigProfileStore::default_store().and_then(|store| store.load_active()) {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -1138,7 +1199,7 @@ fn apply_config_reload(
                 error_revision,
                 &format!("Couldn’t reload configuration: {error}"),
             );
-            return;
+            return false;
         }
     };
     let mut loaded = loaded_groups(snapshot);
@@ -1160,6 +1221,10 @@ fn apply_config_reload(
     ui.set_geometry_save_blocked(false);
     ui.set_geometry_error("".into());
     hydrate_group(ui, &displays, &groups, *active);
+    if let Err(error) = refresh_profile_projection(ui) {
+        diagnostics::log(Level::Warn, "config", "profile-list", None, &error);
+        surface_transient_error(ui, error_revision, &error);
+    }
     diagnostics::log(
         Level::Info,
         "config",
@@ -1170,6 +1235,26 @@ fn apply_config_reload(
             loaded.profile.id, loaded.profile.revision
         ),
     );
+    true
+}
+
+fn refresh_profile_projection(ui: &QuickAccess) -> Result<(), String> {
+    let profiles = ConfigProfileStore::default_store()
+        .and_then(|store| store.list())
+        .map_err(|error| format!("Couldn’t load configuration profiles: {error}"))?;
+    project_profiles(ui, &profiles);
+    Ok(())
+}
+
+fn project_profiles(ui: &QuickAccess, profiles: &ConfigProfiles) {
+    let names = profiles
+        .profiles
+        .iter()
+        .map(|profile| SharedString::from(profile.id.as_str()))
+        .collect::<Vec<_>>();
+    ui.set_profile_names(ModelRc::new(Rc::new(VecModel::from(names))));
+    ui.set_active_profile_name(profiles.active_profile.as_str().into());
+    ui.set_max_profile_count(MAX_CONFIG_PROFILES as i32);
 }
 
 fn persist_groups(
@@ -1215,6 +1300,7 @@ fn persist_validated_groups(
         .lock()
         .expect("config profile revision poisoned")
         .clone();
+    let save_generation = begin_profile_save(ui);
     let result = ConfigProfileStore::default_store()
         .and_then(|store| store.save_active_if_revision(&expected, &config));
     match result {
@@ -1222,12 +1308,38 @@ fn persist_validated_groups(
             *profile_revision
                 .lock()
                 .expect("config profile revision poisoned") = snapshot.profile;
+            finish_profile_save(ui.as_weak(), save_generation, true);
             true
         }
         Err(error) => {
+            finish_profile_save(ui.as_weak(), save_generation, false);
             surface_persistence_error(ui, &error.to_string());
             false
         }
+    }
+}
+
+fn begin_profile_save(ui: &QuickAccess) -> u64 {
+    let generation = PROFILE_SAVE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    ui.set_profile_saving(true);
+    generation
+}
+
+fn finish_profile_save(ui: slint::Weak<QuickAccess>, generation: u64, succeeded: bool) {
+    let finish = move || {
+        if PROFILE_SAVE_GENERATION.load(Ordering::Acquire) != generation {
+            return;
+        }
+        if let Some(ui) = ui.upgrade() {
+            ui.set_profile_saving(false);
+        }
+    };
+    if succeeded {
+        // Keep the real write transition visible long enough to be perceived.
+        // The timer only controls presentation; success still comes from the store.
+        slint::Timer::single_shot(Duration::from_millis(400), finish);
+    } else {
+        finish();
     }
 }
 
@@ -1300,15 +1412,6 @@ fn play_launch_intro(ui: slint::Weak<QuickAccess>, generation: u64) {
         (2_135, 15),
         (2_258, 16),
         (2_380, 17),
-        (2_700, 18),
-        (3_120, 19),
-        (3_380, 20),
-        (3_470, 21),
-        (3_630, 22),
-        (3_720, 23),
-        (3_810, 24),
-        (4_010, 25),
-        (4_180, 26),
     ] {
         let ui = ui.clone();
         slint::Timer::single_shot(Duration::from_millis(delay_ms), move || {
@@ -1320,7 +1423,7 @@ fn play_launch_intro(ui: slint::Weak<QuickAccess>, generation: u64) {
         });
     }
 
-    slint::Timer::single_shot(Duration::from_millis(4_460), move || {
+    slint::Timer::single_shot(Duration::from_millis(2_660), move || {
         if INTRO_GENERATION.load(Ordering::Acquire) == generation
             && let Some(ui) = ui.upgrade()
         {

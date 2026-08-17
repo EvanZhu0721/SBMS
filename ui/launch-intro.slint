@@ -99,7 +99,7 @@ export component LaunchIntro inherits Rectangle {
     callback open-project-home();
 
     visible: root.active;
-    opacity: root.stage >= 26 ? 0 : 1;
+    opacity: root.stage >= 17 ? 0 : 1;
     background: MdTokens.surface;
     clip: true;
 
@@ -112,9 +112,8 @@ export component LaunchIntro inherits Rectangle {
     // geometric cuts then carve the M across the left column and the S across
     // the right column before the complete mark moves into its final position.
     grid := Rectangle {
-        // Start moving while the black mask is still fading in, about 0.5s
-        // before the original stage-9 trigger.
-        x: root.stage >= 15 ? 188px : (parent.width - self.width) / 2;
+        // Move the four tiles as soon as the black lines begin to fade in.
+        x: root.stage > 0 ? 188px : (parent.width - self.width) / 2;
         y: 192px;
         width: 136px;
         height: 136px;
@@ -177,12 +176,12 @@ export component LaunchIntro inherits Rectangle {
 
     // B enters first. The inner Text provides a small damped positional wobble.
     b-entry := Rectangle {
-        x: root.stage >= 19 ? 112px : -96px;
+        x: root.stage >= 5 ? 112px : -96px;
         y: 212px;
         width: 60px;
         height: 96px;
         background: transparent;
-        opacity: root.stage >= 19 ? 1 : 0;
+        opacity: root.stage >= 5 ? 1 : 0;
 
         animate x {
             duration: 260ms;
@@ -192,8 +191,8 @@ export component LaunchIntro inherits Rectangle {
         animate opacity { duration: 80ms; }
 
         GlowLetter {
-            x: root.stage == 20 ? 4px : root.stage == 21 ? -2px : 0;
-            y: root.stage == 20 ? -1px : root.stage == 21 ? 1px : 0;
+            x: root.stage == 6 ? 4px : root.stage == 7 ? -2px : 0;
+            y: root.stage == 6 ? -1px : root.stage == 7 ? 1px : 0;
             width: parent.width;
             height: parent.height;
             glyph: "B";
@@ -207,12 +206,12 @@ export component LaunchIntro inherits Rectangle {
 
     // S follows B from the same left edge and settles at the front of the word.
     s-entry := Rectangle {
-        x: root.stage >= 20 ? 52px : -96px;
+        x: root.stage >= 7 ? 52px : -96px;
         y: 212px;
         width: 60px;
         height: 96px;
         background: transparent;
-        opacity: root.stage >= 20 ? 1 : 0;
+        opacity: root.stage >= 7 ? 1 : 0;
 
         animate x {
             duration: 250ms;
@@ -222,8 +221,8 @@ export component LaunchIntro inherits Rectangle {
         animate opacity { duration: 80ms; }
 
         GlowLetter {
-            x: root.stage == 22 ? 4px : root.stage == 23 ? -2px : 0;
-            y: root.stage == 22 ? 1px : root.stage == 23 ? -1px : 0;
+            x: root.stage == 8 ? 4px : root.stage == 9 ? -2px : 0;
+            y: root.stage == 8 ? 1px : root.stage == 9 ? -1px : 0;
             width: parent.width;
             height: parent.height;
             glyph: "S";

@@ -129,6 +129,12 @@ pub struct ProfileSnapshot {
     pub config: AppConfig,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileDeleteOutcome {
+    pub active: ProfileSnapshot,
+    pub active_changed: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct ConfigProfileStore {
     path: PathBuf,
@@ -977,6 +983,86 @@ impl ConfigProfileStore {
         Ok(result)
     }
 
+    pub fn duplicate_active(
+        &self,
+        id: &str,
+        activate: bool,
+    ) -> Result<(ProfileSnapshot, bool), ConfigError> {
+        validate_profile_id(id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        if profiles.profile(id).is_some() {
+            return Err(ConfigError(format!("config profile {id} already exists")));
+        }
+        if profiles.profiles.len() >= MAX_CONFIG_PROFILES {
+            return Err(ConfigError(format!(
+                "cannot create config profile {id}; the {MAX_CONFIG_PROFILES}-profile limit is reached"
+            )));
+        }
+        let config = profiles.active().config.clone();
+        profiles.profiles.push(ConfigProfile {
+            id: id.into(),
+            revision: 1,
+            config,
+        });
+        let index = profiles.profiles.len() - 1;
+        if activate {
+            profiles.active_profile = profiles.profiles[index].id.clone();
+        }
+        let result = snapshot(&profiles.profiles[index]);
+        let is_active = profiles
+            .active_profile
+            .eq_ignore_ascii_case(&result.profile.id);
+        self.save_locked(&profiles)?;
+        Ok((result, is_active))
+    }
+
+    pub fn rename(
+        &self,
+        old_id: &str,
+        new_id: &str,
+    ) -> Result<(ProfileSnapshot, bool), ConfigError> {
+        validate_profile_id(old_id)?;
+        validate_profile_id(new_id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        let index = profiles
+            .profiles
+            .iter()
+            .position(|profile| profile.id.eq_ignore_ascii_case(old_id))
+            .ok_or_else(|| ConfigError(format!("config profile {old_id} does not exist")))?;
+        if profiles
+            .profiles
+            .iter()
+            .enumerate()
+            .any(|(other_index, profile)| {
+                other_index != index && profile.id.eq_ignore_ascii_case(new_id)
+            })
+        {
+            return Err(ConfigError(format!(
+                "config profile {new_id} already exists"
+            )));
+        }
+        if profiles.profiles[index].id == new_id {
+            let result = snapshot(&profiles.profiles[index]);
+            let is_active = profiles
+                .active_profile
+                .eq_ignore_ascii_case(&result.profile.id);
+            return Ok((result, is_active));
+        }
+        let was_active = profiles
+            .active_profile
+            .eq_ignore_ascii_case(&profiles.profiles[index].id);
+        profiles.profiles[index].id = new_id.into();
+        profiles.profiles[index].revision = next_revision(profiles.profiles[index].revision)?;
+        if was_active {
+            profiles.active_profile = profiles.profiles[index].id.clone();
+        }
+        let result = snapshot(&profiles.profiles[index]);
+        self.save_locked(&profiles)?;
+        Ok((result, was_active))
+    }
+
     pub fn activate(&self, id: &str) -> Result<ProfileSnapshot, ConfigError> {
         validate_profile_id(id)?;
         let _guard = CrossProcessConfigGuard::acquire()?;
@@ -1008,6 +1094,34 @@ impl ConfigProfileStore {
             return Err(ConfigError(format!("config profile {id} does not exist")));
         }
         self.save_locked(&profiles)
+    }
+
+    pub fn delete_with_fallback(&self, id: &str) -> Result<ProfileDeleteOutcome, ConfigError> {
+        validate_profile_id(id)?;
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        let index = profiles
+            .profiles
+            .iter()
+            .position(|profile| profile.id.eq_ignore_ascii_case(id))
+            .ok_or_else(|| ConfigError(format!("config profile {id} does not exist")))?;
+        if profiles.profiles.len() == 1 {
+            return Err(ConfigError("cannot delete the last config profile".into()));
+        }
+        let active_changed = profiles
+            .active_profile
+            .eq_ignore_ascii_case(&profiles.profiles[index].id);
+        profiles.profiles.remove(index);
+        if active_changed {
+            let fallback_index = index.saturating_sub(1).min(profiles.profiles.len() - 1);
+            profiles.active_profile = profiles.profiles[fallback_index].id.clone();
+        }
+        let active = snapshot(profiles.active());
+        self.save_locked(&profiles)?;
+        Ok(ProfileDeleteOutcome {
+            active,
+            active_changed,
+        })
     }
 
     pub fn reset_active(&self) -> Result<ProfileSnapshot, ConfigError> {
@@ -2189,6 +2303,70 @@ mod tests {
 
         assert!(error.to_string().contains("3-profile limit"));
         assert_eq!(profiles.list().unwrap().profiles.len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn duplicate_active_can_activate_and_respects_conflicts_and_limit() {
+        let (root, profiles) = test_profile_store("duplicate-active");
+        let default = profiles.load_active().unwrap();
+        assert!(profiles.duplicate_active("DEFAULT", false).is_err());
+
+        let (gaming, gaming_active) = profiles.duplicate_active("gaming", true).unwrap();
+        assert!(gaming_active);
+        assert_eq!(gaming.config, default.config);
+        assert_eq!(profiles.load_active().unwrap(), gaming);
+
+        profiles.duplicate_active("streaming", false).unwrap();
+        let error = profiles.duplicate_active("fourth", false).unwrap_err();
+        assert!(error.to_string().contains("3-profile limit"));
+        assert_eq!(profiles.list().unwrap().profiles.len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_rename_is_atomic_for_active_case_changes_and_full_stores() {
+        let (root, profiles) = test_profile_store("rename");
+        let original = profiles.load_active().unwrap();
+        profiles.duplicate_active("gaming", false).unwrap();
+        profiles.duplicate_active("streaming", false).unwrap();
+
+        let (case_changed, case_changed_active) = profiles.rename("default", "DEFAULT").unwrap();
+        assert!(case_changed_active);
+        assert_eq!(case_changed.profile.id, "DEFAULT");
+        assert_eq!(case_changed.profile.revision, original.profile.revision + 1);
+        assert_eq!(case_changed.config, original.config);
+
+        let (renamed, renamed_active) = profiles.rename("DEFAULT", "primary").unwrap();
+        assert!(renamed_active);
+        assert_eq!(profiles.load_active().unwrap(), renamed);
+        assert!(profiles.load_profile("default").is_err());
+
+        let error = profiles.rename("streaming", "GAMING").unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(profiles.list().unwrap().profiles.len(), 3);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn deleting_active_profile_selects_fallback_and_rejects_last_profile() {
+        let (root, profiles) = test_profile_store("delete-with-fallback");
+        profiles.load_active().unwrap();
+        profiles.duplicate_active("gaming", true).unwrap();
+        profiles.duplicate_active("streaming", false).unwrap();
+
+        let deleted_active = profiles.delete_with_fallback("gaming").unwrap();
+        assert!(deleted_active.active_changed);
+        assert_eq!(deleted_active.active.profile.id, "default");
+        assert_eq!(profiles.load_active().unwrap(), deleted_active.active);
+
+        let deleted_inactive = profiles.delete_with_fallback("streaming").unwrap();
+        assert!(!deleted_inactive.active_changed);
+        assert_eq!(deleted_inactive.active.profile.id, "default");
+
+        let error = profiles.delete_with_fallback("default").unwrap_err();
+        assert!(error.to_string().contains("last config profile"));
+        assert_eq!(profiles.list().unwrap().profiles.len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 

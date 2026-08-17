@@ -1,12 +1,285 @@
-import { Button, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, ProgressIndicator } from "std-widgets.slint";
 import {
     CompactComboBox,
+    DialogActionButton,
     FullWidthSettingsButton,
     FullWidthPrimaryButton,
     MaterialIconButton,
 } from "../controls.slint";
 import { SevenSegmentDisplay } from "../seven-segment.slint";
 import { MdTokens } from "../theme.slint";
+
+component ProfileMenuRow inherits Rectangle {
+    in property <string> name;
+    in property <bool> selected: false;
+    in property <bool> control-enabled: true;
+    callback picked();
+    callback rename();
+    callback remove();
+
+    height: MdTokens.target;
+    background: root.selected
+        ? MdTokens.primary-container
+        : (pick-touch.has-hover ? MdTokens.surface-container : transparent);
+    border-radius: MdTokens.space-1;
+    animate background { duration: 100ms; easing: ease-in-out; }
+    opacity: root.control-enabled ? 1 : 0.38;
+
+    if root.selected : Path {
+        x: 12px;
+        y: 14px;
+        width: 20px;
+        height: 20px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M9 16.17L4.83 12L3.41 13.41L9 19L21 7L19.59 5.59L9 16.17Z";
+        fill: MdTokens.on-primary-container;
+        accessible-role: none;
+    }
+
+    Text {
+        x: 40px;
+        width: parent.width - 128px;
+        height: parent.height;
+        text: root.name;
+        color: root.selected ? MdTokens.on-primary-container : MdTokens.on-surface;
+        font-size: MdTokens.type-body-large;
+        font-weight: root.selected ? MdTokens.weight-medium : 400;
+        vertical-alignment: center;
+        overflow: elide;
+        accessible-role: none;
+    }
+
+    pick-touch := TouchArea {
+        enabled: root.control-enabled;
+        x: 0;
+        width: parent.width - 88px;
+        accessible-role: button;
+        accessible-label: root.selected
+            ? "Current profile " + root.name
+            : "Switch to profile " + root.name;
+        clicked => { root.picked(); }
+    }
+
+    Rectangle {
+        x: parent.width - 88px;
+        width: 44px;
+        height: parent.height;
+        background: transparent;
+
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: MdTokens.on-surface;
+            opacity: rename-touch.pressed ? 0.12 : (rename-touch.has-hover ? 0.08 : 0);
+            border-radius: MdTokens.shape-full;
+            animate opacity { duration: 100ms; easing: ease-in-out; }
+        }
+
+        Path {
+            x: 12px;
+            y: 14px;
+            width: 20px;
+            height: 20px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M3 17.25V21H6.75L17.81 9.94L14.06 6.19L3 17.25ZM20.71 7.04C21.1 6.65 21.1 6.02 20.71 5.63L18.37 3.29C17.98 2.9 17.35 2.9 16.96 3.29L15.13 5.12L18.88 8.87L20.71 7.04Z";
+            fill: root.selected ? MdTokens.on-primary-container : MdTokens.on-surface-variant;
+            accessible-role: none;
+        }
+
+        rename-touch := TouchArea {
+            enabled: root.control-enabled;
+            accessible-role: button;
+            accessible-label: "Rename profile " + root.name;
+            clicked => { root.rename(); }
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 44px;
+        width: 44px;
+        height: parent.height;
+        background: transparent;
+
+        Rectangle {
+            width: parent.width;
+            height: parent.height;
+            background: MdTokens.error;
+            opacity: remove-touch.pressed ? 0.12 : (remove-touch.has-hover ? 0.08 : 0);
+            border-radius: MdTokens.shape-full;
+            animate opacity { duration: 100ms; easing: ease-in-out; }
+        }
+
+        Path {
+            x: 12px;
+            y: 14px;
+            width: 20px;
+            height: 20px;
+            viewbox-width: 24;
+            viewbox-height: 24;
+            commands: "M6 19C6 20.1 6.9 21 8 21H16C17.1 21 18 20.1 18 19V7H6V19ZM8 9H16V19H8V9ZM15.5 4L14.5 3H9.5L8.5 4H5V6H19V4H15.5Z";
+            fill: MdTokens.error;
+            accessible-role: none;
+        }
+
+        remove-touch := TouchArea {
+            enabled: root.control-enabled;
+            accessible-role: button;
+            accessible-label: "Delete profile " + root.name;
+            clicked => { root.remove(); }
+        }
+    }
+}
+
+component ProfileMenuAction inherits Rectangle {
+    in property <string> text;
+    in property <int> icon-kind: 0; // 0 add, 1 folder
+    in property <bool> control-enabled: true;
+    callback clicked();
+
+    height: MdTokens.target;
+    background: action-touch.has-hover && root.control-enabled
+        ? MdTokens.surface-container : transparent;
+    border-radius: MdTokens.space-1;
+    opacity: root.control-enabled ? 1 : 0.38;
+    animate background { duration: 100ms; easing: ease-in-out; }
+
+    if root.icon-kind == 0 : Path {
+        x: 12px;
+        y: 14px;
+        width: 20px;
+        height: 20px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M19 13H13V19H11V13H5V11H11V5H13V11H19V13Z";
+        fill: MdTokens.primary;
+        accessible-role: none;
+    }
+
+    if root.icon-kind == 1 : Path {
+        x: 12px;
+        y: 14px;
+        width: 20px;
+        height: 20px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        commands: "M10 4H4C2.9 4 2 4.9 2 6V18C2 19.1 2.9 20 4 20H20C21.1 20 22 19.1 22 18V8C22 6.9 21.1 6 20 6H12L10 4Z";
+        fill: MdTokens.on-surface-variant;
+        accessible-role: none;
+    }
+
+    Text {
+        x: 44px;
+        width: parent.width - 56px;
+        height: parent.height;
+        text: root.text;
+        color: root.icon-kind == 0 ? MdTokens.primary : MdTokens.on-surface;
+        font-size: MdTokens.type-body-medium;
+        font-weight: MdTokens.weight-medium;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    action-touch := TouchArea {
+        enabled: root.control-enabled;
+        accessible-role: button;
+        accessible-label: root.text;
+        clicked => { root.clicked(); }
+    }
+}
+
+component ProfileEntryButton inherits FocusScope {
+    in property <bool> expanded: false;
+    in property <string> current-name;
+    callback clicked();
+
+    width: 144px;
+    height: 64px;
+
+    Rectangle {
+        width: root.width;
+        height: root.height;
+        background: transparent;
+
+        Rectangle {
+            x: 0px;
+            y: 0px;
+            width: root.width;
+            height: root.height;
+            background: root.expanded ? MdTokens.primary-container : MdTokens.surface-container;
+            border-width: root.expanded ? 2px : 0px;
+            border-color: root.expanded ? MdTokens.primary : MdTokens.outline-variant;
+            border-radius: MdTokens.shape-medium;
+            animate background, border-color { duration: 150ms; easing: ease-in-out; }
+
+            Rectangle {
+                width: parent.width;
+                height: parent.height;
+                background: MdTokens.primary;
+                border-radius: parent.border-radius;
+                opacity: entry-touch.pressed ? 0.12 : (entry-touch.has-hover ? 0.08 : 0);
+                animate opacity { duration: 100ms; easing: ease-in-out; }
+            }
+
+            Path {
+                x: parent.width - self.width - 12px;
+                y: (parent.height - self.height) / 2;
+                width: 24px;
+                height: 24px;
+                viewbox-width: 24;
+                viewbox-height: 24;
+                commands: "M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2ZM13 3.5L18.5 9H13V3.5ZM16 18H8V16H16V18ZM16 14H8V12H16V14Z";
+                fill: root.expanded ? MdTokens.on-primary-container : MdTokens.on-surface;
+                accessible-role: none;
+            }
+
+            VerticalLayout {
+                x: 12px;
+                width: parent.width - 60px;
+                height: parent.height;
+                alignment: center;
+                spacing: 3px;
+
+                Text {
+                    text: "Profile";
+                    color: root.expanded ? MdTokens.on-primary-container : MdTokens.on-surface;
+                    font-size: MdTokens.type-title-medium;
+                    font-weight: MdTokens.weight-medium;
+                    horizontal-alignment: left;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+
+                Text {
+                    text: root.current-name;
+                    color: root.expanded ? MdTokens.on-primary-container : MdTokens.on-surface-variant;
+                    font-size: MdTokens.type-body-small;
+                    horizontal-alignment: left;
+                    overflow: elide;
+                    accessible-role: none;
+                }
+            }
+        }
+
+        entry-touch := TouchArea {
+            accessible-role: button;
+            accessible-label: "Configuration profiles, current " + root.current-name;
+            clicked => {
+                root.focus();
+                root.clicked();
+            }
+        }
+    }
+
+    key-pressed(event) => {
+        if event.text == Key.Return {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
+}
 
 export component MainPage inherits FocusScope {
     in-out property <[string]> display-names;
@@ -45,6 +318,17 @@ export component MainPage inherits FocusScope {
     in property <int> sunshine-state: 0;
     in property <int> sunshine-port: 0;
     in property <string> sunshine-lan-ip: "--";
+
+    in-out property <bool> profile-menu-open: false;
+    in property <[string]> profile-names;
+    in property <string> active-profile-name: "default";
+    in property <bool> profile-saving: false;
+    in property <int> max-profile-count: 3;
+    in-out property <int> profile-dialog-mode: 0; // 1 new, 2 rename, 3 delete, 4 switch
+    in-out property <string> profile-dialog-target-name: "";
+    in-out property <string> profile-name-draft: "";
+    in-out property <string> profile-name-error: "";
+    property <string> dialog-profile-name: root.profile-dialog-target-name;
     
     callback start();
     callback stop();
@@ -63,9 +347,23 @@ export component MainPage inherits FocusScope {
     callback open-sunshine-panel();
     callback open-display-settings();
     callback open-screen-size();
+    callback open-profile-directory();
+    callback create-profile(string);
+    callback rename-profile(string, string);
+    callback delete-profile(string);
+    callback activate-profile(string);
 
             key-pressed(event) => {
                 if event.text == Key.Escape {
+                    if root.profile-dialog-mode != 0 {
+                        root.profile-dialog-mode = 0;
+                        root.profile-name-error = "";
+                        return accept;
+                    }
+                    if root.profile-menu-open {
+                        root.profile-menu-open = false;
+                        return accept;
+                    }
                     root.dismiss();
                     return accept;
                 }
@@ -88,8 +386,7 @@ export component MainPage inherits FocusScope {
                         spacing: MdTokens.space-1;
     
                         tabs-viewport := Rectangle {
-                            width: root.tab-labels.length * 96px
-                                + Math.max(root.tab-labels.length - 1, 0) * 4px;
+                            horizontal-stretch: 1;
                             clip: true;
                             background: transparent;
     
@@ -218,7 +515,6 @@ export component MainPage inherits FocusScope {
                             clicked => { root.add-group(); }
                         }
     
-                        Rectangle { horizontal-stretch: 1; }
                     }
     
                     HorizontalLayout {
@@ -229,12 +525,14 @@ export component MainPage inherits FocusScope {
                             horizontal-stretch: 1;
                             alignment: center;
                             spacing: 2px;
+
                             Text {
                                 text: "SBMS";
                                 color: MdTokens.on-surface;
                                 font-size: MdTokens.type-title-large;
                                 font-weight: MdTokens.weight-medium;
                             }
+
                             Text {
                                 text: "Display mapping";
                                 color: MdTokens.on-surface-variant;
@@ -277,6 +575,7 @@ export component MainPage inherits FocusScope {
                             }
     
                             VerticalLayout {
+                                horizontal-stretch: 1;
                                 alignment: center;
                                 spacing: 3px;
                                 Text {
@@ -298,10 +597,46 @@ export component MainPage inherits FocusScope {
                                     overflow: elide;
                                 }
                             }
+
+                            if root.error-text == "" : VerticalLayout {
+                                width: root.stream-only ? 176px : 132px;
+                                alignment: center;
+                                spacing: 3px;
+
+                                Text {
+                                    text: root.stream-only ? "LAN endpoint" : root.geometry-summary;
+                                    color: root.running ? MdTokens.on-primary-container : MdTokens.on-surface;
+                                    font-size: MdTokens.type-title-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                    horizontal-alignment: right;
+                                    overflow: elide;
+                                }
+
+                                Text {
+                                    text: root.stream-only
+                                        ? (root.sunshine-state == 2 && root.sunshine-port > 0
+                                            ? (root.sunshine-lan-ip == "--"
+                                                ? "LAN unavailable"
+                                                : root.sunshine-lan-ip + ":" + root.sunshine-port)
+                                            : (root.sunshine-state == 1
+                                                ? "Starting"
+                                                : (root.sunshine-state == 3 ? "Unavailable" : "--")))
+                                        : root.geometry-summary-detail;
+                                    color: root.running
+                                        ? MdTokens.on-primary-container
+                                        : (root.stream-only && root.sunshine-state == 3
+                                            ? MdTokens.error
+                                            : MdTokens.on-surface-variant);
+                                    font-size: MdTokens.type-body-small;
+                                    font-weight: root.stream-only && root.sunshine-state == 2
+                                        ? MdTokens.weight-medium : 400;
+                                    horizontal-alignment: right;
+                                    overflow: elide;
+                                }
+                            }
     
-                            MaterialIconButton {
+                            if root.restart-available : MaterialIconButton {
                                 icon-kind: 1;
-                                visible: root.restart-available;
                                 field-label: "Restart display mapping";
                                 clicked => { root.restart-mapping(); }
                             }
@@ -317,9 +652,8 @@ export component MainPage inherits FocusScope {
                                 }
                             }
     
-                            MaterialIconButton {
+                            if root.error-text != "" : MaterialIconButton {
                                 icon-kind: 4;
-                                visible: root.error-text != "";
                                 field-label: "Show error diagnostics";
                                 clicked => { root.open-diagnostics(); }
                             }
@@ -444,92 +778,107 @@ export component MainPage inherits FocusScope {
                             }
                         }
                     }
-    
-                    Rectangle {
+
+                    HorizontalLayout {
                         height: 64px;
-                        background: MdTokens.surface-container;
-                        border-radius: MdTokens.shape-medium;
-    
-                        HorizontalLayout {
-                            padding: MdTokens.space-2;
-                            spacing: 12px;
-    
-                            Rectangle {
-                                width: 12px;
-                                background: transparent;
-    
+                        spacing: MdTokens.space-1;
+
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            background: MdTokens.surface-container;
+                            border-radius: MdTokens.shape-medium;
+
+                            HorizontalLayout {
+                                padding: MdTokens.space-2;
+                                spacing: 12px;
+
                                 Rectangle {
-                                    y: (parent.height - self.height) / 2;
-                                    width: 12px;
-                                    height: 12px;
-                                    border-radius: MdTokens.shape-full;
-                                    background: root.geometry-configured
-                                        ? MdTokens.primary
-                                        : MdTokens.outline-variant;
+                                    width: 24px;
+                                    background: transparent;
+
+                                    ProgressIndicator {
+                                        x: 2px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 20px;
+                                        height: 20px;
+                                        indeterminate: true;
+                                        opacity: root.profile-saving ? 1 : 0;
+
+                                        animate opacity {
+                                            duration: 150ms;
+                                            easing: cubic-bezier(0.2, 0, 0, 1);
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        y: (parent.height - self.height) / 2;
+                                        width: 24px;
+                                        height: 24px;
+                                        border-radius: MdTokens.shape-full;
+                                        background: MdTokens.success-container;
+                                        opacity: root.profile-saving ? 0 : 1;
+
+                                        animate opacity {
+                                            duration: 150ms;
+                                            easing: cubic-bezier(0.2, 0, 0, 1);
+                                        }
+
+                                        Path {
+                                            x: 3px;
+                                            y: 3px;
+                                            width: 18px;
+                                            height: 18px;
+                                            viewbox-width: 24;
+                                            viewbox-height: 24;
+                                            commands: "M9 16.17L4.83 12L3.41 13.41L9 19L21 7L19.59 5.59L9 16.17Z";
+                                            fill: MdTokens.on-success-container;
+                                            accessible-role: none;
+                                        }
+                                    }
+                                }
+
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    spacing: 3px;
+
+                                    Text {
+                                        text: "Virtual display";
+                                        color: MdTokens.on-surface;
+                                        font-size: MdTokens.type-title-medium;
+                                        font-weight: MdTokens.weight-medium;
+                                    }
+
+                                    Text {
+                                        text: root.profile-saving ? "Saving…" : "Saved";
+                                        color: root.profile-saving
+                                            ? MdTokens.on-surface
+                                            : MdTokens.on-surface-variant;
+                                        font-size: MdTokens.type-body-small;
+                                        overflow: elide;
+
+                                        animate color {
+                                            duration: 150ms;
+                                        }
+                                    }
                                 }
                             }
-    
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                alignment: center;
-                                spacing: 3px;
-    
-                                Text {
-                                    text: "Virtual display";
-                                    color: MdTokens.on-surface;
-                                    font-size: MdTokens.type-title-medium;
-                                    font-weight: MdTokens.weight-medium;
-                                }
-    
-                                Text {
-                                    text: root.stream-only
-                                        ? "LAN endpoint"
-                                        : (root.geometry-configured
-                                            ? "Saved geometry"
-                                            : "Using driver default");
-                                    color: MdTokens.on-surface-variant;
-                                    font-size: MdTokens.type-body-small;
-                                    overflow: elide;
-                                }
-                            }
-    
-                            VerticalLayout {
-                                width: root.stream-only ? 184px : 144px;
-                                alignment: center;
-                                spacing: 3px;
-    
-                                Text {
-                                    text: root.geometry-summary;
-                                    color: MdTokens.on-surface;
-                                    font-size: MdTokens.type-title-medium;
-                                    font-weight: MdTokens.weight-medium;
-                                    horizontal-alignment: right;
-                                    overflow: elide;
-                                }
-    
-                                Text {
-                                    text: root.stream-only
-                                        ? (root.sunshine-state == 2 && root.sunshine-port > 0
-                                            ? (root.sunshine-lan-ip == "--"
-                                                ? "LAN unavailable"
-                                                : root.sunshine-lan-ip + ":" + root.sunshine-port)
-                                            : (root.sunshine-state == 1
-                                                ? "Starting"
-                                                : (root.sunshine-state == 3
-                                                    ? "Unavailable"
-                                                    : "--")))
-                                        : root.geometry-summary-detail;
-                                    color: root.stream-only && root.sunshine-state == 3
-                                        ? MdTokens.error
-                                        : (root.stream-only && root.sunshine-state == 2
-                                            ? MdTokens.primary
-                                            : MdTokens.on-surface-variant);
-                                    font-size: MdTokens.type-body-small;
-                                    font-weight: root.stream-only && root.sunshine-state == 2
-                                        ? MdTokens.weight-medium
-                                        : 400;
-                                    horizontal-alignment: right;
-                                    overflow: elide;
+                        }
+
+                        profile-entry-anchor := Rectangle {
+                            min-width: 144px;
+                            max-width: 144px;
+                            horizontal-stretch: 0;
+                            background: transparent;
+
+                            ProfileEntryButton {
+                                width: parent.width;
+                                height: parent.height;
+                                expanded: root.profile-menu-open;
+                                current-name: root.active-profile-name;
+                                enabled: !root.profile-saving;
+                                clicked => {
+                                    root.profile-menu-open = !root.profile-menu-open;
                                 }
                             }
                         }
@@ -547,13 +896,20 @@ export component MainPage inherits FocusScope {
                         clicked => { root.open-sunshine-panel(); }
                     }
 
-                    FullWidthSettingsButton {
+                    if root.stream-only && root.running : FullWidthPrimaryButton {
+                        text: "Stop and restore";
+                        enabled: !root.busy;
+                        accessible-label: "Stop mapping and restore windows";
+                        clicked => { root.stop(); }
+                    }
+
+                    if !root.stream-only || !root.running : FullWidthSettingsButton {
                         control-enabled: !root.busy;
                         field-label: "Open Windows display settings";
                         clicked => { root.open-display-settings(); }
                     }
     
-                    FullWidthPrimaryButton {
+                    if !root.stream-only || !root.running : FullWidthPrimaryButton {
                         text: root.running ? "Stop and restore" : (root.busy ? root.state : "Start mapping");
                         enabled: !root.busy && (root.running || root.selected-display >= 0);
                         accessible-label: root.running ? "Stop mapping and restore windows" : "Start mapping";
@@ -562,6 +918,292 @@ export component MainPage inherits FocusScope {
                         }
                     }
     
+                }
+            }
+
+            // In-tree menu overlay keeps entry/exit motion smooth and avoids a
+            // second native window for this compact flyout.
+            profile-menu-dismiss := Rectangle {
+                z: 20;
+                width: parent.width;
+                height: parent.height;
+                visible: profile-menu.visible;
+                background: transparent;
+
+                TouchArea {
+                    enabled: root.profile-menu-open;
+                    accessible-role: none;
+                    clicked => { root.profile-menu-open = false; }
+                }
+            }
+
+            profile-menu := Rectangle {
+                z: 21;
+                x: parent.width - self.width - MdTokens.space-2;
+                y: root.profile-menu-open
+                    ? (root.error-text != "" || root.restart-available
+                        ? 332px - self.height
+                        : 316px - self.height)
+                    : (root.error-text != "" || root.restart-available
+                        ? 340px - self.height
+                        : 324px - self.height);
+                width: 248px;
+                height: 153px + root.profile-names.length * 48px;
+                visible: root.profile-menu-open || self.opacity > 0;
+                opacity: root.profile-menu-open ? 1 : 0;
+                background: MdTokens.surface;
+                border-width: 1px;
+                border-color: MdTokens.outline-variant;
+                border-radius: MdTokens.shape-medium;
+                clip: true;
+                animate y, opacity {
+                    duration: 180ms;
+                    easing: cubic-bezier(0.05, 0.7, 0.1, 1);
+                }
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 0px;
+
+                    Rectangle {
+                        height: 48px;
+                        background: transparent;
+
+                        VerticalLayout {
+                            x: 12px;
+                            width: parent.width - 24px;
+                            alignment: center;
+                            spacing: 1px;
+
+                            Text {
+                                text: "Configuration profiles";
+                                color: MdTokens.on-surface;
+                                font-size: MdTokens.type-body-medium;
+                                font-weight: MdTokens.weight-medium;
+                            }
+                            Text {
+                                text: "Current · " + root.active-profile-name;
+                                color: MdTokens.on-surface-variant;
+                                font-size: MdTokens.type-body-small;
+                                overflow: elide;
+                            }
+                        }
+                    }
+
+                    for profile[index] in root.profile-names : ProfileMenuRow {
+                        name: profile;
+                        selected: profile == root.active-profile-name;
+                        control-enabled: !root.profile-saving;
+                        picked => {
+                            root.profile-menu-open = false;
+                            if profile != root.active-profile-name {
+                                if root.running {
+                                    root.profile-dialog-target-name = profile;
+                                    root.profile-dialog-mode = 4;
+                                } else {
+                                    root.activate-profile(profile);
+                                }
+                            }
+                        }
+                        rename => {
+                            root.profile-menu-open = false;
+                            root.profile-dialog-target-name = profile;
+                            root.profile-name-draft = profile;
+                            root.profile-name-error = "";
+                            root.profile-dialog-mode = 2;
+                        }
+                        remove => {
+                            root.profile-menu-open = false;
+                            root.profile-dialog-target-name = profile;
+                            root.profile-dialog-mode = 3;
+                        }
+                    }
+
+                    Rectangle {
+                        height: 1px;
+                        background: MdTokens.outline-variant;
+                    }
+
+                    ProfileMenuAction {
+                        text: root.profile-names.length >= root.max-profile-count
+                            ? "Profile limit reached"
+                            : "New profile";
+                        icon-kind: 0;
+                        control-enabled: !root.profile-saving
+                            && root.profile-names.length < root.max-profile-count;
+                        clicked => {
+                            root.profile-menu-open = false;
+                            root.profile-dialog-target-name = "";
+                            root.profile-name-draft = "";
+                            root.profile-name-error = "";
+                            root.profile-dialog-mode = 1;
+                        }
+                    }
+
+                    ProfileMenuAction {
+                        text: "Open profile folder";
+                        icon-kind: 1;
+                        control-enabled: !root.profile-saving;
+                        clicked => {
+                            root.profile-menu-open = false;
+                            root.open-profile-directory();
+                        }
+                    }
+                }
+            }
+
+            profile-dialog-layer := Rectangle {
+                z: 30;
+                width: parent.width;
+                height: parent.height;
+                visible: root.profile-dialog-mode != 0;
+                opacity: root.profile-dialog-mode != 0 ? 1 : 0;
+                background: #66000000;
+                animate opacity {
+                    duration: 150ms;
+                    easing: cubic-bezier(0.05, 0.7, 0.1, 1);
+                }
+
+                TouchArea {
+                    accessible-role: none;
+                    clicked => {
+                        root.profile-dialog-mode = 0;
+                        root.profile-name-error = "";
+                    }
+                }
+
+                profile-dialog := Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: root.profile-dialog-mode != 0
+                        ? (parent.height - self.height) / 2
+                        : (parent.height - self.height) / 2 + 12px;
+                    width: 320px;
+                    height: root.profile-dialog-mode == 1 || root.profile-dialog-mode == 2
+                        ? 288px : 216px;
+                    background: MdTokens.surface;
+                    border-width: 1px;
+                    border-color: MdTokens.outline-variant;
+                    border-radius: 28px;
+                    animate y {
+                        duration: 220ms;
+                        easing: cubic-bezier(0.05, 0.7, 0.1, 1);
+                    }
+
+                    TouchArea { accessible-role: none; }
+
+                    VerticalLayout {
+                        padding: 20px;
+                        spacing: MdTokens.space-1;
+
+                        Text {
+                            height: 28px;
+                            text: root.profile-dialog-mode == 1
+                                ? "New profile"
+                                : (root.profile-dialog-mode == 2
+                                    ? "Rename profile"
+                                    : (root.profile-dialog-mode == 3
+                                        ? (root.profile-names.length <= 1
+                                            ? "Keep one profile"
+                                            : "Delete " + root.dialog-profile-name + "?")
+                                        : "Switch to " + root.dialog-profile-name + "?"));
+                            color: MdTokens.on-surface;
+                            font-size: MdTokens.type-title-large;
+                            font-weight: MdTokens.weight-medium;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        Text {
+                            height: 44px;
+                            text: root.profile-dialog-mode == 1
+                                ? "Copy the current profile, then customize the new one."
+                                : (root.profile-dialog-mode == 2
+                                    ? "Only the profile name will change."
+                                    : (root.profile-dialog-mode == 3
+                                        ? (root.profile-names.length <= 1
+                                            ? "At least one configuration profile is required."
+                                            : (root.profile-dialog-target-name == root.active-profile-name
+                                                ? (root.running
+                                                    ? "Another profile will become active and the mapping will restart."
+                                                    : "Another profile will become active after deletion.")
+                                                : "This action cannot be undone."))
+                                        : "The current mapping will restart to apply this profile."));
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-medium;
+                            wrap: word-wrap;
+                        }
+
+                        if root.profile-dialog-mode == 1 || root.profile-dialog-mode == 2 : LineEdit {
+                            height: MdTokens.target;
+                            text <=> root.profile-name-draft;
+                            placeholder-text: "Profile name";
+                            accessible-label: root.profile-dialog-mode == 1
+                                ? "New profile name" : "Renamed profile name";
+                            edited => { root.profile-name-error = ""; }
+                        }
+
+                        if root.profile-dialog-mode == 1 || root.profile-dialog-mode == 2 : Text {
+                            height: 16px;
+                            text: root.profile-name-error;
+                            color: MdTokens.error;
+                            font-size: MdTokens.type-body-small;
+                            overflow: elide;
+                        }
+
+                        Rectangle { vertical-stretch: 1; }
+
+                        HorizontalLayout {
+                            height: MdTokens.target;
+                            spacing: MdTokens.space-1;
+                            Rectangle { horizontal-stretch: 1; }
+
+                            DialogActionButton {
+                                text: root.profile-dialog-mode == 3 && root.profile-names.length <= 1
+                                    ? "Close" : "Cancel";
+                                field-label: "Cancel profile action";
+                                clicked => {
+                                    root.profile-dialog-mode = 0;
+                                    root.profile-name-error = "";
+                                }
+                            }
+
+                            DialogActionButton {
+                                visible: !(root.profile-dialog-mode == 3 && root.profile-names.length <= 1);
+                                width: root.profile-dialog-mode == 4 ? 128px : 96px;
+                                text: root.profile-dialog-mode == 1
+                                    ? "Create"
+                                    : (root.profile-dialog-mode == 2
+                                        ? "Rename"
+                                        : (root.profile-dialog-mode == 3
+                                            ? "Delete" : "Switch & restart"));
+                                field-label: "Confirm profile action";
+                                destructive: root.profile-dialog-mode == 3;
+                                clicked => {
+                                    if root.profile-dialog-mode == 1 || root.profile-dialog-mode == 2 {
+                                        if root.profile-name-draft == "" {
+                                            root.profile-name-error = "Enter a profile name";
+                                        } else if root.profile-dialog-mode == 1 {
+                                            root.create-profile(root.profile-name-draft);
+                                            root.profile-dialog-mode = 0;
+                                        } else {
+                                            root.rename-profile(
+                                                root.profile-dialog-target-name,
+                                                root.profile-name-draft,
+                                            );
+                                            root.profile-dialog-mode = 0;
+                                        }
+                                    } else if root.profile-dialog-mode == 3 {
+                                        root.delete-profile(root.profile-dialog-target-name);
+                                        root.profile-dialog-mode = 0;
+                                    } else {
+                                        root.activate-profile(root.profile-dialog-target-name);
+                                        root.profile-dialog-mode = 0;
+                                    }
+                                    root.profile-name-error = "";
+                                }
+                            }
+                        }
+                    }
                 }
             }
 }

@@ -34,6 +34,11 @@ display, sizing, resolution, refresh-rate, aspect-ratio and rotation settings
 survive normal restarts and installer upgrades. Existing single-output
 configuration is imported automatically as **Output 1**.
 
+Quick Access can keep up to three named configuration profiles. Create a profile
+from the current setup, switch between profiles, rename or delete them, and open
+the JSON storage directory from the profile menu. Switching while mapping is
+running asks for confirmation, then restarts the mapping with the selected profile.
+
 ## Streaming
 
 Set an output to **Stream only**, choose its resolution, refresh rate and
@@ -58,7 +63,7 @@ More implementation detail is available in
 
 ## Install
 
-1. Download `SBMS-Setup-1.4.514-x64.exe` from the latest GitHub release.
+1. Download `SBMS-Setup-1.5.1-x64.exe` from the latest GitHub release.
 2. Run it and approve the administrator prompt.
 3. Open SBMS from the tray, choose a target display, and select **Start mapping**.
 4. Select **Stop and restore** when you want to end the mapping and restore the

@@ -1,7 +1,8 @@
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
-use crate::config::{DisplayOverrideStore, DisplayOverrides};
+use crate::config::{ConfigProfiles, DisplayOverrideStore, DisplayOverrides};
 use crate::controller::{ControllerSender, DisplayOption};
 use crate::diagnostics::{self, Level};
 use crate::limits::MAX_OUTPUTS;
@@ -152,6 +153,225 @@ pub(super) fn register_lifecycle_handlers(
             surface_transient_error(&ui, &sunshine_error_revision, &error);
         }
     });
+}
+
+pub(super) fn register_profile_handlers(
+    flyout: &QuickAccess,
+    sender: &ControllerSender,
+    state: &HandlerState,
+    error_revision: &Arc<AtomicU64>,
+    pending_config_reload: &Arc<AtomicBool>,
+    pending_profile_restart: &Arc<AtomicBool>,
+) {
+    {
+        let ui = flyout.as_weak();
+        let state = state.clone();
+        flyout.on_create_profile(move |name| {
+            let name = name.trim().to_string();
+            let state = state.clone();
+            spawn_profile_write(
+                ui.clone(),
+                "create profile",
+                move || {
+                    let store = ConfigProfileStore::default_store().map_err(|e| e.to_string())?;
+                    let (snapshot, _) = store
+                        .duplicate_active(&name, true)
+                        .map_err(|e| e.to_string())?;
+                    let profiles = store.list().map_err(|e| e.to_string())?;
+                    Ok((snapshot, profiles))
+                },
+                move |_ui, snapshot| {
+                    *state
+                        .profile_revision
+                        .lock()
+                        .expect("config profile revision poisoned") = snapshot.profile;
+                },
+            );
+        });
+    }
+
+    {
+        let ui = flyout.as_weak();
+        let state = state.clone();
+        flyout.on_rename_profile(move |old_name, new_name| {
+            let old_name = old_name.to_string();
+            let new_name = new_name.trim().to_string();
+            let state = state.clone();
+            spawn_profile_write(
+                ui.clone(),
+                "rename profile",
+                move || {
+                    let store = ConfigProfileStore::default_store().map_err(|e| e.to_string())?;
+                    let (snapshot, active) = store
+                        .rename(&old_name, &new_name)
+                        .map_err(|e| e.to_string())?;
+                    let profiles = store.list().map_err(|e| e.to_string())?;
+                    Ok(((snapshot, active), profiles))
+                },
+                move |_ui, (snapshot, active)| {
+                    if active {
+                        *state
+                            .profile_revision
+                            .lock()
+                            .expect("config profile revision poisoned") = snapshot.profile;
+                    }
+                },
+            );
+        });
+    }
+
+    {
+        let ui = flyout.as_weak();
+        let sender = sender.clone();
+        let state = state.clone();
+        let error_revision = error_revision.clone();
+        let pending_config_reload = pending_config_reload.clone();
+        let pending_profile_restart = pending_profile_restart.clone();
+        flyout.on_delete_profile(move |name| {
+            let name = name.to_string();
+            let sender = sender.clone();
+            let state = state.clone();
+            let error_revision = error_revision.clone();
+            let pending_config_reload = pending_config_reload.clone();
+            let pending_profile_restart = pending_profile_restart.clone();
+            spawn_profile_write(
+                ui.clone(),
+                "delete profile",
+                move || {
+                    let store = ConfigProfileStore::default_store().map_err(|e| e.to_string())?;
+                    let outcome = store
+                        .delete_with_fallback(&name)
+                        .map_err(|e| e.to_string())?;
+                    let profiles = store.list().map_err(|e| e.to_string())?;
+                    Ok((outcome, profiles))
+                },
+                move |ui, outcome| {
+                    if outcome.active_changed {
+                        reload_or_restart_profile(
+                            ui,
+                            &sender,
+                            &state,
+                            &error_revision,
+                            &pending_config_reload,
+                            &pending_profile_restart,
+                        );
+                    }
+                },
+            );
+        });
+    }
+
+    {
+        let ui = flyout.as_weak();
+        let sender = sender.clone();
+        let state = state.clone();
+        let error_revision = error_revision.clone();
+        let pending_config_reload = pending_config_reload.clone();
+        let pending_profile_restart = pending_profile_restart.clone();
+        flyout.on_activate_profile(move |name| {
+            let name = name.to_string();
+            let sender = sender.clone();
+            let state = state.clone();
+            let error_revision = error_revision.clone();
+            let pending_config_reload = pending_config_reload.clone();
+            let pending_profile_restart = pending_profile_restart.clone();
+            spawn_profile_write(
+                ui.clone(),
+                "switch profile",
+                move || {
+                    let store = ConfigProfileStore::default_store().map_err(|e| e.to_string())?;
+                    let snapshot = store.activate(&name).map_err(|e| e.to_string())?;
+                    let profiles = store.list().map_err(|e| e.to_string())?;
+                    Ok((snapshot, profiles))
+                },
+                move |ui, _snapshot| {
+                    reload_or_restart_profile(
+                        ui,
+                        &sender,
+                        &state,
+                        &error_revision,
+                        &pending_config_reload,
+                        &pending_profile_restart,
+                    );
+                },
+            );
+        });
+    }
+}
+
+fn spawn_profile_write<T, Operation, Completion>(
+    ui: slint::Weak<QuickAccess>,
+    action: &'static str,
+    operation: Operation,
+    completion: Completion,
+) where
+    T: Send + 'static,
+    Operation: FnOnce() -> Result<(T, ConfigProfiles), String> + Send + 'static,
+    Completion: FnOnce(&QuickAccess, T) + Send + 'static,
+{
+    let Some(strong_ui) = ui.upgrade() else {
+        return;
+    };
+    if strong_ui.get_profile_saving() {
+        return;
+    }
+    strong_ui.set_error_text("".into());
+    let generation = begin_profile_save(&strong_ui);
+    drop(strong_ui);
+
+    thread::spawn(move || {
+        let result = operation();
+        let callback_ui = ui.clone();
+        if let Err(error) = slint::invoke_from_event_loop(move || {
+            let Some(strong_ui) = callback_ui.upgrade() else {
+                return;
+            };
+            match result {
+                Ok((value, profiles)) => {
+                    project_profiles(&strong_ui, &profiles);
+                    completion(&strong_ui, value);
+                    finish_profile_save(callback_ui.clone(), generation, true);
+                }
+                Err(error) => {
+                    diagnostics::log(Level::Warn, "config", action, None, &error);
+                    strong_ui.set_error_text(format!("Couldn’t {action}: {error}").into());
+                    finish_profile_save(callback_ui.clone(), generation, false);
+                }
+            }
+        }) {
+            diagnostics::log(
+                Level::Warn,
+                "config",
+                "profile-ui-dispatch",
+                None,
+                error.to_string(),
+            );
+        }
+    });
+}
+
+fn reload_or_restart_profile(
+    ui: &QuickAccess,
+    sender: &ControllerSender,
+    state: &HandlerState,
+    error_revision: &Arc<AtomicU64>,
+    pending_config_reload: &Arc<AtomicBool>,
+    pending_profile_restart: &Arc<AtomicBool>,
+) {
+    if ui.get_running() || ui.get_busy() {
+        pending_config_reload.store(true, Ordering::Release);
+        pending_profile_restart.store(true, Ordering::Release);
+        sender.stop();
+        return;
+    }
+    apply_config_reload(
+        ui,
+        &state.displays,
+        &state.groups,
+        &state.active_group,
+        &state.profile_revision,
+        error_revision,
+    );
 }
 
 pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerState) {
