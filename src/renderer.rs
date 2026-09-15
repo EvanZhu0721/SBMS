@@ -488,7 +488,7 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    if let Some(result) = handle_message(message, lparam) {
+    if let Some(result) = handle_message(message, wparam, lparam) {
         return result;
     }
     match message {

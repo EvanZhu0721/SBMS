@@ -29,3 +29,6 @@ $result = Invoke-Pester -Script $paths -PassThru
 if ($result.FailedCount -ne 0) {
     throw "$($result.FailedCount) Pester test(s) failed."
 }
+
+# Tests may leave a native exit code that the CI PowerShell wrapper would reuse.
+exit 0
