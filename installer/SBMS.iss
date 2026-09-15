@@ -43,7 +43,9 @@ Source: "..\target\driver\SBMSIndirectDisplay.cat"; DestDir: "{app}\driver"; Fla
 Source: "maintenance.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "manage-sunshine-instance.ps1"; DestDir: "{app}\installer"; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}\licenses"; DestName: "GPL-3.0.txt"; Flags: ignoreversion
 Source: "..\LICENSES\MS-PL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\LICENSES\Apache-2.0.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "maintenance.ps1"; DestName: "sbms-maintenance.ps1"; Flags: dontcopy
 
 [InstallDelete]
