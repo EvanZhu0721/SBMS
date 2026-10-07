@@ -1,7 +1,8 @@
+use std::cell::Cell;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS, GetThreadDesktop,
@@ -19,6 +20,27 @@ use windows::core::{BOOL, PWSTR};
 
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const CLOSED_SETTLE: Duration = Duration::from_millis(100);
+
+/// Enlarge an owned clip just enough for a cursor transfer. Both the current
+/// cursor (inside `clip`) and destination stay legal until placement completes.
+pub(super) fn return_clip(clip: RECT, destination: POINT) -> Option<RECT> {
+    Some(RECT {
+        left: clip.left.min(destination.x),
+        top: clip.top.min(destination.y),
+        right: clip.right.max(destination.x.checked_add(1)?),
+        bottom: clip.bottom.max(destination.y.checked_add(1)?),
+    })
+}
+
+/// Discard only events from at/before the transfer, not new motion during a
+/// fixed quiet period. Expiration prevents the 32-bit message clock from being
+/// mistaken for an old event after a long idle or a clock wrap.
+pub(super) fn stale_return_motion(time: u32, encoded_tick: u64, now: u64) -> bool {
+    let Some(tick) = encoded_tick.checked_sub(1) else {
+        return false;
+    };
+    now.saturating_sub(tick) <= 1_000 && (time.wrapping_sub(tick as u32) as i32) <= 0
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Progress {
@@ -74,32 +96,125 @@ impl Session {
     }
 }
 
+/// Pure per-scan state for one `EnumWindows` traversal. `observe` returns
+/// `false` to stop the enumeration as soon as a real overlay is confirmed;
+/// `outcome` folds the traversal result into the established `Option<bool>`
+/// semantics where only a fully clean scan may confirm absence.
 #[derive(Default)]
-struct Enumeration {
+struct OverlayScan {
     visible: bool,
     uncertain: bool,
+    found: Option<isize>,
+}
+
+impl OverlayScan {
+    /// Feed one classified window. `false` means "stop the enumeration"; an
+    /// uncertain classification keeps scanning but never confirms absence.
+    fn observe(&mut self, handle: isize, overlay: Option<bool>) -> bool {
+        match overlay {
+            Some(true) => {
+                self.visible = true;
+                self.found = Some(handle);
+                false
+            }
+            Some(false) => true,
+            None => {
+                self.uncertain = true;
+                true
+            }
+        }
+    }
+
+    /// `enumeration_failed` is `EnumWindows`'s own error return. It is only
+    /// consulted when no overlay was found, so the FALSE produced by the early
+    /// stop (the callback declining further windows after a find) is never
+    /// mistaken for a failed enumeration.
+    fn outcome(&self, enumeration_failed: bool) -> Option<bool> {
+        if self.visible {
+            Some(true)
+        } else if enumeration_failed || self.uncertain {
+            None
+        } else {
+            Some(false)
+        }
+    }
+}
+
+/// Thread-local cache for the last confirmed overlay handle. The handle is a
+/// plain `isize` key so the policy is pure and unit-testable; the caller always
+/// re-validates it through the full `window_is_overlay` identity check
+/// (class/process/visibility), so a closed, destroyed or reused handle falls
+/// back to the full search instead of being trusted.
+#[derive(Clone, Copy)]
+struct OverlayCache {
+    candidate: Option<isize>,
+}
+
+impl OverlayCache {
+    const fn new() -> Self {
+        Self { candidate: None }
+    }
+
+    fn visibility(
+        &mut self,
+        revalidate: impl FnOnce(isize) -> Option<bool>,
+        search: impl FnOnce() -> (Option<bool>, Option<isize>),
+    ) -> Option<bool> {
+        if let Some(candidate) = self.candidate {
+            match revalidate(candidate) {
+                // Still the live overlay: skip the enumeration entirely.
+                Some(true) => return Some(true),
+                // Closed, hidden or reused by another window: search again.
+                Some(false) => self.candidate = None,
+                // A failed re-validation proves nothing. Keep the candidate and
+                // the uncertainty: never report a confirmed close.
+                None => return None,
+            }
+        }
+        let (visible, found) = search();
+        self.candidate = if visible == Some(true) { found } else { None };
+        visible
+    }
+}
+
+thread_local! {
+    static OVERLAY_CACHE: Cell<OverlayCache> = const { Cell::new(OverlayCache::new()) };
 }
 
 pub(super) fn overlay_visible() -> Option<bool> {
     // While a session is armed, any input-desktop switch must defer restoration.
     // The renderer cannot safely move or recapture the cursor on another desktop.
+    // The desktop check runs first on every poll, before the cache.
     if !current_desktop_is_input()? {
         return Some(true);
     }
-    let mut enumeration = Enumeration::default();
+    OVERLAY_CACHE.with(|cache| {
+        // Keep no RefCell borrow alive across Win32 calls: input callbacks can
+        // re-enter this thread while a window is being inspected.
+        let mut candidate = cache.get();
+        let visible = candidate.visibility(
+            |handle| window_is_overlay(hwnd_from_key(handle)),
+            search_overlay,
+        );
+        cache.set(candidate);
+        visible
+    })
+}
+
+/// Full enumeration for cache misses: stops at the first confirmed overlay.
+fn search_overlay() -> (Option<bool>, Option<isize>) {
+    let mut scan = OverlayScan::default();
     let result = unsafe {
         EnumWindows(
             Some(enumerate_window),
-            LPARAM((&mut enumeration as *mut Enumeration) as isize),
+            LPARAM((&mut scan as *mut OverlayScan) as isize),
         )
     };
-    if enumeration.visible {
-        Some(true)
-    } else if result.is_err() || enumeration.uncertain {
-        None
-    } else {
-        Some(false)
-    }
+    (scan.outcome(result.is_err()), scan.found)
+}
+
+fn hwnd_from_key(handle: isize) -> HWND {
+    HWND(handle as *mut _)
 }
 
 fn current_desktop_is_input() -> Option<bool> {
@@ -132,25 +247,34 @@ fn desktop_name(desktop: HDESK) -> Option<Vec<u16>> {
 }
 
 unsafe extern "system" fn enumerate_window(window: HWND, parameter: LPARAM) -> BOOL {
-    let _ = unsafe { enumerate_overlay(window, parameter) };
+    // A confirmed find below returns BOOL(0) and stops this top-level scan too.
+    if unsafe { enumerate_overlay(window, parameter) }.0 == 0 {
+        return BOOL(0);
+    }
     if unsafe { IsWindowVisible(window) }.as_bool() {
         // The precise overlay root can be hosted beneath a framework window.
         // EnumChildWindows already traverses descendants; do not recurse in its callback.
+        // Its FALSE return after a find is the stop signal, not an error.
         unsafe {
             let _ = EnumChildWindows(Some(window), Some(enumerate_overlay), parameter);
         }
     }
-    BOOL(1)
+    // Propagate a find from the child scan to the outer EnumWindows loop.
+    let found = unsafe { &*(parameter.0 as *const OverlayScan) }.visible;
+    BOOL(if found { 0 } else { 1 })
 }
 
 unsafe extern "system" fn enumerate_overlay(window: HWND, parameter: LPARAM) -> BOOL {
-    let enumeration = unsafe { &mut *(parameter.0 as *mut Enumeration) };
-    match window_is_overlay(window) {
-        Some(true) => enumeration.visible = true,
-        Some(false) => {}
-        None => enumeration.uncertain = true,
-    }
-    BOOL(1)
+    let overlay = window_is_overlay(window);
+    let scan = unsafe { &mut *(parameter.0 as *mut OverlayScan) };
+    // BOOL(0) stops EnumChildWindows/EnumWindows as soon as a real overlay is
+    // confirmed. The found handle is recorded before returning, so the early
+    // stop's FALSE can never be mistaken for an enumeration failure.
+    BOOL(if scan.observe(window.0 as isize, overlay) {
+        1
+    } else {
+        0
+    })
 }
 
 fn window_is_overlay(window: HWND) -> Option<bool> {
@@ -256,8 +380,75 @@ fn overlay_kind(class: &str, image: &str) -> Option<OverlayKind> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OverlayKind, Progress, Session, overlay_kind};
+    use super::{
+        OverlayCache, OverlayKind, OverlayScan, Progress, Session, overlay_kind, return_clip,
+        stale_return_motion,
+    };
+    use std::cell::Cell;
     use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::{POINT, RECT};
+
+    #[test]
+    fn return_keeps_both_positions_legal_until_final_placement() {
+        let physical = RECT {
+            left: -200,
+            top: -100,
+            right: 0,
+            bottom: 0,
+        };
+        let logical = RECT {
+            left: 0,
+            top: 0,
+            right: 400,
+            bottom: 400,
+        };
+        let start = POINT { x: -100, y: -50 };
+        let destination = POINT { x: 200, y: 300 };
+        let clamp = |rect: RECT, p: POINT| POINT {
+            x: p.x.clamp(rect.left, rect.right - 1),
+            y: p.y.clamp(rect.top, rect.bottom - 1),
+        };
+        // The old order creates a visible, unrelated intermediate edge point.
+        assert_eq!(clamp(logical, start), POINT { x: 0, y: 0 });
+        let bridge = return_clip(physical, destination).unwrap();
+        assert_eq!(clamp(bridge, start), start);
+        assert_eq!(clamp(bridge, destination), destination);
+        assert_eq!(clamp(logical, destination), destination);
+        // An ordinary display needs no repositioning or unnecessary expansion.
+        assert_eq!(return_clip(logical, destination), Some(logical));
+        // Half-open bounds must include a destination exactly at the old edge.
+        let edge = POINT {
+            x: physical.right,
+            y: physical.bottom,
+        };
+        assert_eq!(clamp(return_clip(physical, edge).unwrap(), edge), edge);
+        assert!(return_clip(physical, POINT { x: i32::MAX, y: 0 }).is_none());
+    }
+
+    #[test]
+    fn return_fence_rejects_delayed_motion_but_never_waits_for_a_quiet_mouse() {
+        let encoded_tick = 1_001;
+        for time in [950, 999, 1_000] {
+            assert!(stale_return_motion(time, encoded_tick, 1_010));
+        }
+        // Keep accepting fresh motion even while an older raw packet is late.
+        assert!(!stale_return_motion(1_001, encoded_tick, 1_010));
+        assert!(stale_return_motion(999, encoded_tick, 1_011));
+        assert!(!stale_return_motion(1_010, encoded_tick, 1_011));
+        assert!(!stale_return_motion(999, 0, 1_010));
+        assert!(!stale_return_motion(999, encoded_tick, 2_001));
+    }
+
+    #[test]
+    fn return_fence_handles_zero_and_32_bit_message_clock_wrap() {
+        assert!(stale_return_motion(0, 1, 0));
+        assert!(!stale_return_motion(1, 1, 1));
+        let tick = u32::MAX as u64 + 2;
+        assert!(stale_return_motion(u32::MAX, tick + 1, tick + 1));
+        assert!(stale_return_motion(1, tick + 1, tick + 1));
+        assert!(!stale_return_motion(2, tick + 1, tick + 1));
+        assert!(!stale_return_motion(0, tick + 1, tick + (1 << 32)));
+    }
 
     #[test]
     fn a_long_selection_has_no_forced_completion() {
@@ -385,5 +576,158 @@ mod tests {
             Some(false)
         );
         assert_eq!(OverlayKind::ScreenClippingHost.visibility(true, None), None);
+    }
+
+    #[test]
+    fn cache_hit_skips_the_full_enumeration() {
+        let mut cache = OverlayCache::new();
+        assert_eq!(
+            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
+            Some(true)
+        );
+        let searched = Cell::new(false);
+        assert_eq!(
+            cache.visibility(
+                |handle| {
+                    assert_eq!(handle, 7);
+                    Some(true)
+                },
+                || {
+                    searched.set(true);
+                    (Some(false), None)
+                }
+            ),
+            Some(true)
+        );
+        assert!(
+            !searched.get(),
+            "a confirmed cache hit must not scan the desktop"
+        );
+    }
+
+    #[test]
+    fn rejected_cache_falls_back_to_search_and_replaces_the_candidate() {
+        let mut cache = OverlayCache::new();
+        assert_eq!(
+            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
+            Some(true)
+        );
+        // Window 7 closed mid-poll: the re-validation rejects it and the full
+        // search runs again, caching the overlay it actually found.
+        assert_eq!(
+            cache.visibility(|_| Some(false), || (Some(true), Some(9))),
+            Some(true)
+        );
+        let searched = Cell::new(false);
+        assert_eq!(
+            cache.visibility(
+                |handle| {
+                    assert_eq!(handle, 9, "the replacement candidate must be re-validated");
+                    Some(true)
+                },
+                || {
+                    searched.set(true);
+                    (Some(false), None)
+                }
+            ),
+            Some(true)
+        );
+        assert!(!searched.get());
+    }
+
+    #[test]
+    fn reused_handle_is_not_mistaken_for_the_overlay() {
+        let mut cache = OverlayCache::new();
+        assert_eq!(
+            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
+            Some(true)
+        );
+        // Handle 7 was destroyed and reused by a foreign window: the full
+        // class/process/visibility re-validation rejects it, so the outcome is
+        // the search's own answer, never a false "overlay visible".
+        assert_eq!(
+            cache.visibility(|_| Some(false), || (Some(false), None)),
+            Some(false)
+        );
+        // The cache is empty again: the next poll searches without a probe.
+        assert_eq!(
+            cache.visibility(|_| unreachable!(), || (Some(true), Some(8))),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn failed_revalidation_keeps_the_candidate_and_never_confirms_closure() {
+        let mut cache = OverlayCache::new();
+        assert_eq!(
+            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
+            Some(true)
+        );
+        let searched = Cell::new(false);
+        // A failed identity query is uncertainty: it must not become a
+        // confirmed close, and no search may overrule it behind the candidate.
+        assert_eq!(
+            cache.visibility(
+                |_| None,
+                || {
+                    searched.set(true);
+                    (Some(false), None)
+                }
+            ),
+            None
+        );
+        assert!(!searched.get());
+        // The candidate stays cached: the next poll re-validates the same handle.
+        assert_eq!(
+            cache.visibility(
+                |handle| {
+                    assert_eq!(handle, 7);
+                    Some(true)
+                },
+                || unreachable!()
+            ),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn search_stops_at_the_first_confirmed_overlay() {
+        let mut scan = OverlayScan::default();
+        assert!(scan.observe(1, Some(false)));
+        // An uncertain classification keeps scanning; it must not stop the
+        // search before a real overlay is found.
+        assert!(scan.observe(2, None));
+        // The confirmed overlay stops the enumeration immediately.
+        assert!(!scan.observe(3, Some(true)));
+        assert_eq!(scan.found, Some(3));
+        // Windows after the stop are never classified: the find already won.
+        assert_eq!(scan.outcome(false), Some(true));
+    }
+
+    #[test]
+    fn uncertain_results_are_never_confirmed_closed() {
+        // A failed window query keeps the scan uncertain even if the rest is clean.
+        let mut scan = OverlayScan::default();
+        assert!(scan.observe(1, Some(false)));
+        assert!(scan.observe(2, None));
+        assert_eq!(scan.outcome(false), None);
+        // An unexplained EnumWindows failure without a find is uncertainty too.
+        let mut scan = OverlayScan::default();
+        assert!(scan.observe(1, Some(false)));
+        assert_eq!(scan.outcome(true), None);
+        // Only a fully clean scan confirms absence.
+        let mut scan = OverlayScan::default();
+        assert!(scan.observe(1, Some(false)));
+        assert_eq!(scan.outcome(false), Some(false));
+    }
+
+    #[test]
+    fn an_early_stop_find_is_not_an_enumeration_failure() {
+        // EnumWindows reports FALSE when the callback stops it after a find;
+        // the recorded find must win over that error return.
+        let mut scan = OverlayScan::default();
+        assert!(!scan.observe(4, Some(true)));
+        assert_eq!(scan.outcome(true), Some(true));
+        assert_eq!(scan.found, Some(4));
     }
 }
