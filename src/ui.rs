@@ -1424,7 +1424,7 @@ fn finish_profile_save(ui: slint::Weak<QuickAccess>, generation: u64, succeeded:
     if succeeded {
         // Keep the real write transition visible long enough to be perceived.
         // The timer only controls presentation; success still comes from the store.
-        slint::Timer::single_shot(Duration::from_millis(400), finish);
+        slint::Timer::single_shot(Duration::from_millis(800), finish);
     } else {
         finish();
     }
