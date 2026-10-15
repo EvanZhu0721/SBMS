@@ -126,10 +126,12 @@ fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
                 MappingEvent::Renderer {
                     id,
                     event: RendererEvent::Fps(fps),
+                    ..
                 } => println!("group={id} fps={fps}"),
                 MappingEvent::Renderer {
                     id,
                     event: RendererEvent::Failed(error),
+                    ..
                 } => {
                     diagnostics::log(
                         Level::Error,
@@ -143,6 +145,7 @@ fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
                 MappingEvent::Renderer {
                     id,
                     event: RendererEvent::TopologyLost,
+                    ..
                 } => {
                     diagnostics::log(
                         Level::Warn,
@@ -289,10 +292,12 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
         MappingEvent::Renderer {
             id: 0,
             event: RendererEvent::Fps(fps),
+            ..
         } => println!("fps={fps}"),
         MappingEvent::Renderer {
             id: 0,
             event: RendererEvent::Failed(error),
+            ..
         } => {
             diagnostics::log(
                 Level::Error,
@@ -306,6 +311,7 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
         MappingEvent::Renderer {
             id: 0,
             event: RendererEvent::TopologyLost,
+            ..
         } => {
             diagnostics::log(
                 Level::Warn,

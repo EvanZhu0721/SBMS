@@ -66,7 +66,49 @@ type ConfigStateRefs<'a> = (
     &'a Arc<AtomicBool>,
 );
 
+fn take_login_start(pending: &AtomicBool, event: &ControllerEvent) -> bool {
+    match event {
+        ControllerEvent::Displays(_) => pending.swap(false, Ordering::AcqRel),
+        ControllerEvent::State { error, .. } if !error.is_empty() => {
+            pending.store(false, Ordering::Release);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn validate_login_displays(
+    groups: &[GroupDraft],
+    displays: &[DisplayOption],
+) -> Result<(), String> {
+    for group in groups {
+        if !group.stream_only
+            && !group
+                .target_id
+                .as_ref()
+                .is_some_and(|id| displays.iter().any(|d| &d.id == id))
+        {
+            return Err(format!(
+                "Group {}: saved target screen is unavailable",
+                group.id + 1
+            ));
+        }
+        if let Some(ReferenceSource::Display(id)) = &group.reference_source
+            && !displays.iter().any(|d| &d.id == id)
+        {
+            return Err(format!(
+                "Group {}: saved reference screen is unavailable",
+                group.id + 1
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<dyn Error>> {
+    // Read before publishing the host window: a manual launcher releases its
+    // marker as soon as that window becomes discoverable.
+    let login_start = crate::launch_broker::is_logon_startup(open_on_start)?;
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("software".into())
@@ -91,6 +133,12 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         });
     })?;
     let flyout = QuickAccess::new()?;
+    let auto_map_on_login = ConfigProfileStore::default_store()
+        .and_then(|store| store.list())
+        .map(|profiles| profiles.auto_map_on_login)
+        .unwrap_or(false);
+    flyout.set_auto_map_on_login(auto_map_on_login);
+    let pending_login_start = Arc::new(AtomicBool::new(login_start && auto_map_on_login));
     let intro_disabled = Arc::new(AtomicBool::new(
         ConfigProfileStore::default_store()
             .and_then(|store| store.list())
@@ -243,6 +291,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let event_pending_config_reload = pending_config_reload.clone();
     let event_pending_profile_restart = pending_profile_restart.clone();
     let controller = Controller::spawn(move |event| {
+        let pending_login_start = pending_login_start.clone();
         let ui = ui.clone();
         let tray = tray_handle.clone();
         let error_revision = event_error_revision.clone();
@@ -255,6 +304,15 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         let pending_profile_restart = event_pending_profile_restart.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui.upgrade() {
+                let auto_start = take_login_start(&pending_login_start, &event);
+                // UI hydration may select a different available screen for manual
+                // editing. Automatic startup must never save or use that fallback.
+                let login_displays = if auto_start && let ControllerEvent::Displays(found) = &event
+                {
+                    validate_login_displays(&groups.lock().expect("group drafts poisoned"), found)
+                } else {
+                    Ok(())
+                };
                 apply_event(
                     &ui,
                     tray,
@@ -269,6 +327,19 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
                     ),
                     event,
                 );
+                if auto_start
+                    && !ui.get_geometry_save_blocked()
+                    && !ui.get_running()
+                    && !ui.get_busy()
+                {
+                    match login_displays {
+                        Ok(()) => ui.invoke_start(),
+                        Err(error) => {
+                            ui.set_error_text(error.into());
+                            ui.set_state_detail("Login mapping needs attention".into());
+                        }
+                    }
+                }
             }
         });
     });
@@ -282,6 +353,22 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         profile_revision.clone(),
     );
     register_lifecycle_handlers(&flyout, &sender, &handler_state, &error_revision);
+    {
+        let ui = flyout.as_weak();
+        flyout.on_set_auto_map_on_login(move |enabled| {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            match ConfigProfileStore::default_store()
+                .and_then(|store| store.set_auto_map_on_login(enabled))
+            {
+                Ok(()) => ui.set_auto_map_on_login(enabled),
+                Err(error) => {
+                    ui.set_error_text(format!("Couldn’t save login preference: {error}").into())
+                }
+            }
+        });
+    }
     register_geometry_handlers(&flyout, &handler_state);
     register_stream_handlers(&flyout, &handler_state);
     register_screen_size_handlers(&flyout, &sender, &handler_state, &override_store);
@@ -1377,6 +1464,10 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
         return;
     }
 
+    // A display-mode change can leave a hidden HWND with pending monitor state.
+    // ShowWindow/winit applies that state while showing and may overwrite the
+    // pre-show position, so correct it once the native window is visible.
+    win32_flyout::position(ui.window());
     let activated = win32_flyout::activate(ui.window());
     diagnostics::log(
         Level::Debug,
@@ -1386,6 +1477,17 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
         format!("attempt=immediate foreground={activated}"),
     );
     ui.window().request_redraw();
+
+    // Explorer's tray rectangle and the monitor work area can settle one event
+    // loop turn after a refresh-rate/topology change. Re-read both instead of
+    // retaining coordinates from before the window became visible.
+    let reposition_ui = ui.as_weak();
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = reposition_ui.upgrade() {
+            win32_flyout::position(ui.window());
+            ui.window().request_redraw();
+        }
+    });
 
     if let Some(generation) = intro_generation {
         play_launch_intro(ui.as_weak(), generation);
@@ -1434,6 +1536,65 @@ fn play_launch_intro(ui: slint::Weak<QuickAccess>, generation: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn login_mapping_never_substitutes_a_missing_saved_screen() {
+        let displays = vec![display_option("other", "Other monitor")];
+        let mut group = super::GroupDraft::new(0);
+        group.target_id = Some("saved".into());
+        assert!(super::validate_login_displays(&[group.clone()], &displays).is_err());
+        group.target_id = Some("other".into());
+        assert!(super::validate_login_displays(&[group.clone()], &displays).is_ok());
+        group.reference_source = Some(crate::config::ReferenceSource::Display("missing".into()));
+        assert!(super::validate_login_displays(&[group.clone()], &displays).is_err());
+        group.stream_only = true;
+        group.reference_source = None;
+        assert!(super::validate_login_displays(&[group], &[]).is_ok());
+    }
+
+    #[test]
+    fn login_mapping_waits_for_displays_and_runs_only_once() {
+        use crate::controller::ControllerEvent;
+        use std::sync::atomic::AtomicBool;
+        let pending = AtomicBool::new(true);
+        assert!(!super::take_login_start(
+            &pending,
+            &ControllerEvent::Fps { id: 0, fps: 60 }
+        ));
+        assert!(super::take_login_start(
+            &pending,
+            &ControllerEvent::Displays(vec![])
+        ));
+        assert!(!super::take_login_start(
+            &pending,
+            &ControllerEvent::Displays(vec![])
+        ));
+        let disabled = AtomicBool::new(false);
+        assert!(!super::take_login_start(
+            &disabled,
+            &ControllerEvent::Displays(vec![])
+        ));
+    }
+
+    #[test]
+    fn failed_initial_refresh_cancels_login_mapping() {
+        use crate::controller::ControllerEvent;
+        use std::sync::atomic::AtomicBool;
+        let pending = AtomicBool::new(true);
+        let failure = ControllerEvent::State {
+            state: "Error",
+            detail: String::new(),
+            running: false,
+            busy: false,
+            error: "Display enumeration failed".into(),
+            restart_available: false,
+        };
+        assert!(!super::take_login_start(&pending, &failure));
+        assert!(!super::take_login_start(
+            &pending,
+            &ControllerEvent::Displays(vec![])
+        ));
+    }
+
     use super::{
         COMMON_HEIGHTS, COMMON_WIDTHS, DISPLAY_SETTINGS_URI, GroupDraft, active_after_removal,
         aspect_ratio_from_index, build_mapping_plan, dimensions_from_diagonal,

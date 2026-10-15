@@ -1089,6 +1089,10 @@ pub(crate) fn flush_movement() {
 }
 
 fn release_capture() -> bool {
+    release_capture_with_handoff(true)
+}
+
+fn release_capture_with_handoff(handoff: bool) -> bool {
     let release = INPUT_STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut()?;
@@ -1113,7 +1117,7 @@ fn release_capture() -> bool {
     if let Some((source, target, tag, pressed, window)) = release {
         let owned_endpoint = deactivate_endpoint(window);
         release_pressed_buttons(source, tag, pressed);
-        if owned_endpoint {
+        if owned_endpoint && handoff {
             // Never land the released cursor inside a mapped target display;
             // with the boundary paused (screenshot handoff) the raw mirror
             // position is kept.
@@ -1146,15 +1150,27 @@ fn release_pressed_buttons(point: POINT, tag: usize, pressed: u8) {
 }
 
 fn cleanup() {
-    cancel_screenshot_restore();
-    release_capture();
+    // Renderer teardown invalidates its coordinates. Discard the screenshot
+    // session without returning through its old navigation or boundary.
+    let restore = take_screenshot_restore();
+    let window = INPUT_STATE.with(|cell| cell.borrow().as_ref().map(|state| state.window));
+    if let Some(window) = window {
+        unregister_input_guard(window);
+    }
+    release_capture_with_handoff(false);
+    if restore.is_some() {
+        let mut coordination = lock_coordination();
+        coordination.boundary.resume();
+        if let Err(error) = apply_clip_state_locked(&mut coordination) {
+            eprintln!("warning: screenshot teardown clip cleanup failed: {error}");
+        }
+    }
     let hooks = INPUT_STATE.with(|cell| {
         cell.borrow_mut()
             .take()
-            .map(|state| (state.window, state.mouse_hook, state.keyboard_hook))
+            .map(|state| (state.mouse_hook, state.keyboard_hook))
     });
-    if let Some((window, mouse, keyboard)) = hooks {
-        unregister_input_guard(window);
+    if let Some((mouse, keyboard)) = hooks {
         unsafe {
             let _ = UnhookWindowsHookEx(mouse);
             let _ = UnhookWindowsHookEx(keyboard);

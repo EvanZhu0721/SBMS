@@ -97,9 +97,18 @@ Describe 'SBMS launch entry contract' {
         Mock New-ScheduledTaskPrincipal { $script:mockPrincipal }
         Mock New-ScheduledTaskSettingsSet { $script:mockSettings }
         Mock Register-ScheduledTask {
+            $marker = [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8')
+            $marker.Dispose()
             $script:taskRegistered = $true
         }
         Mock Start-ScheduledTask {}
+        $script:readyChecks = 0
+        Mock Test-SbmsTrayReady {
+            $marker = [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8')
+            $marker.Dispose()
+            $script:readyChecks++
+            $script:readyChecks -ge 2
+        }
         Mock Start-Sleep {}
         Mock Get-InstalledSbmsProcesses {
             $script:processScan++
@@ -149,9 +158,10 @@ Describe 'SBMS launch entry contract' {
                 $TaskPath -eq '\SBMS\' -and
                     $TaskName -eq 'Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A'
             }
-        Assert-MockCalled Start-Sleep -Times 0 -Exactly `
+        Assert-MockCalled Start-Sleep -Times 1 -Exactly `
             -ParameterFilter { $Milliseconds -eq 200 }
-        $script:processScan | Should Be 2
+        $script:processScan | Should Be 3
+        { [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8') } | Should Throw
     }
 
     It 'accepts the legacy empty task arguments during an upgrade' {

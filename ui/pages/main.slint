@@ -1,4 +1,4 @@
-import { Button, LineEdit, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, ProgressIndicator, Switch } from "std-widgets.slint";
 import {
     CompactComboBox,
     DialogActionButton,
@@ -323,6 +323,7 @@ export component MainPage inherits FocusScope {
     in property <[string]> profile-names;
     in property <string> active-profile-name: "default";
     in property <bool> profile-saving: false;
+    in property <bool> auto-map-on-login: false;
     in property <int> max-profile-count: 3;
     in-out property <int> profile-dialog-mode: 0; // 1 new, 2 rename, 3 delete, 4 switch
     in-out property <string> profile-dialog-target-name: "";
@@ -348,6 +349,7 @@ export component MainPage inherits FocusScope {
     callback open-display-settings();
     callback open-screen-size();
     callback open-profile-directory();
+    callback set-auto-map-on-login(bool);
     callback create-profile(string);
     callback rename-profile(string, string);
     callback delete-profile(string);
@@ -837,37 +839,21 @@ export component MainPage inherits FocusScope {
                                     }
                                 }
 
-                                VerticalLayout {
+                                Text {
                                     horizontal-stretch: 1;
-                                    alignment: center;
-                                    spacing: 3px;
-
-                                    Text {
-                                        text: "Virtual display";
-                                        color: MdTokens.on-surface;
-                                        font-size: MdTokens.type-title-medium;
-                                        font-weight: MdTokens.weight-medium;
-                                    }
-
-                                    Text {
-                                        text: root.profile-saving ? "Saving…" : "Saved";
-                                        color: root.profile-saving
-                                            ? MdTokens.on-surface
-                                            : MdTokens.on-surface-variant;
-                                        font-size: MdTokens.type-body-small;
-                                        overflow: elide;
-
-                                        animate color {
-                                            duration: 150ms;
-                                        }
-                                    }
+                                    vertical-alignment: center;
+                                    text: root.profile-saving ? "Saving…" : "Saved";
+                                    color: MdTokens.on-surface;
+                                    font-size: MdTokens.type-title-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                    overflow: elide;
                                 }
                             }
                         }
 
                         profile-entry-anchor := Rectangle {
-                            min-width: 144px;
-                            max-width: 144px;
+                            min-width: 144px + MdTokens.space-1 + MdTokens.target;
+                            max-width: 144px + MdTokens.space-1 + MdTokens.target;
                             horizontal-stretch: 0;
                             background: transparent;
 
@@ -940,15 +926,15 @@ export component MainPage inherits FocusScope {
             profile-menu := Rectangle {
                 z: 21;
                 x: parent.width - self.width - MdTokens.space-2;
-                y: root.profile-menu-open
+                y: max(4px, root.profile-menu-open
                     ? (root.error-text != "" || root.restart-available
                         ? 332px - self.height
                         : 316px - self.height)
                     : (root.error-text != "" || root.restart-available
                         ? 340px - self.height
-                        : 324px - self.height);
+                        : 324px - self.height));
                 width: 248px;
-                height: 153px + root.profile-names.length * 48px;
+                height: 201px + root.profile-names.length * 48px;
                 visible: root.profile-menu-open || self.opacity > 0;
                 opacity: root.profile-menu-open ? 1 : 0;
                 background: MdTokens.surface;
@@ -1047,6 +1033,24 @@ export component MainPage inherits FocusScope {
                         clicked => {
                             root.profile-menu-open = false;
                             root.open-profile-directory();
+                        }
+                    }
+
+                    Rectangle {
+                        height: 48px;
+                        background: transparent;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: center;
+
+                            Switch {
+                                text: "Map on login";
+                                checked: root.auto-map-on-login;
+                                enabled: !root.profile-saving;
+                                toggled => { root.set-auto-map-on-login(self.checked); }
+                            }
                         }
                     }
                 }

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::diagnostics::{self, Level};
-use windows::Win32::Foundation::{HMODULE, HWND, RECT};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -169,19 +169,31 @@ pub struct GpuRendererConfig {
     pub source_rect: RECT,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GpuRendererError {
     /// Desktop Duplication must be rebuilt after a topology or mode change.
-    AccessLost,
+    AccessLost(String),
+    /// Desktop Duplication output duplication access was denied temporarily (e.g. sleep/wake).
+    DuplicateOutputAccessDenied(String),
     /// The render adapter reset or was removed.
     DeviceLost,
     Failure(String),
 }
 
+impl GpuRendererError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::AccessLost(_) | Self::DuplicateOutputAccessDenied(_)
+        )
+    }
+}
+
 impl fmt::Display for GpuRendererError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AccessLost => formatter.write_str("desktop duplication access was lost"),
+            Self::AccessLost(message) => formatter.write_str(message),
+            Self::DuplicateOutputAccessDenied(message) => formatter.write_str(message),
             Self::DeviceLost => formatter.write_str("D3D11 render device was lost"),
             Self::Failure(message) => formatter.write_str(message),
         }
@@ -205,7 +217,8 @@ pub fn run_gpu_renderer(
     let copy_stats_enabled = CopyMode::diagnostics_requested();
     let (adapter, output) = find_source_output(config.source_rect)?;
     let (device, context) = create_device(&adapter)?;
-    let duplication = unsafe { output.DuplicateOutput(&device) }.map_err(classify_windows_error)?;
+    let duplication = unsafe { output.DuplicateOutput(&device) }
+        .map_err(|error| classify_windows_error("IDXGIOutput1::DuplicateOutput", error))?;
     let pipeline = Pipeline::new(config, &adapter, device, context)?;
     pipeline.run(
         duplication,
@@ -296,27 +309,38 @@ fn validate_config(config: GpuRendererConfig) -> Result<(), GpuRendererError> {
 fn find_source_output(
     source_rect: RECT,
 ) -> Result<(IDXGIAdapter1, IDXGIOutput1), GpuRendererError> {
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(classify_windows_error)?;
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
+        .map_err(|error| classify_windows_error("CreateDXGIFactory1", error))?;
     let mut adapter_index = 0;
     loop {
         let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
             Ok(adapter) => adapter,
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(error) => return Err(classify_windows_error(error)),
+            Err(error) => {
+                return Err(classify_windows_error(
+                    "IDXGIFactory1::EnumAdapters1",
+                    error,
+                ));
+            }
         };
         let mut output_index = 0;
         loop {
             let output = match unsafe { adapter.EnumOutputs(output_index) } {
                 Ok(output) => output,
                 Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-                Err(error) => return Err(classify_windows_error(error)),
+                Err(error) => {
+                    return Err(classify_windows_error("IDXGIAdapter::EnumOutputs", error));
+                }
             };
-            let description = unsafe { output.GetDesc() }.map_err(classify_windows_error)?;
+            let description = unsafe { output.GetDesc() }
+                .map_err(|error| classify_windows_error("IDXGIOutput::GetDesc", error))?;
             if same_rect(description.DesktopCoordinates, source_rect) {
                 return output
                     .cast::<IDXGIOutput1>()
                     .map(|output| (adapter, output))
-                    .map_err(classify_windows_error);
+                    .map_err(|error| {
+                        classify_windows_error("IDXGIOutput::QueryInterface(IDXGIOutput1)", error)
+                    });
             }
             output_index += 1;
         }
@@ -354,7 +378,7 @@ fn create_device(
             Some(&mut context),
         )
     }
-    .map_err(classify_windows_error)?;
+    .map_err(|error| classify_windows_error("D3D11CreateDevice", error))?;
     Ok((
         device.ok_or_else(|| GpuRendererError::Failure("D3D11 returned no device".into()))?,
         context.ok_or_else(|| {
@@ -382,8 +406,9 @@ impl Pipeline {
         device: ID3D11Device,
         context: ID3D11DeviceContext,
     ) -> Result<Self, GpuRendererError> {
-        let factory: IDXGIFactory2 =
-            unsafe { adapter.GetParent() }.map_err(classify_windows_error)?;
+        let factory: IDXGIFactory2 = unsafe { adapter.GetParent() }.map_err(|error| {
+            classify_windows_error("IDXGIAdapter::GetParent(IDXGIFactory2)", error)
+        })?;
         let swap_description = DXGI_SWAP_CHAIN_DESC1 {
             Width: config.target_width,
             Height: config.target_height,
@@ -409,24 +434,28 @@ impl Pipeline {
                 None::<&IDXGIOutput>,
             )
         }
-        .map_err(classify_windows_error)?;
+        .map_err(|error| classify_windows_error("IDXGIFactory2::CreateSwapChainForHwnd", error))?;
         unsafe { factory.MakeWindowAssociation(config.target_window, DXGI_MWA_NO_ALT_ENTER) }
-            .map_err(classify_windows_error)?;
+            .map_err(|error| {
+                classify_windows_error("IDXGIFactory::MakeWindowAssociation", error)
+            })?;
 
-        let back_buffer: ID3D11Texture2D =
-            unsafe { swap_chain.GetBuffer(0) }.map_err(classify_windows_error)?;
+        let back_buffer: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0) }
+            .map_err(|error| classify_windows_error("IDXGISwapChain::GetBuffer", error))?;
         let mut render_target = None;
         unsafe { device.CreateRenderTargetView(&back_buffer, None, Some(&mut render_target)) }
-            .map_err(classify_windows_error)?;
+            .map_err(|error| {
+                classify_windows_error("ID3D11Device::CreateRenderTargetView", error)
+            })?;
 
         let vertex_code = compile_shader("vertex_main", "vs_5_0")?;
         let pixel_code = compile_shader("pixel_main", "ps_5_0")?;
         let mut vertex_shader = None;
         let mut pixel_shader = None;
         unsafe { device.CreateVertexShader(&vertex_code, None, Some(&mut vertex_shader)) }
-            .map_err(classify_windows_error)?;
+            .map_err(|error| classify_windows_error("ID3D11Device::CreateVertexShader", error))?;
         unsafe { device.CreatePixelShader(&pixel_code, None, Some(&mut pixel_shader)) }
-            .map_err(classify_windows_error)?;
+            .map_err(|error| classify_windows_error("ID3D11Device::CreatePixelShader", error))?;
 
         let sampler_description = D3D11_SAMPLER_DESC {
             Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
@@ -438,7 +467,7 @@ impl Pipeline {
         };
         let mut sampler = None;
         unsafe { device.CreateSamplerState(&sampler_description, Some(&mut sampler)) }
-            .map_err(classify_windows_error)?;
+            .map_err(|error| classify_windows_error("ID3D11Device::CreateSamplerState", error))?;
 
         let buffer_description = D3D11_BUFFER_DESC {
             ByteWidth: size_of::<ScaleParameters>() as u32,
@@ -448,7 +477,7 @@ impl Pipeline {
         };
         let mut scale_parameters = None;
         unsafe { device.CreateBuffer(&buffer_description, None, Some(&mut scale_parameters)) }
-            .map_err(classify_windows_error)?;
+            .map_err(|error| classify_windows_error("ID3D11Device::CreateBuffer", error))?;
 
         Ok(Self {
             config,
@@ -497,14 +526,20 @@ impl Pipeline {
             } {
                 Ok(()) => {}
                 Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
-                Err(error) => return Err(classify_windows_error(error)),
+                Err(error) => {
+                    return Err(classify_windows_error(
+                        "IDXGIOutputDuplication::AcquireNextFrame",
+                        error,
+                    ));
+                }
             }
             let frame = AcquiredFrame(&duplication);
             let desktop_resource = desktop_resource.ok_or_else(|| {
                 GpuRendererError::Failure("Desktop Duplication returned no texture".into())
             })?;
-            let acquired: ID3D11Texture2D =
-                desktop_resource.cast().map_err(classify_windows_error)?;
+            let acquired: ID3D11Texture2D = desktop_resource.cast().map_err(|error| {
+                classify_windows_error("IDXGIResource::QueryInterface(ID3D11Texture2D)", error)
+            })?;
             let mut description = D3D11_TEXTURE2D_DESC::default();
             unsafe { acquired.GetDesc(&mut description) };
             if description.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
@@ -544,7 +579,9 @@ impl Pipeline {
             })?;
             self.draw(view);
             let present = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
-            present.ok().map_err(|_| classify_hresult(present))?;
+            present
+                .ok()
+                .map_err(|_| classify_hresult("IDXGISwapChain::Present", present))?;
             on_present().map_err(GpuRendererError::Failure)?;
             unsafe {
                 self.context.PSSetShaderResources(0, Some(&[None]));
@@ -623,7 +660,7 @@ impl Pipeline {
             self.device
                 .CreateTexture2D(&description, None, Some(&mut texture))
         }
-        .map_err(classify_windows_error)?;
+        .map_err(|error| classify_windows_error("ID3D11Device::CreateTexture2D", error))?;
         let texture =
             texture.ok_or_else(|| GpuRendererError::Failure("D3D11 returned no texture".into()))?;
         let mut view = None;
@@ -631,7 +668,7 @@ impl Pipeline {
             self.device
                 .CreateShaderResourceView(&texture, None, Some(&mut view))
         }
-        .map_err(classify_windows_error)?;
+        .map_err(|error| classify_windows_error("ID3D11Device::CreateShaderResourceView", error))?;
         Ok((
             texture,
             view.ok_or_else(|| GpuRendererError::Failure("D3D11 returned no SRV".into()))?,
@@ -930,7 +967,8 @@ fn compile_shader(entry: &str, target: &str) -> Result<Vec<u8>, GpuRendererError
             .filter(|message| !message.is_empty())
             .unwrap_or_else(|| error.to_string());
         return Err(GpuRendererError::Failure(format!(
-            "D3D shader compilation failed: {detail}"
+            "D3DCompile failed: {:?}; {detail}",
+            error.code()
         )));
     }
     let code =
@@ -956,28 +994,36 @@ fn null_terminated(value: &str) -> Vec<u8> {
     bytes
 }
 
-fn classify_windows_error(error: WindowsError) -> GpuRendererError {
-    classify_hresult(error.code())
+fn classify_windows_error(api: &str, error: WindowsError) -> GpuRendererError {
+    classify_hresult(api, error.code())
 }
 
-fn classify_hresult(code: windows::core::HRESULT) -> GpuRendererError {
+fn classify_hresult(api: &str, code: windows::core::HRESULT) -> GpuRendererError {
+    let detail = format!("{api} failed: {code:?}");
+    // Log every failing API, including device loss whose classification does
+    // not retain the original error text.
+    diagnostics::log(Level::Warn, "renderer", "gpu-api", None, &detail);
     if code == DXGI_ERROR_ACCESS_LOST {
-        GpuRendererError::AccessLost
+        GpuRendererError::AccessLost(detail)
     } else if code == DXGI_ERROR_DEVICE_REMOVED || code == DXGI_ERROR_DEVICE_RESET {
         GpuRendererError::DeviceLost
+    } else if api == "IDXGIOutput1::DuplicateOutput" && code == E_ACCESSDENIED {
+        GpuRendererError::DuplicateOutputAccessDenied(detail)
     } else {
-        GpuRendererError::Failure(format!("DXGI/D3D11 call failed: {code:?}"))
+        GpuRendererError::Failure(detail)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CopyMode, DXGI_ERROR_ACCESS_LOST, GpuRendererError, MAX_COPY_REGIONS, ScaleParameters,
-        classify_hresult, compile_shader, select_copy_regions,
+        CopyMode, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
+        GpuRendererError, MAX_COPY_REGIONS, ScaleParameters, classify_hresult,
+        classify_windows_error, compile_shader, select_copy_regions,
     };
     use std::ffi::OsStr;
-    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Foundation::{E_ACCESSDENIED, RECT};
+    use windows::core::Error as WindowsError;
 
     #[test]
     fn shaders_compile_with_the_system_d3d_compiler() {
@@ -987,10 +1033,56 @@ mod tests {
 
     #[test]
     fn dxgi_access_lost_is_a_recoverable_topology_loss() {
+        let error = classify_hresult(
+            "IDXGIOutputDuplication::AcquireNextFrame",
+            DXGI_ERROR_ACCESS_LOST,
+        );
+        assert!(matches!(error, GpuRendererError::AccessLost(_)));
+        assert!(error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "IDXGIOutputDuplication::AcquireNextFrame failed: HRESULT(0x887A0026)"
+        );
+    }
+
+    #[test]
+    fn duplicate_output_access_denied_is_retryable() {
+        let error = classify_windows_error(
+            "IDXGIOutput1::DuplicateOutput",
+            WindowsError::from_hresult(E_ACCESSDENIED),
+        );
         assert!(matches!(
-            classify_hresult(DXGI_ERROR_ACCESS_LOST),
-            GpuRendererError::AccessLost
+            error,
+            GpuRendererError::DuplicateOutputAccessDenied(_)
         ));
+        assert!(error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "IDXGIOutput1::DuplicateOutput failed: HRESULT(0x80070005)"
+        );
+    }
+
+    #[test]
+    fn other_api_access_denied_does_not_become_retryable() {
+        let error = classify_windows_error(
+            "ID3D11Device::CreateTexture2D",
+            WindowsError::from_hresult(E_ACCESSDENIED),
+        );
+        assert!(matches!(error, GpuRendererError::Failure(_)));
+        assert!(!error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "ID3D11Device::CreateTexture2D failed: HRESULT(0x80070005)"
+        );
+    }
+
+    #[test]
+    fn dxgi_device_removed_and_reset_keep_the_device_loss_classification() {
+        for code in [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET] {
+            let error = classify_hresult("IDXGISwapChain::Present", code);
+            assert!(matches!(error, GpuRendererError::DeviceLost));
+            assert!(!error.is_retryable());
+        }
     }
 
     #[test]

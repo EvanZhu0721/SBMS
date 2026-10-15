@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::{Display as FmtDisplay, Formatter};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -28,6 +28,7 @@ const RECOVERY_STABLE_INTERVAL: Duration = Duration::from_millis(500);
 const RECOVERY_TIMEOUT: Duration = Duration::from_secs(7);
 const RECOVERY_STABLE_SAMPLES: u8 = 3;
 const ERROR_CANCELLED_HRESULT: HRESULT = HRESULT(0x800704C7_u32 as i32);
+static NEXT_RENDERER_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MappingPlan {
@@ -65,8 +66,14 @@ pub struct MappingGroupInfo {
 #[derive(Clone, Debug)]
 pub enum MappingEvent {
     GroupReady(MappingGroupInfo),
-    Renderer { id: u32, event: RendererEvent },
-    Topology { message: String },
+    Renderer {
+        id: u32,
+        renderer_id: u64,
+        event: RendererEvent,
+    },
+    Topology {
+        message: String,
+    },
 }
 
 pub type MappingReporter = Arc<dyn Fn(MappingEvent) + Send + Sync + 'static>;
@@ -87,6 +94,7 @@ enum RendererEventGateState {
 
 struct RendererEventGate {
     id: u32,
+    renderer_id: u64,
     reporter: MappingReporter,
     state: Mutex<RendererEventGateState>,
 }
@@ -95,6 +103,7 @@ impl RendererEventGate {
     fn new(id: u32, reporter: MappingReporter) -> Arc<Self> {
         Arc::new(Self {
             id,
+            renderer_id: NEXT_RENDERER_ID.fetch_add(1, Ordering::Relaxed),
             reporter,
             state: Mutex::new(RendererEventGateState::Starting(Vec::new())),
         })
@@ -107,9 +116,11 @@ impl RendererEventGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         match &mut *state {
             RendererEventGateState::Starting(events) => events.push(event),
-            RendererEventGateState::Active => {
-                (self.reporter)(MappingEvent::Renderer { id: self.id, event })
-            }
+            RendererEventGateState::Active => (self.reporter)(MappingEvent::Renderer {
+                id: self.id,
+                renderer_id: self.renderer_id,
+                event,
+            }),
             RendererEventGateState::Discarded => {}
         }
     }
@@ -124,7 +135,11 @@ impl RendererEventGate {
             RendererEventGateState::Active | RendererEventGateState::Discarded => Vec::new(),
         };
         for event in buffered {
-            (self.reporter)(MappingEvent::Renderer { id: self.id, event });
+            (self.reporter)(MappingEvent::Renderer {
+                id: self.id,
+                renderer_id: self.renderer_id,
+                event,
+            });
         }
     }
 
@@ -134,6 +149,17 @@ impl RendererEventGate {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *state = RendererEventGateState::Discarded;
+    }
+
+    fn accepts(&self, renderer_id: u64) -> bool {
+        renderer_id == self.renderer_id
+            && matches!(
+                *self
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                RendererEventGateState::Active
+            )
     }
 }
 
@@ -151,6 +177,7 @@ pub struct MappingError {
     group_id: Option<u32>,
     message: String,
     cleanup_incomplete: bool,
+    retryable: bool,
 }
 
 impl FmtDisplay for MappingError {
@@ -181,7 +208,16 @@ impl MappingError {
         self.stage == "cancelled" && !self.cleanup_incomplete
     }
 
-    fn record_cleanup_failure(&mut self, error: impl FmtDisplay) {
+    pub(crate) fn is_retryable(&self) -> bool {
+        self.retryable && !self.cleanup_incomplete
+    }
+
+    fn retryable(mut self) -> Self {
+        self.retryable = true;
+        self
+    }
+
+    pub(crate) fn record_cleanup_failure(&mut self, error: impl FmtDisplay) {
         self.cleanup_incomplete = true;
         self.message
             .push_str(&format!("; rollback was incomplete: {error}"));
@@ -202,6 +238,7 @@ impl MappingPlan {
                 group_id: None,
                 message: "at least one mapping group is required".into(),
                 cleanup_incomplete: false,
+                retryable: false,
             });
         }
         if self.groups.len() > MAX_OUTPUTS {
@@ -210,6 +247,7 @@ impl MappingPlan {
                 group_id: None,
                 message: format!("at most {MAX_OUTPUTS} mapping groups are supported"),
                 cleanup_incomplete: false,
+                retryable: false,
             });
         }
 
@@ -417,7 +455,7 @@ impl MappingSession {
                     }
                     return Err(rollback_start(session, cause));
                 }
-                Err(RendererStartError::Failed(error)) => {
+                Err(RendererStartError::Failed(error) | RendererStartError::Retryable(error)) => {
                     return Err(rollback_start(
                         session,
                         group_stage(request.id, "first-frame", error),
@@ -525,6 +563,7 @@ impl MappingSession {
                 group_id: None,
                 message: errors.join("; "),
                 cleanup_incomplete: false,
+                retryable: false,
             })
         }
     }
@@ -533,11 +572,18 @@ impl MappingSession {
         self.groups.iter().map(|group| &group.info)
     }
 
+    pub(crate) fn accepts_renderer_event(&self, id: u32, renderer_id: u64) -> bool {
+        self.groups
+            .iter()
+            .find(|group| group.info.id == id)
+            .is_some_and(|group| group.renderer_event_gate.accepts(renderer_id))
+    }
+
     pub(crate) fn recover_group_topology(
         &mut self,
         group_id: u32,
         reporter: MappingReporter,
-        cancel: &AtomicBool,
+        interrupted: impl Fn() -> bool,
     ) -> Result<MappingGroupInfo, MappingError> {
         let group_index = self
             .groups
@@ -550,16 +596,10 @@ impl MappingSession {
             group_stage(group_id, "recovery", "stream-only group has no renderer")
         })?;
 
-        self.groups[group_index].renderer_event_gate.discard();
-
-        if let Some(mut renderer) = self.groups[group_index].renderer.take()
-            && let Err(error) = renderer.stop()
-        {
-            return Err(group_stage(group_id, "renderer-stop", error));
-        }
+        self.pause_group_renderer(group_id)?;
 
         let group_info = self.groups[group_index].info.clone();
-        let displays = wait_for_stable_recovery_topology(&group_info, &target_id, cancel)?;
+        let displays = wait_for_stable_recovery_topology(&group_info, &target_id, &interrupted)?;
         let target =
             mapping_target(&displays, &target_id).map_err(|error| error.with_group(group_id))?;
         let source = displays
@@ -594,11 +634,11 @@ impl MappingSession {
         let renderer_reporter: RendererReporter = Arc::new(move |event| {
             reporter_gate.report(event);
         });
-        let renderer = Renderer::start_with_reporter_cancellable(
+        let renderer = Renderer::start_with_reporter_interruptible(
             target,
             source.clone(),
             renderer_reporter,
-            cancel,
+            &interrupted,
         )
         .map_err(|error| match error {
             RendererStartError::Cancelled { cleanup_error } => {
@@ -610,6 +650,9 @@ impl MappingSession {
                 error
             }
             RendererStartError::Failed(error) => group_stage(group_id, "first-frame", error),
+            RendererStartError::Retryable(error) => {
+                group_stage(group_id, "first-frame", error).retryable()
+            }
         })?;
 
         self.groups[group_index].info.source_id = source.id;
@@ -619,6 +662,25 @@ impl MappingSession {
         self.groups[group_index].renderer_event_gate = Arc::clone(&event_gate);
         event_gate.activate();
         Ok(self.groups[group_index].info.clone())
+    }
+
+    /// Drop only short-lived capture/input resources; keep the virtual display
+    /// and window migration snapshot alive while the user desktop is unavailable.
+    pub(crate) fn pause_group_renderer(&mut self, group_id: u32) -> Result<(), MappingError> {
+        let group = self
+            .groups
+            .iter_mut()
+            .find(|group| group.info.id == group_id)
+            .ok_or_else(|| {
+                group_stage(group_id, "recovery", "mapping group is no longer active")
+            })?;
+        group.renderer_event_gate.discard();
+        if let Some(mut renderer) = group.renderer.take() {
+            renderer
+                .stop()
+                .map_err(|error| group_stage(group_id, "renderer-stop", error))?;
+        }
+        Ok(())
     }
 }
 
@@ -649,15 +711,20 @@ fn mapping_target(displays: &[Display], target_id: &str) -> Result<Display, Mapp
 fn wait_for_stable_recovery_topology(
     group: &MappingGroupInfo,
     target_id: &str,
-    cancel: &AtomicBool,
+    interrupted: &impl Fn() -> bool,
 ) -> Result<Vec<Display>, MappingError> {
     let group_id = group.id;
     let deadline = Instant::now() + RECOVERY_TIMEOUT;
     let mut stability = RecoveryStability::default();
     loop {
-        check_start_cancelled(cancel)?;
-        let displays =
-            active_display_topology().map_err(|error| group_stage(group_id, "recovery", error))?;
+        if interrupted() {
+            return Err(start_cancelled());
+        }
+        let displays = active_display_topology();
+        if interrupted() {
+            return Err(start_cancelled());
+        }
+        let displays = displays.map_err(|error| group_stage(group_id, "recovery", error))?;
         let ready = unique_physical_display(&displays, target_id).is_ok()
             && displays.iter().any(|display| {
                 display.virtual_display
@@ -666,8 +733,11 @@ fn wait_for_stable_recovery_topology(
             });
         let signature = ready.then(|| recovery_topology_signature(&displays));
         if stability.observe(signature) {
-            let hydrated =
-                active_displays().map_err(|error| group_stage(group_id, "recovery", error))?;
+            let hydrated = active_displays();
+            if interrupted() {
+                return Err(start_cancelled());
+            }
+            let hydrated = hydrated.map_err(|error| group_stage(group_id, "recovery", error))?;
             let hydrated_ready = unique_physical_display(&hydrated, target_id).is_ok()
                 && hydrated.iter().any(|display| {
                     display.virtual_display
@@ -675,6 +745,9 @@ fn wait_for_stable_recovery_topology(
                         && source_matches_mode(display, group.mode, group.rotation)
                 });
             if hydrated_ready && stability.matches(&recovery_topology_signature(&hydrated)) {
+                if interrupted() {
+                    return Err(start_cancelled());
+                }
                 return Ok(hydrated);
             }
             stability.reset();
@@ -684,7 +757,8 @@ fn wait_for_stable_recovery_topology(
                 group_id,
                 "recovery",
                 "display topology did not become stable within 7 seconds",
-            ));
+            )
+            .retryable());
         }
         thread::sleep(RECOVERY_STABLE_INTERVAL);
     }
@@ -778,6 +852,7 @@ fn wait_for_sources(
                     source.connector_index
                 ),
                 cleanup_incomplete: false,
+                retryable: false,
             });
         }
         let mut seen = HashSet::new();
@@ -868,6 +943,7 @@ fn wait_for_sources(
                     topology_timeout.as_secs()
                 ),
                 cleanup_incomplete: false,
+                retryable: false,
             });
         }
         thread::sleep(POLL_INTERVAL);
@@ -1015,6 +1091,7 @@ fn wait_for_sources_removed(connector_indices: &[u32]) -> Result<(), MappingErro
                 group_id: None,
                 message: "virtual sources stayed active after the device handle closed".into(),
                 cleanup_incomplete: false,
+                retryable: false,
             });
         }
         thread::sleep(POLL_INTERVAL);
@@ -1045,6 +1122,7 @@ fn stage(stage: &'static str, error: impl FmtDisplay) -> MappingError {
         group_id: None,
         message: error.to_string(),
         cleanup_incomplete: false,
+        retryable: false,
     }
 }
 
@@ -1054,6 +1132,7 @@ fn group_stage(group_id: u32, stage: &'static str, error: impl FmtDisplay) -> Ma
         group_id: Some(group_id),
         message: error.to_string(),
         cleanup_incomplete: false,
+        retryable: false,
     }
 }
 
@@ -1061,6 +1140,33 @@ fn group_stage(group_id: u32, stage: &'static str, error: impl FmtDisplay) -> Ma
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn cleanup_failure_prevents_retrying_a_transient_error() {
+        let mut error =
+            group_stage(0, "first-frame", "DuplicateOutput: E_ACCESSDENIED").retryable();
+        assert!(error.is_retryable());
+        error.record_cleanup_failure("renderer thread failed to stop");
+        assert!(!error.is_retryable());
+        assert!(!error.is_clean_cancellation());
+    }
+
+    #[test]
+    fn interrupted_recovery_does_not_query_display_topology() {
+        let group = MappingGroupInfo {
+            id: 0,
+            mode: VirtualMode::default(),
+            rotation: Rotation::default(),
+            route: MappingRoute::Mirror {
+                target: "unused".into(),
+            },
+            source_id: String::new(),
+            source_device_name: String::new(),
+            sunshine_id: None,
+        };
+        let error = wait_for_stable_recovery_topology(&group, "unused", &|| true).unwrap_err();
+        assert!(error.is_clean_cancellation());
+    }
 
     fn group(id: u32, route: MappingRoute) -> MappingGroupRequest {
         MappingGroupRequest {
@@ -1351,7 +1457,8 @@ mod tests {
             rx.recv().unwrap(),
             MappingEvent::Renderer {
                 id: 3,
-                event: RendererEvent::TopologyLost
+                event: RendererEvent::TopologyLost,
+                ..
             }
         ));
     }
@@ -1367,5 +1474,23 @@ mod tests {
         gate.report(RendererEvent::Failed("stale".into()));
 
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn already_queued_events_are_rejected_after_renderer_replacement() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reporter: MappingReporter = Arc::new(move |event| tx.send(event).unwrap());
+        let old = RendererEventGate::new(0, Arc::clone(&reporter));
+        old.activate();
+        old.report(RendererEvent::TopologyLost);
+        old.discard();
+        let current = RendererEventGate::new(0, reporter);
+        current.activate();
+        let MappingEvent::Renderer { renderer_id, .. } = rx.recv().unwrap() else {
+            panic!("renderer event expected")
+        };
+        assert!(!old.accepts(renderer_id));
+        assert!(!current.accepts(renderer_id));
+        assert!(current.accepts(current.renderer_id));
     }
 }

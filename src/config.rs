@@ -110,6 +110,8 @@ pub struct ConfigProfiles {
     pub active_profile: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub launch_intro_disabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_map_on_login: bool,
     pub profiles: Vec<ConfigProfile>,
 }
 
@@ -837,6 +839,13 @@ impl ConfigProfileStore {
         self.save_locked(&profiles)
     }
 
+    pub fn set_auto_map_on_login(&self, enabled: bool) -> Result<(), ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        profiles.auto_map_on_login = enabled;
+        self.save_locked(&profiles)
+    }
+
     pub fn load_profile(&self, id: &str) -> Result<ProfileSnapshot, ConfigError> {
         validate_profile_id(id)?;
         let _guard = CrossProcessConfigGuard::acquire()?;
@@ -1133,6 +1142,7 @@ impl ConfigProfileStore {
                 version: CONFIG_PROFILES_VERSION,
                 active_profile: "default".into(),
                 launch_intro_disabled: false,
+                auto_map_on_login: false,
                 profiles: vec![ConfigProfile {
                     id: "default".into(),
                     revision: 1,
@@ -1189,6 +1199,7 @@ impl ConfigProfileStore {
                     version: CONFIG_PROFILES_VERSION,
                     active_profile: "default".into(),
                     launch_intro_disabled: false,
+                    auto_map_on_login: false,
                     profiles: vec![ConfigProfile {
                         id: "default".into(),
                         revision: 1,
@@ -2283,6 +2294,43 @@ mod tests {
 
         profiles.set_launch_intro_disabled(false).unwrap();
         assert!(!profiles.list().unwrap().launch_intro_disabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_map_on_login_defaults_off_for_existing_profile_stores() {
+        let (root, profiles) = test_profile_store("auto-map-compatibility");
+        profiles.load_active().unwrap();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(profiles.path()).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("auto_map_on_login");
+        fs::write(profiles.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        assert!(!profiles.list().unwrap().auto_map_on_login);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_map_on_login_is_persistent_and_survives_profile_switches() {
+        let (root, profiles) = test_profile_store("auto-map-preference");
+        let original = profiles.load_active().unwrap();
+        assert!(!profiles.list().unwrap().auto_map_on_login);
+        profiles.set_auto_map_on_login(true).unwrap();
+        assert_eq!(profiles.load_active().unwrap(), original);
+
+        profiles
+            .save_profile("gaming", &config_with_target("gaming"), false, false)
+            .unwrap();
+        profiles.activate("gaming").unwrap();
+        let reopened =
+            ConfigProfileStore::new(root.join(CONFIG_PROFILES_FILE), root.join(CONFIG_FILE));
+        assert!(reopened.list().unwrap().auto_map_on_login);
+        reopened.activate("default").unwrap();
+        assert!(reopened.list().unwrap().auto_map_on_login);
+        assert_eq!(reopened.load_active().unwrap(), original);
+
+        reopened.set_auto_map_on_login(false).unwrap();
+        assert!(!profiles.list().unwrap().auto_map_on_login);
         fs::remove_dir_all(root).unwrap();
     }
 

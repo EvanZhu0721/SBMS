@@ -109,6 +109,7 @@ export component QuickAccess inherits Window {
     in property <[string]> profile-names;
     in property <string> active-profile-name: "default";
     in property <bool> profile-saving: false;
+    in property <bool> auto-map-on-login: false;
     in property <int> max-profile-count: 3;
 
     callback start();
@@ -139,6 +140,7 @@ export component QuickAccess inherits Window {
     callback disable-launch-intro();
     callback open-project-home();
     callback open-profile-directory();
+    callback set-auto-map-on-login(bool);
     callback open-screen-size();
     callback close-screen-size();
     callback screen-size-edited();
@@ -193,6 +195,7 @@ export component QuickAccess inherits Window {
         profile-names: root.profile-names;
         active-profile-name: root.active-profile-name;
         profile-saving: root.profile-saving;
+        auto-map-on-login: root.auto-map-on-login;
         max-profile-count: root.max-profile-count;
 
         start => { root.start(); }
@@ -212,6 +215,7 @@ export component QuickAccess inherits Window {
         open-sunshine-panel => { root.open-sunshine-panel(); }
         open-display-settings => { root.open-display-settings(); }
         open-profile-directory => { root.open-profile-directory(); }
+        set-auto-map-on-login(enabled) => { root.set-auto-map-on-login(enabled); }
         open-screen-size => { root.open-screen-size(); }
         create-profile(name) => { root.create-profile(name); }
         rename-profile(old-name, new-name) => { root.rename-profile(old-name, new-name); }

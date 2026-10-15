@@ -1,4 +1,4 @@
-import { TextEdit } from "std-widgets.slint";
+import { ScrollView } from "std-widgets.slint";
 import { BackButton, FullWidthPrimaryButton } from "../controls.slint";
 import { MdTokens } from "../theme.slint";
 
@@ -62,12 +62,15 @@ export component DiagnosticsPage inherits FocusScope {
                                 font-weight: MdTokens.weight-medium;
                             }
     
-                            Text {
+                            TextInput {
                                 text: root.diagnostic-summary;
-                                color: MdTokens.on-error-container;
-                                font-size: MdTokens.type-body-small;
+                                read-only: true;
+                                single-line: false;
                                 wrap: word-wrap;
-                                overflow: clip;
+                                color: MdTokens.on-error-container;
+                                selection-background-color: MdTokens.on-error-container;
+                                selection-foreground-color: MdTokens.error-container;
+                                font-size: MdTokens.type-body-small;
                             }
                         }
                     }
@@ -97,14 +100,64 @@ export component DiagnosticsPage inherits FocusScope {
                         }
                     }
     
-                    TextEdit {
+                    Rectangle {
                         vertical-stretch: 1;
-                        text: root.diagnostic-text;
-                        read-only: true;
-                        font-size: MdTokens.type-body-small;
-                        font-family: "Cascadia Mono";
-                        wrap: word-wrap;
-                        accessible-label: "Recent diagnostic records. Text can be selected and copied.";
+                        background: MdTokens.surface-container;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: log-input.has-focus ? MdTokens.primary : MdTokens.outline-variant;
+                        clip: true;
+
+                        ContextMenuArea {
+                            Menu {
+                                MenuItem {
+                                    title: "Copy";
+                                    activated => { log-input.copy(); }
+                                }
+                                MenuItem {
+                                    title: "Select All";
+                                    activated => { log-input.select-all(); }
+                                }
+                            }
+
+                            log-scroll := ScrollView {
+                                // Drag selects text; the wheel and scrollbar still scroll.
+                                mouse-drag-pan-enabled: false;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height, log-input.preferred-height + 16px);
+
+                                log-input := TextInput {
+                                    x: 8px;
+                                    y: 8px;
+                                    width: log-scroll.visible-width - 16px;
+                                    text: root.diagnostic-text;
+                                    read-only: true;
+                                    single-line: false;
+                                    wrap: word-wrap;
+                                    page-height: log-scroll.visible-height;
+                                    font-size: MdTokens.type-body-small;
+                                    font-family: "Cascadia Mono";
+                                    color: MdTokens.on-surface;
+                                    selection-background-color: MdTokens.primary-container;
+                                    selection-foreground-color: MdTokens.on-primary-container;
+                                    accessible-label: "Recent diagnostic records. Text can be selected and copied.";
+
+                                    cursor-position-changed(cpos) => {
+                                        if (cpos.y + self.y + log-scroll.viewport-y < 0px) {
+                                            log-scroll.viewport-y = min(
+                                                0px,
+                                                max(log-scroll.visible-height - log-scroll.viewport-height, -(cpos.y + self.y)),
+                                            );
+                                        } else if (cpos.y + self.y + log-scroll.viewport-y > log-scroll.visible-height - 20px) {
+                                            log-scroll.viewport-y = min(
+                                                0px,
+                                                max(log-scroll.visible-height - log-scroll.viewport-height, log-scroll.visible-height - (cpos.y + self.y) - 20px),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
     
                     Text {
