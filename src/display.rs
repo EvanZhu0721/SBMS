@@ -8,7 +8,8 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DICS_FLAG_GLOBAL, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DIREG_DEV, HDEVINFO,
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
     SetupDiDestroyDeviceInfoList, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
-    SetupDiGetDeviceInterfaceDetailW, SetupDiOpenDevRegKey, SetupDiOpenDeviceInterfaceW,
+    SetupDiGetDeviceInterfaceDetailW, SetupDiGetDevicePropertyW, SetupDiOpenDevRegKey,
+    SetupDiOpenDeviceInterfaceW,
 };
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
@@ -18,13 +19,18 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE180,
     DISPLAYCONFIG_ROTATION_ROTATE270, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
     DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GUID_DEVINTERFACE_MONITOR,
-    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig, SDC_APPLY,
+    SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SetDisplayConfig,
+};
+use windows::Win32::Devices::Properties::{
+    DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID, DEVPROPTYPE,
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CDS_FULLSCREEN, CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_DISPLAYORIENTATION,
-    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_DEFAULT, ENUM_DISPLAY_SETTINGS_FLAGS,
+    CDS_FULLSCREEN, CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY,
+    ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
+    DM_DISPLAYORIENTATION, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90, DMDO_180, DMDO_270,
+    DMDO_DEFAULT, EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
     ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
 };
 use windows::Win32::Security::Cryptography::{
@@ -34,9 +40,11 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::System::Registry::{
     HKEY, KEY_READ, REG_BINARY, REG_VALUE_TYPE, RegCloseKey, RegQueryValueExW,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{GUID, PCWSTR, w};
 
+use crate::diagnostics::{self, Level};
 use crate::geometry::Rotation;
+use crate::limits::MAX_OUTPUTS;
 use crate::session_gate::VirtualMode;
 
 #[derive(Clone, Debug)]
@@ -51,6 +59,7 @@ pub struct Display {
     pub native_height: u32,
     pub physical_width_mm: Option<f64>,
     pub physical_height_mm: Option<f64>,
+    pub preferred_refresh_millihz: Option<u32>,
     pub rotation: Rotation,
     pub refresh_numerator: u32,
     pub refresh_denominator: u32,
@@ -144,6 +153,7 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
         requested.width,
         requested.height,
         requested_hz,
+        Rotation::Deg0,
     )
     .ok_or_else(|| {
         DisplayError(format!(
@@ -175,7 +185,105 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
 }
 
 pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError> {
-    let current = active_displays()?;
+    trace_topology("restore saved", expected);
+    let current = match active_displays() {
+        Ok(current) => current,
+        Err(error) => {
+            trace_restore(&format!("initial read failed: {error}"));
+            return Err(error);
+        }
+    };
+    trace_topology("restore current", &current);
+    for saved in expected.iter().filter(|display| !display.virtual_display) {
+        if !current
+            .iter()
+            .any(|actual| actual.id.eq_ignore_ascii_case(&saved.id))
+        {
+            trace_restore(&format!(
+                "missing saved physical display: device={} id={}; existing restore policy skips absent displays",
+                saved.device_name, saved.id
+            ));
+        }
+    }
+    let result = restore_display_topology_inner(expected, &current);
+    trace_restore(&format!("restore result={result:?}"));
+    match active_displays() {
+        Ok(displays) => {
+            trace_topology("restore final readback", &displays);
+            for saved in expected.iter().filter(|display| !display.virtual_display) {
+                if !displays
+                    .iter()
+                    .any(|actual| actual.id.eq_ignore_ascii_case(&saved.id))
+                {
+                    trace_restore(&format!(
+                        "final readback missing saved physical display: device={} id={}",
+                        saved.device_name, saved.id
+                    ));
+                }
+            }
+        }
+        Err(error) => trace_restore(&format!("final readback failed: {error}")),
+    }
+    result
+}
+
+fn trace_restore(message: &str) {
+    diagnostics::log(
+        Level::Debug,
+        "display",
+        "topology-restore",
+        None,
+        format!("pid={} {message}", std::process::id()),
+    );
+}
+
+pub(crate) fn trace_topology(stage: &str, displays: &[Display]) {
+    trace_restore(&format!("{stage}: count={}", displays.len()));
+    for display in displays {
+        trace_restore(&format!(
+            "{stage}: device={} id={} rect={:?} primary={} refresh={}/{} rotation={:?} virtual={}",
+            display.device_name,
+            display.id,
+            display.rect,
+            display.primary,
+            display.refresh_numerator,
+            display.refresh_denominator,
+            display.rotation,
+            display.virtual_display,
+        ));
+    }
+}
+
+fn restore_display_topology_inner(
+    expected: &[Display],
+    current: &[Display],
+) -> Result<(), DisplayError> {
+    let pairs: Vec<_> = expected
+        .iter()
+        .filter(|d| !d.virtual_display)
+        .filter_map(|saved| {
+            current
+                .iter()
+                .find(|actual| actual.id.eq_ignore_ascii_case(&saved.id))
+                .map(|actual| (saved, actual))
+        })
+        .collect();
+    if pairs
+        .iter()
+        .all(|(saved, actual)| same_desktop_mode(saved, actual))
+    {
+        if pairs
+            .iter()
+            .any(|(saved, actual)| saved.rect != actual.rect || saved.primary != actual.primary)
+        {
+            trace_restore("branch=CCD position-only");
+            restore_desktop_positions(expected)?;
+        } else {
+            trace_restore("branch=no-op matched physical displays already restored");
+        }
+        return Ok(());
+    }
+    trace_restore("branch=GDI mode-change");
     let mut pending = false;
     for display in expected.iter().filter(|display| !display.virtual_display) {
         let Some(actual) = current
@@ -184,10 +292,8 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
         else {
             continue;
         };
-        if actual.rect == display.rect
-            && actual.refresh_numerator == display.refresh_numerator
-            && actual.refresh_denominator == display.refresh_denominator
-        {
+        let same_mode = same_desktop_mode(actual, display);
+        if actual.rect == display.rect && same_mode && actual.primary == display.primary {
             continue;
         }
 
@@ -201,31 +307,82 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
             .and_then(|value| u32::try_from(value).ok())
             .ok_or_else(|| DisplayError("saved display refresh rate is invalid".into()))?;
         let device_name = wide(&actual.device_name);
-        let mut mode = find_display_mode(PCWSTR(device_name.as_ptr()), width, height, refresh_hz)
+        let mut mode = if same_mode {
+            // A position-only restore must not request a new panel timing.
+            // Preserve the current driver's mode rather than selecting the
+            // first enumerated mode with the same rounded refresh rate.
+            let mut mode = current_desktop_mode(&actual.device_name)?;
+            mode.Anonymous1.Anonymous2.dmPosition.x = display.rect.left;
+            mode.Anonymous1.Anonymous2.dmPosition.y = display.rect.top;
+            mode.dmFields = DM_POSITION;
+            mode
+        } else {
+            find_display_mode(
+                PCWSTR(device_name.as_ptr()),
+                width,
+                height,
+                refresh_hz,
+                display.rotation,
+            )
             .ok_or_else(|| {
-            DisplayError(format!(
-                "{} no longer exposes saved mode {}x{}@{}",
-                actual.device_name, width, height, refresh_hz
-            ))
-        })?;
-        let position = unsafe { &mut mode.Anonymous1.Anonymous2.dmPosition };
-        position.x = display.rect.left;
-        position.y = display.rect.top;
-        mode.dmFields =
-            DM_POSITION | DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY;
+                DisplayError(format!(
+                    "{} no longer exposes saved mode {}x{}@{}",
+                    actual.device_name, width, height, refresh_hz
+                ))
+            })?
+        };
+        if !same_mode {
+            prepare_topology_mode(&mut mode, display);
+        }
+        let flags = topology_restore_flags(display, actual);
+        trace_restore(&format!(
+            "GDI stage device={} id={} flags={:#x} fields={:#x} position=({}, {}) mode={}x{}@{} bpp={} position_only={}",
+            actual.device_name,
+            actual.id,
+            flags.0,
+            mode.dmFields.0,
+            unsafe { mode.Anonymous1.Anonymous2.dmPosition.x },
+            unsafe { mode.Anonymous1.Anonymous2.dmPosition.y },
+            mode.dmPelsWidth,
+            mode.dmPelsHeight,
+            mode.dmDisplayFrequency,
+            mode.dmBitsPerPel,
+            same_mode,
+        ));
         let result = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(device_name.as_ptr()),
                 Some(&raw const mode),
                 None,
-                CDS_UPDATEREGISTRY | CDS_NORESET,
+                flags,
                 None,
             )
         };
+        trace_restore(&format!(
+            "ChangeDisplaySettingsExW stage device={} flags={:#x} status={}",
+            actual.device_name, flags.0, result.0
+        ));
         if result != DISP_CHANGE_SUCCESSFUL {
             return Err(DisplayError(format!(
-                "could not stage saved topology for {}: status {}",
-                actual.device_name, result.0
+                "could not stage saved topology for {}: status {}; saved={:?} {:?} @{}/{} primary={}; current={:?} {:?} @{}/{} primary={}; submitted={}x{}@{} bpp={} fields={:#x} position_only={}",
+                actual.device_name,
+                result.0,
+                display.rect,
+                display.rotation,
+                display.refresh_numerator,
+                display.refresh_denominator,
+                display.primary,
+                actual.rect,
+                actual.rotation,
+                actual.refresh_numerator,
+                actual.refresh_denominator,
+                actual.primary,
+                mode.dmPelsWidth,
+                mode.dmPelsHeight,
+                mode.dmDisplayFrequency,
+                mode.dmBitsPerPel,
+                mode.dmFields.0,
+                same_mode,
             )));
         }
         pending = true;
@@ -234,6 +391,10 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
         let result = unsafe {
             ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE::default(), None)
         };
+        trace_restore(&format!(
+            "ChangeDisplaySettingsExW apply flags=0x0 status={}",
+            result.0
+        ));
         if result != DISP_CHANGE_SUCCESSFUL {
             return Err(DisplayError(format!(
                 "could not apply saved physical topology: status {}",
@@ -244,11 +405,144 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
     Ok(())
 }
 
+fn restore_desktop_positions(expected: &[Display]) -> Result<(), DisplayError> {
+    let (mut path_count, mut mode_count) = (0, 0);
+    let status = unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+    };
+    trace_restore(&format!(
+        "GetDisplayConfigBufferSizes flags={:#x} status={} paths={} modes={}",
+        QDC_ONLY_ACTIVE_PATHS.0, status.0, path_count, mode_count
+    ));
+    if status != ERROR_SUCCESS {
+        return Err(win32_error(
+            "GetDisplayConfigBufferSizes(restore)",
+            status.0,
+        ));
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    let status = unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    };
+    trace_restore(&format!(
+        "QueryDisplayConfig flags={:#x} status={} paths={} modes={}",
+        QDC_ONLY_ACTIVE_PATHS.0, status.0, path_count, mode_count
+    ));
+    if status != ERROR_SUCCESS {
+        return Err(win32_error("QueryDisplayConfig(restore)", status.0));
+    }
+    paths.truncate(path_count as usize);
+    modes.truncate(mode_count as usize);
+    for path in &paths {
+        let target = target_name(path.targetInfo.adapterId, path.targetInfo.id)?;
+        let id = wide_string(&target.monitorDevicePath);
+        let Some(saved) = expected
+            .iter()
+            .find(|d| !d.virtual_display && d.id.eq_ignore_ascii_case(&id))
+        else {
+            continue;
+        };
+        let index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
+        let source = modes
+            .get_mut(index)
+            .filter(|mode| mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+            .ok_or_else(|| {
+                DisplayError(format!(
+                    "missing source mode while restoring {}",
+                    saved.device_name
+                ))
+            })?;
+        trace_restore(&format!(
+            "CCD source device={} id={} source_index={} position=({}, {}) -> ({}, {})",
+            saved.device_name,
+            saved.id,
+            index,
+            unsafe { source.Anonymous.sourceMode.position.x },
+            unsafe { source.Anonymous.sourceMode.position.y },
+            saved.rect.left,
+            saved.rect.top,
+        ));
+        source.Anonymous.sourceMode.position.x = saved.rect.left;
+        source.Anonymous.sourceMode.position.y = saved.rect.top;
+    }
+    // Submit the complete active layout at once. Preserve exact panel timings,
+    // rotations and unrelated outputs; do not allow Windows to choose new modes.
+    let flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE;
+    let status = unsafe { SetDisplayConfig(Some(&paths), Some(&modes), flags) };
+    trace_restore(&format!(
+        "SetDisplayConfig flags={:#x} status={} paths={} modes={}",
+        flags.0,
+        status,
+        paths.len(),
+        modes.len()
+    ));
+    if status != 0 {
+        return Err(DisplayError(format!(
+            "could not restore complete desktop positions: status {}; requested={:?}",
+            status,
+            expected
+                .iter()
+                .filter(|d| !d.virtual_display)
+                .map(|d| (&d.device_name, d.rect, d.primary))
+                .collect::<Vec<_>>()
+        )));
+    }
+    let actual = active_displays()?;
+    for saved in expected.iter().filter(|d| !d.virtual_display) {
+        if let Some(current) = actual.iter().find(|d| d.id.eq_ignore_ascii_case(&saved.id))
+            && (current.rect != saved.rect
+                || current.primary != saved.primary
+                || !same_desktop_mode(current, saved))
+        {
+            return Err(DisplayError(format!(
+                "desktop restore verification failed for {}: saved={:?} primary={} @{}/{}; actual={:?} primary={} @{}/{}",
+                current.device_name,
+                saved.rect,
+                saved.primary,
+                saved.refresh_numerator,
+                saved.refresh_denominator,
+                current.rect,
+                current.primary,
+                current.refresh_numerator,
+                current.refresh_denominator
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn topology_restore_flags(saved: &Display, actual: &Display) -> CDS_TYPE {
+    let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+    if saved.primary && !actual.primary {
+        flags |= CDS_SET_PRIMARY;
+    }
+    flags
+}
+
+fn same_desktop_mode(left: &Display, right: &Display) -> bool {
+    left.rect.right - left.rect.left == right.rect.right - right.rect.left
+        && left.rect.bottom - left.rect.top == right.rect.bottom - right.rect.top
+        && left.rotation == right.rotation
+        && left.refresh_denominator != 0
+        && right.refresh_denominator != 0
+        && u64::from(left.refresh_numerator) * u64::from(right.refresh_denominator)
+            == u64::from(right.refresh_numerator) * u64::from(left.refresh_denominator)
+}
+
 fn find_display_mode(
     device_name: PCWSTR,
     width: u32,
     height: u32,
     refresh_hz: u32,
+    rotation: Rotation,
 ) -> Option<DEVMODEW> {
     for index in 0..u32::MAX {
         let mut mode = DEVMODEW {
@@ -260,21 +554,101 @@ fn find_display_mode(
                 device_name,
                 ENUM_DISPLAY_SETTINGS_MODE(index),
                 &mut mode,
-                ENUM_DISPLAY_SETTINGS_FLAGS::default(),
+                EDS_ROTATEDMODE,
             )
         }
         .as_bool()
         {
             break;
         }
-        if mode.dmPelsWidth == width
-            && mode.dmPelsHeight == height
-            && mode.dmDisplayFrequency == refresh_hz
-        {
+        if display_mode_matches(&mode, width, height, refresh_hz, rotation) {
             return Some(mode);
         }
     }
     None
+}
+
+fn display_mode_matches(
+    mode: &DEVMODEW,
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+    rotation: Rotation,
+) -> bool {
+    mode.dmPelsWidth == width
+        && mode.dmPelsHeight == height
+        && mode.dmDisplayFrequency == refresh_hz
+        && unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation } == gdi_orientation(rotation)
+}
+
+fn gdi_orientation(
+    rotation: Rotation,
+) -> windows::Win32::Graphics::Gdi::DEVMODE_DISPLAY_ORIENTATION {
+    match rotation {
+        Rotation::Deg0 => DMDO_DEFAULT,
+        Rotation::Deg90 => DMDO_90,
+        Rotation::Deg180 => DMDO_180,
+        Rotation::Deg270 => DMDO_270,
+    }
+}
+
+fn prepare_topology_mode(mode: &mut DEVMODEW, display: &Display) {
+    let position = unsafe { &mut mode.Anonymous1.Anonymous2.dmPosition };
+    position.x = display.rect.left;
+    position.y = display.rect.top;
+    mode.Anonymous1.Anonymous2.dmDisplayOrientation = gdi_orientation(display.rotation);
+    mode.dmFields = DM_POSITION
+        | DM_BITSPERPEL
+        | DM_PELSWIDTH
+        | DM_PELSHEIGHT
+        | DM_DISPLAYFREQUENCY
+        | DM_DISPLAYORIENTATION;
+}
+
+fn current_desktop_geometry(device_name: &str) -> Result<(RECT, Rotation), DisplayError> {
+    Ok(desktop_geometry(&current_desktop_mode(device_name)?))
+}
+
+fn current_desktop_mode(device_name: &str) -> Result<DEVMODEW, DisplayError> {
+    let name = wide(device_name);
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    if !unsafe {
+        EnumDisplaySettingsExW(
+            PCWSTR(name.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+            ENUM_DISPLAY_SETTINGS_FLAGS::default(),
+        )
+    }
+    .as_bool()
+    {
+        return Err(DisplayError(format!(
+            "could not read current desktop mode for {device_name}"
+        )));
+    }
+    Ok(mode)
+}
+
+fn desktop_geometry(mode: &DEVMODEW) -> (RECT, Rotation) {
+    let fields = unsafe { mode.Anonymous1.Anonymous2 };
+    let rotation = match fields.dmDisplayOrientation {
+        DMDO_90 => Rotation::Deg90,
+        DMDO_180 => Rotation::Deg180,
+        DMDO_270 => Rotation::Deg270,
+        _ => Rotation::Deg0,
+    };
+    (
+        RECT {
+            left: fields.dmPosition.x,
+            top: fields.dmPosition.y,
+            right: fields.dmPosition.x + mode.dmPelsWidth as i32,
+            bottom: fields.dmPosition.y + mode.dmPelsHeight as i32,
+        },
+        rotation,
+    )
 }
 
 fn wide(value: &str) -> Vec<u16> {
@@ -330,51 +704,62 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
                 continue;
             }
             let mode = unsafe { mode.Anonymous.sourceMode };
-            let left = mode.position.x;
-            let top = mode.position.y;
             let rotation = rotation(path.targetInfo.rotation);
             let (native_width, native_height) =
                 target_active_size(&path, &modes).unwrap_or(match rotation {
                     Rotation::Deg90 | Rotation::Deg270 => (mode.height, mode.width),
                     Rotation::Deg0 | Rotation::Deg180 => (mode.width, mode.height),
                 });
+            // CCD source surfaces can remain unrotated; GDI describes desktop coordinates.
+            let (rect, rotation) = current_desktop_geometry(&source)?;
             let name = wide_string(&target.monitorFriendlyDeviceName);
             let id = wide_string(&target.monitorDevicePath);
-            let (physical_size, sunshine_id) = if include_identity {
+            let virtual_display = is_sbms_adapter(&adapter);
+            let connector_index = if virtual_display {
+                monitor_container_id(&id)
+                    .and_then(sbms_connector_index)
+                    .ok_or_else(|| {
+                        DisplayError(format!(
+                            "SBMS monitor has no valid connector identity: {id}"
+                        ))
+                    })?
+            } else {
+                target.connectorInstance
+            };
+            let (physical_size, preferred_refresh_millihz, sunshine_id) = if include_identity {
                 let monitor_identity = monitor_identity(&id);
                 (
                     monitor_identity
                         .as_ref()
                         .and_then(|identity| edid_dimensions_mm(&identity.edid)),
+                    monitor_identity
+                        .as_ref()
+                        .and_then(|identity| edid_preferred_refresh_millihz(&identity.edid)),
                     sunshine_display_id(&sunshine_device_id_payload(
                         &id,
                         monitor_identity.as_ref(),
                     )),
                 )
             } else {
-                (None, None)
+                (None, None, None)
             };
             displays.push(Display {
                 id,
-                connector_index: target.connectorInstance,
+                connector_index,
                 sunshine_id,
-                name: name.clone(),
+                name: display_name(&name, physical_size, &source),
                 device_name: source,
-                rect: RECT {
-                    left,
-                    top,
-                    right: left + mode.width as i32,
-                    bottom: top + mode.height as i32,
-                },
+                rect,
                 native_width,
                 native_height,
                 physical_width_mm: physical_size.map(|size| size.0),
                 physical_height_mm: physical_size.map(|size| size.1),
+                preferred_refresh_millihz,
                 rotation,
                 refresh_numerator: path.targetInfo.refreshRate.Numerator,
                 refresh_denominator: path.targetInfo.refreshRate.Denominator,
-                primary: left == 0 && top == 0,
-                virtual_display: is_sbms_adapter(&adapter),
+                primary: rect.left == 0 && rect.top == 0,
+                virtual_display,
             });
         }
         return Ok(displays);
@@ -431,7 +816,61 @@ struct MonitorIdentity {
     edid: Vec<u8>,
 }
 
+fn display_name(name: &str, physical_size: Option<(f64, f64)>, device_name: &str) -> String {
+    if !name.trim().is_empty() {
+        return name.to_owned();
+    }
+    match physical_size {
+        Some((width, height)) => {
+            format!("{:.1}-inch display", width.hypot(height) / 25.4)
+        }
+        None => device_name.to_owned(),
+    }
+}
+
 fn monitor_identity(monitor_device_path: &str) -> Option<MonitorIdentity> {
+    let (device_info_set, device_info) = open_monitor_device(monitor_device_path)?;
+    let instance_id = device_instance_id(device_info_set.0, &device_info).unwrap_or_default();
+    let edid = monitor_edid(device_info_set.0, &device_info).unwrap_or_default();
+    Some(MonitorIdentity { instance_id, edid })
+}
+
+fn monitor_container_id(monitor_device_path: &str) -> Option<GUID> {
+    let (device_info_set, device_info) = open_monitor_device(monitor_device_path)?;
+    let mut property_type = DEVPROPTYPE::default();
+    let mut bytes = [0u8; size_of::<GUID>()];
+    let mut size = 0;
+    unsafe {
+        SetupDiGetDevicePropertyW(
+            device_info_set.0,
+            &device_info,
+            &DEVPKEY_Device_ContainerId,
+            &mut property_type,
+            Some(&mut bytes),
+            Some(&mut size),
+            0,
+        )
+    }
+    .ok()?;
+    if property_type != DEVPROP_TYPE_GUID || size as usize != bytes.len() {
+        return None;
+    }
+    Some(unsafe { bytes.as_ptr().cast::<GUID>().read_unaligned() })
+}
+
+fn sbms_connector_index(container_id: GUID) -> Option<u32> {
+    // Must match MonitorContainerId in driver/Driver.cpp. Windows' connectorInstance
+    // is not the driver's stable ConnectorIndex when only a later slot is active.
+    const BASE: GUID = GUID::from_u128(0x67453031_7ba9_4d45_8f0b_721db4616242);
+    let index = container_id.data1 ^ BASE.data1;
+    (container_id.data2 == BASE.data2
+        && container_id.data3 == BASE.data3
+        && container_id.data4 == BASE.data4
+        && index < MAX_OUTPUTS as u32)
+        .then_some(index)
+}
+
+fn open_monitor_device(monitor_device_path: &str) -> Option<(DeviceInfoSet, SP_DEVINFO_DATA)> {
     let device_path: Vec<u16> = monitor_device_path
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -501,9 +940,7 @@ fn monitor_identity(monitor_device_path: &str) -> Option<MonitorIdentity> {
     }
     .ok()?;
 
-    let instance_id = device_instance_id(device_info_set.0, &device_info).unwrap_or_default();
-    let edid = monitor_edid(device_info_set.0, &device_info).unwrap_or_default();
-    Some(MonitorIdentity { instance_id, edid })
+    Some((device_info_set, device_info))
 }
 
 fn device_instance_id(device_info_set: HDEVINFO, device_info: &SP_DEVINFO_DATA) -> Option<String> {
@@ -681,6 +1118,30 @@ fn sunshine_display_id(payload: &[u8]) -> Option<String> {
     ))
 }
 
+fn edid_preferred_refresh_millihz(edid: &[u8]) -> Option<u32> {
+    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    if edid.len() < 128 || edid[..8] != HEADER || edid[24] & 0x02 == 0 {
+        return None;
+    }
+    let timing = &edid[54..72];
+    let clock = u64::from(u16::from_le_bytes([timing[0], timing[1]])) * 10_000;
+    // Virtual desktop outputs are progressive. Do not mislabel an interlaced
+    // preferred timing's field rate as a progressive frame rate.
+    if clock == 0 || timing[17] & 0x80 != 0 {
+        return None;
+    }
+    let h_active = u64::from(timing[2]) + (u64::from(timing[4] >> 4) << 8);
+    let h_blank = u64::from(timing[3]) + (u64::from(timing[4] & 0x0f) << 8);
+    let v_active = u64::from(timing[5]) + (u64::from(timing[7] >> 4) << 8);
+    let v_blank = u64::from(timing[6]) + (u64::from(timing[7] & 0x0f) << 8);
+    let pixels = (h_active + h_blank) * (v_active + v_blank);
+    if h_active == 0 || v_active == 0 || pixels == 0 {
+        return None;
+    }
+    let rate = u32::try_from((clock * 1000 + pixels / 2) / pixels).ok()?;
+    crate::limits::valid_refresh_millihz(rate).then_some(rate)
+}
+
 fn edid_dimensions_mm(edid: &[u8]) -> Option<(f64, f64)> {
     const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
     if edid.len() < 128 || edid[..8] != HEADER {
@@ -807,6 +1268,27 @@ mod tests {
         value
     }
 
+    #[test]
+    fn sbms_container_identity_preserves_sparse_connector_slots() {
+        for index in [0, 1, 5, 15] {
+            let mut container =
+                windows::core::GUID::from_u128(0x67453031_7ba9_4d45_8f0b_721db4616242);
+            container.data1 ^= index;
+            assert_eq!(super::sbms_connector_index(container), Some(index));
+        }
+    }
+
+    #[test]
+    fn sbms_container_identity_rejects_unrelated_and_out_of_range_guids() {
+        let base = windows::core::GUID::from_u128(0x67453031_7ba9_4d45_8f0b_721db4616242);
+        let mut unrelated = base;
+        unrelated.data4[7] ^= 1;
+        assert_eq!(super::sbms_connector_index(unrelated), None);
+        let mut out_of_range = base;
+        out_of_range.data1 ^= crate::limits::MAX_OUTPUTS as u32;
+        assert_eq!(super::sbms_connector_index(out_of_range), None);
+    }
+
     fn display(id: &str, device_name: &str, virtual_display: bool) -> Display {
         Display {
             id: id.into(),
@@ -819,12 +1301,115 @@ mod tests {
             native_height: 1080,
             physical_width_mm: None,
             physical_height_mm: None,
+            preferred_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 60,
             refresh_denominator: 1,
             primary: false,
             virtual_display,
         }
+    }
+
+    #[test]
+    fn topology_position_changes_do_not_require_a_mode_change() {
+        let mut saved = display("panel", r"\\.\DISPLAY1", false);
+        saved.rect = RECT {
+            left: 0,
+            top: 0,
+            right: 2832,
+            bottom: 1770,
+        };
+        saved.refresh_numerator = 240;
+        let mut actual = saved.clone();
+        actual.rect.left += 2832;
+        actual.rect.right += 2832;
+        actual.refresh_numerator = 240_000;
+        actual.refresh_denominator = 1000;
+        assert!(super::same_desktop_mode(&saved, &actual));
+        actual.refresh_numerator = 239_760;
+        assert!(!super::same_desktop_mode(&saved, &actual));
+        actual = saved.clone();
+        actual.rect.right = 1920;
+        assert!(!super::same_desktop_mode(&saved, &actual));
+        actual = saved.clone();
+        actual.rotation = Rotation::Deg180;
+        assert!(!super::same_desktop_mode(&saved, &actual));
+        assert_eq!(
+            super::topology_restore_flags(&saved, &actual),
+            super::CDS_UPDATEREGISTRY | super::CDS_NORESET
+        );
+        saved.primary = true;
+        assert_eq!(
+            super::topology_restore_flags(&saved, &actual),
+            super::CDS_UPDATEREGISTRY | super::CDS_NORESET | super::CDS_SET_PRIMARY
+        );
+    }
+
+    #[test]
+    fn portrait_desktop_geometry_uses_gdi_dimensions_without_rotating_again() {
+        let mut mode = windows::Win32::Graphics::Gdi::DEVMODEW {
+            dmPelsWidth: 1440,
+            dmPelsHeight: 2560,
+            ..Default::default()
+        };
+        mode.Anonymous1.Anonymous2.dmPosition.x = 2560;
+        mode.Anonymous1.Anonymous2.dmPosition.y = -1116;
+        mode.Anonymous1.Anonymous2.dmDisplayOrientation = super::DMDO_90;
+        let (rect, rotation) = super::desktop_geometry(&mode);
+        assert_eq!(
+            rect,
+            RECT {
+                left: 2560,
+                top: -1116,
+                right: 4000,
+                bottom: 1444
+            }
+        );
+        assert_eq!(rotation, Rotation::Deg90);
+    }
+
+    #[test]
+    fn topology_restore_matches_and_applies_saved_orientation() {
+        let mut mode = windows::Win32::Graphics::Gdi::DEVMODEW {
+            dmPelsWidth: 1440,
+            dmPelsHeight: 2560,
+            dmDisplayFrequency: 240,
+            ..Default::default()
+        };
+        mode.Anonymous1.Anonymous2.dmDisplayOrientation = super::DMDO_90;
+        assert!(super::display_mode_matches(
+            &mode,
+            1440,
+            2560,
+            240,
+            Rotation::Deg90
+        ));
+        assert!(!super::display_mode_matches(
+            &mode,
+            1440,
+            2560,
+            240,
+            Rotation::Deg270
+        ));
+        assert!(!super::display_mode_matches(
+            &mode,
+            1440,
+            2560,
+            240,
+            Rotation::Deg0
+        ));
+        let mut saved = display("physical", r"\\.\DISPLAY1", false);
+        saved.rotation = Rotation::Deg90;
+        saved.rect = RECT {
+            left: 2560,
+            top: -1116,
+            right: 4000,
+            bottom: 1444,
+        };
+        super::prepare_topology_mode(&mut mode, &saved);
+        assert_eq!(super::desktop_geometry(&mode), (saved.rect, saved.rotation));
+        assert!(mode.dmFields.contains(super::DM_DISPLAYORIENTATION));
+        assert!(mode.dmFields.contains(super::DM_POSITION));
     }
 
     #[test]
@@ -860,6 +1445,55 @@ mod tests {
         assert!(
             unique_physical_display(&[display("virtual", r"\\.\DISPLAY2", true)], "virtual",)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn preferred_refresh_uses_edid_timing_not_a_fixed_default() {
+        let mut value = edid();
+        value[24] = 0x02;
+        let timing = &mut value[54..72];
+        timing[..2].copy_from_slice(&14850u16.to_le_bytes());
+        timing[2] = 0x80; // 1920 active + 280 blank = 2200.
+        timing[3] = 0x18;
+        timing[4] = 0x71;
+        timing[5] = 0x38; // 1080 active + 45 blank = 1125.
+        timing[6] = 0x2d;
+        timing[7] = 0x40;
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(60_000));
+        value[54..56].copy_from_slice(&59400u16.to_le_bytes());
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(240_000));
+        value[54..56].copy_from_slice(&14835u16.to_le_bytes());
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(59_939));
+        value[71] = 0x80;
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), None);
+        value[71] = 0;
+        value[24] = 0;
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), None);
+        assert_eq!(super::edid_preferred_refresh_millihz(&[0; 128]), None);
+    }
+
+    #[test]
+    fn unnamed_display_uses_detected_edid_diagonal() {
+        let mut value = edid();
+        value[21] = 34;
+        value[22] = 19;
+        let size = edid_dimensions_mm(&value);
+        assert_eq!(
+            super::display_name("", size, r"\\.\DISPLAY1"),
+            "15.3-inch display"
+        );
+        assert_eq!(
+            super::display_name("  ", size, r"\\.\DISPLAY1"),
+            "15.3-inch display"
+        );
+        assert_eq!(
+            super::display_name("P245MS", size, r"\\.\DISPLAY1"),
+            "P245MS"
+        );
+        assert_eq!(
+            super::display_name("", None, r"\\.\DISPLAY1"),
+            r"\\.\DISPLAY1"
         );
     }
 

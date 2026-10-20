@@ -1,7 +1,11 @@
 use crate::config::ProfileRevision;
-use crate::config::{GroupConfig, GroupRouteConfig, ReferenceSource, StreamScreenConfig};
+use crate::config::{
+    GroupConfig, GroupRouteConfig, ManualReference, ReferenceSource, RenderingOptions,
+    StreamScreenConfig,
+};
 use crate::geometry::{
     AspectRatio, DisplayGeometry, PhysicalMeasurement, PixelSize, Rotation, SizingRequest,
+    SizingStrategy,
 };
 use crate::limits::{
     MAX_REFRESH_MILLIHZ, MILLIMETERS_PER_INCH, MIN_REFRESH_MILLIHZ, valid_refresh_millihz,
@@ -42,10 +46,13 @@ pub(super) struct GroupTelemetry {
 #[derive(Clone, Debug)]
 pub(super) struct GroupDraft {
     pub id: u32,
+    pub rendering: RenderingOptions,
     pub target_id: Option<String>,
     pub stream_only: bool,
     pub reference_source: Option<ReferenceSource>,
+    pub reference_geometry: Option<DisplayGeometry>,
     pub sizing: Option<SizingRequest>,
+    pub sizing_strategy: SizingStrategy,
     pub stream_width: String,
     pub stream_height: String,
     pub stream_diagonal: String,
@@ -120,8 +127,11 @@ impl ValidatedStreamFields {
 #[derive(Clone)]
 pub(super) struct ValidatedGroupDraft {
     id: u32,
+    rendering: RenderingOptions,
     reference_source: Option<ReferenceSource>,
     sizing: Option<SizingRequest>,
+    manual_reference: Option<ManualReference>,
+    sizing_strategy: Option<SizingStrategy>,
     route: ValidatedRoute,
 }
 
@@ -154,13 +164,19 @@ impl ValidatedGroupDraft {
         };
         GroupConfig {
             id: self.id,
+            rendering: self.rendering,
             route,
             reference_source: self.reference_source.clone(),
             sizing: self.sizing,
+            manual_reference: self.manual_reference,
+            sizing_strategy: self.sizing_strategy,
         }
     }
 
-    pub(super) fn to_mapping_request(&self) -> Result<MappingGroupRequest, String> {
+    pub(super) fn to_mapping_request(
+        &self,
+        group_number: usize,
+    ) -> Result<MappingGroupRequest, String> {
         let (mode, rotation, route) = match &self.route {
             ValidatedRoute::Mirror {
                 target_id,
@@ -169,14 +185,14 @@ impl ValidatedGroupDraft {
             } => {
                 let target = target_id
                     .clone()
-                    .ok_or_else(|| format!("Choose a target screen for Output {}", self.id + 1))?;
+                    .ok_or_else(|| format!("Choose a target screen for Output {group_number}"))?;
                 (*mode, *rotation, MappingRoute::Mirror { target })
             }
             ValidatedRoute::StreamOnly { mode, screen } => {
                 let mode = (*mode).ok_or_else(|| {
                     format!(
                         "Configure streaming screen geometry and a reference display for Output {}",
-                        self.id + 1
+                        group_number
                     )
                 })?;
                 (mode, screen.rotation, MappingRoute::StreamOnly)
@@ -184,6 +200,7 @@ impl ValidatedGroupDraft {
         };
         Ok(MappingGroupRequest {
             id: self.id,
+            rendering: self.rendering,
             mode,
             rotation,
             route,
@@ -195,10 +212,13 @@ impl GroupDraft {
     pub(super) fn new(id: u32) -> Self {
         Self {
             id,
+            rendering: RenderingOptions::default(),
             target_id: None,
             stream_only: false,
             reference_source: None,
+            reference_geometry: None,
             sizing: None,
+            sizing_strategy: SizingStrategy::MatchPhysicalSize,
             stream_width: "3840".into(),
             stream_height: "2160".into(),
             stream_diagonal: String::new(),
@@ -212,6 +232,7 @@ impl GroupDraft {
 
     pub(super) fn from_config(config: &GroupConfig) -> Self {
         let mut draft = Self::new(config.id);
+        draft.rendering = config.rendering;
         match &config.route {
             GroupRouteConfig::Mirror { target_id } => draft.target_id = target_id.clone(),
             GroupRouteConfig::StreamOnly { screen } => {
@@ -229,16 +250,37 @@ impl GroupDraft {
         }
         draft.reference_source = config.reference_source.clone();
         draft.sizing = config.sizing;
+        draft.reference_geometry = config.sizing.map(|request| request.reference).or_else(|| {
+            config.manual_reference.map(|reference| DisplayGeometry {
+                native_pixels: PixelSize {
+                    width: reference.width,
+                    height: reference.height,
+                },
+                physical: PhysicalMeasurement::DiagonalMm(
+                    reference.diagonal_inches * MILLIMETERS_PER_INCH,
+                ),
+                aspect_ratio: reference.aspect_ratio.or(Some(AspectRatio {
+                    width: reference.width,
+                    height: reference.height,
+                })),
+                rotation: reference.rotation,
+            })
+        });
+        draft.sizing_strategy = config
+            .sizing
+            .map(|request| request.strategy)
+            .or(config.sizing_strategy)
+            .unwrap_or(SizingStrategy::MatchPhysicalSize);
         draft
     }
 
-    pub(super) fn validate(&self) -> Result<ValidatedGroupDraft, String> {
+    pub(super) fn validate(&self, group_number: usize) -> Result<ValidatedGroupDraft, String> {
         let calculated = self
             .sizing
             .map(|request| {
                 request
                     .calculate()
-                    .map_err(|error| format!("Output {} geometry: {error}", self.id + 1))
+                    .map_err(|error| format!("Output {group_number} geometry: {error}"))
             })
             .transpose()?;
         let route = if self.stream_only {
@@ -249,7 +291,8 @@ impl GroupDraft {
                 &self.stream_refresh,
                 self.stream_aspect_ratio_index,
                 self.stream_rotation_index,
-            )?;
+            )
+            .map_err(|error| format!("Output {group_number}: {error}"))?;
             let mode = calculated
                 .map(|result| {
                     VirtualMode::from_millihz(
@@ -257,7 +300,7 @@ impl GroupDraft {
                         result.virtual_mode.height,
                         stream.screen.refresh_millihz,
                     )
-                    .map_err(|error| format!("Output {}: {error}", self.id + 1))
+                    .map_err(|error| format!("Output {group_number}: {error}"))
                 })
                 .transpose()?;
             ValidatedRoute::StreamOnly {
@@ -272,7 +315,7 @@ impl GroupDraft {
                         result.virtual_mode.height,
                         result.preferred_refresh_millihz.unwrap_or(240_000),
                     )
-                    .map_err(|error| format!("Output {}: {error}", self.id + 1))?,
+                    .map_err(|error| format!("Output {group_number}: {error}"))?,
                     self.sizing
                         .map(|request| request.target.rotation)
                         .unwrap_or(Rotation::Deg0),
@@ -287,14 +330,80 @@ impl GroupDraft {
         };
         Ok(ValidatedGroupDraft {
             id: self.id,
+            rendering: self.rendering,
             reference_source: self.reference_source.clone(),
             sizing: self.sizing,
+            manual_reference: if self.sizing.is_none()
+                && self.reference_source == Some(ReferenceSource::Manual)
+            {
+                self.reference_geometry.map(|reference| ManualReference {
+                    width: reference.native_pixels.width,
+                    height: reference.native_pixels.height,
+                    diagonal_inches: super::diagonal_mm(reference) / MILLIMETERS_PER_INCH,
+                    aspect_ratio: reference.aspect_ratio,
+                    rotation: reference.rotation,
+                })
+            } else {
+                None
+            },
+            sizing_strategy: self.sizing.is_none().then_some(self.sizing_strategy),
             route,
         })
     }
 
     pub(super) fn reset_telemetry(&mut self) {
         self.telemetry = GroupTelemetry::default();
+    }
+}
+
+/// Old files carry a copy in every group. Resolve it once, then keep those copies identical.
+pub(super) fn normalize_shared_reference(groups: &mut [GroupDraft], active: usize) {
+    let source = groups
+        .get(active)
+        .and_then(|group| group.reference_source.clone())
+        .or_else(|| {
+            groups
+                .iter()
+                .find_map(|group| group.reference_source.clone())
+        });
+    let geometry = groups
+        .get(active)
+        .filter(|group| group.reference_source == source)
+        .and_then(|group| group.sizing.map(|request| request.reference))
+        .or_else(|| {
+            groups
+                .iter()
+                .filter(|group| group.reference_source == source)
+                .find_map(|group| group.sizing.map(|request| request.reference))
+        })
+        .or_else(|| {
+            groups
+                .get(active)
+                .filter(|group| group.reference_source == source)
+                .and_then(|group| group.reference_geometry)
+        })
+        .or_else(|| {
+            groups
+                .iter()
+                .filter(|group| group.reference_source == source)
+                .find_map(|group| group.reference_geometry)
+        });
+    set_shared_reference(groups, source, geometry);
+}
+
+pub(super) fn set_shared_reference(
+    groups: &mut [GroupDraft],
+    source: Option<ReferenceSource>,
+    geometry: Option<DisplayGeometry>,
+) {
+    for group in groups {
+        group.reference_source = source.clone();
+        group.reference_geometry = geometry;
+        if let (Some(request), Some(reference)) = (&mut group.sizing, geometry) {
+            request.reference = reference;
+        } else if geometry.is_none() {
+            group.sizing = None;
+        }
     }
 }
 

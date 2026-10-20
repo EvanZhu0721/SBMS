@@ -1,4 +1,4 @@
-import { LineEdit, ScrollView } from "std-widgets.slint";
+import { LineEdit, ScrollView } from "../vendor/material/std-widgets.slint";
 import {
     BackButton,
     CompactComboBox,
@@ -139,6 +139,7 @@ export component GeometryPage inherits FocusScope {
                                                 "Portrait (counter-clockwise)",
                                             ];
                                             current-index <=> root.reference-rotation;
+                                            popup-width: 328px;
                                             field-label: "Reference display orientation";
                                             selected => { root.geometry-edited(); }
                                         }

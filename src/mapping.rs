@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use windows::core::HRESULT;
 
+use crate::config::RenderingOptions;
 use crate::display::{
     Display, active_display_topology, active_displays, apply_display_mode,
     restore_display_topology, unique_physical_display,
@@ -39,6 +40,8 @@ pub struct MappingPlan {
 pub struct MappingGroupRequest {
     /// Stable zero-based output slot. The value is also the IDD connector index.
     pub id: u32,
+    #[serde(default, skip_serializing_if = "RenderingOptions::is_default")]
+    pub rendering: RenderingOptions,
     pub mode: VirtualMode,
     #[serde(default)]
     pub rotation: Rotation,
@@ -80,6 +83,7 @@ pub type MappingReporter = Arc<dyn Fn(MappingEvent) + Send + Sync + 'static>;
 
 struct ActiveGroup {
     info: MappingGroupInfo,
+    rendering: RenderingOptions,
     target_id: Option<String>,
     renderer: Option<Renderer>,
     renderer_event_gate: Arc<RendererEventGate>,
@@ -324,11 +328,12 @@ impl MappingSession {
             }
         }
 
-        let physical_topology = displays
+        let physical_topology: Vec<_> = displays
             .iter()
             .filter(|display| !display.virtual_display)
             .cloned()
             .collect();
+        crate::display::trace_topology("saved-at-start", &physical_topology);
         let connector_indices = plan.groups.iter().map(|group| group.id).collect();
         let gate_configs: Vec<_> = plan
             .groups
@@ -373,6 +378,7 @@ impl MappingSession {
                 MappingRoute::StreamOnly => None,
             };
             session.groups.push(ActiveGroup {
+                rendering: request.rendering,
                 info: MappingGroupInfo {
                     id: request.id,
                     mode: request.mode,
@@ -441,11 +447,12 @@ impl MappingSession {
             let renderer_reporter: RendererReporter = Arc::new(move |event| {
                 event_gate.report(event);
             });
-            let renderer = match Renderer::start_with_reporter_cancellable(
+            let renderer = match Renderer::start_with_options_interruptible(
                 physical,
                 sources[index].clone(),
                 renderer_reporter,
-                cancel,
+                request.rendering,
+                || cancel.load(Ordering::Acquire),
             ) {
                 Ok(renderer) => renderer,
                 Err(RendererStartError::Cancelled { cleanup_error }) => {
@@ -487,6 +494,7 @@ impl MappingSession {
         }
 
         let mut errors = Vec::new();
+        let mut window_restore_errors = Vec::new();
         for group in self.groups.iter().rev() {
             if let Some(renderer) = group.renderer.as_ref() {
                 renderer.request_stop();
@@ -508,7 +516,7 @@ impl MappingSession {
             if let Some(migration) = group.migration.as_mut()
                 && let Err(error) = migration.restore()
             {
-                errors.push(format!("group {} windows-restore: {error}", group.info.id));
+                window_restore_errors.push((group.info.id, error));
             }
         }
 
@@ -544,6 +552,15 @@ impl MappingSession {
                     .and_then(|displays| unique_physical_display(displays, target_id).ok())
             });
             if let Err(error) = migration.reconcile_after_topology_change(target.as_ref()) {
+                if let Some((_, initial_error)) = window_restore_errors
+                    .iter()
+                    .find(|(id, _)| *id == group.info.id)
+                {
+                    errors.push(format!(
+                        "group {} windows-restore: {initial_error}",
+                        group.info.id
+                    ));
+                }
                 errors.push(format!(
                     "group {} windows-reconcile: {error}",
                     group.info.id
@@ -622,6 +639,7 @@ impl MappingSession {
             .filter(|display| !display.virtual_display)
             .cloned()
             .collect();
+        crate::display::trace_topology("saved-at-recovery", &self.physical_topology);
 
         if let Some(migration) = self.groups[group_index].migration.as_mut() {
             migration
@@ -634,10 +652,11 @@ impl MappingSession {
         let renderer_reporter: RendererReporter = Arc::new(move |event| {
             reporter_gate.report(event);
         });
-        let renderer = Renderer::start_with_reporter_interruptible(
+        let renderer = Renderer::start_with_options_interruptible(
             target,
             source.clone(),
             renderer_reporter,
+            self.groups[group_index].rendering,
             &interrupted,
         )
         .map_err(|error| match error {
@@ -1171,6 +1190,7 @@ mod tests {
     fn group(id: u32, route: MappingRoute) -> MappingGroupRequest {
         MappingGroupRequest {
             id,
+            rendering: RenderingOptions::default(),
             mode: VirtualMode::default(),
             rotation: Rotation::Deg0,
             route,
@@ -1194,6 +1214,7 @@ mod tests {
             native_height: 2160,
             physical_width_mm: None,
             physical_height_mm: None,
+            preferred_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 240,
             refresh_denominator: 1,
@@ -1349,6 +1370,7 @@ mod tests {
             native_height: 2880,
             physical_width_mm: None,
             physical_height_mm: None,
+            preferred_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 120,
             refresh_denominator: 1,

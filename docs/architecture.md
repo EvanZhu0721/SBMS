@@ -18,9 +18,20 @@ publishes every requested connector and drains their IddCx swap chains; it does
 not copy frames into shared memory. Connector indexes are stable identities and
 must not be inferred from Windows enumeration order.
 
-Pixels remain on the GPU in the Rust renderer. For reductions up to 2:1 per
-axis, the shader integrates source-pixel area and suppresses high-frequency
-subpixel colour fringing. Other ratios use bilinear sampling.
+Pixels remain on the GPU in the Rust renderer. Quality sampling first applies
+selective subpixel colour-fringe suppression. A reduction on either axis uses
+separable, scale-aware Lanczos3; enlargement uses EWA Lanczos4Sharpest for
+luminance, bilinear chroma and anti-ringing. At 1:1, only fringe suppression is
+applied, without resampling.
+
+The optional high-performance path retains the previous sampler: when both axes
+shrink by more than 1:1 and at most 2:1, it integrates source-pixel area and
+suppresses subpixel colour fringing; other ratios use bilinear sampling. The
+automatic default selects this path unless a hardware adapter explicitly reports
+non-unified memory. Per-group settings can override that default, enable full-frame
+copying, or keep presenting static content at the target refresh rate. See
+[configuration.md](configuration.md#rendering-options) for the settings and
+automatic-selection limits.
 
 The whole plan starts and stops as one transaction. Startup creates and
 confirms every virtual source before any mirror renderer starts. Shutdown

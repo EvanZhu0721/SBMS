@@ -128,6 +128,13 @@ fn clear_target_only_changes_output_one() {
             {
                 "id": 3,
                 "route": {
+                    "kind": "mirror",
+                    "target_id": "stable-display-id"
+                }
+            },
+            {
+                "id": 5,
+                "route": {
                     "kind": "stream_only",
                     "screen": {
                         "width": 1920,
@@ -136,13 +143,6 @@ fn clear_target_only_changes_output_one() {
                         "aspect_ratio": {"width": 16, "height": 9},
                         "rotation": "deg0"
                     }
-                }
-            },
-            {
-                "id": 0,
-                "route": {
-                    "kind": "mirror",
-                    "target_id": "stable-display-id"
                 }
             },
             {
@@ -162,10 +162,9 @@ fn clear_target_only_changes_output_one() {
     assert!(text(&output.stdout).starts_with("saved=default revision=2 reload="));
     let profiles: Value = serde_json::from_slice(&fs::read(root.profiles_path()).unwrap()).unwrap();
     let saved = &profiles["profiles"][0]["config"];
-    assert_eq!(saved["groups"][0], original["groups"][0]);
     assert_eq!(saved["groups"][0]["id"], 3);
-    assert_eq!(saved["groups"][1]["id"], 0);
-    assert_eq!(saved["groups"][1]["route"], json!({"kind": "mirror"}));
+    assert_eq!(saved["groups"][0]["route"], json!({"kind": "mirror"}));
+    assert_eq!(saved["groups"][1], original["groups"][1]);
     assert_eq!(saved["groups"][2], original["groups"][2]);
     assert_eq!(saved["selected_group_id"], 3);
 }

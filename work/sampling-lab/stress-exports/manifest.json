@@ -1,0 +1,741 @@
+{
+  "release": {
+    "repository": "https://github.com/EvanZhu0721/SBMS",
+    "releaseUrl": "https://github.com/EvanZhu0721/SBMS/releases/tag/v1.6.1",
+    "tag": "v1.6.1",
+    "commit": "3c1ae5bb054c5613be530659360cbb75b95f0e31",
+    "publishedAt": "2026-10-15T12:29:14Z",
+    "checkedAt": "2026-10-20T09:59:26Z",
+    "draft": false,
+    "prerelease": false,
+    "label": "SBMS 1.6.1",
+    "comparisonLabel": "SBMS 1.6.1 · 发布版采样复现",
+    "verification": {
+      "latestReleaseApi": "https://api.github.com/repos/EvanZhu0721/SBMS/releases/latest",
+      "latestReleaseRedirect": "https://github.com/EvanZhu0721/SBMS/releases/latest",
+      "remoteAnnotatedTag": "3021c09aac4fd95bede5af596edd5c76e65dc7f0",
+      "remotePeeledTagMatchesLocalCommit": true,
+      "workingTreeRendererMatchesRelease": true,
+      "workingTreeShaderMatchesRelease": true,
+      "baselineHlslMatchesReleaseShader": true,
+      "textComparison": "Direct content comparison after normalizing CRLF/LF and trailing whitespace; no file hashes.",
+      "baselineShaderCharacters": 4512,
+      "baselineNeedsReplacement": false
+    },
+    "sampling": {
+      "areaCondition": "Both source/target axis ratios are > 1.0001 and <= 2.0.",
+      "areaBranch": "Exact pixel-area coverage plus adaptive horizontal subpixel-chroma suppression.",
+      "fallbackBranch": "Bilinear sampling, including enlargement, 1:1, reduction beyond 2x, and single-axis reductions.",
+      "releaseBoundary": "Clamp",
+      "demoBoundary": "Repeat",
+      "demoCoreFormulaMatchesRelease": true
+    },
+    "limits": [
+      "This is a reproduction of the released sampling formula, not a screenshot captured from the installed release.",
+      "The demo sums individual area-weighted texels; the release combines the same coverage through four hardware bilinear fetches.",
+      "WebGL manual interpolation and native D3D11 hardware sampling are not guaranteed to be bit-identical.",
+      "The demo repeats texture boundaries while the release clamps them. Compare interior regions sufficiently far from image edges.",
+      "Animated demo offsets translate the common source before both algorithms; a static zero-offset comparison directly matches the released pixel-center convention.",
+      "These comparisons do not measure the installed application's performance or the separate Stream only capture and encoder path."
+    ],
+    "sourceLinks": {
+      "releaseShader": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L49-L161",
+      "releaseAreaWeights": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L77-L116",
+      "releaseChromaSuppression": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L119-L145",
+      "releaseBranchSelection": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L148-L160",
+      "releaseSampler": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L460-L465"
+    },
+    "localEvidence": {
+      "baselineHlsl": "work/sampling-lab/sbms-current-baseline.hlsl",
+      "demoArea": "work/sampling-lab/dynamic-filter.js:355",
+      "demoSbms": "work/sampling-lab/dynamic-filter.js:371",
+      "demoBoundary": "work/sampling-lab/dynamic-filter.js:340",
+      "demoPixelCenters": "work/sampling-lab/dynamic-filter.js:462",
+      "cpuSbms": "work/sampling-lab/dynamic-filter.js:640"
+    }
+  },
+  "sourceSize": [
+    6144,
+    3456
+  ],
+  "outputSize": [
+    2560,
+    1440
+  ],
+  "atlas": "pixels.png",
+  "sourceDpi": 230.4,
+  "outputDpi": 96,
+  "sourceMotion": [
+    0,
+    0
+  ],
+  "scope": "Released sampling formula reproduced in WebGL versus the experimental final filter; not installed-app screenshots or a performance/streaming test.",
+  "tiles": [
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "label": "ClearType",
+      "type": "capture",
+      "detail": {
+        "x": 0,
+        "y": 40,
+        "width": 64,
+        "height": 28
+      },
+      "provenance": "Independent native Win32 GDI capture at 230.4 target DPI (240%). GDI rounds the source em to 29 px, producing 12.0833 output px. Not a resized 100% screenshot or a named application screenshot.",
+      "width": 536,
+      "height": 69,
+      "source": {
+        "sourceRect": {
+          "x": 2880,
+          "y": 1365,
+          "width": 1286,
+          "height": 163
+        },
+        "asset": "windows-gdi-auto-240-cleartype",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 568,
+        "width": 536,
+        "height": 69
+      },
+      "sbms": {
+        "x": 0,
+        "y": 0,
+        "width": 536,
+        "height": 69
+      },
+      "final": {
+        "x": 616,
+        "y": 0,
+        "width": 536,
+        "height": 69
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "label": "ClearType",
+      "type": "capture",
+      "detail": {
+        "x": 96,
+        "y": 80,
+        "width": 68,
+        "height": 28
+      },
+      "provenance": "Independent native Win32 GDI capture at 230.4 target DPI (240%). GDI rounds the source em to 29 px, producing 12.0833 output px. Not a resized 100% screenshot or a named application screenshot.",
+      "width": 536,
+      "height": 109,
+      "source": {
+        "sourceRect": {
+          "x": 2880,
+          "y": 1653,
+          "width": 1286,
+          "height": 259
+        },
+        "asset": "windows-gdi-auto-240-cleartype",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 688,
+        "width": 536,
+        "height": 109
+      },
+      "sbms": {
+        "x": 0,
+        "y": 85,
+        "width": 536,
+        "height": 109
+      },
+      "final": {
+        "x": 616,
+        "y": 85,
+        "width": 536,
+        "height": 109
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "label": "Grayscale antialiasing",
+      "type": "capture",
+      "detail": {
+        "x": 0,
+        "y": 40,
+        "width": 64,
+        "height": 28
+      },
+      "provenance": "Independent native Win32 GDI capture at 230.4 target DPI (240%). GDI rounds the source em to 29 px, producing 12.0833 output px. Not a resized 100% screenshot or a named application screenshot.",
+      "width": 536,
+      "height": 69,
+      "source": {
+        "sourceRect": {
+          "x": 2880,
+          "y": 1365,
+          "width": 1286,
+          "height": 163
+        },
+        "asset": "windows-gdi-auto-240-grayscale",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 568,
+        "width": 536,
+        "height": 69
+      },
+      "sbms": {
+        "x": 0,
+        "y": 210,
+        "width": 536,
+        "height": 69
+      },
+      "final": {
+        "x": 616,
+        "y": 210,
+        "width": 536,
+        "height": 69
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "label": "Grayscale antialiasing",
+      "type": "capture",
+      "detail": {
+        "x": 96,
+        "y": 80,
+        "width": 68,
+        "height": 28
+      },
+      "provenance": "Independent native Win32 GDI capture at 230.4 target DPI (240%). GDI rounds the source em to 29 px, producing 12.0833 output px. Not a resized 100% screenshot or a named application screenshot.",
+      "width": 536,
+      "height": 109,
+      "source": {
+        "sourceRect": {
+          "x": 2880,
+          "y": 1653,
+          "width": 1286,
+          "height": 259
+        },
+        "asset": "windows-gdi-auto-240-grayscale",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 688,
+        "width": 536,
+        "height": 109
+      },
+      "sbms": {
+        "x": 0,
+        "y": 295,
+        "width": 536,
+        "height": 109
+      },
+      "final": {
+        "x": 616,
+        "y": 295,
+        "width": 536,
+        "height": 109
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "label": "0.5 / 1 / 2 DIP sloping lines",
+      "type": "synthetic",
+      "detail": {
+        "x": 10,
+        "y": 24,
+        "width": 100,
+        "height": 44
+      },
+      "provenance": "Existing synthetic canvas sloping lines independently drawn at 240% layout density. The crop shows all three line widths.",
+      "width": 600,
+      "height": 120,
+      "source": {
+        "sourceRect": {
+          "x": 48,
+          "y": 1812,
+          "width": 1440,
+          "height": 288
+        },
+        "asset": "positive",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 20,
+        "y": 755,
+        "width": 600,
+        "height": 120
+      },
+      "sbms": {
+        "x": 0,
+        "y": 420,
+        "width": 600,
+        "height": 120
+      },
+      "final": {
+        "x": 616,
+        "y": 420,
+        "width": 600,
+        "height": 120
+      }
+    },
+    {
+      "id": "stripes",
+      "scene": "texture",
+      "label": "1-source-pixel stripes",
+      "type": "synthetic",
+      "detail": {
+        "x": 32,
+        "y": 20,
+        "width": 64,
+        "height": 40
+      },
+      "provenance": "Existing synthetic fixed-source-pixel texture. Intentionally contains frequencies beyond the output Nyquist limit, unlike DPI-scaled UI text. Expected benefit is suppression of false patterns, not recovery of individual stripes.",
+      "width": 600,
+      "height": 100,
+      "source": {
+        "sourceRect": {
+          "x": 2112,
+          "y": 1908,
+          "width": 1440,
+          "height": 240
+        },
+        "asset": "positive",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 880,
+        "y": 795,
+        "width": 600,
+        "height": 100
+      },
+      "sbms": {
+        "x": 0,
+        "y": 556,
+        "width": 600,
+        "height": 100
+      },
+      "final": {
+        "x": 616,
+        "y": 556,
+        "width": 600,
+        "height": 100
+      }
+    },
+    {
+      "id": "checker",
+      "scene": "texture",
+      "label": "2-source-pixel checks",
+      "type": "synthetic",
+      "detail": {
+        "x": 32,
+        "y": 20,
+        "width": 64,
+        "height": 40
+      },
+      "provenance": "Existing synthetic fixed-source-pixel texture. Intentionally contains frequencies beyond the output Nyquist limit, unlike DPI-scaled UI text. Expected benefit is suppression of false patterns, not recovery of individual stripes.",
+      "width": 600,
+      "height": 100,
+      "source": {
+        "sourceRect": {
+          "x": 2112,
+          "y": 2436,
+          "width": 1440,
+          "height": 240
+        },
+        "asset": "positive",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 880,
+        "y": 1015,
+        "width": 600,
+        "height": 100
+      },
+      "sbms": {
+        "x": 0,
+        "y": 672,
+        "width": 600,
+        "height": 100
+      },
+      "final": {
+        "x": 616,
+        "y": 672,
+        "width": 600,
+        "height": 100
+      }
+    },
+    {
+      "id": "diagonal",
+      "scene": "texture",
+      "label": "1-source-pixel diagonal hatching",
+      "type": "synthetic",
+      "detail": {
+        "x": 32,
+        "y": 20,
+        "width": 64,
+        "height": 40
+      },
+      "provenance": "Existing synthetic fixed-source-pixel texture. Intentionally contains frequencies beyond the output Nyquist limit, unlike DPI-scaled UI text. Expected benefit is suppression of false patterns, not recovery of individual stripes.",
+      "width": 600,
+      "height": 100,
+      "source": {
+        "sourceRect": {
+          "x": 2112,
+          "y": 2952,
+          "width": 1440,
+          "height": 240
+        },
+        "asset": "positive",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 880,
+        "y": 1230,
+        "width": 600,
+        "height": 100
+      },
+      "sbms": {
+        "x": 0,
+        "y": 788,
+        "width": 600,
+        "height": 100
+      },
+      "final": {
+        "x": 616,
+        "y": 788,
+        "width": 600,
+        "height": 100
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "label": "tiktok · ~40 px",
+      "type": "icon",
+      "detail": {
+        "x": 0,
+        "y": 0,
+        "width": 41,
+        "height": 41
+      },
+      "provenance": "Published icon, rasterized at 96 source px before both sampling paths. Approximately 40 output px, including original intentional colors. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 41,
+      "height": 41,
+      "source": {
+        "sourceRect": {
+          "x": 3046,
+          "y": 1674,
+          "width": 96,
+          "height": 96,
+          "id": "tiktok",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "tiktok",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1269,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "sbms": {
+        "x": 0,
+        "y": 904,
+        "width": 41,
+        "height": 41
+      },
+      "final": {
+        "x": 616,
+        "y": 904,
+        "width": 41,
+        "height": 41
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "label": "vlc · ~40 px",
+      "type": "icon",
+      "detail": {
+        "x": 0,
+        "y": 0,
+        "width": 36,
+        "height": 41
+      },
+      "provenance": "Published icon, rasterized at 96 source px before both sampling paths. Approximately 40 output px, including original intentional colors. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 36,
+      "height": 41,
+      "source": {
+        "sourceRect": {
+          "x": 3051,
+          "y": 1674,
+          "width": 85,
+          "height": 96,
+          "id": "vlc",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "vlc",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1271,
+        "y": 697,
+        "width": 36,
+        "height": 41
+      },
+      "sbms": {
+        "x": 0,
+        "y": 961,
+        "width": 36,
+        "height": 41
+      },
+      "final": {
+        "x": 616,
+        "y": 961,
+        "width": 36,
+        "height": 41
+      }
+    },
+    {
+      "id": "flag-us-96",
+      "scene": "icons",
+      "label": "flag-us · ~40 px",
+      "type": "icon",
+      "detail": {
+        "x": 0,
+        "y": 0,
+        "width": 41,
+        "height": 41
+      },
+      "provenance": "Published icon, rasterized at 96 source px before both sampling paths. Approximately 40 output px, including original intentional colors. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 41,
+      "height": 41,
+      "source": {
+        "sourceRect": {
+          "x": 3046,
+          "y": 1674,
+          "width": 96,
+          "height": 96,
+          "id": "flag-us",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "flag-us",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1269,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1018,
+        "width": 41,
+        "height": 41
+      },
+      "final": {
+        "x": 616,
+        "y": 1018,
+        "width": 41,
+        "height": 41
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "label": "git · ~40 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized at 96 source px before both sampling paths. Approximately 40 output px, including original intentional colors. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 41,
+      "height": 41,
+      "source": {
+        "sourceRect": {
+          "x": 3046,
+          "y": 1674,
+          "width": 96,
+          "height": 96,
+          "id": "git",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "git",
+        "dimensions": {
+          "width": 2560,
+          "height": 1440,
+          "sourceWidth": 6144,
+          "sourceHeight": 3456,
+          "dpi": 240,
+          "area": false,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.3125
+        }
+      },
+      "outputRect": {
+        "x": 1269,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1075,
+        "width": 41,
+        "height": 41
+      },
+      "final": {
+        "x": 616,
+        "y": 1075,
+        "width": 41,
+        "height": 41
+      }
+    }
+  ],
+  "sceneTitles": {
+    "reading": "Small text · Stress test",
+    "code": "Dark text & code · Stress test",
+    "lines": "Fine lines · Stress test",
+    "texture": "Dense textures · Stress test",
+    "icons": "Real colors · Control"
+  },
+  "atlasSize": [
+    1216,
+    1116
+  ]
+}

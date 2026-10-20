@@ -1,0 +1,241 @@
+{
+  "assets": [
+    {
+      "id": "firefox",
+      "name": "Firefox Browser",
+      "file": "firefox.png",
+      "kind": "icon",
+      "sourceUrl": "https://github.com/mozilla-firefox/firefox/blob/main/browser/branding/official/content/about-logo.png",
+      "downloadUrl": "https://raw.githubusercontent.com/mozilla-firefox/firefox/main/browser/branding/official/content/about-logo.png",
+      "license": "Mozilla trademark; official branding asset. https://www.mozilla.org/en-US/foundation/trademarks/policy/",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "vlc",
+      "name": "VLC",
+      "file": "vlc.svg",
+      "kind": "icon",
+      "sourceUrl": "https://www.videolan.org/vlc/",
+      "downloadUrl": "https://www.videolan.org/images/icons-VLC/vlc.svg",
+      "license": "VideoLAN trademark; official website asset by Richard Oiestad. Page mentions some icons are CC BY-SA 3.0+, without a file-specific assignment. https://www.videolan.org/legal.html",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "git",
+      "name": "Git",
+      "file": "git.svg",
+      "kind": "icon",
+      "sourceUrl": "https://git-scm.com/community/logos",
+      "downloadUrl": "https://git-scm.com/images/logos/downloads/Git-Icon-1788C.svg",
+      "license": "CC BY 3.0, Jason Long. https://creativecommons.org/licenses/by/3.0/",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "vscode",
+      "name": "Visual Studio Code",
+      "file": "vscode.png",
+      "kind": "icon",
+      "sourceUrl": "https://code.visualstudio.com/brand",
+      "downloadUrl": "https://code.visualstudio.com/assets/branding/code-stable.png",
+      "license": "Microsoft trademark, all rights reserved; official branding asset. https://code.visualstudio.com/brand",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "flag-us",
+      "name": "Twemoji US flag",
+      "file": "flag-us.svg",
+      "kind": "icon",
+      "sourceUrl": "https://github.com/twitter/twemoji/blob/v14.0.2/assets/svg/1f1fa-1f1f8.svg",
+      "downloadUrl": "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/svg/1f1fa-1f1f8.svg",
+      "license": "CC BY 4.0, Twitter, Inc and other contributors. https://github.com/twitter/twemoji/blob/v14.0.2/LICENSE-GRAPHICS",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "flag-gb",
+      "name": "Twemoji UK flag",
+      "file": "flag-gb.svg",
+      "kind": "icon",
+      "sourceUrl": "https://github.com/twitter/twemoji/blob/v14.0.2/assets/svg/1f1ec-1f1e7.svg",
+      "downloadUrl": "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/svg/1f1ec-1f1e7.svg",
+      "license": "CC BY 4.0, Twitter, Inc and other contributors. https://github.com/twitter/twemoji/blob/v14.0.2/LICENSE-GRAPHICS",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "rainbow-flag",
+      "name": "Twemoji rainbow flag",
+      "file": "rainbow-flag.svg",
+      "kind": "icon",
+      "sourceUrl": "https://github.com/twitter/twemoji/blob/v14.0.2/assets/svg/1f3f3-fe0f-200d-1f308.svg",
+      "downloadUrl": "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/svg/1f3f3-fe0f-200d-1f308.svg",
+      "license": "CC BY 4.0, Twitter, Inc and other contributors. https://github.com/twitter/twemoji/blob/v14.0.2/LICENSE-GRAPHICS",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "traffic-light",
+      "name": "Twemoji traffic light",
+      "file": "traffic-light.svg",
+      "kind": "icon",
+      "sourceUrl": "https://github.com/twitter/twemoji/blob/v14.0.2/assets/svg/1f6a6.svg",
+      "downloadUrl": "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/svg/1f6a6.svg",
+      "license": "CC BY 4.0, Twitter, Inc and other contributors. https://github.com/twitter/twemoji/blob/v14.0.2/LICENSE-GRAPHICS",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "pizza",
+      "name": "Twemoji pizza",
+      "file": "pizza.svg",
+      "kind": "icon",
+      "sourceUrl": "https://github.com/twitter/twemoji/blob/v14.0.2/assets/svg/1f355.svg",
+      "downloadUrl": "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/svg/1f355.svg",
+      "license": "CC BY 4.0, Twitter, Inc and other contributors. https://github.com/twitter/twemoji/blob/v14.0.2/LICENSE-GRAPHICS",
+      "backgrounds": [
+        "#ffffff",
+        "#181818"
+      ],
+      "sizes": [
+        16,
+        24,
+        32,
+        48,
+        64,
+        128
+      ]
+    },
+    {
+      "id": "astronaut",
+      "name": "NASA astronaut",
+      "file": "astronaut.png",
+      "kind": "photo",
+      "sourceUrl": "https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.astronaut",
+      "downloadUrl": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.18.3/skimage/data/astronaut.png",
+      "license": "Public domain; NASA Eileen Collins photograph. https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.astronaut",
+      "backgrounds": [
+        "#ffffff"
+      ],
+      "sizes": [
+        256,
+        512
+      ]
+    },
+    {
+      "id": "coffee",
+      "name": "Coffee",
+      "file": "coffee.png",
+      "kind": "photo",
+      "sourceUrl": "https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.coffee",
+      "downloadUrl": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.18.3/skimage/data/coffee.png",
+      "license": "CC0, Rachel Michetti; courtesy of Pikolo Espresso Bar. https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.coffee",
+      "backgrounds": [
+        "#ffffff"
+      ],
+      "sizes": [
+        256,
+        512
+      ]
+    },
+    {
+      "id": "chelsea",
+      "name": "Chelsea the cat",
+      "file": "chelsea.png",
+      "kind": "photo",
+      "sourceUrl": "https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.chelsea",
+      "downloadUrl": "https://raw.githubusercontent.com/scikit-image/scikit-image/v0.18.3/skimage/data/chelsea.png",
+      "license": "CC0, Stefan van der Walt. https://scikit-image.org/docs/stable/api/skimage.data.html#skimage.data.chelsea",
+      "backgrounds": [
+        "#ffffff"
+      ],
+      "sizes": [
+        256,
+        512
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1991 @@
+{
+  "release": {
+    "repository": "https://github.com/EvanZhu0721/SBMS",
+    "releaseUrl": "https://github.com/EvanZhu0721/SBMS/releases/tag/v1.6.1",
+    "tag": "v1.6.1",
+    "commit": "3c1ae5bb054c5613be530659360cbb75b95f0e31",
+    "publishedAt": "2026-10-15T12:29:14Z",
+    "checkedAt": "2026-10-20T09:59:26Z",
+    "draft": false,
+    "prerelease": false,
+    "label": "SBMS 1.6.1",
+    "comparisonLabel": "SBMS 1.6.1 · 发布版采样复现",
+    "verification": {
+      "latestReleaseApi": "https://api.github.com/repos/EvanZhu0721/SBMS/releases/latest",
+      "latestReleaseRedirect": "https://github.com/EvanZhu0721/SBMS/releases/latest",
+      "remoteAnnotatedTag": "3021c09aac4fd95bede5af596edd5c76e65dc7f0",
+      "remotePeeledTagMatchesLocalCommit": true,
+      "workingTreeRendererMatchesRelease": true,
+      "workingTreeShaderMatchesRelease": true,
+      "baselineHlslMatchesReleaseShader": true,
+      "textComparison": "Direct content comparison after normalizing CRLF/LF and trailing whitespace; no file hashes.",
+      "baselineShaderCharacters": 4512,
+      "baselineNeedsReplacement": false
+    },
+    "sampling": {
+      "areaCondition": "Both source/target axis ratios are > 1.0001 and <= 2.0.",
+      "areaBranch": "Exact pixel-area coverage plus adaptive horizontal subpixel-chroma suppression.",
+      "fallbackBranch": "Bilinear sampling, including enlargement, 1:1, reduction beyond 2x, and single-axis reductions.",
+      "releaseBoundary": "Clamp",
+      "demoBoundary": "Repeat",
+      "demoCoreFormulaMatchesRelease": true
+    },
+    "limits": [
+      "This is a reproduction of the released sampling formula, not a screenshot captured from the installed release.",
+      "The demo sums individual area-weighted texels; the release combines the same coverage through four hardware bilinear fetches.",
+      "WebGL manual interpolation and native D3D11 hardware sampling are not guaranteed to be bit-identical.",
+      "The demo repeats texture boundaries while the release clamps them. Compare interior regions sufficiently far from image edges.",
+      "Animated demo offsets translate the common source before both algorithms; a static zero-offset comparison directly matches the released pixel-center convention.",
+      "These comparisons do not measure the installed application's performance or the separate Stream only capture and encoder path."
+    ],
+    "sourceLinks": {
+      "releaseShader": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L49-L161",
+      "releaseAreaWeights": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L77-L116",
+      "releaseChromaSuppression": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L119-L145",
+      "releaseBranchSelection": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L148-L160",
+      "releaseSampler": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L460-L465"
+    },
+    "localEvidence": {
+      "baselineHlsl": "work/sampling-lab/sbms-current-baseline.hlsl",
+      "demoArea": "work/sampling-lab/dynamic-filter.js:355",
+      "demoSbms": "work/sampling-lab/dynamic-filter.js:371",
+      "demoBoundary": "work/sampling-lab/dynamic-filter.js:340",
+      "demoPixelCenters": "work/sampling-lab/dynamic-filter.js:462",
+      "cpuSbms": "work/sampling-lab/dynamic-filter.js:640"
+    }
+  },
+  "sourceSize": [
+    6144,
+    3456
+  ],
+  "outputSize": [
+    2560,
+    1440
+  ],
+  "scope": "Released sampling formula reproduced in WebGL versus the experimental final filter; not installed-app screenshots or a performance/streaming test.",
+  "conditions": "Every scene uses 6k2k, with 240% text/layout DPI where applicable. Both sides share source bytes and source offset.",
+  "phases": [
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1365,
+        "width": 1286,
+        "height": 163
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 568,
+        "width": 536,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 36984,
+          "chromaSum": 107819,
+          "chromaAtLeast8": 1879,
+          "maxChroma": 141,
+          "minLuma": 32,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.1548235020541,
+          "lumaStdDev": 34.86003534588397
+        },
+        "final": {
+          "pixels": 36984,
+          "chromaSum": 10101,
+          "chromaAtLeast8": 283,
+          "maxChroma": 51,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 246.5860832089551,
+          "lumaStdDev": 32.50237631738756
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.735119691398082,
+      "lumaMeanAbsoluteDelta": 2.4050453871944657,
+      "maxLumaDelta": 118.23479999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1365,
+        "width": 1286,
+        "height": 163
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 568,
+        "width": 537,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 37053,
+          "chromaSum": 102751,
+          "chromaAtLeast8": 1855,
+          "maxChroma": 141,
+          "minLuma": 32,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.11324339729592,
+          "lumaStdDev": 35.40533940294535
+        },
+        "final": {
+          "pixels": 37053,
+          "chromaSum": 10225,
+          "chromaAtLeast8": 305,
+          "maxChroma": 65,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 246.63490653928162,
+          "lumaStdDev": 32.56182072358624
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.7098390593654136,
+      "lumaMeanAbsoluteDelta": 2.3989575365017655,
+      "maxLumaDelta": 105,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1365,
+        "width": 1286,
+        "height": 163
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 568,
+        "width": 537,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 37053,
+          "chromaSum": 105624,
+          "chromaAtLeast8": 1965,
+          "maxChroma": 141,
+          "minLuma": 32,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 246.99646432947432,
+          "lumaStdDev": 35.636234775730976
+        },
+        "final": {
+          "pixels": 37053,
+          "chromaSum": 10231,
+          "chromaAtLeast8": 306,
+          "maxChroma": 67,
+          "minLuma": 12.9278,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 246.61581071438167,
+          "lumaStdDev": 32.541885345567216
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.70630358315566,
+      "lumaMeanAbsoluteDelta": 2.383669090222114,
+      "maxLumaDelta": 113,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1653,
+        "width": 1286,
+        "height": 259
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 688,
+        "width": 536,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58424,
+          "chromaSum": 146669,
+          "chromaAtLeast8": 2665,
+          "maxChroma": 135,
+          "minLuma": 24,
+          "maxLuma": 238,
+          "lumaMean": 31.039278005614293,
+          "lumaStdDev": 33.017655179178334
+        },
+        "final": {
+          "pixels": 58424,
+          "chromaSum": 15421,
+          "chromaAtLeast8": 392,
+          "maxChroma": 62,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 31.009207784472217,
+          "lumaStdDev": 31.12274963913782
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.687246108905016,
+      "lumaMeanAbsoluteDelta": 2.374760800356027,
+      "maxLumaDelta": 116.1404,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1653,
+        "width": 1286,
+        "height": 259
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 688,
+        "width": 537,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58533,
+          "chromaSum": 136256,
+          "chromaAtLeast8": 2677,
+          "maxChroma": 135,
+          "minLuma": 24,
+          "maxLuma": 238,
+          "lumaMean": 31.040800546700105,
+          "lumaStdDev": 33.42477193131937
+        },
+        "final": {
+          "pixels": 58533,
+          "chromaSum": 15435,
+          "chromaAtLeast8": 393,
+          "maxChroma": 67,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 30.991389219756396,
+          "lumaStdDev": 31.161311692068455
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.646091378652498,
+      "lumaMeanAbsoluteDelta": 2.3846522269488992,
+      "maxLumaDelta": 98.21259999999998,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1653,
+        "width": 1286,
+        "height": 259
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 688,
+        "width": 537,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58533,
+          "chromaSum": 138926,
+          "chromaAtLeast8": 2752,
+          "maxChroma": 135,
+          "minLuma": 24,
+          "maxLuma": 238,
+          "lumaMean": 31.034722843524097,
+          "lumaStdDev": 33.080562471661985
+        },
+        "final": {
+          "pixels": 58533,
+          "chromaSum": 15398,
+          "chromaAtLeast8": 391,
+          "maxChroma": 62,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 30.99529502332016,
+          "lumaStdDev": 31.086715589320782
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.7284437838484275,
+      "lumaMeanAbsoluteDelta": 2.453945804930559,
+      "maxLumaDelta": 104,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1365,
+        "width": 1286,
+        "height": 163
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 568,
+        "width": 536,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 36984,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 32,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 248.0459117456197,
+          "lumaStdDev": 33.68270244701444
+        },
+        "final": {
+          "pixels": 36984,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 27,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.44686891628808,
+          "lumaStdDev": 30.127558684249543
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.8677536231884058,
+      "lumaMeanAbsoluteDelta": 2.8677536231884058,
+      "maxLumaDelta": 133.99999999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1365,
+        "width": 1286,
+        "height": 163
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 568,
+        "width": 537,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 37053,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 32,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.7381858419021,
+          "lumaStdDev": 35.52250264594695
+        },
+        "final": {
+          "pixels": 37053,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 9.999999999999998,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.52584136237277,
+          "lumaStdDev": 30.357522248521747
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.8705367986397863,
+      "lumaMeanAbsoluteDelta": 2.8705367986397863,
+      "maxLumaDelta": 129.99999999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1365,
+        "width": 1286,
+        "height": 163
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 568,
+        "width": 537,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 37053,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 32,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.8603891722667,
+          "lumaStdDev": 34.531714178196374
+        },
+        "final": {
+          "pixels": 37053,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 4,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 247.48090572963048,
+          "lumaStdDev": 30.134568841226336
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.889941435241411,
+      "lumaMeanAbsoluteDelta": 2.889941435241411,
+      "maxLumaDelta": 126.99999999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1653,
+        "width": 1286,
+        "height": 259
+      },
+      "outputRect": {
+        "x": 1200,
+        "y": 688,
+        "width": 536,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58424,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 24,
+          "maxLuma": 238,
+          "lumaMean": 31.356548678625224,
+          "lumaStdDev": 34.832180099430744
+        },
+        "final": {
+          "pixels": 58424,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 31.412980966726003,
+          "lumaStdDev": 32.92499837811077
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.5277796795837326,
+      "lumaMeanAbsoluteDelta": 2.5277796795837326,
+      "maxLumaDelta": 140,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1653,
+        "width": 1286,
+        "height": 259
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 688,
+        "width": 537,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58533,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 24,
+          "maxLuma": 238,
+          "lumaMean": 31.443390907693097,
+          "lumaStdDev": 35.62328492021095
+        },
+        "final": {
+          "pixels": 58533,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 31.393863290793227,
+          "lumaStdDev": 33.009778291101945
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.543197854201903,
+      "lumaMeanAbsoluteDelta": 2.543197854201903,
+      "maxLumaDelta": 130,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2880,
+        "y": 1653,
+        "width": 1286,
+        "height": 259
+      },
+      "outputRect": {
+        "x": 1199,
+        "y": 688,
+        "width": 537,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58533,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 24,
+          "maxLuma": 238,
+          "lumaMean": 31.491534689833085,
+          "lumaStdDev": 35.16921153312849
+        },
+        "final": {
+          "pixels": 58533,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 31.39572548818615,
+          "lumaStdDev": 32.845369863475796
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.5915637332786634,
+      "lumaMeanAbsoluteDelta": 2.5915637332786634,
+      "maxLumaDelta": 119,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 48,
+        "y": 1812,
+        "width": 1440,
+        "height": 288
+      },
+      "outputRect": {
+        "x": 20,
+        "y": 755,
+        "width": 600,
+        "height": 120
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 72000,
+          "chromaSum": 101849,
+          "chromaAtLeast8": 3507,
+          "maxChroma": 46,
+          "minLuma": 73.99839999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 249.51171502223187,
+          "lumaStdDev": 27.18252154734778
+        },
+        "final": {
+          "pixels": 72000,
+          "chromaSum": 109190,
+          "chromaAtLeast8": 4022,
+          "maxChroma": 53,
+          "minLuma": 48.141600000000004,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 249.11901219167126,
+          "lumaStdDev": 26.319713514195104
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.278523148148148,
+      "lumaMeanAbsoluteDelta": 1.3958273694444472,
+      "maxLumaDelta": 78.42999999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 48,
+        "y": 1812,
+        "width": 1440,
+        "height": 288
+      },
+      "outputRect": {
+        "x": 19,
+        "y": 755,
+        "width": 601,
+        "height": 120
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 72120,
+          "chromaSum": 101785,
+          "chromaAtLeast8": 3503,
+          "maxChroma": 46,
+          "minLuma": 73.99839999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 249.51847558514604,
+          "lumaStdDev": 27.16040028986452
+        },
+        "final": {
+          "pixels": 72120,
+          "chromaSum": 109263,
+          "chromaAtLeast8": 4025,
+          "maxChroma": 53,
+          "minLuma": 48.141600000000004,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 249.12456599556754,
+          "lumaStdDev": 26.30436209257839
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2772416343131818,
+      "lumaMeanAbsoluteDelta": 1.3945025513033877,
+      "maxLumaDelta": 78.42999999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 48,
+        "y": 1812,
+        "width": 1440,
+        "height": 288
+      },
+      "outputRect": {
+        "x": 19,
+        "y": 754,
+        "width": 601,
+        "height": 121
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 72721,
+          "chromaSum": 102659,
+          "chromaAtLeast8": 2894,
+          "maxChroma": 46,
+          "minLuma": 73.99839999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 249.53932266058925,
+          "lumaStdDev": 27.016255858168
+        },
+        "final": {
+          "pixels": 72721,
+          "chromaSum": 110021,
+          "chromaAtLeast8": 3588,
+          "maxChroma": 56,
+          "minLuma": 35.7834,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 249.15648203132983,
+          "lumaStdDev": 26.192168027051096
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2351957022959896,
+      "lumaMeanAbsoluteDelta": 1.3457404738658698,
+      "maxLumaDelta": 78.6426,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "stripes",
+      "scene": "texture",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 1908,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 880,
+        "y": 795,
+        "width": 600,
+        "height": 100
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60000,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 39,
+          "maxLuma": 222,
+          "lumaMean": 130.4,
+          "lumaStdDev": 64.63002398266615
+        },
+        "final": {
+          "pixels": 60000,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 130,
+          "maxLuma": 130,
+          "lumaMean": 130,
+          "lumaStdDev": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 54.8,
+      "lumaMeanAbsoluteDelta": 54.8,
+      "maxLumaDelta": 92,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "stripes",
+      "scene": "texture",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 1908,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 879,
+        "y": 795,
+        "width": 601,
+        "height": 100
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60100,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 39,
+          "maxLuma": 222,
+          "lumaMean": 130.4758735440932,
+          "lumaStdDev": 64.60297150337233
+        },
+        "final": {
+          "pixels": 60100,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 130,
+          "maxLuma": 130,
+          "lumaMean": 130,
+          "lumaStdDev": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 54.785357737104825,
+      "lumaMeanAbsoluteDelta": 54.785357737104825,
+      "maxLumaDelta": 92,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "stripes",
+      "scene": "texture",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 1908,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 879,
+        "y": 794,
+        "width": 601,
+        "height": 101
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60701,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 39,
+          "maxLuma": 222,
+          "lumaMean": 130.4758735440932,
+          "lumaStdDev": 64.60297150337233
+        },
+        "final": {
+          "pixels": 60701,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 130,
+          "maxLuma": 130,
+          "lumaMean": 130,
+          "lumaStdDev": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 54.785357737104825,
+      "lumaMeanAbsoluteDelta": 54.785357737104825,
+      "maxLumaDelta": 92,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "checker",
+      "scene": "texture",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 2436,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 880,
+        "y": 1015,
+        "width": 600,
+        "height": 100
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60000,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 16,
+          "maxLuma": 244.99999999999997,
+          "lumaMean": 130.32,
+          "lumaStdDev": 75.10777323286854
+        },
+        "final": {
+          "pixels": 60000,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 124,
+          "maxLuma": 137,
+          "lumaMean": 130.32,
+          "lumaStdDev": 3.7812167353910957
+        }
+      },
+      "rgbMeanAbsoluteDelta": 56.48,
+      "lumaMeanAbsoluteDelta": 56.48,
+      "maxLumaDelta": 108,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 0,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "checker",
+      "scene": "texture",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 2436,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 879,
+        "y": 1015,
+        "width": 601,
+        "height": 100
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60100,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 16,
+          "maxLuma": 244.99999999999997,
+          "lumaMean": 130.4,
+          "lumaStdDev": 75.45210423359887
+        },
+        "final": {
+          "pixels": 60100,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 123,
+          "maxLuma": 137,
+          "lumaMean": 130.36006655574045,
+          "lumaStdDev": 3.7058396147356274
+        }
+      },
+      "rgbMeanAbsoluteDelta": 59.51281198003328,
+      "lumaMeanAbsoluteDelta": 59.51281198003328,
+      "maxLumaDelta": 109,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 0,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "checker",
+      "scene": "texture",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 2436,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 879,
+        "y": 1014,
+        "width": 601,
+        "height": 101
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60701,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 16,
+          "maxLuma": 244.99999999999997,
+          "lumaMean": 130.26230210375448,
+          "lumaStdDev": 75.61355079962738
+        },
+        "final": {
+          "pixels": 60701,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 123,
+          "maxLuma": 136,
+          "lumaMean": 130.36045534669938,
+          "lumaStdDev": 3.457868995883545
+        }
+      },
+      "rgbMeanAbsoluteDelta": 62.816065633185616,
+      "lumaMeanAbsoluteDelta": 62.816065633185616,
+      "maxLumaDelta": 109.99999999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 0,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "diagonal",
+      "scene": "texture",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 2952,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 880,
+        "y": 1230,
+        "width": 600,
+        "height": 100
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60000,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 131,
+          "maxLuma": 213,
+          "lumaMean": 172.32,
+          "lumaStdDev": 27.850630154450766
+        },
+        "final": {
+          "pixels": 60000,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 170,
+          "maxLuma": 174,
+          "lumaMean": 172.4,
+          "lumaStdDev": 1.4966629547088959
+        }
+      },
+      "rgbMeanAbsoluteDelta": 23.92,
+      "lumaMeanAbsoluteDelta": 23.92,
+      "maxLumaDelta": 39,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 0,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "diagonal",
+      "scene": "texture",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 2952,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 879,
+        "y": 1230,
+        "width": 601,
+        "height": 100
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60100,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 127,
+          "maxLuma": 209,
+          "lumaMean": 172.20199667221297,
+          "lumaStdDev": 27.770634054944356
+        },
+        "final": {
+          "pixels": 60100,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 170,
+          "maxLuma": 174,
+          "lumaMean": 172,
+          "lumaStdDev": 1.4142135623730951
+        }
+      },
+      "rgbMeanAbsoluteDelta": 23.39866888519135,
+      "lumaMeanAbsoluteDelta": 23.39866888519135,
+      "maxLumaDelta": 43,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 0,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "diagonal",
+      "scene": "texture",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 2112,
+        "y": 2952,
+        "width": 1440,
+        "height": 240
+      },
+      "outputRect": {
+        "x": 879,
+        "y": 1229,
+        "width": 601,
+        "height": 101
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60701,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 131,
+          "maxLuma": 213,
+          "lumaMean": 172.3098630994547,
+          "lumaStdDev": 27.832381950985145
+        },
+        "final": {
+          "pixels": 60701,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0,
+          "minLuma": 170,
+          "maxLuma": 174,
+          "lumaMean": 172.40002635870908,
+          "lumaStdDev": 1.496664715641839
+        }
+      },
+      "rgbMeanAbsoluteDelta": 23.8988978764765,
+      "lumaMeanAbsoluteDelta": 23.8988978764765,
+      "maxLumaDelta": 39,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 0,
+        "finalMax": 0,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "tiktok",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1269,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 26723,
+          "chromaAtLeast8": 212,
+          "maxChroma": 210,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 39.34751766805471,
+          "lumaStdDev": 85.0531081557942
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 28489,
+          "chromaAtLeast8": 240,
+          "maxChroma": 229,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 38.65961475312313,
+          "lumaStdDev": 82.84647923621817
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.3565338092405312,
+      "lumaMeanAbsoluteDelta": 2.2075752528256984,
+      "maxLumaDelta": 42.95000000000002,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "tiktok",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1268,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 27161,
+          "chromaAtLeast8": 220,
+          "maxChroma": 210,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 38.089008090422375,
+          "lumaStdDev": 83.31992576766537
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 28633,
+          "chromaAtLeast8": 262,
+          "maxChroma": 233,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 38.80209660916118,
+          "lumaStdDev": 82.84569008075283
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.512393416617093,
+      "lumaMeanAbsoluteDelta": 2.5386785246876844,
+      "maxLumaDelta": 47.80580000000001,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "tiktok",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1268,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 27372,
+          "chromaAtLeast8": 222,
+          "maxChroma": 210,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 38.120985722784056,
+          "lumaStdDev": 83.20716056820814
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 28558,
+          "chromaAtLeast8": 261,
+          "maxChroma": 230,
+          "minLuma": 0,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 38.786647947650145,
+          "lumaStdDev": 82.78892715725999
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.4747174301011303,
+      "lumaMeanAbsoluteDelta": 2.481353837001783,
+      "maxLumaDelta": 50.095800000000004,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 3051,
+        "y": 1674,
+        "width": 85,
+        "height": 96,
+        "id": "vlc",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1271,
+        "y": 697,
+        "width": 36,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1476,
+          "chromaSum": 123718,
+          "chromaAtLeast8": 726,
+          "maxChroma": 255,
+          "minLuma": 78.49359999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 200.47237506775076,
+          "lumaStdDev": 56.36765620990077
+        },
+        "final": {
+          "pixels": 1476,
+          "chromaSum": 124478,
+          "chromaAtLeast8": 746,
+          "maxChroma": 255,
+          "minLuma": 67.9204,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 199.8279628726284,
+          "lumaStdDev": 56.32072016807486
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.969286359530262,
+      "lumaMeanAbsoluteDelta": 2.947400813008133,
+      "maxLumaDelta": 36.11579999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 3051,
+        "y": 1674,
+        "width": 85,
+        "height": 96,
+        "id": "vlc",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1270,
+        "y": 697,
+        "width": 37,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1517,
+          "chromaSum": 124242,
+          "chromaAtLeast8": 734,
+          "maxChroma": 255,
+          "minLuma": 78.49359999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 201.9368601186549,
+          "lumaStdDev": 56.1886036571518
+        },
+        "final": {
+          "pixels": 1517,
+          "chromaSum": 124768,
+          "chromaAtLeast8": 738,
+          "maxChroma": 255,
+          "minLuma": 64.1318,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 201.24593829927463,
+          "lumaStdDev": 56.22462933225107
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.91430454845089,
+      "lumaMeanAbsoluteDelta": 2.8936044825313143,
+      "maxLumaDelta": 36.69060000000002,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 3051,
+        "y": 1674,
+        "width": 85,
+        "height": 96,
+        "id": "vlc",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1270,
+        "y": 697,
+        "width": 37,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1517,
+          "chromaSum": 127046,
+          "chromaAtLeast8": 743,
+          "maxChroma": 255,
+          "minLuma": 78.49359999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 200.07470639419887,
+          "lumaStdDev": 57.530812375810925
+        },
+        "final": {
+          "pixels": 1517,
+          "chromaSum": 126403,
+          "chromaAtLeast8": 749,
+          "maxChroma": 255,
+          "minLuma": 65.56219999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 200.3437281476601,
+          "lumaStdDev": 56.289952563682455
+        }
+      },
+      "rgbMeanAbsoluteDelta": 3.01098659635245,
+      "lumaMeanAbsoluteDelta": 2.9329207646671094,
+      "maxLumaDelta": 49.28500000000001,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "flag-us-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "flag-us",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1269,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 75302,
+          "chromaAtLeast8": 852,
+          "maxChroma": 143,
+          "minLuma": 62.8948,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 170.98973789410928,
+          "lumaStdDev": 83.26856421134197
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 79957,
+          "chromaAtLeast8": 1136,
+          "maxChroma": 171,
+          "minLuma": 39.6542,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 170.26273313503762,
+          "lumaStdDev": 83.44549430540565
+        }
+      },
+      "rgbMeanAbsoluteDelta": 9.078921277017649,
+      "lumaMeanAbsoluteDelta": 10.130327781082778,
+      "maxLumaDelta": 57.4564,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "flag-us-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "flag-us",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1268,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 74954,
+          "chromaAtLeast8": 856,
+          "maxChroma": 143,
+          "minLuma": 62.8948,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 170.31231505056374,
+          "lumaStdDev": 83.52088595969276
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 79621,
+          "chromaAtLeast8": 1134,
+          "maxChroma": 173,
+          "minLuma": 39.07940000000001,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 169.8773967876253,
+          "lumaStdDev": 83.51475234939124
+        }
+      },
+      "rgbMeanAbsoluteDelta": 9.228832044418006,
+      "lumaMeanAbsoluteDelta": 10.266452349791882,
+      "maxLumaDelta": 50.9262,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "flag-us-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "flag-us",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1268,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 75743,
+          "chromaAtLeast8": 856,
+          "maxChroma": 143,
+          "minLuma": 62.8948,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 169.9519518143953,
+          "lumaStdDev": 83.2994519388592
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 79381,
+          "chromaAtLeast8": 1140,
+          "maxChroma": 168,
+          "minLuma": 40.522999999999996,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 169.62094943485928,
+          "lumaStdDev": 83.14672984848369
+        }
+      },
+      "rgbMeanAbsoluteDelta": 9.112829664882014,
+      "lumaMeanAbsoluteDelta": 10.153795002974368,
+      "maxLumaDelta": 50.13880000000001,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "git",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1269,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 142530,
+          "chromaAtLeast8": 802,
+          "maxChroma": 194,
+          "minLuma": 97.25720000000001,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 186.05276835216884,
+          "lumaStdDev": 76.1171783771854
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 144019,
+          "chromaAtLeast8": 839,
+          "maxChroma": 217,
+          "minLuma": 78.5774,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 185.33386186793368,
+          "lumaStdDev": 75.49824665708915
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.2393416617093,
+      "lumaMeanAbsoluteDelta": 2.534161451516956,
+      "maxLumaDelta": 33.99740000000003,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "git",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1268,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 142646,
+          "chromaAtLeast8": 807,
+          "maxChroma": 194,
+          "minLuma": 97.25720000000001,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 186.0060947055301,
+          "lumaStdDev": 75.98056420480314
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 143871,
+          "chromaAtLeast8": 817,
+          "maxChroma": 212,
+          "minLuma": 82.7992,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 185.41153039857036,
+          "lumaStdDev": 75.56619422726638
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.1707317073170733,
+      "lumaMeanAbsoluteDelta": 2.4524010707911996,
+      "maxLumaDelta": 45.446200000000005,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 3046,
+        "y": 1674,
+        "width": 96,
+        "height": 96,
+        "id": "git",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 1268,
+        "y": 697,
+        "width": 41,
+        "height": 41
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 1681,
+          "chromaSum": 143040,
+          "chromaAtLeast8": 801,
+          "maxChroma": 194,
+          "minLuma": 97.25720000000001,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 185.80872433075322,
+          "lumaStdDev": 75.91258106361853
+        },
+        "final": {
+          "pixels": 1681,
+          "chromaSum": 143868,
+          "chromaAtLeast8": 824,
+          "maxChroma": 216,
+          "minLuma": 78.64959999999999,
+          "maxLuma": 254.99999999999997,
+          "lumaMean": 185.39939988102103,
+          "lumaStdDev": 75.5743392842744
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.1505056513979772,
+      "lumaMeanAbsoluteDelta": 2.43369779892921,
+      "maxLumaDelta": 38.86220000000003,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    }
+  ],
+  "failures": [],
+  "errors": [],
+  "renderer": "ANGLE (AMD, AMD Radeon RX 7900 XTX (0x0000744C) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "cpuSamples": 6048,
+  "browserExceptions": [],
+  "dynamicErrors": [],
+  "notes": [
+    "Zero offset is exported; all three fixed source offsets are verified, without moving or rerasterizing the source.",
+    "CPU checks use the actual GPU-preprocessed source, isolating resampling from previously audited defringe behavior.",
+    "Color differences on icons and photos are not improvements. Neutral-text chroma is one diagnostic, not a total image quality score.",
+    "The atlas copies GPU RGBA8 pixels directly. Figure construction must preserve 1:1 pixels and use nearest-neighbor only for labeled details.",
+    "230.4 DPI describes native text target rasterization and canvas layout. Photo input dimensions remain original; icon source sizes are explicitly stated.",
+    "96 px icons and original-size photos are enabled only in this test tab, without changing the shipped demo size menu."
+  ]
+}

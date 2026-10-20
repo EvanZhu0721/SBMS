@@ -4,9 +4,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{
-    HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WPARAM,
-};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -18,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::config::RenderingOptions;
 use crate::display::Display;
 use crate::gpu_renderer::{GpuRendererConfig, GpuRendererError, run_gpu_renderer};
 use crate::input::{InputGuard, flush_movement, handle_message};
@@ -121,6 +120,22 @@ impl Renderer {
         reporter: RendererReporter,
         interrupted: impl Fn() -> bool,
     ) -> Result<Self, RendererStartError> {
+        Self::start_with_options_interruptible(
+            target,
+            source,
+            reporter,
+            RenderingOptions::default(),
+            interrupted,
+        )
+    }
+
+    pub(crate) fn start_with_options_interruptible(
+        target: Display,
+        source: Display,
+        reporter: RendererReporter,
+        rendering: RenderingOptions,
+        interrupted: impl Fn() -> bool,
+    ) -> Result<Self, RendererStartError> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let wake_event = Arc::new(create_wake_event().map_err(RendererStartError::Failed)?);
@@ -130,8 +145,9 @@ impl Renderer {
         let worker_reporter = Arc::clone(&reporter);
         let thread = thread::spawn(move || {
             let result = run(
-                target.rect,
-                source.rect,
+                target,
+                source,
+                rendering,
                 &worker_stop,
                 &worker_wake_event,
                 &ready_tx,
@@ -343,13 +359,22 @@ impl Drop for Renderer {
 }
 
 fn run(
-    target: RECT,
-    source: RECT,
+    target: Display,
+    source: Display,
+    rendering: RenderingOptions,
     stop: &AtomicBool,
     wake_event: &OwnedHandle,
     ready: &mpsc::Sender<Result<(), RendererStartError>>,
     reporter: &RendererReporter,
 ) -> Result<(), WorkerRunError> {
+    let target_refresh_millihz = if target.refresh_numerator == 0 || target.refresh_denominator == 0
+    {
+        60_000
+    } else {
+        (u64::from(target.refresh_numerator) * 1000 / u64::from(target.refresh_denominator)) as u32
+    };
+    let target = target.rect;
+    let source = source.rect;
     let instance = unsafe { GetModuleHandleW(None) }
         .map_err(|error| WorkerRunError::Failed(format!("GetModuleHandleW failed: {error}")))?;
     let instance = HINSTANCE(instance.0);
@@ -413,7 +438,19 @@ fn run(
         let window_value = window.0 as usize;
         let draw_thread = scope.spawn(move || {
             let window = HWND(window_value as *mut _);
-            let result = draw_frames(window, width, height, source, stop, ready, reporter);
+            let result = draw_frames(
+                GpuRendererConfig {
+                    target_window: window,
+                    target_width: width as u32,
+                    target_height: height as u32,
+                    source_rect: source,
+                    rendering,
+                    target_refresh_millihz,
+                },
+                stop,
+                ready,
+                reporter,
+            );
             let _ = draw_done_tx.send(result);
             signal_event(wake_event);
         });
@@ -482,10 +519,7 @@ fn signal_event(wake_event: &OwnedHandle) {
 }
 
 fn draw_frames(
-    window: HWND,
-    target_width: i32,
-    target_height: i32,
-    source: RECT,
+    config: GpuRendererConfig,
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), RendererStartError>>,
     reporter: &RendererReporter,
@@ -493,31 +527,22 @@ fn draw_frames(
     let mut first_frame = true;
     let mut frames = 0_u32;
     let mut sample_started = Instant::now();
-    let result = run_gpu_renderer(
-        GpuRendererConfig {
-            target_window: window,
-            target_width: target_width as u32,
-            target_height: target_height as u32,
-            source_rect: source,
-        },
-        stop,
-        || {
-            frames = frames.saturating_add(1);
-            if first_frame {
-                ready
-                    .send(Ok(()))
-                    .map_err(|_| "mapping start was cancelled".to_string())?;
-                first_frame = false;
-            }
-            let elapsed = sample_started.elapsed();
-            if elapsed >= Duration::from_secs(1) {
-                reporter(RendererEvent::Fps(measured_fps(frames, elapsed)));
-                frames = 0;
-                sample_started = Instant::now();
-            }
-            Ok(())
-        },
-    );
+    let result = run_gpu_renderer(config, stop, || {
+        frames = frames.saturating_add(1);
+        if first_frame {
+            ready
+                .send(Ok(()))
+                .map_err(|_| "mapping start was cancelled".to_string())?;
+            first_frame = false;
+        }
+        let elapsed = sample_started.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            reporter(RendererEvent::Fps(measured_fps(frames, elapsed)));
+            frames = 0;
+            sample_started = Instant::now();
+        }
+        Ok(())
+    });
     finish_gpu_renderer(result, reporter, first_frame, ready)
 }
 

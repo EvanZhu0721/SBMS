@@ -64,6 +64,12 @@ pub(super) fn register_lifecycle_handlers(
                 .lock()
                 .expect("active group poisoned");
             snapshot_group(&ui, &displays, &mut groups, active);
+            refresh_group_sizing(&mut groups, &displays);
+            if let Err(error) = validate_live_group_sizing(&groups, &displays) {
+                ui.set_error_text(error.into());
+                ui.set_state_detail("Mapping plan needs attention".into());
+                return;
+            }
             let validated = match validate_group_drafts(&groups) {
                 Ok(validated) => validated,
                 Err(error) => {
@@ -377,6 +383,27 @@ fn reload_or_restart_profile(
 pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerState) {
     let flyout_weak = flyout.as_weak();
     let callback_state = state.clone();
+    flyout.on_rendering_edited(move || {
+        if let Some(ui) = flyout_weak.upgrade() {
+            if ui.get_running() || ui.get_busy() {
+                return;
+            }
+            let displays = callback_state
+                .displays
+                .lock()
+                .expect("display metadata poisoned");
+            let mut groups = callback_state.groups.lock().expect("group drafts poisoned");
+            let active = *callback_state
+                .active_group
+                .lock()
+                .expect("active group poisoned");
+            snapshot_group(&ui, &displays, &mut groups, active);
+            persist_groups(&ui, &groups, active, &callback_state.profile_revision);
+        }
+    });
+
+    let flyout_weak = flyout.as_weak();
+    let callback_state = state.clone();
     flyout.on_display_selected(move || {
         if let Some(ui) = flyout_weak.upgrade() {
             let displays = callback_state
@@ -385,14 +412,20 @@ pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerSt
                 .expect("display metadata poisoned");
             let selected_id = selected_display_id(&ui, ui.get_selected_display());
             ui.set_stream_only(selected_id.as_deref() == Some(STREAM_ONLY_ID));
-            let previous_reference = selected_reference_source(&ui);
-            rebuild_reference_options(&ui, &displays, previous_reference);
-            update_reference_action(&ui, &displays);
             let mut groups = callback_state.groups.lock().expect("group drafts poisoned");
             let active = *callback_state
                 .active_group
                 .lock()
                 .expect("active group poisoned");
+            let previous_reference = groups
+                .first()
+                .and_then(|group| group.reference_source.clone());
+            if let Some(group) = groups.get_mut(active) {
+                group.stream_only = ui.get_stream_only();
+                group.target_id = (!group.stream_only).then_some(selected_id).flatten();
+            }
+            rebuild_reference_options(&ui, &displays, &groups, previous_reference);
+            update_reference_action(&ui, &displays);
             snapshot_group(&ui, &displays, &mut groups, active);
             update_tab_projection(&ui, &groups, active);
             project_group_telemetry(&ui, &groups, active);
@@ -418,7 +451,7 @@ pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerSt
                 .lock()
                 .expect("active group poisoned");
             snapshot_group(&ui, &displays, &mut groups, active);
-            update_tab_projection(&ui, &groups, active);
+            hydrate_group(&ui, &displays, &groups, active);
             persist_groups(&ui, &groups, active, &callback_state.profile_revision);
         }
     });
@@ -597,8 +630,11 @@ pub(super) fn register_screen_size_handlers(
     let screen_sender = sender.clone();
     flyout.on_open_screen_size(move || {
         if let Some(ui) = flyout_weak.upgrade() {
+            if ui.get_running() || ui.get_busy() {
+                return;
+            }
             let displays = screen_displays.lock().expect("display metadata poisoned");
-            populate_screen_size_page(&ui, &displays);
+            populate_screen_size_page(&ui, &displays, false);
             ui.set_page(QuickAccessPage::ScreenSize);
             screen_sender.refresh();
             reposition_after_layout(ui.as_weak());
@@ -615,25 +651,67 @@ pub(super) fn register_screen_size_handlers(
 
     let flyout_weak = flyout.as_weak();
     let screen_displays = state.displays.clone();
-    flyout.on_screen_size_edited(move || {
+    flyout.on_screen_size_edited(move |index, manual_inches, aspect_ratio| {
         if let Some(ui) = flyout_weak.upgrade() {
+            if ui.get_running() || ui.get_busy() || ui.get_screen_size_save_blocked() {
+                return;
+            }
             let displays = screen_displays.lock().expect("display metadata poisoned");
-            update_screen_size_preview(&ui, &displays);
+            edit_screen_size_row(&ui, &displays, index, manual_inches, aspect_ratio);
         }
     });
 
     let flyout_weak = flyout.as_weak();
     let screen_displays = state.displays.clone();
-    flyout.on_reset_screen_size(move || {
+    flyout.on_reset_screen_size(move |index| {
         if let Some(ui) = flyout_weak.upgrade() {
-            ui.set_screen_size_manual_inches("".into());
+            if ui.get_running() || ui.get_busy() || ui.get_screen_size_save_blocked() {
+                return;
+            }
             let displays = screen_displays.lock().expect("display metadata poisoned");
-            update_screen_size_preview(&ui, &displays);
+            edit_screen_size_row(&ui, &displays, index, "".into(), 0);
         }
     });
 
+    let flyout_weak = flyout.as_weak();
+    let screen_displays = state.displays.clone();
+    flyout.on_screen_refresh_edited(move |index, refresh| {
+        let Some(ui) = flyout_weak.upgrade() else {
+            return;
+        };
+        if ui.get_running() || ui.get_busy() || ui.get_screen_size_save_blocked() {
+            return;
+        }
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let rows = ui.get_screen_size_rows();
+        let Some(mut row) = rows.row_data(index) else {
+            return;
+        };
+        let displays = screen_displays.lock().expect("display metadata poisoned");
+        let Some(display) = displays
+            .iter()
+            .find(|display| row.display_id.eq_ignore_ascii_case(&display.id))
+        else {
+            return;
+        };
+        row.manual_refresh = refresh;
+        update_screen_size_row_preview(display, &mut row);
+        rows.set_row_data(index, row);
+        update_screen_size_validity(&ui);
+    });
+
     let reread_sender = sender.clone();
-    flyout.on_reread_screen_size(move || reread_sender.refresh());
+    let flyout_weak = flyout.as_weak();
+    flyout.on_reread_screen_size(move || {
+        if let Some(ui) = flyout_weak.upgrade()
+            && !ui.get_running()
+            && !ui.get_busy()
+        {
+            reread_sender.refresh();
+        }
+    });
 
     let flyout_weak = flyout.as_weak();
     let screen_state = state.clone();
@@ -642,44 +720,27 @@ pub(super) fn register_screen_size_handlers(
         let Some(ui) = flyout_weak.upgrade() else {
             return;
         };
-        if ui.get_screen_size_save_blocked() {
+        if ui.get_running() || ui.get_busy() || ui.get_screen_size_save_blocked() {
             return;
         }
         let mut displays = screen_state
             .displays
             .lock()
             .expect("display metadata poisoned");
-        let Some(display_id) = selected_display_id(&ui, ui.get_selected_display()) else {
-            ui.set_screen_size_error("Target screen is no longer available".into());
-            return;
-        };
-        if display_id == STREAM_ONLY_ID {
-            return;
-        }
-        let manual = ui.get_screen_size_manual_inches();
+        let rows = ui.get_screen_size_rows().iter().collect::<Vec<_>>();
         let mut overrides = screen_state
             .display_overrides
             .lock()
             .expect("display overrides poisoned");
-        let mut candidate = overrides.clone();
-        let candidate_result = if manual.trim().is_empty() {
-            candidate.remove(&display_id);
-            Ok(())
-        } else {
-            parse_screen_diagonal(manual.as_str()).and_then(|value| {
-                let aspect_ratio = screen_override_aspect_ratio(ui.get_screen_size_aspect_ratio())?;
-                candidate
-                    .upsert(display_id.clone(), value, aspect_ratio)
-                    .map_err(|error| error.to_string())
+        if let Err(error) =
+            screen_size_override_candidate(&overrides, &displays, &rows).and_then(|candidate| {
+                persist_then_commit_display_overrides(&mut overrides, candidate, |candidate| {
+                    screen_store
+                        .save(candidate)
+                        .map_err(|error| error.to_string())
+                })
             })
-        };
-        if let Err(error) = candidate_result.and_then(|_| {
-            persist_then_commit_display_overrides(&mut overrides, candidate, |candidate| {
-                screen_store
-                    .save(candidate)
-                    .map_err(|error| error.to_string())
-            })
-        }) {
+        {
             ui.set_screen_size_error(error.into());
             return;
         }
@@ -772,14 +833,10 @@ pub(super) fn register_group_handlers(flyout: &QuickAccess, state: &HandlerState
             let id = (0..MAX_OUTPUTS as u32)
                 .find(|id| groups.iter().all(|group| group.id != *id))
                 .expect("mapping group capacity and ids diverged");
-            let mut group = GroupDraft::new(id);
-            group.stream_only = displays.iter().all(|display| {
-                groups.iter().any(|group| {
-                    !group.stream_only && group.target_id.as_deref() == Some(display.id.as_str())
-                })
-            });
+            let mut group = new_group_draft(id, &groups, &displays);
             group.tab_detail = group_tab_detail(&group, &displays);
             groups.push(group);
+            refresh_group_sizing(&mut groups, &displays);
             let next = groups.len() - 1;
             *add_state
                 .active_group

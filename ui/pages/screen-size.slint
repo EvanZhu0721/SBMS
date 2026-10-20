@@ -1,104 +1,141 @@
-import { LineEdit } from "std-widgets.slint";
-import {
-    BackButton,
-    CompactComboBox,
-    PageActionButton,
-} from "../controls.slint";
+import { LineEdit, ScrollView } from "../vendor/material/std-widgets.slint";
+import { BackButton, CompactComboBox, PageActionButton } from "../controls.slint";
 import { MdTokens } from "../theme.slint";
 
+export struct ScreenSizeRow {
+    display-id: string,
+    name: string,
+    native-mode: string,
+    detected-size: string,
+    detected-refresh: string,
+    manual-refresh: string,
+    manual-inches: string,
+    aspect-ratio: int,
+    effective-size: string,
+    error: string,
+}
+
 export component ScreenSizePage inherits FocusScope {
-    in property <string> screen-size-target: "";
-    in property <string> screen-size-native-mode: "";
-    in property <string> screen-size-detected-mm: "Not reported";
-    in property <string> screen-size-detected-inches: "";
-    in-out property <string> screen-size-manual-inches: "";
-    in-out property <int> screen-size-aspect-ratio: 0;
-    in property <string> screen-size-effective-mm: "";
-    in property <string> screen-size-effective-inches: "";
-    in property <string> screen-size-source: "";
+    in-out property <[ScreenSizeRow]> screen-size-rows;
     in property <string> screen-size-error: "";
     in property <bool> screen-size-valid: true;
     in property <bool> screen-size-save-blocked: false;
-    
+
     callback close-screen-size();
-    callback screen-size-edited();
-    callback reset-screen-size();
+    callback screen-size-edited(int, string, int);
+    callback reset-screen-size(int);
+    callback screen-refresh-edited(int, string);
     callback reread-screen-size();
     callback save-screen-size();
 
-            key-pressed(event) => {
-                if event.text == Key.Escape {
-                    root.close-screen-size();
-                    return accept;
+    key-pressed(event) => {
+        if event.text == Key.Escape {
+            root.close-screen-size();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: MdTokens.surface;
+
+        VerticalLayout {
+            padding: MdTokens.space-2;
+            spacing: MdTokens.space-1;
+
+            HorizontalLayout {
+                height: MdTokens.target;
+                spacing: MdTokens.space-1;
+                BackButton {
+                    accessible-label: "Back to mapping group";
+                    clicked => { root.close-screen-size(); }
                 }
-                return reject;
+                Text {
+                    text: "Displays";
+                    color: MdTokens.on-surface;
+                    font-size: MdTokens.type-title-large;
+                    font-weight: MdTokens.weight-medium;
+                    vertical-alignment: center;
+                }
             }
-    
-            Rectangle {
-                width: parent.width;
-                height: parent.height;
-                background: MdTokens.surface;
-    
+
+            screen-list := ScrollView {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                viewport-width: self.visible-width;
+
                 VerticalLayout {
-                    padding: MdTokens.space-2;
                     spacing: MdTokens.space-1;
-    
-                    HorizontalLayout {
-                        height: MdTokens.target;
-                        spacing: MdTokens.space-1;
-                        BackButton {
-                            accessible-label: "Back to mapping group";
-                            clicked => { root.close-screen-size(); }
-                        }
-                        Text {
-                            text: "Screen size";
-                            color: MdTokens.on-surface;
-                            font-size: MdTokens.type-title-large;
-                            font-weight: MdTokens.weight-medium;
-                            vertical-alignment: center;
-                        }
-                    }
-    
-                    Rectangle {
-                        height: 92px;
+                    for screen[index] in root.screen-size-rows : card := Rectangle {
+                        height: 184px;
                         background: MdTokens.surface-container;
                         border-radius: MdTokens.shape-medium;
+
                         VerticalLayout {
-                            padding: 12px;
-                            spacing: 3px;
-                            Text {
-                                text: root.screen-size-target;
-                                color: MdTokens.on-surface;
-                                font-size: MdTokens.type-title-medium;
-                                font-weight: MdTokens.weight-medium;
-                                overflow: elide;
+                            padding: 10px;
+                            spacing: 4px;
+                            VerticalLayout {
+                                height: 38px;
+                                spacing: 2px;
+                                Text {
+                                    height: 20px;
+                                    text: screen.name;
+                                    color: MdTokens.on-surface;
+                                    font-size: MdTokens.type-title-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    height: 16px;
+                                    text: screen.native-mode;
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-small;
+                                    overflow: elide;
+                                }
                             }
-                            Text {
-                                text: "EDID · " + root.screen-size-detected-mm;
-                                color: MdTokens.on-surface-variant;
-                                font-size: MdTokens.type-body-medium;
-                            }
-                            Text {
-                                text: root.screen-size-detected-inches + " · " + root.screen-size-native-mode;
-                                color: MdTokens.on-surface-variant;
-                                font-size: MdTokens.type-body-small;
-                                overflow: elide;
-                            }
-                        }
-                    }
-    
-                    Rectangle {
-                        height: 136px;
-                        background: MdTokens.surface-container;
-                        border-radius: MdTokens.shape-medium;
-                        VerticalLayout {
-                            padding: 12px;
-                            spacing: MdTokens.space-1;
-                            Text {
-                                text: "Manual override";
-                                color: MdTokens.on-surface;
-                                font-size: MdTokens.type-body-medium;
-                                font-weight: MdTokens.weight-medium;
+                            HorizontalLayout {
+                                height: MdTokens.target;
+                                spacing: MdTokens.space-1;
+                                inches := LineEdit {
+                                    horizontal-stretch: 1;
+                                    height: MdTokens.target;
+                                    text <=> screen.manual-inches;
+                                    placeholder-text: screen.detected-size == "" ? "Size" : screen.detected-size;
+                                    input-type: InputType.decimal;
+                                    enabled: !root.screen-size-save-blocked;
+                                    accessible-label: screen.name + " diagonal in inches";
+                                    edited => {
+                                        if self.text == "" {
+                                            root.reset-screen-size(index);
+                                        } else {
+                                            root.screen-size-edited(index, self.text, ratio.current-index);
+                                        }
+                                    }
+                                }
+                                Text {
+                                    width: 16px;
+                                    text: "in";
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-small;
+                                    vertical-alignment: center;
+                                }
+                                ratio := CompactComboBox {
+                                    width: 112px;
+                                    property <length> page-y: screen-list.y + screen-list.viewport-y + card.y + 56px;
+                                    model: ["Native", "16:9", "16:10", "3:2", "4:3", "21:9", "32:9"];
+                                    current-index <=> screen.aspect-ratio;
+                                    control-enabled: !root.screen-size-save-blocked && inches.text != "";
+                                    field-label: screen.name + " physical aspect ratio";
+                                    // Keep the 248px menu inside the page, including mid-scroll.
+                                    popup-offset-y: max(4px - self.page-y,
+                                        min(root.height - self.page-y - 252px,
+                                            self.page-y < 252px ? self.height + 4px : -252px));
+                                    selected => {
+                                        root.screen-size-edited(index, inches.text, self.current-index);
+                                    }
+                                }
                             }
                             HorizontalLayout {
                                 height: MdTokens.target;
@@ -106,95 +143,66 @@ export component ScreenSizePage inherits FocusScope {
                                 LineEdit {
                                     horizontal-stretch: 1;
                                     height: MdTokens.target;
-                                    text <=> root.screen-size-manual-inches;
-                                    placeholder-text: "Diagonal in";
+                                    text <=> screen.manual-refresh;
+                                    placeholder-text: screen.detected-refresh;
                                     input-type: InputType.decimal;
-                                    accessible-label: "Target display diagonal in inches";
-                                    edited => { root.screen-size-edited(); }
+                                    enabled: !root.screen-size-save-blocked;
+                                    accessible-label: screen.name + " refresh rate in hertz; empty uses detected rate";
+                                    edited => { root.screen-refresh-edited(index, self.text); }
                                 }
-                                CompactComboBox {
-                                    width: 112px;
-                                    height: MdTokens.target;
-                                    model: ["Native", "16:9", "16:10", "3:2", "4:3", "21:9", "32:9"];
-                                    current-index <=> root.screen-size-aspect-ratio;
-                                    control-enabled: root.screen-size-manual-inches != "";
-                                    field-label: "Target display physical aspect ratio";
-                                    selected => { root.screen-size-edited(); }
+                                Text {
+                                    width: 24px;
+                                    text: "Hz";
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-small;
+                                    vertical-alignment: center;
                                 }
                             }
                             Text {
-                                text: "Diagonal and ratio determine the effective dimensions";
-                                color: MdTokens.on-surface-variant;
+                                height: 16px;
+                                text: screen.error == ""
+                                    ? (screen.manual-inches == "" && screen.detected-size != "" ? "EDID · " : "") + screen.effective-size
+                                    : screen.error;
+                                color: screen.error == "" ? MdTokens.on-surface-variant : MdTokens.error;
                                 font-size: MdTokens.type-body-small;
                                 overflow: elide;
                             }
                         }
                     }
-    
-                    Rectangle {
-                        height: 72px;
-                        background: root.screen-size-error == ""
-                            ? MdTokens.primary-container : MdTokens.error-container;
-                        border-radius: MdTokens.shape-medium;
-                        VerticalLayout {
-                            padding: 12px;
-                            alignment: center;
-                            spacing: 3px;
-                            Text {
-                                text: root.screen-size-error == ""
-                                    ? "Effective · " + root.screen-size-effective-mm
-                                    : "Check the value";
-                                color: root.screen-size-error == ""
-                                    ? MdTokens.on-primary-container : MdTokens.on-error-container;
-                                font-size: MdTokens.type-title-medium;
-                                font-weight: MdTokens.weight-medium;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: root.screen-size-error == ""
-                                    ? root.screen-size-effective-inches + " · " + root.screen-size-source
-                                    : root.screen-size-error;
-                                color: root.screen-size-error == ""
-                                    ? MdTokens.on-primary-container : MdTokens.on-error-container;
-                                font-size: MdTokens.type-body-small;
-                                overflow: elide;
-                            }
-                        }
-                    }
-    
-                    Text {
-                        height: 32px;
-                        text: "Only virtual-resolution calculations use this value.";
+                    if root.screen-size-rows.length == 0 : Text {
+                        text: "No displays";
                         color: MdTokens.on-surface-variant;
-                        font-size: MdTokens.type-body-small;
-                        wrap: word-wrap;
+                        font-size: MdTokens.type-body-medium;
                     }
-    
                     Rectangle { vertical-stretch: 1; }
-    
-                    HorizontalLayout {
-                        height: MdTokens.target;
-                        spacing: MdTokens.space-1;
-                        PageActionButton {
-                            text: "Reset";
-                            enabled: !root.screen-size-save-blocked;
-                            accessible-label: "Use detected EDID size";
-                            clicked => { root.reset-screen-size(); }
-                        }
-                        PageActionButton {
-                            text: "Re-read";
-                            accessible-label: "Read display EDID again";
-                            clicked => { root.reread-screen-size(); }
-                        }
-                        Rectangle { horizontal-stretch: 1; }
-                        PageActionButton {
-                            text: "Save";
-                            enabled: root.screen-size-valid && !root.screen-size-save-blocked;
-                            primary: true;
-                            accessible-label: "Save target display physical size";
-                            clicked => { root.save-screen-size(); }
-                        }
-                    }
                 }
             }
+
+            if root.screen-size-error != "" : Text {
+                text: root.screen-size-error;
+                color: MdTokens.error;
+                font-size: MdTokens.type-body-small;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                height: MdTokens.target;
+                spacing: MdTokens.space-1;
+                PageActionButton {
+                    text: "Re-read";
+                    enabled: !root.screen-size-save-blocked;
+                    accessible-label: "Read display EDID again";
+                    clicked => { root.reread-screen-size(); }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                PageActionButton {
+                    text: "Save";
+                    enabled: root.screen-size-valid && !root.screen-size-save-blocked;
+                    primary: true;
+                    accessible-label: "Save display settings";
+                    clicked => { root.save-screen-size(); }
+                }
+            }
+        }
+    }
 }

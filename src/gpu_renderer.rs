@@ -2,8 +2,8 @@
 //!
 //! The hot path stays on the render adapter:
 //! `Desktop Duplication -> D3D11 texture -> pixel shader -> flip-model swap chain`.
-//! In particular, this module never creates a staging texture, maps a GPU
-//! resource into CPU memory, or sends pixels through GDI.
+//! The production path never maps pixels into CPU memory or uses GDI.
+//! Test-only offscreen readback validates the same native shader pipeline.
 
 use std::fmt;
 use std::mem::size_of;
@@ -11,7 +11,21 @@ use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::config::RenderingOptions;
 use crate::diagnostics::{self, Level};
+
+#[path = "gpu_sampling.rs"]
+mod sampling;
+use sampling::{SamplingPipeline, TextureTarget};
+
+#[cfg(test)]
+#[path = "gpu_sampling_benchmark.rs"]
+mod native_benchmark;
+#[cfg(test)]
+#[path = "native_sampling_tests.rs"]
+mod native_sampling_tests;
+#[cfg(test)]
+pub(crate) use native_benchmark::benchmark_sample_rgba;
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, HWND, RECT};
 use windows::Win32::Graphics::Direct3D::Fxc::D3DCompile;
 use windows::Win32::Graphics::Direct3D::{
@@ -167,6 +181,8 @@ pub struct GpuRendererConfig {
     pub target_width: u32,
     pub target_height: u32,
     pub source_rect: RECT,
+    pub rendering: RenderingOptions,
+    pub target_refresh_millihz: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,7 +229,7 @@ pub fn run_gpu_renderer(
     mut on_present: impl FnMut() -> Result<(), String>,
 ) -> Result<(), GpuRendererError> {
     validate_config(config)?;
-    let copy_mode = CopyMode::from_environment();
+    let copy_mode = CopyMode::from_options(config.rendering);
     let copy_stats_enabled = CopyMode::diagnostics_requested();
     let (adapter, output) = find_source_output(config.source_rect)?;
     let (device, context) = create_device(&adapter)?;
@@ -236,32 +252,13 @@ enum CopyMode {
 }
 
 impl CopyMode {
-    fn from_environment() -> Self {
-        let value = std::env::var_os(COPY_MODE_ENV);
-        match Self::parse(value.as_deref()) {
-            Ok(Self::Dirty) => {
-                if value.is_some() {
-                    diagnostics::log(
-                        Level::Info,
-                        "renderer",
-                        "copy-mode",
-                        None,
-                        "dirty source copy diagnostics enabled",
-                    );
-                }
-                Self::Dirty
-            }
-            Ok(Self::Full) => Self::Full,
-            Err(value) => {
-                diagnostics::log(
-                    Level::Warn,
-                    "renderer",
-                    "copy-mode",
-                    None,
-                    format!("invalid {COPY_MODE_ENV}={value}; using full source copy"),
-                );
-                Self::Full
-            }
+    fn from_options(options: RenderingOptions) -> Self {
+        // The persisted UI setting is authoritative. The environment variable
+        // remains a diagnostics opt-in, never a hidden behavior override.
+        if options.full_frame_copy {
+            Self::Full
+        } else {
+            Self::Dirty
         }
     }
 
@@ -393,10 +390,9 @@ struct Pipeline {
     context: ID3D11DeviceContext,
     swap_chain: IDXGISwapChain1,
     render_target: ID3D11RenderTargetView,
-    vertex_shader: ID3D11VertexShader,
-    pixel_shader: ID3D11PixelShader,
-    sampler: ID3D11SamplerState,
-    scale_parameters: ID3D11Buffer,
+    back_buffer: ID3D11Texture2D,
+    sampling: SamplingPipeline,
+    cached_frame: Option<TextureTarget>,
 }
 
 impl Pipeline {
@@ -448,60 +444,39 @@ impl Pipeline {
                 classify_windows_error("ID3D11Device::CreateRenderTargetView", error)
             })?;
 
-        let vertex_code = compile_shader("vertex_main", "vs_5_0")?;
-        let pixel_code = compile_shader("pixel_main", "ps_5_0")?;
-        let mut vertex_shader = None;
-        let mut pixel_shader = None;
-        unsafe { device.CreateVertexShader(&vertex_code, None, Some(&mut vertex_shader)) }
-            .map_err(|error| classify_windows_error("ID3D11Device::CreateVertexShader", error))?;
-        unsafe { device.CreatePixelShader(&pixel_code, None, Some(&mut pixel_shader)) }
-            .map_err(|error| classify_windows_error("ID3D11Device::CreatePixelShader", error))?;
-
-        let sampler_description = D3D11_SAMPLER_DESC {
-            Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-            AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
-            AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
-            AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
-            MaxLOD: f32::MAX,
-            ..Default::default()
-        };
-        let mut sampler = None;
-        unsafe { device.CreateSamplerState(&sampler_description, Some(&mut sampler)) }
-            .map_err(|error| classify_windows_error("ID3D11Device::CreateSamplerState", error))?;
-
-        let buffer_description = D3D11_BUFFER_DESC {
-            ByteWidth: size_of::<ScaleParameters>() as u32,
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
-            ..Default::default()
-        };
-        let mut scale_parameters = None;
-        unsafe { device.CreateBuffer(&buffer_description, None, Some(&mut scale_parameters)) }
-            .map_err(|error| classify_windows_error("ID3D11Device::CreateBuffer", error))?;
-
+        let sampling = SamplingPipeline::new(
+            device.clone(),
+            context.clone(),
+            config.rendering.high_performance_sampling(),
+        )?;
+        // Flip-discard back buffers do not preserve untouched pixels. Keep the
+        // quality result in our own texture so partial sampling can reuse it.
+        let cached_frame =
+            if config.rendering.static_refresh || !config.rendering.high_performance_sampling() {
+                Some(TextureTarget::new(
+                    &device,
+                    config.target_width,
+                    config.target_height,
+                    DXGI_FORMAT_B8G8R8A8_UNORM,
+                )?)
+            } else {
+                None
+            };
         Ok(Self {
             config,
             device,
             context,
             swap_chain,
+            back_buffer,
+            sampling,
+            cached_frame,
             render_target: render_target
                 .ok_or_else(|| GpuRendererError::Failure("D3D11 returned no RTV".into()))?,
-            vertex_shader: vertex_shader.ok_or_else(|| {
-                GpuRendererError::Failure("D3D11 returned no vertex shader".into())
-            })?,
-            pixel_shader: pixel_shader.ok_or_else(|| {
-                GpuRendererError::Failure("D3D11 returned no pixel shader".into())
-            })?,
-            sampler: sampler
-                .ok_or_else(|| GpuRendererError::Failure("D3D11 returned no sampler".into()))?,
-            scale_parameters: scale_parameters.ok_or_else(|| {
-                GpuRendererError::Failure("D3D11 returned no constant buffer".into())
-            })?,
         })
     }
 
     fn run(
-        self,
+        mut self,
         duplication: IDXGIOutputDuplication,
         stop: &AtomicBool,
         copy_mode: CopyMode,
@@ -513,19 +488,41 @@ impl Pipeline {
         let mut source_description = None;
         let mut copy_stats = CopyStats::new();
         let mut metadata_buffers = FrameMetadataBuffers::default();
+        let mut cache_valid = false;
+        let mut direct_source_active = None;
+        let mut last_present: Option<Instant> = None;
+        let refresh_interval =
+            Duration::from_secs_f64(1000.0 / f64::from(self.config.target_refresh_millihz.max(1)));
 
         while !stop.load(Ordering::Acquire) {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
             match unsafe {
                 duplication.AcquireNextFrame(
-                    FRAME_WAIT_TIMEOUT_MS,
+                    frame_wait_timeout(
+                        last_present,
+                        refresh_interval,
+                        self.config.rendering.static_refresh,
+                    ),
                     &mut frame_info,
                     &mut desktop_resource,
                 )
             } {
                 Ok(()) => {}
-                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
+                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    if !stop.load(Ordering::Acquire)
+                        && self.config.rendering.static_refresh
+                        && last_present.is_some_and(|time| time.elapsed() >= refresh_interval)
+                    {
+                        self.present_cached(0)?;
+                        on_present().map_err(GpuRendererError::Failure)?;
+                        last_present = Some(advance_refresh_deadline(
+                            last_present.unwrap(),
+                            refresh_interval,
+                        ));
+                    }
+                    continue;
+                }
                 Err(error) => {
                     return Err(classify_windows_error(
                         "IDXGIOutputDuplication::AcquireNextFrame",
@@ -533,7 +530,27 @@ impl Pipeline {
                     ));
                 }
             }
-            let frame = AcquiredFrame(&duplication);
+            // Keep ownership through sampling and Present. Releasing just
+            // before the next Acquire avoids redundant desktop updates to
+            // the duplication surface while presentation is waiting.
+            let _frame = AcquiredFrame(&duplication);
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            // Pointer-only events do not alter the captured desktop texture.
+            if frame_info.LastPresentTime == 0 && last_present.is_some() {
+                if self.config.rendering.static_refresh
+                    && last_present.is_some_and(|time| time.elapsed() >= refresh_interval)
+                {
+                    self.present_cached(0)?;
+                    on_present().map_err(GpuRendererError::Failure)?;
+                    last_present = Some(advance_refresh_deadline(
+                        last_present.unwrap(),
+                        refresh_interval,
+                    ));
+                }
+                continue;
+            }
             let desktop_resource = desktop_resource.ok_or_else(|| {
                 GpuRendererError::Failure("Desktop Duplication returned no texture".into())
             })?;
@@ -548,6 +565,82 @@ impl Pipeline {
                     description.Format.0
                 )));
             }
+            if use_identity_copy(
+                self.config.rendering.high_performance_sampling(),
+                &description,
+                [self.config.target_width, self.config.target_height],
+            ) {
+                copy_identity_frame(
+                    &self.context,
+                    &acquired,
+                    &self.back_buffer,
+                    self.cached_frame.as_ref().map(|frame| &frame.texture),
+                );
+                // If the source later changes size again, its dirty metadata
+                // cannot update an intermediate texture from before this path.
+                source_description = None;
+                source_texture = None;
+                source_view = None;
+                cache_valid = false;
+                self.present(1)?;
+                on_present().map_err(GpuRendererError::Failure)?;
+                last_present = Some(Instant::now());
+                copy_stats.record_full(description.Width, description.Height);
+                copy_stats.maybe_log(
+                    copy_mode,
+                    copy_stats_enabled,
+                    description.Width,
+                    description.Height,
+                );
+                continue;
+            }
+            if self.config.rendering.high_performance_sampling() {
+                let direct_view = if copy_mode == CopyMode::Full {
+                    None
+                } else {
+                    direct_source_view(&self.device, &acquired, description.BindFlags)
+                };
+                let direct = direct_view.is_some();
+                if direct_source_active != Some(direct) {
+                    diagnostics::log(
+                        Level::Info,
+                        "renderer",
+                        "legacy-source",
+                        None,
+                        if direct {
+                            "sampling acquired desktop texture directly; source copy bypassed"
+                        } else {
+                            "using copied desktop texture (full-copy requested or direct SRV unavailable)"
+                        },
+                    );
+                    direct_source_active = Some(direct);
+                }
+                if let Some(view) = direct_view {
+                    let output = self
+                        .cached_frame
+                        .as_ref()
+                        .map_or(&self.render_target, |frame| &frame.target);
+                    self.sampling.render_regions(
+                        &view,
+                        [description.Width, description.Height],
+                        output,
+                        [self.config.target_width, self.config.target_height],
+                        None,
+                    )?;
+                    source_description = None;
+                    source_texture = None;
+                    source_view = None;
+                    cache_valid = false;
+                    if self.cached_frame.is_some() {
+                        self.present_cached(1)?;
+                    } else {
+                        self.present(1)?;
+                    }
+                    on_present().map_err(GpuRendererError::Failure)?;
+                    last_present = Some(Instant::now());
+                    continue;
+                }
+            }
             let texture_rebuilt =
                 source_description != Some((description.Width, description.Height));
             if texture_rebuilt {
@@ -555,12 +648,11 @@ impl Pipeline {
                 source_texture = Some(texture);
                 source_view = Some(view);
                 source_description = Some((description.Width, description.Height));
-                self.update_scale_parameters(description.Width, description.Height);
             }
             let texture = source_texture.as_ref().ok_or_else(|| {
                 GpuRendererError::Failure("source texture was not initialized".into())
             })?;
-            self.copy_source_frame(
+            let has_regions = self.copy_source_frame(
                 &duplication,
                 &frame_info,
                 texture,
@@ -572,20 +664,42 @@ impl Pipeline {
                 &mut metadata_buffers,
                 &mut copy_stats,
             );
-            drop(frame);
 
             let view = source_view.as_ref().ok_or_else(|| {
                 GpuRendererError::Failure("source texture view was not initialized".into())
             })?;
-            self.draw(view);
-            let present = unsafe { self.swap_chain.Present(1, DXGI_PRESENT(0)) };
-            present
-                .ok()
-                .map_err(|_| classify_hresult("IDXGISwapChain::Present", present))?;
-            on_present().map_err(GpuRendererError::Failure)?;
-            unsafe {
-                self.context.PSSetShaderResources(0, Some(&[None]));
+            let quality = !self.config.rendering.high_performance_sampling();
+            let full_region = metadata_buffers.regions.iter().any(|r| {
+                r.left == 0
+                    && r.top == 0
+                    && r.right == description.Width as i32
+                    && r.bottom == description.Height as i32
+            });
+            // Full updates can render straight to the swap chain. On returning
+            // to partial updates, initialize the persistent output once.
+            let use_cache =
+                self.config.rendering.static_refresh || (quality && has_regions && !full_region);
+            let output = if use_cache {
+                &self.cached_frame.as_ref().unwrap().target
+            } else {
+                &self.render_target
+            };
+            self.sampling.render_regions(
+                view,
+                [description.Width, description.Height],
+                output,
+                [self.config.target_width, self.config.target_height],
+                (use_cache && cache_valid && has_regions && quality)
+                    .then_some(metadata_buffers.regions.as_slice()),
+            )?;
+            cache_valid = use_cache;
+            if use_cache {
+                self.present_cached(1)?;
+            } else {
+                self.present(1)?;
             }
+            on_present().map_err(GpuRendererError::Failure)?;
+            last_present = Some(Instant::now());
             copy_stats.maybe_log(
                 copy_mode,
                 copy_stats_enabled,
@@ -609,7 +723,7 @@ impl Pipeline {
         force_full_copy: bool,
         metadata_buffers: &mut FrameMetadataBuffers,
         stats: &mut CopyStats,
-    ) {
+    ) -> bool {
         let regions = if copy_mode == CopyMode::Dirty && !force_full_copy {
             dirty_copy_regions(duplication, frame_info, width, height, metadata_buffers)
         } else {
@@ -619,8 +733,19 @@ impl Pipeline {
         let Some(regions) = regions else {
             unsafe { self.context.CopyResource(target, acquired) };
             stats.record_full(width, height);
-            return;
+            return false;
         };
+        // Large updates are cheaper to copy in one operation, but their valid
+        // metadata still lets the filtering stages preserve unchanged pixels.
+        let changed_pixels: u64 = regions
+            .iter()
+            .map(|r| (r.right - r.left) as u64 * (r.bottom - r.top) as u64)
+            .sum();
+        if changed_pixels * 100 >= u64::from(width) * u64::from(height) * MAX_PARTIAL_COPY_PERCENT {
+            unsafe { self.context.CopyResource(target, acquired) };
+            stats.record_full(width, height);
+            return true;
+        }
 
         for region in regions {
             let source_box = D3D11_BOX {
@@ -645,6 +770,7 @@ impl Pipeline {
             }
         }
         stats.record_partial(regions);
+        true
     }
 
     fn create_source_texture(
@@ -675,51 +801,94 @@ impl Pipeline {
         ))
     }
 
-    fn update_scale_parameters(&self, source_width: u32, source_height: u32) {
-        let parameters = ScaleParameters {
-            source_size: [source_width as f32, source_height as f32],
-            target_size: [
-                self.config.target_width as f32,
-                self.config.target_height as f32,
-            ],
-        };
-        unsafe {
-            self.context.UpdateSubresource(
-                &self.scale_parameters,
-                0,
-                None,
-                (&parameters as *const ScaleParameters).cast(),
-                0,
-                0,
-            );
+    fn present_cached(&self, sync_interval: u32) -> Result<(), GpuRendererError> {
+        if let Some(frame) = &self.cached_frame {
+            unsafe {
+                self.context.CopyResource(&self.back_buffer, &frame.texture);
+            }
         }
+        self.present(sync_interval)
     }
 
-    fn draw(&self, source_view: &ID3D11ShaderResourceView) {
-        let viewport = D3D11_VIEWPORT {
-            Width: self.config.target_width as f32,
-            Height: self.config.target_height as f32,
-            MinDepth: 0.0,
-            MaxDepth: 1.0,
-            ..Default::default()
-        };
-        unsafe {
-            self.context
-                .OMSetRenderTargets(Some(&[Some(self.render_target.clone())]), None);
-            self.context.RSSetViewports(Some(&[viewport]));
-            self.context
-                .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            self.context.VSSetShader(&self.vertex_shader, None);
-            self.context.PSSetShader(&self.pixel_shader, None);
-            self.context
-                .PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
-            self.context
-                .PSSetConstantBuffers(0, Some(&[Some(self.scale_parameters.clone())]));
-            self.context
-                .PSSetShaderResources(0, Some(&[Some(source_view.clone())]));
-            self.context.Draw(3, 0);
+    fn present(&self, sync_interval: u32) -> Result<(), GpuRendererError> {
+        let present = unsafe { self.swap_chain.Present(sync_interval, DXGI_PRESENT(0)) };
+        present
+            .ok()
+            .map_err(|_| classify_hresult("IDXGISwapChain::Present", present))
+    }
+}
+
+fn use_identity_copy(
+    high_performance: bool,
+    source: &D3D11_TEXTURE2D_DESC,
+    target: [u32; 2],
+) -> bool {
+    high_performance
+        && [source.Width, source.Height] == target
+        && source.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+        && source.MipLevels == 1
+        && source.ArraySize == 1
+        && source.SampleDesc.Count == 1
+        && source.SampleDesc.Quality == 0
+}
+
+fn direct_source_view(
+    device: &ID3D11Device,
+    source: &ID3D11Texture2D,
+    bind_flags: u32,
+) -> Option<ID3D11ShaderResourceView> {
+    if bind_flags & D3D11_BIND_SHADER_RESOURCE.0 as u32 == 0 {
+        return None;
+    }
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(source, None, Some(&mut view)) }.ok()?;
+    view
+}
+
+// A legacy 1:1 frame is already the final image. Avoid both the private source
+// texture and the full-screen sampling draw. Static refresh still needs its
+// own persistent copy because flip-discard back buffers are not preserved.
+fn copy_identity_frame(
+    context: &ID3D11DeviceContext,
+    source: &ID3D11Texture2D,
+    back_buffer: &ID3D11Texture2D,
+    cached: Option<&ID3D11Texture2D>,
+) {
+    unsafe {
+        if let Some(cached) = cached {
+            context.CopyResource(cached, source);
+            context.CopyResource(back_buffer, cached);
+        } else {
+            context.CopyResource(back_buffer, source);
         }
     }
+}
+
+// Wait for new pixels or for the next static presentation deadline. Cap the
+// blocking wait so cancellation/device recovery stays responsive.
+fn frame_wait_timeout(last: Option<Instant>, interval: Duration, static_refresh: bool) -> u32 {
+    if !static_refresh {
+        return FRAME_WAIT_TIMEOUT_MS;
+    }
+    let Some(last) = last else {
+        return FRAME_WAIT_TIMEOUT_MS;
+    };
+    let remaining = interval.saturating_sub(last.elapsed());
+    remaining
+        .as_millis()
+        .saturating_add(u128::from(
+            !remaining.subsec_nanos().is_multiple_of(1_000_000),
+        ))
+        .min(u128::from(FRAME_WAIT_TIMEOUT_MS)) as u32
+}
+
+fn advance_refresh_deadline(previous: Instant, interval: Duration) -> Instant {
+    let now = Instant::now();
+    let mut scheduled = previous + interval;
+    while scheduled + interval <= now {
+        scheduled += interval;
+    }
+    scheduled
 }
 
 fn dirty_copy_regions<'a>(
@@ -824,7 +993,6 @@ fn select_copy_regions(
         return false;
     }
 
-    let mut copied_pixels = 0_u64;
     for region in moved.into_iter().chain(dirty) {
         if region.left < 0
             || region.top < 0
@@ -839,17 +1007,6 @@ fn select_copy_regions(
             continue;
         }
         if regions.len() == MAX_COPY_REGIONS {
-            return false;
-        }
-        let region_pixels =
-            (region.right - region.left) as u64 * (region.bottom - region.top) as u64;
-        let Some(updated_pixels) = copied_pixels.checked_add(region_pixels) else {
-            return false;
-        };
-        copied_pixels = updated_pixels;
-        if copied_pixels.saturating_mul(100)
-            >= source_pixels.saturating_mul(MAX_PARTIAL_COPY_PERCENT)
-        {
             return false;
         }
         regions.push(region);
@@ -941,14 +1098,22 @@ struct ScaleParameters {
 }
 
 fn compile_shader(entry: &str, target: &str) -> Result<Vec<u8>, GpuRendererError> {
+    compile_shader_source(SHADER, entry, target)
+}
+
+fn compile_shader_source(
+    source: &str,
+    entry: &str,
+    target: &str,
+) -> Result<Vec<u8>, GpuRendererError> {
     let entry = null_terminated(entry);
     let target = null_terminated(target);
     let mut code: Option<ID3DBlob> = None;
     let mut diagnostics: Option<ID3DBlob> = None;
     let result = unsafe {
         D3DCompile(
-            SHADER.as_ptr().cast(),
-            SHADER.len(),
+            source.as_ptr().cast(),
+            source.len(),
             PCSTR::null(),
             None,
             None::<&ID3DInclude>,
@@ -1012,6 +1177,134 @@ fn classify_hresult(api: &str, code: windows::core::HRESULT) -> GpuRendererError
     } else {
         GpuRendererError::Failure(detail)
     }
+}
+
+/// Test-only readback. The production renderer never stages or maps pixels.
+#[cfg(test)]
+pub(crate) struct NativeSample {
+    pub rgba: Vec<u8>,
+    pub cleaned_rgba: Option<Vec<u8>>,
+    pub adapter_name: String,
+    /// CPU wall time including resource allocation/upload, submission and
+    /// readback/GPU completion; excludes device creation and shader compilation.
+    pub elapsed: Duration,
+}
+
+#[cfg(test)]
+pub(crate) fn verify_sample_rgba(
+    source: &[u8],
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+    high_performance: bool,
+) -> Result<NativeSample, String> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_USAGE_STAGING,
+    };
+    fn readback(
+        device: &ID3D11Device,
+        context: &ID3D11DeviceContext,
+        texture: &ID3D11Texture2D,
+    ) -> Result<Vec<u8>, String> {
+        let mut description = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut description) };
+        description.Usage = D3D11_USAGE_STAGING;
+        description.BindFlags = 0;
+        description.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+        description.MiscFlags = 0;
+        let mut staging = None;
+        unsafe { device.CreateTexture2D(&description, None, Some(&mut staging)) }
+            .map_err(|e| e.to_string())?;
+        let staging = staging.ok_or("No readback texture")?;
+        unsafe { context.CopyResource(&staging, texture) };
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
+            .map_err(|e| e.to_string())?;
+        let mut rgba = vec![0; (description.Width * description.Height * 4) as usize];
+        for y in 0..description.Height as usize {
+            let row = unsafe {
+                slice::from_raw_parts(
+                    mapped.pData.cast::<u8>().add(y * mapped.RowPitch as usize),
+                    description.Width as usize * 4,
+                )
+            };
+            let output = &mut rgba[y * description.Width as usize * 4..][..row.len()];
+            for (input, output) in row.chunks_exact(4).zip(output.chunks_exact_mut(4)) {
+                output.copy_from_slice(&[input[2], input[1], input[0], input[3]]);
+            }
+        }
+        unsafe { context.Unmap(&staging, 0) };
+        Ok(rgba)
+    }
+    if [source_width, source_height, target_width, target_height]
+        .iter()
+        .any(|&v| v == 0 || v > 16384)
+        || source.len() != source_width as usize * source_height as usize * 4
+    {
+        return Err("Invalid native sampling test dimensions or RGBA buffer".into());
+    }
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| e.to_string())?;
+    let adapter = unsafe { factory.EnumAdapters1(0) }.map_err(|e| e.to_string())?;
+    let description = unsafe { adapter.GetDesc1() }.map_err(|e| e.to_string())?;
+    let length = description
+        .Description
+        .iter()
+        .position(|&v| v == 0)
+        .unwrap_or(description.Description.len());
+    let adapter_name = String::from_utf16_lossy(&description.Description[..length]);
+    let (device, context) = create_device(&adapter).map_err(|e| e.to_string())?;
+    let mut sampling = SamplingPipeline::new(device.clone(), context.clone(), high_performance)
+        .map_err(|e| e.to_string())?;
+    let start = Instant::now();
+    let input = TextureTarget::new(
+        &device,
+        source_width,
+        source_height,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+    )
+    .map_err(|e| e.to_string())?;
+    let output = TextureTarget::new(
+        &device,
+        target_width,
+        target_height,
+        DXGI_FORMAT_B8G8R8A8_UNORM,
+    )
+    .map_err(|e| e.to_string())?;
+    let mut bgra = source.to_vec();
+    for pixel in bgra.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+    unsafe {
+        context.UpdateSubresource(
+            &input.texture,
+            0,
+            None,
+            bgra.as_ptr().cast(),
+            source_width * 4,
+            0,
+        );
+    }
+    sampling
+        .render(
+            &input.view,
+            [source_width, source_height],
+            &output.target,
+            [target_width, target_height],
+        )
+        .map_err(|e| e.to_string())?;
+    let rgba = readback(&device, &context, &output.texture)?;
+    let cleaned_rgba = sampling
+        .clean
+        .as_ref()
+        .map(|clean| readback(&device, &context, &clean.texture))
+        .transpose()?;
+    Ok(NativeSample {
+        rgba,
+        cleaned_rgba,
+        adapter_name,
+        elapsed: start.elapsed(),
+    })
 }
 
 #[cfg(test)]
@@ -1126,7 +1419,9 @@ mod tests {
             right: 50,
             bottom: 100,
         }];
-        assert!(!select_copy_regions([], half_frame, 100, 100, &mut regions));
+        // Full-copy threshold must not discard valid sampling metadata.
+        assert!(select_copy_regions([], half_frame, 100, 100, &mut regions));
+        assert_eq!(regions, half_frame);
 
         let too_many = (0..=MAX_COPY_REGIONS).map(|column| RECT {
             left: column as i32,

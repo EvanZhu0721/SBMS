@@ -1,0 +1,1107 @@
+{
+  "release": {
+    "repository": "https://github.com/EvanZhu0721/SBMS",
+    "releaseUrl": "https://github.com/EvanZhu0721/SBMS/releases/tag/v1.6.1",
+    "tag": "v1.6.1",
+    "commit": "3c1ae5bb054c5613be530659360cbb75b95f0e31",
+    "publishedAt": "2026-10-15T12:29:14Z",
+    "checkedAt": "2026-10-20T09:59:26Z",
+    "draft": false,
+    "prerelease": false,
+    "label": "SBMS 1.6.1",
+    "comparisonLabel": "SBMS 1.6.1 · 发布版采样复现",
+    "verification": {
+      "latestReleaseApi": "https://api.github.com/repos/EvanZhu0721/SBMS/releases/latest",
+      "latestReleaseRedirect": "https://github.com/EvanZhu0721/SBMS/releases/latest",
+      "remoteAnnotatedTag": "3021c09aac4fd95bede5af596edd5c76e65dc7f0",
+      "remotePeeledTagMatchesLocalCommit": true,
+      "workingTreeRendererMatchesRelease": true,
+      "workingTreeShaderMatchesRelease": true,
+      "baselineHlslMatchesReleaseShader": true,
+      "textComparison": "Direct content comparison after normalizing CRLF/LF and trailing whitespace; no file hashes.",
+      "baselineShaderCharacters": 4512,
+      "baselineNeedsReplacement": false
+    },
+    "sampling": {
+      "areaCondition": "Both source/target axis ratios are > 1.0001 and <= 2.0.",
+      "areaBranch": "Exact pixel-area coverage plus adaptive horizontal subpixel-chroma suppression.",
+      "fallbackBranch": "Bilinear sampling, including enlargement, 1:1, reduction beyond 2x, and single-axis reductions.",
+      "releaseBoundary": "Clamp",
+      "demoBoundary": "Repeat",
+      "demoCoreFormulaMatchesRelease": true
+    },
+    "limits": [
+      "This is a reproduction of the released sampling formula, not a screenshot captured from the installed release.",
+      "The demo sums individual area-weighted texels; the release combines the same coverage through four hardware bilinear fetches.",
+      "WebGL manual interpolation and native D3D11 hardware sampling are not guaranteed to be bit-identical.",
+      "The demo repeats texture boundaries while the release clamps them. Compare interior regions sufficiently far from image edges.",
+      "Animated demo offsets translate the common source before both algorithms; a static zero-offset comparison directly matches the released pixel-center convention.",
+      "These comparisons do not measure the installed application's performance or the separate Stream only capture and encoder path."
+    ],
+    "sourceLinks": {
+      "releaseShader": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L49-L161",
+      "releaseAreaWeights": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L77-L116",
+      "releaseChromaSuppression": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L119-L145",
+      "releaseBranchSelection": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L148-L160",
+      "releaseSampler": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L460-L465"
+    },
+    "localEvidence": {
+      "baselineHlsl": "work/sampling-lab/sbms-current-baseline.hlsl",
+      "demoArea": "work/sampling-lab/dynamic-filter.js:355",
+      "demoSbms": "work/sampling-lab/dynamic-filter.js:371",
+      "demoBoundary": "work/sampling-lab/dynamic-filter.js:340",
+      "demoPixelCenters": "work/sampling-lab/dynamic-filter.js:462",
+      "cpuSbms": "work/sampling-lab/dynamic-filter.js:640"
+    }
+  },
+  "sourceSize": [
+    3840,
+    2160
+  ],
+  "outputSize": [
+    1920,
+    1080
+  ],
+  "atlas": "pixels.png",
+  "sourceDpi": 192,
+  "outputDpi": 96,
+  "sourceMotion": [
+    0,
+    0
+  ],
+  "scope": "Released sampling formula reproduced in WebGL versus the experimental final filter; not installed-app screenshots or a performance/streaming test.",
+  "tiles": [
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "label": "ClearType",
+      "type": "capture",
+      "detail": {
+        "x": 0,
+        "y": 40,
+        "width": 64,
+        "height": 28
+      },
+      "provenance": "Native Win32 GDI test-window capture, 192 target DPI, 24 px source em -> 12 px output em. Not a screenshot of a named office/editor application.",
+      "width": 536,
+      "height": 68,
+      "source": {
+        "sourceRect": {
+          "x": 1234,
+          "y": 592,
+          "width": 1072,
+          "height": 136
+        },
+        "asset": "windows-gdi-auto-200-cleartype",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 296,
+        "width": 536,
+        "height": 68
+      },
+      "sbms": {
+        "x": 0,
+        "y": 0,
+        "width": 536,
+        "height": 68
+      },
+      "final": {
+        "x": 616,
+        "y": 0,
+        "width": 536,
+        "height": 68
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "label": "ClearType",
+      "type": "capture",
+      "detail": {
+        "x": 82,
+        "y": 80,
+        "width": 64,
+        "height": 28
+      },
+      "provenance": "Native Win32 GDI test-window capture, 192 target DPI, 24 px source em -> 12 px output em. Not a screenshot of a named office/editor application.",
+      "width": 536,
+      "height": 108,
+      "source": {
+        "sourceRect": {
+          "x": 1234,
+          "y": 832,
+          "width": 1072,
+          "height": 216
+        },
+        "asset": "windows-gdi-auto-200-cleartype",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 416,
+        "width": 536,
+        "height": 108
+      },
+      "sbms": {
+        "x": 0,
+        "y": 84,
+        "width": 536,
+        "height": 108
+      },
+      "final": {
+        "x": 616,
+        "y": 84,
+        "width": 536,
+        "height": 108
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "label": "Grayscale antialiasing",
+      "type": "capture",
+      "detail": {
+        "x": 0,
+        "y": 40,
+        "width": 64,
+        "height": 28
+      },
+      "provenance": "Native Win32 GDI test-window capture, 192 target DPI, 24 px source em -> 12 px output em. Not a screenshot of a named office/editor application.",
+      "width": 536,
+      "height": 68,
+      "source": {
+        "sourceRect": {
+          "x": 1234,
+          "y": 592,
+          "width": 1072,
+          "height": 136
+        },
+        "asset": "windows-gdi-auto-200-grayscale",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 296,
+        "width": 536,
+        "height": 68
+      },
+      "sbms": {
+        "x": 0,
+        "y": 208,
+        "width": 536,
+        "height": 68
+      },
+      "final": {
+        "x": 616,
+        "y": 208,
+        "width": 536,
+        "height": 68
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "label": "Grayscale antialiasing",
+      "type": "capture",
+      "detail": {
+        "x": 82,
+        "y": 80,
+        "width": 64,
+        "height": 28
+      },
+      "provenance": "Native Win32 GDI test-window capture, 192 target DPI, 24 px source em -> 12 px output em. Not a screenshot of a named office/editor application.",
+      "width": 536,
+      "height": 108,
+      "source": {
+        "sourceRect": {
+          "x": 1234,
+          "y": 832,
+          "width": 1072,
+          "height": 216
+        },
+        "asset": "windows-gdi-auto-200-grayscale",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 416,
+        "width": 536,
+        "height": 108
+      },
+      "sbms": {
+        "x": 0,
+        "y": 292,
+        "width": 536,
+        "height": 108
+      },
+      "final": {
+        "x": 616,
+        "y": 292,
+        "width": 536,
+        "height": 108
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "label": "0.5 / 1 / 2 DIP",
+      "type": "synthetic",
+      "detail": {
+        "x": 55,
+        "y": 248,
+        "width": 80,
+        "height": 48
+      },
+      "provenance": "Existing canvas-generated line/circle/Bezier fixture, independently drawn at 200% layout density. No source-pixel stripes in this crop.",
+      "width": 600,
+      "height": 460,
+      "source": {
+        "sourceRect": {
+          "x": 40,
+          "y": 1160,
+          "width": 1200,
+          "height": 920
+        },
+        "asset": "positive",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 20,
+        "y": 580,
+        "width": 600,
+        "height": 460
+      },
+      "sbms": {
+        "x": 0,
+        "y": 416,
+        "width": 600,
+        "height": 460
+      },
+      "final": {
+        "x": 616,
+        "y": 416,
+        "width": 600,
+        "height": 460
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "label": "tiktok · 48 px",
+      "type": "icon",
+      "detail": {
+        "x": 0,
+        "y": 0,
+        "width": 48,
+        "height": 48
+      },
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 48,
+      "height": 48,
+      "source": {
+        "sourceRect": {
+          "x": 1856,
+          "y": 938,
+          "width": 96,
+          "height": 96,
+          "id": "tiktok",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "tiktok",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "sbms": {
+        "x": 0,
+        "y": 892,
+        "width": 48,
+        "height": 48
+      },
+      "final": {
+        "x": 616,
+        "y": 892,
+        "width": 48,
+        "height": 48
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "label": "vlc · 48 px",
+      "type": "icon",
+      "detail": {
+        "x": 0,
+        "y": 0,
+        "width": 43,
+        "height": 48
+      },
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 43,
+      "height": 48,
+      "source": {
+        "sourceRect": {
+          "x": 1862,
+          "y": 938,
+          "width": 85,
+          "height": 96,
+          "id": "vlc",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "vlc",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 931,
+        "y": 469,
+        "width": 43,
+        "height": 48
+      },
+      "sbms": {
+        "x": 0,
+        "y": 956,
+        "width": 43,
+        "height": 48
+      },
+      "final": {
+        "x": 616,
+        "y": 956,
+        "width": 43,
+        "height": 48
+      }
+    },
+    {
+      "id": "firefox-96",
+      "scene": "icons",
+      "label": "firefox · 48 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 48,
+      "height": 48,
+      "source": {
+        "sourceRect": {
+          "x": 1856,
+          "y": 938,
+          "width": 96,
+          "height": 96,
+          "id": "firefox",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "firefox",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1020,
+        "width": 48,
+        "height": 48
+      },
+      "final": {
+        "x": 616,
+        "y": 1020,
+        "width": 48,
+        "height": 48
+      }
+    },
+    {
+      "id": "vscode-96",
+      "scene": "icons",
+      "label": "vscode · 48 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 48,
+      "height": 48,
+      "source": {
+        "sourceRect": {
+          "x": 1856,
+          "y": 938,
+          "width": 96,
+          "height": 96,
+          "id": "vscode",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "vscode",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1084,
+        "width": 48,
+        "height": 48
+      },
+      "final": {
+        "x": 616,
+        "y": 1084,
+        "width": 48,
+        "height": 48
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "label": "git · 48 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 48,
+      "height": 48,
+      "source": {
+        "sourceRect": {
+          "x": 1856,
+          "y": 938,
+          "width": 96,
+          "height": 96,
+          "id": "git",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "git",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1148,
+        "width": 48,
+        "height": 48
+      },
+      "final": {
+        "x": 616,
+        "y": 1148,
+        "width": 48,
+        "height": 48
+      }
+    },
+    {
+      "id": "rainbow-flag-96",
+      "scene": "icons",
+      "label": "rainbow-flag · 48 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 48,
+      "height": 48,
+      "source": {
+        "sourceRect": {
+          "x": 1856,
+          "y": 938,
+          "width": 96,
+          "height": 96,
+          "id": "rainbow-flag",
+          "size": 96,
+          "background": "#ffffff"
+        },
+        "asset": "rainbow-flag",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1212,
+        "width": 48,
+        "height": 48
+      },
+      "final": {
+        "x": 616,
+        "y": 1212,
+        "width": 48,
+        "height": 48
+      }
+    },
+    {
+      "id": "tiktok-32",
+      "scene": "icons",
+      "label": "tiktok · 16 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 16,
+      "height": 16,
+      "source": {
+        "sourceRect": {
+          "x": 1888,
+          "y": 970,
+          "width": 32,
+          "height": 32,
+          "id": "tiktok",
+          "size": 32,
+          "background": "#ffffff"
+        },
+        "asset": "tiktok",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1276,
+        "width": 16,
+        "height": 16
+      },
+      "final": {
+        "x": 616,
+        "y": 1276,
+        "width": 16,
+        "height": 16
+      }
+    },
+    {
+      "id": "vlc-32",
+      "scene": "icons",
+      "label": "vlc · 16 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 14,
+      "height": 16,
+      "source": {
+        "sourceRect": {
+          "x": 1890,
+          "y": 970,
+          "width": 28,
+          "height": 32,
+          "id": "vlc",
+          "size": 32,
+          "background": "#ffffff"
+        },
+        "asset": "vlc",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 945,
+        "y": 485,
+        "width": 14,
+        "height": 16
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1308,
+        "width": 14,
+        "height": 16
+      },
+      "final": {
+        "x": 616,
+        "y": 1308,
+        "width": 14,
+        "height": 16
+      }
+    },
+    {
+      "id": "firefox-32",
+      "scene": "icons",
+      "label": "firefox · 16 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 16,
+      "height": 16,
+      "source": {
+        "sourceRect": {
+          "x": 1888,
+          "y": 970,
+          "width": 32,
+          "height": 32,
+          "id": "firefox",
+          "size": 32,
+          "background": "#ffffff"
+        },
+        "asset": "firefox",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1340,
+        "width": 16,
+        "height": 16
+      },
+      "final": {
+        "x": 616,
+        "y": 1340,
+        "width": 16,
+        "height": 16
+      }
+    },
+    {
+      "id": "vscode-32",
+      "scene": "icons",
+      "label": "vscode · 16 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 16,
+      "height": 16,
+      "source": {
+        "sourceRect": {
+          "x": 1888,
+          "y": 970,
+          "width": 32,
+          "height": 32,
+          "id": "vscode",
+          "size": 32,
+          "background": "#ffffff"
+        },
+        "asset": "vscode",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1372,
+        "width": 16,
+        "height": 16
+      },
+      "final": {
+        "x": 616,
+        "y": 1372,
+        "width": 16,
+        "height": 16
+      }
+    },
+    {
+      "id": "git-32",
+      "scene": "icons",
+      "label": "git · 16 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 16,
+      "height": 16,
+      "source": {
+        "sourceRect": {
+          "x": 1888,
+          "y": 970,
+          "width": 32,
+          "height": 32,
+          "id": "git",
+          "size": 32,
+          "background": "#ffffff"
+        },
+        "asset": "git",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1404,
+        "width": 16,
+        "height": 16
+      },
+      "final": {
+        "x": 616,
+        "y": 1404,
+        "width": 16,
+        "height": 16
+      }
+    },
+    {
+      "id": "rainbow-flag-32",
+      "scene": "icons",
+      "label": "rainbow-flag · 16 px",
+      "type": "icon",
+      "detail": null,
+      "provenance": "Published icon, rasterized once at the stated source size before both sampling paths. Source links: assets/corpus/SOURCES.md and the embedded TikTok source metadata.",
+      "width": 16,
+      "height": 16,
+      "source": {
+        "sourceRect": {
+          "x": 1888,
+          "y": 970,
+          "width": 32,
+          "height": 32,
+          "id": "rainbow-flag",
+          "size": 32,
+          "background": "#ffffff"
+        },
+        "asset": "rainbow-flag",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        }
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1436,
+        "width": 16,
+        "height": 16
+      },
+      "final": {
+        "x": 616,
+        "y": 1436,
+        "width": 16,
+        "height": 16
+      }
+    },
+    {
+      "id": "astronaut",
+      "scene": "photos",
+      "label": "Portrait / fabric",
+      "type": "photo",
+      "detail": {
+        "x": 80,
+        "y": 36,
+        "width": 64,
+        "height": 48
+      },
+      "provenance": "Original PNG dimensions preserved in the source texture; only the tested final 2:1 reduction is applied. Source links: assets/corpus/SOURCES.md.",
+      "width": 256,
+      "height": 256,
+      "source": {
+        "sourceRect": {
+          "x": 1746,
+          "y": 610,
+          "width": 512,
+          "height": 512,
+          "id": "astronaut",
+          "size": 512,
+          "background": "#ffffff"
+        },
+        "asset": "astronaut",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        },
+        "originalPhoto": {
+          "width": 512,
+          "height": 512,
+          "differences": 0
+        }
+      },
+      "outputRect": {
+        "x": 873,
+        "y": 305,
+        "width": 256,
+        "height": 256
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1468,
+        "width": 256,
+        "height": 256
+      },
+      "final": {
+        "x": 616,
+        "y": 1468,
+        "width": 256,
+        "height": 256
+      }
+    },
+    {
+      "id": "coffee",
+      "scene": "photos",
+      "label": "Ceramic / texture",
+      "type": "photo",
+      "detail": {
+        "x": 118,
+        "y": 44,
+        "width": 64,
+        "height": 48
+      },
+      "provenance": "Original PNG dimensions preserved in the source texture; only the tested final 2:1 reduction is applied. Source links: assets/corpus/SOURCES.md.",
+      "width": 300,
+      "height": 200,
+      "source": {
+        "sourceRect": {
+          "x": 1350,
+          "y": 978,
+          "width": 600,
+          "height": 400,
+          "id": "coffee",
+          "size": 600,
+          "background": "#ffffff"
+        },
+        "asset": "coffee",
+        "dimensions": {
+          "width": 1920,
+          "height": 1080,
+          "sourceWidth": 3840,
+          "sourceHeight": 2160,
+          "dpi": 200,
+          "area": true,
+          "native": false,
+          "up": false,
+          "dpr": 1,
+          "previewScale": 0.4166666666666667
+        },
+        "originalPhoto": {
+          "width": 600,
+          "height": 400,
+          "differences": 0
+        }
+      },
+      "outputRect": {
+        "x": 675,
+        "y": 489,
+        "width": 300,
+        "height": 200
+      },
+      "sbms": {
+        "x": 0,
+        "y": 1740,
+        "width": 300,
+        "height": 200
+      },
+      "final": {
+        "x": 616,
+        "y": 1740,
+        "width": 300,
+        "height": 200
+      }
+    }
+  ],
+  "atlasSize": [
+    1216,
+    1940
+  ]
+}

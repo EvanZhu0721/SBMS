@@ -4,6 +4,7 @@ mod controller;
 pub mod diagnostics;
 pub mod display;
 pub mod geometry;
+mod gpu_preference;
 mod gpu_renderer;
 mod input;
 pub mod launch_broker;

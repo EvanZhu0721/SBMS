@@ -1,4 +1,4 @@
-import { ScrollView } from "std-widgets.slint";
+import { ScrollView } from "../vendor/material/std-widgets.slint";
 import { BackButton, FullWidthPrimaryButton } from "../controls.slint";
 import { MdTokens } from "../theme.slint";
 
@@ -50,27 +50,40 @@ export component DiagnosticsPage inherits FocusScope {
                         height: 88px;
                         background: MdTokens.error-container;
                         border-radius: MdTokens.shape-medium;
+                        clip: true;
     
                         VerticalLayout {
                             padding: 12px;
                             spacing: 4px;
     
                             Text {
+                                height: 20px;
                                 text: "Last recorded error";
                                 color: MdTokens.on-error-container;
                                 font-size: MdTokens.type-title-medium;
                                 font-weight: MdTokens.weight-medium;
                             }
     
-                            TextInput {
-                                text: root.diagnostic-summary;
-                                read-only: true;
-                                single-line: false;
-                                wrap: word-wrap;
-                                color: MdTokens.on-error-container;
-                                selection-background-color: MdTokens.on-error-container;
-                                selection-foreground-color: MdTokens.error-container;
-                                font-size: MdTokens.type-body-small;
+                            summary-scroll := ScrollView {
+                                vertical-stretch: 1;
+                                mouse-drag-pan-enabled: false;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height, summary-input.preferred-height);
+
+                                summary-input := TextInput {
+                                    width: summary-scroll.visible-width;
+                                    height: self.preferred-height;
+                                    text: root.diagnostic-summary;
+                                    read-only: true;
+                                    single-line: false;
+                                    wrap: word-wrap;
+                                    color: MdTokens.on-error-container;
+                                    selection-background-color: MdTokens.on-error-container;
+                                    selection-foreground-color: MdTokens.error-container;
+                                    font-size: MdTokens.type-body-small;
+                                    page-height: summary-scroll.visible-height;
+                                    accessible-label: "Last recorded error. Scroll to read the full message.";
+                                }
                             }
                         }
                     }

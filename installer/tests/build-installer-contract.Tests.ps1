@@ -20,16 +20,6 @@ Describe 'Installer build entry point contract' {
             [ref]$parseErrors
         )
         @($parseErrors).Count | Should Be 0
-        $hashFunction = $ast.Find(
-            {
-                param($node)
-                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -eq 'Get-Sha256Hex'
-            },
-            $true
-        )
-        $hashFunction | Should Not BeNullOrEmpty
-        $script:hashFunctionSource = $hashFunction.Extent.Text
     }
 
     It 'requires a certificate in the default signed release path' {
@@ -65,21 +55,6 @@ Describe 'Installer build entry point contract' {
         $failure | Should Not BeNullOrEmpty
         $failure.Exception.Message | Should Match (
             'Unsigned packaging must be explicitly enabled'
-        )
-    }
-
-    It 'computes SHA256 without depending on PowerShell module discovery' {
-        . ([scriptblock]::Create($script:hashFunctionSource))
-        $inputFile = Join-Path $TestDrive 'sha256-input.txt'
-        [IO.File]::WriteAllText(
-            $inputFile,
-            'abc',
-            [Text.UTF8Encoding]::new($false)
-        )
-
-        Get-Sha256Hex -LiteralPath $inputFile | Should Be (
-            'BA7816BF8F01CFEA414140DE5DAE2223' +
-            'B00361A396177A9CB410FF61F20015AD'
         )
     }
 

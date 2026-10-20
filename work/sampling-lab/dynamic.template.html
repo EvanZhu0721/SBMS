@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>自适应去彩边 · 动态对比</title>
+  <!-- __LIBPLACEBO_LICENSE__ -->
+  <style>
+    :root{font-family:"Segoe UI","Microsoft YaHei UI","Microsoft YaHei",sans-serif;font-synthesis:none;color:#302b34;background:#f5f3f0;--paper:#fffefa;--line:#ded9df;--muted:#817783;--purple:#70538b;--purple-soft:#ebe2f1;--red:#b34f45;--split:50%}
+    *{box-sizing:border-box}[hidden]{display:none!important}
+    html,body{width:100%;height:100%;margin:0;overflow:hidden;overscroll-behavior:none}
+    body{height:100dvh;display:flex;flex-direction:column;min-width:0;min-height:0}
+    button,select{font:inherit;color:inherit;touch-action:manipulation}
+    button{cursor:pointer}
+    button,select{height:29px;min-width:0;border:1px solid var(--line);border-radius:7px;background:var(--paper);font-size:11px}
+    button:hover{background:#ede7ef}
+    button:active{background:#e6dced}
+    button:disabled{opacity:.4;cursor:default}
+    select{padding:3px 5px;cursor:pointer}
+    button:focus-visible,select:focus-visible,#divider:focus-visible{outline:2px solid #997db1;outline-offset:2px}
+    svg{display:block;width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+    .toolbar{position:relative;z-index:6;display:flex;align-items:center;gap:7px;flex:none;height:43px;min-width:0;padding:6px 10px;background:#f5f3f0;border-bottom:1px solid var(--line)}
+    .brand{flex:none;margin-right:8px;font-size:12px;font-weight:650;letter-spacing:.2px;color:#66506f;white-space:nowrap}
+    .controls,.utilities{display:flex;align-items:center;gap:5px;min-width:0}
+    .controls{flex:1}
+    .utilities{flex:none}
+    .icon-button{display:grid;place-items:center;flex:none;width:29px;padding:0;background:transparent}
+    #play{background:var(--purple-soft);border-color:transparent;color:#674c80}
+    #settings[aria-expanded=true]{background:var(--purple-soft);border-color:#c8b6d5;color:#674c80}
+    #scenario{width:157px;margin-right:4px}
+    #motion{width:69px;margin-left:5px}
+    #speed{width:84px}
+    #content{width:130px}
+    body[data-content] .dynamic-only{display:none!important}
+    .dynamic-only.settings-row{margin-top:9px}
+    #asset-size{width:100px}
+    #background{width:76px}
+    #dynamic-motion #motion{margin-left:0}
+    #dynamic-motion{margin-top:9px}
+    #comparison-settings{margin-top:0}
+    #dynamic-reference{width:100%}
+    #settings-panel{position:absolute;z-index:8;top:calc(100% + 7px);right:9px;width:344px;max-width:calc(100vw - 18px);padding:13px 14px;border:1px solid #d8cddf;border-radius:11px;background:#fcf9fd;box-shadow:0 8px 30px #35283d26}
+    .settings-row{display:flex;align-items:center;gap:8px}
+    .settings-row label{font-size:11px;color:#726379;white-space:nowrap}
+    #dpi{width:102px}
+    #reset{margin-left:auto;padding:0 10px}
+    #info{margin:11px 0 0;font-size:10px;line-height:1.8;color:#807385}
+    #info span{display:block;margin-top:5px}
+    #stage{position:relative;display:flex;align-items:center;justify-content:center;flex:1;min-width:0;min-height:0;overflow:hidden;background:#eeeae7;isolation:isolate}
+    #comparison{position:relative;flex:none;overflow:hidden}
+    #view{display:block;width:100%;height:100%;image-rendering:pixelated}
+    .sbms-frame{position:absolute;z-index:2;inset:0 auto 0 0;width:var(--split);border:2px solid var(--red);pointer-events:none}
+    .comparison-labels{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:none;height:25px;padding:0 10px;background:#fcfafc;border-bottom:1px solid var(--line)}
+    .algorithm-tag{max-width:calc(50% - 6px);font-size:10px;font-weight:600;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#654e76}
+    #left-tag{color:#a3453c}
+    #right-tag{text-align:right}
+    #focus{flex:none;height:20px;padding:0 8px;font-size:10px;line-height:18px}
+    #focus[aria-pressed=true]{background:var(--purple-soft);color:#674c80;border-color:#c8b6d5}
+    #divider{position:absolute;z-index:4;top:0;bottom:0;left:var(--split);width:36px;transform:translateX(-50%);cursor:ew-resize;touch-action:none;outline-offset:-5px}
+    #divider::before{content:"";position:absolute;top:0;bottom:0;left:17px;width:2px;background:#80648c;box-shadow:1px 0 #fff9,-1px 0 #fff7;pointer-events:none}
+    .divider-handle{position:absolute;left:3px;top:50%;display:flex;align-items:center;justify-content:center;width:30px;height:47px;transform:translateY(-50%);border:1px solid #c7b9d0;border-radius:16px;background:#fffbfff5;color:#795b8b;box-shadow:0 3px 12px #35283d25;pointer-events:none}
+    .divider-handle svg{width:20px;height:20px}
+    body:not([data-content]) .divider-handle{top:clamp(24px,88%,calc(100% - 25px))}
+    #divider:hover .divider-handle,#divider:focus-visible .divider-handle{background:#ede1f4;border-color:#ad92bf}
+    .footer{display:flex;align-items:center;gap:12px;flex:none;height:20px;min-width:0;padding:0 10px;border-top:1px solid var(--line);background:#f5f3f0;font-size:9px;line-height:1;color:#8b7d8e;font-variant-numeric:tabular-nums;white-space:nowrap}
+    #status{flex:none;color:#706275}
+    #branch{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;text-align:center}
+    #metrics{flex:none;min-width:45px;text-align:right}
+    #error{position:absolute;z-index:9;left:12px;right:12px;top:12px;padding:12px 14px;border:1px solid #dda89f;border-radius:9px;background:#fff1ed;color:#a3453c;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+    @media(max-width:640px){
+      .toolbar{gap:4px;padding:6px;height:41px}
+      .brand{display:none}
+      .controls,.utilities{gap:4px}
+      #scenario{width:125px;margin-right:0}
+      #motion{width:64px;margin-left:1px}
+      #speed{width:76px}
+      .comparison-labels{padding:0 7px;height:23px;gap:8px}
+      .algorithm-tag{font-size:9px}
+      .footer{gap:7px;padding:0 7px;font-size:8px}
+      #settings-panel{right:5px}
+      body:not([data-content]) #content{width:100px}
+    }
+    @media(max-width:440px){
+      #scenario{width:111px;font-size:10px}
+      #motion{width:59px;font-size:10px}
+      #speed{width:67px;font-size:10px}
+      .icon-button{width:27px;height:28px}
+      .controls,.utilities{gap:3px}
+      #branch{font-size:7px}
+      body:not([data-content]) #content{width:94px;font-size:10px}
+    }
+    @media(max-width:374px){
+      #scenario{width:96px}
+      #motion{width:55px}
+      #speed{width:57px}
+      .icon-button{width:25px}
+      .toolbar{padding:6px 4px}
+      .controls,.utilities{gap:2px}
+    }
+  </style>
+</head>
+<body data-ready="false">
+  <header class="toolbar">
+    <span class="brand">动态采样</span>
+    <div class="controls">
+      <select id="scenario" aria-label="缩放场景" title="缩放场景">
+        <option value="native">1∶1 · 原尺寸</option>
+        <option value="up2" selected>2× · 1080p → 4K</option>
+        <option value="up15">1.5× · 1440p → 4K</option>
+        <option value="down75">75% · 1440p → 1080p</option>
+        <option value="down50">50% · 4K → 1080p</option>
+        <option value="down33">⅓ · 6K → 1080p</option>
+        <option value="6k2k">42% · 6K → 1440p</option>
+        <option value="x75">横向 75%</option>
+      </select>
+      <select id="content" class="dynamic-only" aria-label="测试素材" title="测试素材">
+        <option value="positive">文字与细线</option>
+      </select>
+      <button id="play" class="icon-button" aria-label="暂停" title="暂停 / 播放 · 空格"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14" stroke-width="3"/></svg></button>
+      <button id="step" class="icon-button" aria-label="下一帧" title="下一帧 · 句号"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 5 10 7-10 7Z"/><path d="M19 5v14"/></svg></button>
+      <select id="motion" aria-label="运动方向" title="运动方向">
+        <option value="y" selected>↕ 滚动</option>
+        <option value="x">↔ 平移</option>
+        <option value="xy">↘ 斜移</option>
+      </select>
+      <select id="speed" aria-label="运动速度，输出像素每秒" title="运动速度 · 输出像素/秒">
+        <option value="24">24 px/s</option>
+        <option value="72" selected>72 px/s</option>
+        <option value="180">180 px/s</option>
+      </select>
+    </div>
+    <div class="utilities">
+      <button id="settings" class="icon-button" aria-label="设置" title="设置" aria-expanded="false" aria-controls="settings-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h7m4 0h5M4 17h3m4 0h9"/><circle cx="13" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg></button>
+      <button id="fullscreen" class="icon-button" aria-label="全屏" title="全屏"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4"/></svg></button>
+    </div>
+    <section id="settings-panel" aria-label="设置" hidden>
+      <div class="dynamic-only settings-row" id="comparison-settings">
+        <select id="dynamic-reference" aria-label="对照方案">
+          <option value="previous">优化前 ↔ 优化后</option>
+          <option value="sbms">SBMS 当前 ↔ 优化版</option>
+          <option value="raw">未去彩边 ↔ 优化版</option>
+          <option value="legacy">修改前 ↔ 修改后</option>
+        </select>
+      </div>
+      <div class="dynamic-only settings-row" id="asset-settings">
+        <label for="asset-size">素材长边</label>
+        <select id="asset-size" aria-label="素材长边，源像素"></select>
+        <select id="background" aria-label="素材背景">
+          <option value="#181818">深底</option>
+          <option value="#ffffff">浅底</option>
+        </select>
+      </div>
+      <div class="dynamic-only settings-row" id="dynamic-motion"></div>
+      <div class="settings-row">
+        <label for="dpi">源画面 DPI</label>
+        <select id="dpi" aria-label="源画面 DPI">
+          <option value="auto" selected>自动匹配</option>
+          <option value="100">100%</option>
+          <option value="125">125%</option>
+          <option value="150">150%</option>
+          <option value="200">200%</option>
+          <option value="300">300%</option>
+        </select>
+        <button id="reset" title="重置分隔线与运动位置">重置</button>
+      </div>
+      <p id="info">左右使用相同缩放核；右侧额外对源图做自适应去彩边。<span>RGB 文字为合成压力样本。彩色文字与细线用于检查误伤。静态源图的去彩边结果会缓存，预览 FPS 不包含逐帧预处理成本。</span></p>
+    </section>
+  </header>
+  <div class="comparison-labels">
+    <span id="left-tag" class="algorithm-tag">新方案</span>
+    <button id="focus" aria-pressed="false" title="当前场景 · 暂停 · 8 倍像素特写">彩边 ×8</button>
+    <span id="right-tag" class="algorithm-tag">新方案＋自适应去彩边</span>
+  </div>
+  <main id="stage" aria-label="左侧新方案，右侧相同方案加自适应去彩边">
+    <div id="comparison">
+    <canvas id="view" aria-label="同一画面的左右采样对照"></canvas>
+    <div class="sbms-frame" aria-hidden="true"></div>
+    <div id="divider" role="slider" tabindex="0" aria-label="对比分隔线" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" title="拖动对比 · 方向键微调">
+      <span class="divider-handle"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 8-4 4 4 4m8-8 4 4-4 4M11 7v10m2-10v10"/></svg></span>
+    </div>
+    </div>
+    <div id="error" role="alert" hidden></div>
+  </main>
+  <footer class="footer">
+    <span id="status" role="status">加载中</span>
+    <span id="branch">新方案 ↔ 自适应去彩边</span>
+    <span id="metrics">— FPS</span>
+  </footer>
+  <script>__FILTER_JS__</script>
+  <script id="corpus-data" type="application/json">__CORPUS_DATA__</script>
+  <script>__APP_JS__</script>
+</body>
+</html>

@@ -21,6 +21,8 @@ fn semantic_brushes_use_fixed_light_and_dark_pairs() {
         ("surface", "#2a282d", "#f8f3f9"),
         ("on-surface", "#e6e1e5", "#1c1b1f"),
         ("surface-container", "#1c1b1f", "#fffbfe"),
+        ("profile-container", "#1c1b1f", "#ece6f0"),
+        ("profile-outline", "#938f99", "#cac4d0"),
         ("on-surface-variant", "#e6e1e5", "#1c1b1f"),
         ("primary", "#cacaca", "#343236"),
         ("on-primary", "#343236", "#ffffff"),
@@ -43,5 +45,8 @@ fn semantic_brushes_use_fixed_light_and_dark_pairs() {
         );
     }
 
-    assert_eq!(THEME_SOURCE.matches("out property <brush>").count(), 14);
+    assert_eq!(
+        THEME_SOURCE.matches("out property <brush>").count(),
+        expected_pairs.len()
+    );
 }

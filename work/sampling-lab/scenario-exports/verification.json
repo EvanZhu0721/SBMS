@@ -1,0 +1,2717 @@
+{
+  "release": {
+    "repository": "https://github.com/EvanZhu0721/SBMS",
+    "releaseUrl": "https://github.com/EvanZhu0721/SBMS/releases/tag/v1.6.1",
+    "tag": "v1.6.1",
+    "commit": "3c1ae5bb054c5613be530659360cbb75b95f0e31",
+    "publishedAt": "2026-10-15T12:29:14Z",
+    "checkedAt": "2026-10-20T09:59:26Z",
+    "draft": false,
+    "prerelease": false,
+    "label": "SBMS 1.6.1",
+    "comparisonLabel": "SBMS 1.6.1 · 发布版采样复现",
+    "verification": {
+      "latestReleaseApi": "https://api.github.com/repos/EvanZhu0721/SBMS/releases/latest",
+      "latestReleaseRedirect": "https://github.com/EvanZhu0721/SBMS/releases/latest",
+      "remoteAnnotatedTag": "3021c09aac4fd95bede5af596edd5c76e65dc7f0",
+      "remotePeeledTagMatchesLocalCommit": true,
+      "workingTreeRendererMatchesRelease": true,
+      "workingTreeShaderMatchesRelease": true,
+      "baselineHlslMatchesReleaseShader": true,
+      "textComparison": "Direct content comparison after normalizing CRLF/LF and trailing whitespace; no file hashes.",
+      "baselineShaderCharacters": 4512,
+      "baselineNeedsReplacement": false
+    },
+    "sampling": {
+      "areaCondition": "Both source/target axis ratios are > 1.0001 and <= 2.0.",
+      "areaBranch": "Exact pixel-area coverage plus adaptive horizontal subpixel-chroma suppression.",
+      "fallbackBranch": "Bilinear sampling, including enlargement, 1:1, reduction beyond 2x, and single-axis reductions.",
+      "releaseBoundary": "Clamp",
+      "demoBoundary": "Repeat",
+      "demoCoreFormulaMatchesRelease": true
+    },
+    "limits": [
+      "This is a reproduction of the released sampling formula, not a screenshot captured from the installed release.",
+      "The demo sums individual area-weighted texels; the release combines the same coverage through four hardware bilinear fetches.",
+      "WebGL manual interpolation and native D3D11 hardware sampling are not guaranteed to be bit-identical.",
+      "The demo repeats texture boundaries while the release clamps them. Compare interior regions sufficiently far from image edges.",
+      "Animated demo offsets translate the common source before both algorithms; a static zero-offset comparison directly matches the released pixel-center convention.",
+      "These comparisons do not measure the installed application's performance or the separate Stream only capture and encoder path."
+    ],
+    "sourceLinks": {
+      "releaseShader": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L49-L161",
+      "releaseAreaWeights": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L77-L116",
+      "releaseChromaSuppression": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L119-L145",
+      "releaseBranchSelection": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L148-L160",
+      "releaseSampler": "https://github.com/EvanZhu0721/SBMS/blob/3c1ae5bb054c5613be530659360cbb75b95f0e31/src/gpu_renderer.rs#L460-L465"
+    },
+    "localEvidence": {
+      "baselineHlsl": "work/sampling-lab/sbms-current-baseline.hlsl",
+      "demoArea": "work/sampling-lab/dynamic-filter.js:355",
+      "demoSbms": "work/sampling-lab/dynamic-filter.js:371",
+      "demoBoundary": "work/sampling-lab/dynamic-filter.js:340",
+      "demoPixelCenters": "work/sampling-lab/dynamic-filter.js:462",
+      "cpuSbms": "work/sampling-lab/dynamic-filter.js:640"
+    }
+  },
+  "sourceSize": [
+    3840,
+    2160
+  ],
+  "outputSize": [
+    1920,
+    1080
+  ],
+  "scope": "Released sampling formula reproduced in WebGL versus the experimental final filter; not installed-app screenshots or a performance/streaming test.",
+  "conditions": "Every scene uses down50, with 200% text/layout DPI where applicable. Both sides share source bytes and source offset.",
+  "phases": [
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 592,
+        "width": 1072,
+        "height": 136
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 296,
+        "width": 536,
+        "height": 68
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 36448,
+          "chromaSum": 108546,
+          "chromaAtLeast8": 2391,
+          "maxChroma": 87
+        },
+        "final": {
+          "pixels": 36448,
+          "chromaSum": 22893,
+          "chromaAtLeast8": 735,
+          "maxChroma": 78
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.600051214515657,
+      "lumaMeanAbsoluteDelta": 1.190019062774365,
+      "maxLumaDelta": 60.96799999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 592,
+        "width": 1072,
+        "height": 136
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 296,
+        "width": 537,
+        "height": 68
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 36516,
+          "chromaSum": 107216,
+          "chromaAtLeast8": 2371,
+          "maxChroma": 85
+        },
+        "final": {
+          "pixels": 36516,
+          "chromaSum": 22078,
+          "chromaAtLeast8": 706,
+          "maxChroma": 74
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.5969620622923284,
+      "lumaMeanAbsoluteDelta": 1.1908028206813464,
+      "maxLumaDelta": 62.5754,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-cleartype",
+      "scene": "reading",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 592,
+        "width": 1072,
+        "height": 136
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 295,
+        "width": 537,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 37053,
+          "chromaSum": 107855,
+          "chromaAtLeast8": 2471,
+          "maxChroma": 82
+        },
+        "final": {
+          "pixels": 37053,
+          "chromaSum": 22155,
+          "chromaAtLeast8": 709,
+          "maxChroma": 81
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.5682131001538338,
+      "lumaMeanAbsoluteDelta": 1.1641388227673848,
+      "maxLumaDelta": 60.662000000000006,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 832,
+        "width": 1072,
+        "height": 216
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 416,
+        "width": 536,
+        "height": 108
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 57888,
+          "chromaSum": 151855,
+          "chromaAtLeast8": 3409,
+          "maxChroma": 80
+        },
+        "final": {
+          "pixels": 57888,
+          "chromaSum": 29803,
+          "chromaAtLeast8": 883,
+          "maxChroma": 70
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.8072024138566427,
+      "lumaMeanAbsoluteDelta": 1.4024021558872326,
+      "maxLumaDelta": 55.713599999999985,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 832,
+        "width": 1072,
+        "height": 216
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 416,
+        "width": 537,
+        "height": 108
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 57996,
+          "chromaSum": 150010,
+          "chromaAtLeast8": 3404,
+          "maxChroma": 82
+        },
+        "final": {
+          "pixels": 57996,
+          "chromaSum": 29307,
+          "chromaAtLeast8": 850,
+          "maxChroma": 68
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.7939628020323242,
+      "lumaMeanAbsoluteDelta": 1.400420160011043,
+      "maxLumaDelta": 56.85499999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-cleartype",
+      "scene": "code",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 832,
+        "width": 1072,
+        "height": 216
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 415,
+        "width": 537,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58533,
+          "chromaSum": 150609,
+          "chromaAtLeast8": 3531,
+          "maxChroma": 82
+        },
+        "final": {
+          "pixels": 58533,
+          "chromaSum": 29443,
+          "chromaAtLeast8": 876,
+          "maxChroma": 73
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.8179032910210196,
+      "lumaMeanAbsoluteDelta": 1.4306016845198501,
+      "maxLumaDelta": 61.07299999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 592,
+        "width": 1072,
+        "height": 136
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 296,
+        "width": 536,
+        "height": 68
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 36448,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        },
+        "final": {
+          "pixels": 36448,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.32534021071115,
+      "lumaMeanAbsoluteDelta": 1.32534021071115,
+      "maxLumaDelta": 70.00000000000003,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 592,
+        "width": 1072,
+        "height": 136
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 296,
+        "width": 537,
+        "height": 68
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 36516,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        },
+        "final": {
+          "pixels": 36516,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.3149852119618797,
+      "lumaMeanAbsoluteDelta": 1.3149852119618795,
+      "maxLumaDelta": 74,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "reading-grayscale",
+      "scene": "reading",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 592,
+        "width": 1072,
+        "height": 136
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 295,
+        "width": 537,
+        "height": 69
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 37053,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        },
+        "final": {
+          "pixels": 37053,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2801662483469625,
+      "lumaMeanAbsoluteDelta": 1.2801662483469625,
+      "maxLumaDelta": 75,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 832,
+        "width": 1072,
+        "height": 216
+      },
+      "outputRect": {
+        "x": 617,
+        "y": 416,
+        "width": 536,
+        "height": 108
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 57888,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        },
+        "final": {
+          "pixels": 57888,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.4525290215588722,
+      "lumaMeanAbsoluteDelta": 1.4525290215588722,
+      "maxLumaDelta": 59.99999999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 832,
+        "width": 1072,
+        "height": 216
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 416,
+        "width": 537,
+        "height": 108
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 57996,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        },
+        "final": {
+          "pixels": 57996,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.4370818677150148,
+      "lumaMeanAbsoluteDelta": 1.4370818677150148,
+      "maxLumaDelta": 59.00000000000003,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "code-grayscale",
+      "scene": "code",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1234,
+        "y": 832,
+        "width": 1072,
+        "height": 216
+      },
+      "outputRect": {
+        "x": 616,
+        "y": 415,
+        "width": 537,
+        "height": 109
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 58533,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        },
+        "final": {
+          "pixels": 58533,
+          "chromaSum": 0,
+          "chromaAtLeast8": 0,
+          "maxChroma": 0
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.4687441272444604,
+      "lumaMeanAbsoluteDelta": 1.4687441272444604,
+      "maxLumaDelta": 65,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 40,
+        "y": 1160,
+        "width": 1200,
+        "height": 920
+      },
+      "outputRect": {
+        "x": 20,
+        "y": 580,
+        "width": 600,
+        "height": 460
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 276000,
+          "chromaSum": 150123,
+          "chromaAtLeast8": 5214,
+          "maxChroma": 46
+        },
+        "final": {
+          "pixels": 276000,
+          "chromaSum": 161467,
+          "chromaAtLeast8": 5606,
+          "maxChroma": 53
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.23509299516908214,
+      "lumaMeanAbsoluteDelta": 0.25644749420288054,
+      "maxLumaDelta": 27.856799999999993,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 40,
+        "y": 1160,
+        "width": 1200,
+        "height": 920
+      },
+      "outputRect": {
+        "x": 19,
+        "y": 580,
+        "width": 601,
+        "height": 460
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 276460,
+          "chromaSum": 150104,
+          "chromaAtLeast8": 5233,
+          "maxChroma": 46
+        },
+        "final": {
+          "pixels": 276460,
+          "chromaSum": 161440,
+          "chromaAtLeast8": 5601,
+          "maxChroma": 53
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.23460175070534617,
+      "lumaMeanAbsoluteDelta": 0.25590397091801725,
+      "maxLumaDelta": 27.856799999999993,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "lines",
+      "scene": "lines",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 40,
+        "y": 1160,
+        "width": 1200,
+        "height": 920
+      },
+      "outputRect": {
+        "x": 19,
+        "y": 579,
+        "width": 601,
+        "height": 461
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 277061,
+          "chromaSum": 150161,
+          "chromaAtLeast8": 5215,
+          "maxChroma": 46
+        },
+        "final": {
+          "pixels": 277061,
+          "chromaSum": 161645,
+          "chromaAtLeast8": 5612,
+          "maxChroma": 56
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.2339929955256544,
+      "lumaMeanAbsoluteDelta": 0.25520829564606723,
+      "maxLumaDelta": 41.21499999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "tiktok",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2304,
+          "chromaSum": 39396,
+          "chromaAtLeast8": 338,
+          "maxChroma": 210
+        },
+        "final": {
+          "pixels": 2304,
+          "chromaSum": 40778,
+          "chromaAtLeast8": 344,
+          "maxChroma": 230
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.0120081018518519,
+      "lumaMeanAbsoluteDelta": 0.9744252604166667,
+      "maxLumaDelta": 18.864800000000002,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "tiktok",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 469,
+        "width": 49,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2352,
+          "chromaSum": 39339,
+          "chromaAtLeast8": 313,
+          "maxChroma": 210
+        },
+        "final": {
+          "pixels": 2352,
+          "chromaSum": 40643,
+          "chromaAtLeast8": 345,
+          "maxChroma": 229
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.9923469387755102,
+      "lumaMeanAbsoluteDelta": 0.9336612244897944,
+      "maxLumaDelta": 16.5026,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "tiktok",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 468,
+        "width": 49,
+        "height": 49
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2401,
+          "chromaSum": 39423,
+          "chromaAtLeast8": 314,
+          "maxChroma": 210
+        },
+        "final": {
+          "pixels": 2401,
+          "chromaSum": 40606,
+          "chromaAtLeast8": 349,
+          "maxChroma": 228
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.9727891156462585,
+      "lumaMeanAbsoluteDelta": 0.9038353186172419,
+      "maxLumaDelta": 18,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1862,
+        "y": 938,
+        "width": 85,
+        "height": 96,
+        "id": "vlc",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 931,
+        "y": 469,
+        "width": 43,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2064,
+          "chromaSum": 174456,
+          "chromaAtLeast8": 1022,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 2064,
+          "chromaSum": 175017,
+          "chromaAtLeast8": 1022,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2719638242894056,
+      "lumaMeanAbsoluteDelta": 1.2760852713178317,
+      "maxLumaDelta": 14.238999999999976,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1862,
+        "y": 938,
+        "width": 85,
+        "height": 96,
+        "id": "vlc",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 930,
+        "y": 469,
+        "width": 43,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2064,
+          "chromaSum": 174408,
+          "chromaAtLeast8": 1017,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 2064,
+          "chromaSum": 174985,
+          "chromaAtLeast8": 1018,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.270187338501292,
+      "lumaMeanAbsoluteDelta": 1.284162209302327,
+      "maxLumaDelta": 13.221400000000003,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1862,
+        "y": 938,
+        "width": 85,
+        "height": 96,
+        "id": "vlc",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 930,
+        "y": 468,
+        "width": 43,
+        "height": 49
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2107,
+          "chromaSum": 177977,
+          "chromaAtLeast8": 1046,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 2107,
+          "chromaSum": 178347,
+          "chromaAtLeast8": 1053,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2978959025470653,
+      "lumaMeanAbsoluteDelta": 1.3353962980541074,
+      "maxLumaDelta": 14.811000000000007,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "firefox-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "firefox",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2304,
+          "chromaSum": 280852,
+          "chromaAtLeast8": 1576,
+          "maxChroma": 238
+        },
+        "final": {
+          "pixels": 2304,
+          "chromaSum": 282145,
+          "chromaAtLeast8": 1589,
+          "maxChroma": 246
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.1400462962962963,
+      "lumaMeanAbsoluteDelta": 1.088024392361113,
+      "maxLumaDelta": 16.639800000000008,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "firefox-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "firefox",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 469,
+        "width": 49,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2352,
+          "chromaSum": 280887,
+          "chromaAtLeast8": 1583,
+          "maxChroma": 238
+        },
+        "final": {
+          "pixels": 2352,
+          "chromaSum": 282357,
+          "chromaAtLeast8": 1587,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.0850340136054422,
+      "lumaMeanAbsoluteDelta": 1.0242943877551065,
+      "maxLumaDelta": 20.626199999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "firefox-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "firefox",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 468,
+        "width": 49,
+        "height": 49
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2401,
+          "chromaSum": 281013,
+          "chromaAtLeast8": 1589,
+          "maxChroma": 238
+        },
+        "final": {
+          "pixels": 2401,
+          "chromaSum": 282463,
+          "chromaAtLeast8": 1591,
+          "maxChroma": 252
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.108982368457587,
+      "lumaMeanAbsoluteDelta": 1.0636587255310324,
+      "maxLumaDelta": 15.523399999999995,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vscode-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "vscode",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2304,
+          "chromaSum": 250400,
+          "chromaAtLeast8": 1347,
+          "maxChroma": 213
+        },
+        "final": {
+          "pixels": 2304,
+          "chromaSum": 250341,
+          "chromaAtLeast8": 1360,
+          "maxChroma": 226
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.7249710648148148,
+      "lumaMeanAbsoluteDelta": 0.8048677951388892,
+      "maxLumaDelta": 9.833199999999977,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vscode-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "vscode",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 469,
+        "width": 49,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2352,
+          "chromaSum": 254297,
+          "chromaAtLeast8": 1373,
+          "maxChroma": 213
+        },
+        "final": {
+          "pixels": 2352,
+          "chromaSum": 254458,
+          "chromaAtLeast8": 1365,
+          "maxChroma": 226
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.7464569160997733,
+      "lumaMeanAbsoluteDelta": 0.8311085884353743,
+      "maxLumaDelta": 10.982799999999969,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vscode-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "vscode",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 468,
+        "width": 49,
+        "height": 49
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2401,
+          "chromaSum": 254563,
+          "chromaAtLeast8": 1380,
+          "maxChroma": 213
+        },
+        "final": {
+          "pixels": 2401,
+          "chromaSum": 254731,
+          "chromaAtLeast8": 1375,
+          "maxChroma": 226
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.7315007635707345,
+      "lumaMeanAbsoluteDelta": 0.8119821740941287,
+      "maxLumaDelta": 9.833200000000005,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "git",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2304,
+          "chromaSum": 204501,
+          "chromaAtLeast8": 1141,
+          "maxChroma": 194
+        },
+        "final": {
+          "pixels": 2304,
+          "chromaSum": 205785,
+          "chromaAtLeast8": 1139,
+          "maxChroma": 211
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.1251446759259258,
+      "lumaMeanAbsoluteDelta": 1.2745829861111113,
+      "maxLumaDelta": 14.670600000000007,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "git",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 469,
+        "width": 49,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2352,
+          "chromaSum": 204838,
+          "chromaAtLeast8": 1192,
+          "maxChroma": 194
+        },
+        "final": {
+          "pixels": 2352,
+          "chromaSum": 206525,
+          "chromaAtLeast8": 1184,
+          "maxChroma": 215
+        }
+      },
+      "rgbMeanAbsoluteDelta": 0.9118480725623582,
+      "lumaMeanAbsoluteDelta": 1.041269812925168,
+      "maxLumaDelta": 17.105000000000004,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "git",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 468,
+        "width": 49,
+        "height": 49
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2401,
+          "chromaSum": 205333,
+          "chromaAtLeast8": 1143,
+          "maxChroma": 194
+        },
+        "final": {
+          "pixels": 2401,
+          "chromaSum": 206391,
+          "chromaAtLeast8": 1142,
+          "maxChroma": 211
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.0788560322088019,
+      "lumaMeanAbsoluteDelta": 1.2232019991670113,
+      "maxLumaDelta": 14.457999999999984,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "rainbow-flag-96",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "rainbow-flag",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 928,
+        "y": 469,
+        "width": 48,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2304,
+          "chromaSum": 297405,
+          "chromaAtLeast8": 1702,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 2304,
+          "chromaSum": 297031,
+          "chromaAtLeast8": 1702,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.3391203703703705,
+      "lumaMeanAbsoluteDelta": 1.2558566840277954,
+      "maxLumaDelta": 7.874000000000024,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "rainbow-flag-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "rainbow-flag",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 469,
+        "width": 49,
+        "height": 48
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2352,
+          "chromaSum": 302164,
+          "chromaAtLeast8": 1732,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 2352,
+          "chromaSum": 301873,
+          "chromaAtLeast8": 1732,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.3290816326530612,
+      "lumaMeanAbsoluteDelta": 1.2577669217687242,
+      "maxLumaDelta": 11.804199999999994,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "rainbow-flag-96",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1856,
+        "y": 938,
+        "width": 96,
+        "height": 96,
+        "id": "rainbow-flag",
+        "size": 96,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 927,
+        "y": 468,
+        "width": 49,
+        "height": 49
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 2401,
+          "chromaSum": 301372,
+          "chromaAtLeast8": 1691,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 2401,
+          "chromaSum": 300451,
+          "chromaAtLeast8": 1691,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.4073302790503956,
+      "lumaMeanAbsoluteDelta": 1.4615910870470716,
+      "maxLumaDelta": 9.363399999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-32",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "tiktok",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 256,
+          "chromaSum": 4238,
+          "chromaAtLeast8": 64,
+          "maxChroma": 142
+        },
+        "final": {
+          "pixels": 256,
+          "chromaSum": 4356,
+          "chromaAtLeast8": 65,
+          "maxChroma": 142
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.7734375,
+      "lumaMeanAbsoluteDelta": 1.5267218749999978,
+      "maxLumaDelta": 16.31359999999998,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "tiktok",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 485,
+        "width": 17,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 272,
+          "chromaSum": 4186,
+          "chromaAtLeast8": 62,
+          "maxChroma": 151
+        },
+        "final": {
+          "pixels": 272,
+          "chromaSum": 4222,
+          "chromaAtLeast8": 64,
+          "maxChroma": 139
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.5318627450980393,
+      "lumaMeanAbsoluteDelta": 1.2962904411764704,
+      "maxLumaDelta": 23.647000000000006,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "tiktok-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "tiktok",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 484,
+        "width": 17,
+        "height": 17
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 289,
+          "chromaSum": 4156,
+          "chromaAtLeast8": 59,
+          "maxChroma": 144
+        },
+        "final": {
+          "pixels": 289,
+          "chromaSum": 4226,
+          "chromaAtLeast8": 62,
+          "maxChroma": 156
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.3863898500576701,
+      "lumaMeanAbsoluteDelta": 1.2323197231833918,
+      "maxLumaDelta": 19.17840000000001,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-32",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1890,
+        "y": 970,
+        "width": 28,
+        "height": 32,
+        "id": "vlc",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 945,
+        "y": 485,
+        "width": 14,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 224,
+          "chromaSum": 19281,
+          "chromaAtLeast8": 121,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 224,
+          "chromaSum": 19533,
+          "chromaAtLeast8": 130,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.424107142857143,
+      "lumaMeanAbsoluteDelta": 2.2738660714285674,
+      "maxLumaDelta": 12.800600000000003,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1890,
+        "y": 970,
+        "width": 28,
+        "height": 32,
+        "id": "vlc",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 15,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 240,
+          "chromaSum": 19627,
+          "chromaAtLeast8": 124,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 240,
+          "chromaSum": 19833,
+          "chromaAtLeast8": 132,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.2847222222222223,
+      "lumaMeanAbsoluteDelta": 2.2269758333333316,
+      "maxLumaDelta": 14.23899999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vlc-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1890,
+        "y": 970,
+        "width": 28,
+        "height": 32,
+        "id": "vlc",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 484,
+        "width": 15,
+        "height": 17
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 255,
+          "chromaSum": 21365,
+          "chromaAtLeast8": 135,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 255,
+          "chromaSum": 21486,
+          "chromaAtLeast8": 137,
+          "maxChroma": 254
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.197385620915033,
+      "lumaMeanAbsoluteDelta": 2.1605639215686248,
+      "maxLumaDelta": 15.23060000000001,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "firefox-32",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "firefox",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 256,
+          "chromaSum": 30176,
+          "chromaAtLeast8": 196,
+          "maxChroma": 237
+        },
+        "final": {
+          "pixels": 256,
+          "chromaSum": 30693,
+          "chromaAtLeast8": 195,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.44140625,
+      "lumaMeanAbsoluteDelta": 2.2009273437499983,
+      "maxLumaDelta": 15.487399999999994,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "firefox-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "firefox",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 485,
+        "width": 17,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 272,
+          "chromaSum": 30141,
+          "chromaAtLeast8": 198,
+          "maxChroma": 237
+        },
+        "final": {
+          "pixels": 272,
+          "chromaSum": 30676,
+          "chromaAtLeast8": 199,
+          "maxChroma": 247
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.360294117647059,
+      "lumaMeanAbsoluteDelta": 2.1896558823529397,
+      "maxLumaDelta": 14.281599999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "firefox-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "firefox",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 484,
+        "width": 17,
+        "height": 17
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 289,
+          "chromaSum": 30735,
+          "chromaAtLeast8": 198,
+          "maxChroma": 236
+        },
+        "final": {
+          "pixels": 289,
+          "chromaSum": 31102,
+          "chromaAtLeast8": 200,
+          "maxChroma": 241
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.1833910034602075,
+      "lumaMeanAbsoluteDelta": 2.106896193771624,
+      "maxLumaDelta": 14.808199999999992,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vscode-32",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "vscode",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 256,
+          "chromaSum": 27809,
+          "chromaAtLeast8": 166,
+          "maxChroma": 212
+        },
+        "final": {
+          "pixels": 256,
+          "chromaSum": 27778,
+          "chromaAtLeast8": 172,
+          "maxChroma": 221
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.7786458333333333,
+      "lumaMeanAbsoluteDelta": 1.9661023437499976,
+      "maxLumaDelta": 8.34899999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vscode-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "vscode",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 485,
+        "width": 17,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 272,
+          "chromaSum": 29245,
+          "chromaAtLeast8": 181,
+          "maxChroma": 212
+        },
+        "final": {
+          "pixels": 272,
+          "chromaSum": 29223,
+          "chromaAtLeast8": 181,
+          "maxChroma": 226
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.9767156862745099,
+      "lumaMeanAbsoluteDelta": 2.1370176470588214,
+      "maxLumaDelta": 11.449999999999989,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "vscode-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "vscode",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 484,
+        "width": 17,
+        "height": 17
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 289,
+          "chromaSum": 29481,
+          "chromaAtLeast8": 180,
+          "maxChroma": 212
+        },
+        "final": {
+          "pixels": 289,
+          "chromaSum": 29598,
+          "chromaAtLeast8": 182,
+          "maxChroma": 224
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.021914648212226,
+      "lumaMeanAbsoluteDelta": 2.2049501730103755,
+      "maxLumaDelta": 11.973600000000005,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-32",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "git",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 256,
+          "chromaSum": 22926,
+          "chromaAtLeast8": 164,
+          "maxChroma": 194
+        },
+        "final": {
+          "pixels": 256,
+          "chromaSum": 23268,
+          "chromaAtLeast8": 164,
+          "maxChroma": 215
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.5872395833333335,
+      "lumaMeanAbsoluteDelta": 2.9174765625000028,
+      "maxLumaDelta": 17.820200000000014,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "git",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 485,
+        "width": 17,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 272,
+          "chromaSum": 23164,
+          "chromaAtLeast8": 153,
+          "maxChroma": 194
+        },
+        "final": {
+          "pixels": 272,
+          "chromaSum": 23623,
+          "chromaAtLeast8": 153,
+          "maxChroma": 213
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.344362745098039,
+      "lumaMeanAbsoluteDelta": 2.6579095588235284,
+      "maxLumaDelta": 19.1824,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "git-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "git",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 484,
+        "width": 17,
+        "height": 17
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 289,
+          "chromaSum": 23409,
+          "chromaAtLeast8": 170,
+          "maxChroma": 194
+        },
+        "final": {
+          "pixels": 289,
+          "chromaSum": 23785,
+          "chromaAtLeast8": 170,
+          "maxChroma": 213
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.3967704728950405,
+      "lumaMeanAbsoluteDelta": 2.7042795847750885,
+      "maxLumaDelta": 16.89239999999998,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "rainbow-flag-32",
+      "scene": "icons",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "rainbow-flag",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 944,
+        "y": 485,
+        "width": 16,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 256,
+          "chromaSum": 32265,
+          "chromaAtLeast8": 192,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 256,
+          "chromaSum": 31693,
+          "chromaAtLeast8": 192,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.4088541666666665,
+      "lumaMeanAbsoluteDelta": 2.096339062500001,
+      "maxLumaDelta": 5.358200000000011,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "rainbow-flag-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "rainbow-flag",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 485,
+        "width": 17,
+        "height": 16
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 272,
+          "chromaSum": 33987,
+          "chromaAtLeast8": 204,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 272,
+          "chromaSum": 33359,
+          "chromaAtLeast8": 204,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.4620098039215685,
+      "lumaMeanAbsoluteDelta": 2.1919727941176483,
+      "maxLumaDelta": 8.300399999999996,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "rainbow-flag-32",
+      "scene": "icons",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1888,
+        "y": 970,
+        "width": 32,
+        "height": 32,
+        "id": "rainbow-flag",
+        "size": 32,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 943,
+        "y": 484,
+        "width": 17,
+        "height": 17
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 289,
+          "chromaSum": 32581,
+          "chromaAtLeast8": 217,
+          "maxChroma": 255
+        },
+        "final": {
+          "pixels": 289,
+          "chromaSum": 33145,
+          "chromaAtLeast8": 217,
+          "maxChroma": 255
+        }
+      },
+      "rgbMeanAbsoluteDelta": 2.602076124567474,
+      "lumaMeanAbsoluteDelta": 2.4121197231833866,
+      "maxLumaDelta": 9.802999999999997,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "astronaut",
+      "scene": "photos",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1746,
+        "y": 610,
+        "width": 512,
+        "height": 512,
+        "id": "astronaut",
+        "size": 512,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 873,
+        "y": 305,
+        "width": 256,
+        "height": 256
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 65536,
+          "chromaSum": 3251396,
+          "chromaAtLeast8": 49299,
+          "maxChroma": 183
+        },
+        "final": {
+          "pixels": 65536,
+          "chromaSum": 3247600,
+          "chromaAtLeast8": 48885,
+          "maxChroma": 185
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2540639241536458,
+      "lumaMeanAbsoluteDelta": 1.215717016601581,
+      "maxLumaDelta": 36.64699999999999,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "astronaut",
+      "scene": "photos",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1746,
+        "y": 610,
+        "width": 512,
+        "height": 512,
+        "id": "astronaut",
+        "size": 512,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 872,
+        "y": 305,
+        "width": 257,
+        "height": 256
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 65792,
+          "chromaSum": 3259581,
+          "chromaAtLeast8": 49494,
+          "maxChroma": 183
+        },
+        "final": {
+          "pixels": 65792,
+          "chromaSum": 3255230,
+          "chromaAtLeast8": 48981,
+          "maxChroma": 184
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.255486989299611,
+      "lumaMeanAbsoluteDelta": 1.2204695464494284,
+      "maxLumaDelta": 33.139999999999986,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "astronaut",
+      "scene": "photos",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1746,
+        "y": 610,
+        "width": 512,
+        "height": 512,
+        "id": "astronaut",
+        "size": 512,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 872,
+        "y": 304,
+        "width": 257,
+        "height": 257
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 66049,
+          "chromaSum": 3266880,
+          "chromaAtLeast8": 49657,
+          "maxChroma": 184
+        },
+        "final": {
+          "pixels": 66049,
+          "chromaSum": 3262861,
+          "chromaAtLeast8": 49178,
+          "maxChroma": 186
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.2549016639161834,
+      "lumaMeanAbsoluteDelta": 1.2178534633378315,
+      "maxLumaDelta": 37.14680000000001,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "coffee",
+      "scene": "photos",
+      "motion": [
+        0,
+        0
+      ],
+      "sourceRect": {
+        "x": 1350,
+        "y": 978,
+        "width": 600,
+        "height": 400,
+        "id": "coffee",
+        "size": 600,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 675,
+        "y": 489,
+        "width": 300,
+        "height": 200
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60000,
+          "chromaSum": 6428493,
+          "chromaAtLeast8": 59653,
+          "maxChroma": 186
+        },
+        "final": {
+          "pixels": 60000,
+          "chromaSum": 6426105,
+          "chromaAtLeast8": 59630,
+          "maxChroma": 192
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.3405,
+      "lumaMeanAbsoluteDelta": 1.357265073333273,
+      "maxLumaDelta": 25.289999999999978,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "coffee",
+      "scene": "photos",
+      "motion": [
+        1,
+        0
+      ],
+      "sourceRect": {
+        "x": 1350,
+        "y": 978,
+        "width": 600,
+        "height": 400,
+        "id": "coffee",
+        "size": 600,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 674,
+        "y": 489,
+        "width": 301,
+        "height": 200
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60200,
+          "chromaSum": 6448258,
+          "chromaAtLeast8": 59858,
+          "maxChroma": 187
+        },
+        "final": {
+          "pixels": 60200,
+          "chromaSum": 6445783,
+          "chromaAtLeast8": 59842,
+          "maxChroma": 191
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.3459468438538207,
+      "lumaMeanAbsoluteDelta": 1.3659540930231944,
+      "maxLumaDelta": 26.936999999999998,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    },
+    {
+      "id": "coffee",
+      "scene": "photos",
+      "motion": [
+        1,
+        1
+      ],
+      "sourceRect": {
+        "x": 1350,
+        "y": 978,
+        "width": 600,
+        "height": 400,
+        "id": "coffee",
+        "size": 600,
+        "background": "#ffffff"
+      },
+      "outputRect": {
+        "x": 674,
+        "y": 488,
+        "width": 301,
+        "height": 201
+      },
+      "metrics": {
+        "sbms": {
+          "pixels": 60501,
+          "chromaSum": 6474488,
+          "chromaAtLeast8": 60150,
+          "maxChroma": 187
+        },
+        "final": {
+          "pixels": 60501,
+          "chromaSum": 6472003,
+          "chromaAtLeast8": 60137,
+          "maxChroma": 190
+        }
+      },
+      "rgbMeanAbsoluteDelta": 1.343261543886327,
+      "lumaMeanAbsoluteDelta": 1.363123267383942,
+      "maxLumaDelta": 33.07739999999998,
+      "splitErrors": 0,
+      "cpu": {
+        "samples": 168,
+        "sbmsMax": 1,
+        "finalMax": 1,
+        "mismatches": []
+      }
+    }
+  ],
+  "failures": [],
+  "errors": [],
+  "renderer": "ANGLE (AMD, AMD Radeon RX 7900 XTX (0x0000744C) Direct3D11 vs_5_0 ps_5_0, D3D11)",
+  "cpuSamples": 9576,
+  "browserExceptions": [],
+  "dynamicErrors": [],
+  "notes": [
+    "Zero offset is exported; all three fixed source offsets are verified, without moving or rerasterizing the source.",
+    "CPU checks use the actual GPU-preprocessed source, isolating resampling from previously audited defringe behavior.",
+    "Color differences on icons and photos are not improvements. Neutral-text chroma is one diagnostic, not a total image quality score.",
+    "The atlas copies GPU RGBA8 pixels directly. Figure construction must preserve 1:1 pixels and use nearest-neighbor only for labeled details.",
+    "192 DPI describes native text target rasterization and canvas layout. Photo input dimensions remain original; icon source sizes are explicitly stated.",
+    "96 px icons and original-size photos are enabled only in this test tab, without changing the shipped demo size menu."
+  ]
+}

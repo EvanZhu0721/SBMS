@@ -36,6 +36,15 @@ matched. `target` describes the physical display that receives the mirror.
 Physical size may be supplied as width and height in millimetres or as a
 diagonal; an explicit aspect ratio can be supplied when a diagonal is used.
 
+The configuration UI shares one reference across all groups in a profile.
+Changing the reference display or its manual measurements updates every group;
+each group keeps its own target and sizing strategy. Existing files keep the
+original per-group `SizingRequest` format, with the same reference written into
+each request. When loading an older profile with different references, the
+selected group's reference is used (or the first configured reference if empty).
+Missing reference displays retain their identity and prevent starting until
+available or explicitly replaced.
+
 `SizingRequest::calculate()` returns:
 
 ```rust
@@ -59,7 +68,7 @@ to 1000 Hz.
 SizingRequest::calculate
   -> SizingResult.virtual_mode
   -> VirtualMode
-  -> protected v5 session gate
+  -> protected v7 session gate
   -> IDD monitor and target mode
   -> Windows display source
   -> GPU renderer
