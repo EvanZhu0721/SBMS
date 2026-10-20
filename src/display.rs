@@ -26,10 +26,10 @@ use windows::Win32::Devices::Properties::{
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CDS_FULLSCREEN, CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_DISPLAYORIENTATION,
-    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90, DMDO_180, DMDO_270, DMDO_DEFAULT,
-    EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
+    CDS_FULLSCREEN, CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY,
+    ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
+    DM_DISPLAYORIENTATION, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90, DMDO_180, DMDO_270,
+    DMDO_DEFAULT, EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
     ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
 };
 use windows::Win32::Security::Cryptography::{
@@ -191,11 +191,8 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
         else {
             continue;
         };
-        if actual.rect == display.rect
-            && actual.rotation == display.rotation
-            && actual.refresh_numerator == display.refresh_numerator
-            && actual.refresh_denominator == display.refresh_denominator
-        {
+        let same_mode = same_desktop_mode(actual, display);
+        if actual.rect == display.rect && same_mode && actual.primary == display.primary {
             continue;
         }
 
@@ -209,33 +206,63 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
             .and_then(|value| u32::try_from(value).ok())
             .ok_or_else(|| DisplayError("saved display refresh rate is invalid".into()))?;
         let device_name = wide(&actual.device_name);
-        let mut mode = find_display_mode(
-            PCWSTR(device_name.as_ptr()),
-            width,
-            height,
-            refresh_hz,
-            display.rotation,
-        )
-        .ok_or_else(|| {
-            DisplayError(format!(
-                "{} no longer exposes saved mode {}x{}@{}",
-                actual.device_name, width, height, refresh_hz
-            ))
-        })?;
-        prepare_topology_mode(&mut mode, display);
+        let mut mode = if same_mode {
+            // A position-only restore must not request a new panel timing.
+            // Preserve the current driver's mode rather than selecting the
+            // first enumerated mode with the same rounded refresh rate.
+            let mut mode = current_desktop_mode(&actual.device_name)?;
+            mode.Anonymous1.Anonymous2.dmPosition.x = display.rect.left;
+            mode.Anonymous1.Anonymous2.dmPosition.y = display.rect.top;
+            mode.dmFields = DM_POSITION;
+            mode
+        } else {
+            find_display_mode(
+                PCWSTR(device_name.as_ptr()),
+                width,
+                height,
+                refresh_hz,
+                display.rotation,
+            )
+            .ok_or_else(|| {
+                DisplayError(format!(
+                    "{} no longer exposes saved mode {}x{}@{}",
+                    actual.device_name, width, height, refresh_hz
+                ))
+            })?
+        };
+        if !same_mode {
+            prepare_topology_mode(&mut mode, display);
+        }
         let result = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(device_name.as_ptr()),
                 Some(&raw const mode),
                 None,
-                CDS_UPDATEREGISTRY | CDS_NORESET,
+                topology_restore_flags(display, actual),
                 None,
             )
         };
         if result != DISP_CHANGE_SUCCESSFUL {
             return Err(DisplayError(format!(
-                "could not stage saved topology for {}: status {}",
-                actual.device_name, result.0
+                "could not stage saved topology for {}: status {}; saved={:?} {:?} @{}/{} primary={}; current={:?} {:?} @{}/{} primary={}; submitted={}x{}@{} bpp={} fields={:#x} position_only={}",
+                actual.device_name,
+                result.0,
+                display.rect,
+                display.rotation,
+                display.refresh_numerator,
+                display.refresh_denominator,
+                display.primary,
+                actual.rect,
+                actual.rotation,
+                actual.refresh_numerator,
+                actual.refresh_denominator,
+                actual.primary,
+                mode.dmPelsWidth,
+                mode.dmPelsHeight,
+                mode.dmDisplayFrequency,
+                mode.dmBitsPerPel,
+                mode.dmFields.0,
+                same_mode,
             )));
         }
         pending = true;
@@ -252,6 +279,24 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
         }
     }
     Ok(())
+}
+
+fn topology_restore_flags(saved: &Display, actual: &Display) -> CDS_TYPE {
+    let mut flags = CDS_UPDATEREGISTRY | CDS_NORESET;
+    if saved.primary && !actual.primary {
+        flags |= CDS_SET_PRIMARY;
+    }
+    flags
+}
+
+fn same_desktop_mode(left: &Display, right: &Display) -> bool {
+    left.rect.right - left.rect.left == right.rect.right - right.rect.left
+        && left.rect.bottom - left.rect.top == right.rect.bottom - right.rect.top
+        && left.rotation == right.rotation
+        && left.refresh_denominator != 0
+        && right.refresh_denominator != 0
+        && u64::from(left.refresh_numerator) * u64::from(right.refresh_denominator)
+            == u64::from(right.refresh_numerator) * u64::from(left.refresh_denominator)
 }
 
 fn find_display_mode(
@@ -323,6 +368,10 @@ fn prepare_topology_mode(mode: &mut DEVMODEW, display: &Display) {
 }
 
 fn current_desktop_geometry(device_name: &str) -> Result<(RECT, Rotation), DisplayError> {
+    Ok(desktop_geometry(&current_desktop_mode(device_name)?))
+}
+
+fn current_desktop_mode(device_name: &str) -> Result<DEVMODEW, DisplayError> {
     let name = wide(device_name);
     let mut mode = DEVMODEW {
         dmSize: size_of::<DEVMODEW>() as u16,
@@ -342,7 +391,7 @@ fn current_desktop_geometry(device_name: &str) -> Result<(RECT, Rotation), Displ
             "could not read current desktop mode for {device_name}"
         )));
     }
-    Ok(desktop_geometry(&mode))
+    Ok(mode)
 }
 
 fn desktop_geometry(mode: &DEVMODEW) -> (RECT, Rotation) {
@@ -457,7 +506,7 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
                 id,
                 connector_index,
                 sunshine_id,
-                name: name.clone(),
+                name: display_name(&name, physical_size, &source),
                 device_name: source,
                 rect,
                 native_width,
@@ -523,6 +572,18 @@ impl Drop for RegistryKey {
 struct MonitorIdentity {
     instance_id: String,
     edid: Vec<u8>,
+}
+
+fn display_name(name: &str, physical_size: Option<(f64, f64)>, device_name: &str) -> String {
+    if !name.trim().is_empty() {
+        return name.to_owned();
+    }
+    match physical_size {
+        Some((width, height)) => {
+            format!("{:.1}-inch display", width.hypot(height) / 25.4)
+        }
+        None => device_name.to_owned(),
+    }
 }
 
 fn monitor_identity(monitor_device_path: &str) -> Option<MonitorIdentity> {
@@ -983,6 +1044,41 @@ mod tests {
     }
 
     #[test]
+    fn topology_position_changes_do_not_require_a_mode_change() {
+        let mut saved = display("panel", r"\\.\DISPLAY1", false);
+        saved.rect = RECT {
+            left: 0,
+            top: 0,
+            right: 2832,
+            bottom: 1770,
+        };
+        saved.refresh_numerator = 240;
+        let mut actual = saved.clone();
+        actual.rect.left += 2832;
+        actual.rect.right += 2832;
+        actual.refresh_numerator = 240_000;
+        actual.refresh_denominator = 1000;
+        assert!(super::same_desktop_mode(&saved, &actual));
+        actual.refresh_numerator = 239_760;
+        assert!(!super::same_desktop_mode(&saved, &actual));
+        actual = saved.clone();
+        actual.rect.right = 1920;
+        assert!(!super::same_desktop_mode(&saved, &actual));
+        actual = saved.clone();
+        actual.rotation = Rotation::Deg180;
+        assert!(!super::same_desktop_mode(&saved, &actual));
+        assert_eq!(
+            super::topology_restore_flags(&saved, &actual),
+            super::CDS_UPDATEREGISTRY | super::CDS_NORESET
+        );
+        saved.primary = true;
+        assert_eq!(
+            super::topology_restore_flags(&saved, &actual),
+            super::CDS_UPDATEREGISTRY | super::CDS_NORESET | super::CDS_SET_PRIMARY
+        );
+    }
+
+    #[test]
     fn portrait_desktop_geometry_uses_gdi_dimensions_without_rotating_again() {
         let mut mode = windows::Win32::Graphics::Gdi::DEVMODEW {
             dmPelsWidth: 1440,
@@ -1082,6 +1178,30 @@ mod tests {
         assert!(
             unique_physical_display(&[display("virtual", r"\\.\DISPLAY2", true)], "virtual",)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn unnamed_display_uses_detected_edid_diagonal() {
+        let mut value = edid();
+        value[21] = 34;
+        value[22] = 19;
+        let size = edid_dimensions_mm(&value);
+        assert_eq!(
+            super::display_name("", size, r"\\.\DISPLAY1"),
+            "15.3-inch display"
+        );
+        assert_eq!(
+            super::display_name("  ", size, r"\\.\DISPLAY1"),
+            "15.3-inch display"
+        );
+        assert_eq!(
+            super::display_name("P245MS", size, r"\\.\DISPLAY1"),
+            "P245MS"
+        );
+        assert_eq!(
+            super::display_name("", None, r"\\.\DISPLAY1"),
+            r"\\.\DISPLAY1"
         );
     }
 

@@ -324,16 +324,7 @@ impl Controller {
                             if reason == StartReason::User {
                                 restart_plan = None;
                             }
-                            let sunshine_ports = match plan
-                                .groups
-                                .iter()
-                                .enumerate()
-                                .map(|(slot, group)| {
-                                    sunshine::default_port_for_slot(slot)
-                                        .map(|port| (group.id, port))
-                                })
-                                .collect::<Result<HashMap<_, _>, _>>()
-                            {
+                            let sunshine_ports = match sunshine_ports_for_plan(&plan) {
                                 Ok(ports) => ports,
                                 Err(error) => {
                                     diagnostics::log(
@@ -390,19 +381,21 @@ impl Controller {
                                     plan.groups.len()
                                 ),
                             );
-                            diagnostics::log(
-                                Level::Info,
-                                "controller",
-                                "sunshine-capture",
-                                Some(session_id),
-                                format!(
-                                    "selected capture={} for {} managed Sunshine instance(s); projected DDA processes={} (limit={})",
-                                    sunshine_capture.as_str(),
-                                    plan.groups.len(),
-                                    projected_desktop_duplication_processes(&plan),
-                                    DESKTOP_DUPLICATION_PROCESS_LIMIT,
-                                ),
-                            );
+                            if !sunshine_ports.is_empty() {
+                                diagnostics::log(
+                                    Level::Info,
+                                    "controller",
+                                    "sunshine-capture",
+                                    Some(session_id),
+                                    format!(
+                                        "selected capture={} for {} managed Sunshine instance(s); projected DDA processes={} (limit={})",
+                                        sunshine_capture.as_str(),
+                                        sunshine_ports.len(),
+                                        projected_desktop_duplication_processes(&plan),
+                                        DESKTOP_DUPLICATION_PROCESS_LIMIT,
+                                    ),
+                                );
+                            }
                             for group in &plan.groups {
                                 diagnostics::log(
                                     Level::Info,
@@ -682,10 +675,12 @@ impl Controller {
                             match event {
                                 MappingEvent::GroupReady(group) => {
                                     let active = active.as_ref().expect("guard checked active run");
-                                    if let (Some(display_id), Some(port)) = (
-                                        group.sunshine_id.clone(),
-                                        active.sunshine_ports.get(&group.id).copied(),
-                                    ) {
+                                    if matches!(group.route, MappingRoute::StreamOnly)
+                                        && let (Some(display_id), Some(port)) = (
+                                            group.sunshine_id.clone(),
+                                            active.sunshine_ports.get(&group.id).copied(),
+                                        )
+                                    {
                                         sunshine_sender.start(
                                             generation,
                                             group.id,
@@ -1133,6 +1128,15 @@ fn format_mapping_group_plan(group: &MappingGroupRequest) -> String {
     )
 }
 
+fn sunshine_ports_for_plan(plan: &MappingPlan) -> Result<HashMap<u32, u16>, String> {
+    plan.groups
+        .iter()
+        .enumerate()
+        .filter(|(_, group)| matches!(group.route, MappingRoute::StreamOnly))
+        .map(|(slot, group)| sunshine::default_port_for_slot(slot).map(|port| (group.id, port)))
+        .collect()
+}
+
 fn capture_backend_for_plan(plan: &MappingPlan) -> CaptureBackend {
     if projected_desktop_duplication_processes(plan) > DESKTOP_DUPLICATION_PROCESS_LIMIT {
         CaptureBackend::Wgc
@@ -1147,7 +1151,12 @@ fn projected_desktop_duplication_processes(plan: &MappingPlan) -> usize {
             .iter()
             .any(|group| matches!(group.route, MappingRoute::Mirror { .. })),
     );
-    renderer_processes + plan.groups.len()
+    renderer_processes
+        + plan
+            .groups
+            .iter()
+            .filter(|group| matches!(group.route, MappingRoute::StreamOnly))
+            .count()
 }
 
 fn refresh(emit: &impl Fn(ControllerEvent)) {
@@ -1374,11 +1383,65 @@ mod tests {
     }
 
     #[test]
+    fn mirror_only_plan_does_not_reserve_sunshine_ports() {
+        let plan = plan(vec![
+            MappingRoute::Mirror {
+                target: "display-a".into(),
+            },
+            MappingRoute::Mirror {
+                target: "display-b".into(),
+            },
+        ]);
+
+        assert!(sunshine_ports_for_plan(&plan).unwrap().is_empty());
+        assert_eq!(projected_desktop_duplication_processes(&plan), 1);
+        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Auto);
+    }
+
+    #[test]
+    fn mixed_plan_reserves_only_streaming_ports_and_preserves_output_slots() {
+        let plan = plan(vec![
+            MappingRoute::Mirror {
+                target: "display-a".into(),
+            },
+            MappingRoute::StreamOnly,
+            MappingRoute::Mirror {
+                target: "display-b".into(),
+            },
+            MappingRoute::StreamOnly,
+        ]);
+
+        assert_eq!(
+            sunshine_ports_for_plan(&plan).unwrap(),
+            HashMap::from([
+                (1, sunshine::default_port_for_slot(1).unwrap()),
+                (3, sunshine::default_port_for_slot(3).unwrap()),
+            ])
+        );
+        assert_eq!(projected_desktop_duplication_processes(&plan), 3);
+    }
+
+    #[test]
+    fn stream_only_plan_preserves_all_streaming_ports() {
+        let plan = plan(vec![MappingRoute::StreamOnly, MappingRoute::StreamOnly]);
+
+        assert_eq!(
+            sunshine_ports_for_plan(&plan).unwrap(),
+            HashMap::from([
+                (0, sunshine::default_port_for_slot(0).unwrap()),
+                (1, sunshine::default_port_for_slot(1).unwrap()),
+            ])
+        );
+        assert_eq!(projected_desktop_duplication_processes(&plan), 2);
+    }
+
+    #[test]
     fn stays_on_auto_at_the_desktop_duplication_limit() {
         let plan = plan(vec![
             MappingRoute::Mirror {
                 target: "display-a".into(),
             },
+            MappingRoute::StreamOnly,
             MappingRoute::StreamOnly,
             MappingRoute::StreamOnly,
         ]);
@@ -1392,6 +1455,7 @@ mod tests {
             MappingRoute::Mirror {
                 target: "display-a".into(),
             },
+            MappingRoute::StreamOnly,
             MappingRoute::StreamOnly,
             MappingRoute::StreamOnly,
             MappingRoute::StreamOnly,

@@ -19,7 +19,7 @@ use crate::geometry::{
 use crate::limits::{
     MAX_OUTPUTS, MAX_VIRTUAL_DIMENSION, MILLIMETERS_PER_INCH, valid_physical_millimeters,
 };
-use crate::mapping::MappingPlan;
+use crate::mapping::{MappingPlan, MappingRoute};
 use crate::network::preferred_lan_ipv4;
 use crate::session_gate::VirtualMode;
 use crate::win32_flyout;
@@ -612,12 +612,14 @@ fn apply_event(
             if let Some(group) = groups.iter_mut().find(|group| group.id == info.id) {
                 group.telemetry.ready = true;
                 group.telemetry.sunshine_id = info.sunshine_id;
-                group.telemetry.sunshine_state =
-                    if group.telemetry.sunshine_id.as_deref().is_some_and(is_guid) {
-                        SunshineState::Starting
-                    } else {
-                        SunshineState::Failed
-                    };
+                group.telemetry.sunshine_state = if !matches!(info.route, MappingRoute::StreamOnly)
+                {
+                    SunshineState::Unavailable
+                } else if group.telemetry.sunshine_id.as_deref().is_some_and(is_guid) {
+                    SunshineState::Starting
+                } else {
+                    SunshineState::Failed
+                };
             }
             let active = *active_group.lock().expect("active group poisoned");
             project_group_telemetry(ui, &groups, active);
