@@ -85,6 +85,39 @@ Unknown fields, unsupported versions, empty or oversized group collections,
 duplicate group IDs or mirror targets, invalid geometry and invalid selected
 group IDs are rejected before any persistent state changes.
 
+## Rendering options
+
+Each group can include a `rendering` object:
+
+```json
+"rendering": {
+  "high_performance_sampling": false,
+  "full_frame_copy": false,
+  "static_refresh": false
+}
+```
+
+- `high_performance_sampling`: `true` selects the legacy area/bilinear sampler;
+  `false` selects the quality sampler. Omitting the field (or using `null`)
+  selects the automatic hardware default, not an explicit `false`.
+- `full_frame_copy`: `true` copies the complete captured frame instead of using
+  dirty/move rectangles. The default is `false`.
+- `static_refresh`: `true` keeps presenting the cached image at the target
+  refresh rate when no new desktop pixels arrive. The default is `false`.
+
+These options affect local mirror rendering, not an external capturer used for
+stream-only output. Omitting the entire object uses all defaults.
+
+Automatic sampling selection enumerates DXGI hardware adapters and queries
+`D3D11_FEATURE_DATA_D3D11_OPTIONS2.UnifiedMemoryArchitecture`. If at least one
+non-software adapter explicitly reports non-unified memory, quality sampling is
+the default; otherwise, including failed or inconclusive detection, the legacy
+high-performance sampler is the default. The result is cached once per process.
+This checks available adapters, not the GPU actually rendering the group, and
+does not recheck hot-plug changes. Hybrid systems defaulting to an integrated GPU,
+external-GPU changes and driver misreports may therefore need an explicit
+setting; restart to repeat detection.
+
 ## Hot reload contract
 
 The CLI signals the running tray only after the profile transaction has been

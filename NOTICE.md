@@ -18,13 +18,32 @@ installed as `licenses/GPL-3.0.txt`.
 Third-party components remain subject to their respective licenses;
 `driver/Driver.cpp` retains the Microsoft Public License described above.
 
-The refresh and edit icon paths in `ui/controls.slint` are adapted from
+The Material icon paths in `ui/controls.slint` and `ui/pages/main.slint` are adapted from
 Google Material Design Icons for use in Slint:
 
 https://github.com/google/material-design-icons
 
 Those icon paths retain the Apache License, version 2.0. The complete license is
 included at `LICENSES/Apache-2.0.txt` and installed as `licenses/Apache-2.0.txt`.
+
+The high-quality sampling shaders in `src/sampling_quality.hlsl` and
+`src/sampling_ewa_lut.hlsl` adapt libplacebo's EWA LanczosSharp filter construction
+and antiringing, with SBMS-specific source defringing and scaling passes:
+
+https://github.com/haasn/libplacebo/tree/285d1cc8af2ab79b72ac662eb09736de8c12392b
+
+The adapted portions retain libplacebo's LGPL-2.1-or-later license and source
+notices in their source headers. The complete license is included at
+`LICENSES/LGPL-2.1.txt` and installed as `licenses/LGPL-2.1.txt`.
+
+The Material widget subset in `ui/vendor` is adapted from Slint 1.17.1:
+
+https://github.com/slint-ui/slint/tree/v1.17.1/internal/compiler/widgets
+
+Copyright © SixtyFPS GmbH <info@slint.dev>. SBMS uses these files under the
+GPL-3.0-only alternative offered by their upstream SPDX license notices.
+The complete license is included in the repository root `LICENSE` file.
+`ui/vendor/README.md` documents the fixed-palette changes and retained files.
 
 Repository builds are development builds. A distributable Windows driver still
 requires an appropriate signing and certification process.

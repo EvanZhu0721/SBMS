@@ -5,7 +5,9 @@ param(
     [string]$Action,
 
     [Parameter(Mandatory)]
-    [string]$InstallRoot
+    [string]$InstallRoot,
+
+    [switch]$TrustCertificate
 )
 
 $ErrorActionPreference = 'Stop'
@@ -520,11 +522,8 @@ function Install-SbmsDriver {
     if (-not (Test-Path -LiteralPath $driverInf)) {
         throw "Driver package is missing: $driverInf"
     }
-    $nativeArgs = @('/add-driver', $driverInf, '/install')
-    & pnputil.exe @nativeArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "pnputil add-driver failed with exit code $LASTEXITCODE"
-    }
+    . (Join-Path $PSScriptRoot 'driver-trust.ps1')
+    Invoke-SbmsDriverInstall -DriverInf $driverInf -TrustCertificate:$TrustCertificate
 }
 
 function Remove-DriverPackages {
@@ -626,20 +625,35 @@ function Uninstall-Sbms {
     }
 }
 
+function Invoke-MaintenanceAction {
+    param([scriptblock]$Operation)
+
+    try {
+        & $Operation
+    }
+    catch {
+        # Setup captures stdout/stderr even if PowerShell cannot start this script.
+        # Keep the original exception and location visible in the persistent log.
+        [Console]::Error.WriteLine("SBMS $Action failed: $($_.Exception.Message)")
+        [Console]::Error.WriteLine($_.ScriptStackTrace)
+        exit 1
+    }
+}
+
 switch ($Action) {
     'PrepareUpgrade' {
-        Prepare-SbmsUpgrade
+        Invoke-MaintenanceAction { Prepare-SbmsUpgrade }
     }
     'Stop' {
-        Stop-Sbms
+        Invoke-MaintenanceAction { Stop-Sbms }
     }
     'PreflightUninstall' {
-        Test-UninstallPreflight
+        Invoke-MaintenanceAction { Test-UninstallPreflight }
     }
     'Install' {
-        Install-Sbms
+        Invoke-MaintenanceAction { Install-Sbms }
     }
     'Uninstall' {
-        Uninstall-Sbms
+        Invoke-MaintenanceAction { Uninstall-Sbms }
     }
 }

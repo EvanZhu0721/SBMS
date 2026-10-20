@@ -1,4 +1,4 @@
-import { Button, LineEdit } from "std-widgets.slint";
+import { Button, LineEdit } from "vendor/material/std-widgets.slint";
 import { MdTokens } from "theme.slint";
 
 export component ResolutionLineEdit inherits Rectangle {
@@ -67,13 +67,24 @@ export component CompactComboBox inherits Rectangle {
     in property <bool> control-enabled: true;
     in property <string> field-label;
     in property <length> popup-width: root.width;
+    in property <bool> popup-align-right: false;
+    in property <length> popup-offset-y: -root.popup-height - 4px;
     callback selected();
 
     property <string> current-value: root.current-index >= 0
         && root.current-index < root.collapsed-model.length
         ? root.collapsed-model[root.current-index]
         : "";
-    property <length> popup-height: root.model.length * MdTokens.target + 8px;
+    property <length> menu-height: min(root.model.length, 5) * MdTokens.target;
+    property <length> popup-height: root.menu-height + 8px;
+    property <length> menu-offset: 0px;
+    property <length> scroll-range: max(0px, root.model.length * MdTokens.target - root.menu-height);
+
+    function reveal-current() {
+        root.menu-offset = max(-root.scroll-range, min(0px,
+            max(-max(root.current-index, 0) * MdTokens.target,
+                min(root.menu-offset, root.menu-height - (max(root.current-index, 0) + 1) * MdTokens.target))));
+    }
 
     height: MdTokens.target;
     background: selector-touch.pressed
@@ -96,6 +107,7 @@ export component CompactComboBox inherits Rectangle {
     accessible-action-expand => {
         if root.control-enabled && root.model.length > 0 {
             popup.show();
+            root.reveal-current();
         }
     }
 
@@ -107,7 +119,7 @@ export component CompactComboBox inherits Rectangle {
         color: MdTokens.on-surface;
         font-size: MdTokens.type-body-large;
         vertical-alignment: center;
-        overflow: clip;
+        overflow: elide;
         accessible-role: none;
     }
 
@@ -140,6 +152,7 @@ export component CompactComboBox inherits Rectangle {
                 return accept;
             } else if event.text == Key.Return {
                 popup.show();
+                root.reveal-current();
                 return accept;
             }
             return reject;
@@ -150,13 +163,14 @@ export component CompactComboBox inherits Rectangle {
             clicked => {
                 root.focus();
                 popup.show();
+                root.reveal-current();
             }
         }
     }
 
     popup := PopupWindow {
-        x: 0;
-        y: -root.popup-height - 4px;
+        x: root.popup-align-right ? root.width - root.popup-width : 0px;
+        y: root.popup-offset-y;
         width: root.popup-width;
         height: root.popup-height;
         close-policy: close-on-click-outside;
@@ -167,10 +181,12 @@ export component CompactComboBox inherits Rectangle {
                 if event.text == Key.UpArrow {
                     root.current-index = Math.max(root.current-index - 1, 0);
                     root.selected();
+                    root.reveal-current();
                     return accept;
                 } else if event.text == Key.DownArrow {
                     root.current-index = Math.min(root.current-index + 1, root.model.length - 1);
                     root.selected();
+                    root.reveal-current();
                     return accept;
                 } else if event.text == Key.Return || event.text == Key.Escape {
                     popup.close();
@@ -186,8 +202,20 @@ export component CompactComboBox inherits Rectangle {
                 border-radius: MdTokens.shape-medium;
                 clip: true;
 
+                menu-scroll := Flickable {
+                    x: 4px;
+                    y: 4px;
+                    width: parent.width - 8px - (root.scroll-range > 0px ? 10px : 0px);
+                    height: root.menu-height;
+                    interactive: false;
+                    viewport-width: self.width;
+                    viewport-height: root.model.length * MdTokens.target;
+                    viewport-y <=> root.menu-offset;
+
                 VerticalLayout {
-                    padding: 4px;
+                    width: menu-scroll.width;
+                    height: menu-scroll.viewport-height;
+                    padding: 0px;
                     spacing: 0px;
 
                     for option[index] in root.model : Rectangle {
@@ -220,6 +248,42 @@ export component CompactComboBox inherits Rectangle {
                         }
                     }
                 }
+                }
+
+                if root.scroll-range > 0px : Rectangle {
+                    x: parent.width - 14px;
+                    y: 4px;
+                    width: 10px;
+                    height: root.menu-height;
+                    background: transparent;
+                    property <length> thumb-height: max(24px, self.height * self.height / (root.model.length * MdTokens.target));
+                    property <length> travel: self.height - self.thumb-height;
+                    Rectangle {
+                        x: 3px;
+                        y: -root.menu-offset / root.scroll-range * parent.travel;
+                        width: 4px;
+                        height: parent.thumb-height;
+                        border-radius: 2px;
+                        background: MdTokens.on-surface;
+                        opacity: scroll-touch.pressed ? 0.65 : (scroll-touch.has-hover ? 0.5 : 0.32);
+                    }
+                    scroll-touch := TouchArea {
+                        property <length> start-y;
+                        property <length> start-offset;
+                        pointer-event(event) => {
+                            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                                self.start-y = self.mouse-y;
+                                self.start-offset = root.menu-offset;
+                            }
+                        }
+                        moved => {
+                            if self.pressed {
+                                root.menu-offset = max(-root.scroll-range, min(0px,
+                                    self.start-offset - (self.mouse-y - self.start-y) * root.scroll-range / parent.travel));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -229,10 +293,49 @@ export component CompactComboBox inherits Rectangle {
 
 // Text buttons use three deliberate width tiers. This keeps their geometry
 // stable when labels or translations change.
-export component BackButton inherits Button {
-    text: "Back";
+export component BackButton inherits Rectangle {
+    in property <string> text: "Back";
+    in property <bool> enabled: true;
+    callback clicked();
     width: 80px;
     height: MdTokens.target;
+    border-radius: MdTokens.button-radius;
+    background: MdTokens.surface-container;
+    opacity: root.enabled ? 1 : 0.38;
+    forward-focus: back-focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: parent.border-radius;
+        background: MdTokens.on-surface;
+        opacity: back-touch.pressed || back-focus.has-focus ? 0.12 : (back-touch.has-hover ? 0.08 : 0);
+        animate opacity { duration: 100ms; easing: ease-in-out; }
+    }
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.text;
+        color: MdTokens.on-surface;
+        font-size: MdTokens.type-body-medium;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+    back-focus := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.clicked(); return accept; }
+            return reject;
+        }
+        back-touch := TouchArea {
+            enabled: root.enabled;
+            clicked => { root.focus(); root.clicked(); }
+        }
+    }
 }
 
 export component PageActionButton inherits Button {
@@ -346,6 +449,11 @@ export component MaterialIconButton inherits Rectangle {
     border-color: MdTokens.outline-variant;
     border-radius: MdTokens.shape-medium;
     opacity: root.control-enabled ? 1 : 0.38;
+    forward-focus: icon-focus;
+    accessible-role: button;
+    accessible-label: root.field-label;
+    accessible-enabled: root.control-enabled;
+    accessible-action-default => { if root.control-enabled { root.clicked(); } }
 
     // Material state layer. It deliberately shares the exact outer geometry.
     Rectangle {
@@ -353,7 +461,7 @@ export component MaterialIconButton inherits Rectangle {
         height: parent.height;
         border-radius: root.border-radius;
         background: MdTokens.primary;
-        opacity: icon-touch.pressed ? 0.12 : (icon-touch.has-hover ? 0.08 : 0);
+        opacity: icon-touch.pressed || icon-focus.has-focus ? 0.12 : (icon-touch.has-hover ? 0.08 : 0);
         animate opacity { duration: 100ms; easing: ease-in-out; }
     }
 
@@ -433,10 +541,18 @@ export component MaterialIconButton inherits Rectangle {
         accessible-role: none;
     }
 
-    icon-touch := TouchArea {
+    icon-focus := FocusScope {
         enabled: root.control-enabled;
-        accessible-role: button;
-        accessible-label: root.field-label;
-        clicked => { root.clicked(); }
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+        icon-touch := TouchArea {
+            enabled: root.control-enabled;
+            clicked => { icon-focus.focus(); root.clicked(); }
+        }
     }
 }

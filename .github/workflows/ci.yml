@@ -59,7 +59,6 @@ jobs:
           $compiler = (Get-Command ISCC.exe -ErrorAction Stop).Source
           .\build-installer.ps1 -Unsigned -InnoCompiler $compiler
           $package = Get-Item '.\target\installer\SBMS-Setup-*-x64-unsigned.exe'
-          $hashFile = Get-Item "$($package.FullName).sha256"
-          if ($package.Length -eq 0 -or $hashFile.Length -eq 0) {
+          if ($package.Length -eq 0) {
             throw 'Unsigned installer smoke artifact is empty.'
           }

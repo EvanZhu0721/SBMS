@@ -4,12 +4,14 @@ use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::controller::DisplayOption;
 
-use super::state::{GroupDraft, SunshineState};
+use super::state::{GroupDraft, SunshineState, set_shared_reference};
 use super::{
-    QuickAccess, STREAM_ONLY_ID, geometry_request, group_tab_detail, populate_geometry_fields,
-    rebuild_reference_options, selected_display_id, selected_reference_source, set_geometry_result,
-    set_geometry_unconfigured, update_reference_action, update_stream_suggestions,
-    validate_stream_fields,
+    QuickAccess, QuickAccessPage, ReferenceSource, STREAM_ONLY_ID, group_sizing_request,
+    populate_reference_fields, rebuild_reference_options, reference_geometry_from_ui,
+    refresh_group_sizing, refresh_group_tab_details, selected_display_id,
+    selected_reference_source, set_geometry_result, set_geometry_unconfigured,
+    sizing_strategy_from_index, sizing_strategy_index, update_reference_action,
+    update_stream_suggestions, validate_stream_fields,
 };
 
 pub(super) fn update_tab_projection(ui: &QuickAccess, groups: &[GroupDraft], active: usize) {
@@ -23,7 +25,7 @@ pub(super) fn update_tab_projection(ui: &QuickAccess, groups: &[GroupDraft], act
     let mut details = Vec::new();
     let mut indices = Vec::new();
     for (index, group) in visible {
-        labels.push(SharedString::from((group.id + 1).to_string()));
+        labels.push(SharedString::from((index + 1).to_string()));
         details.push(SharedString::from(group.tab_detail.as_str()));
         indices.push(index as i32);
     }
@@ -67,7 +69,13 @@ pub(super) fn set_target_options(
         .collect::<Vec<_>>();
     let candidates = displays
         .iter()
-        .filter(|display| !used.contains(&display.id.as_str()))
+        .filter(|display| {
+            !used.contains(&display.id.as_str())
+                && groups
+                    .first()
+                    .and_then(|group| group.reference_source.as_ref())
+                    != Some(&ReferenceSource::Display(display.id.clone()))
+        })
         .collect::<Vec<_>>();
     let mut names = candidates
         .iter()
@@ -89,6 +97,16 @@ pub(super) fn set_target_options(
         .iter()
         .map(|display| SharedString::from(display.id.as_str()))
         .collect::<Vec<_>>();
+    let group = &groups[active];
+    if !group.stream_only
+        && let Some(id) = &group.target_id
+        && !ids.iter().any(|candidate| candidate.as_str() == id)
+    {
+        names.push("Unavailable".into());
+        labels.push("Unavailable · Saved target screen".into());
+        ids.push(id.as_str().into());
+    }
+    let stream_index = ids.len();
     names.push("Stream only".into());
     labels.push("Stream only · Create a virtual display".into());
     ids.push(STREAM_ONLY_ID.into());
@@ -96,7 +114,6 @@ pub(super) fn set_target_options(
     ui.set_display_labels(ModelRc::new(Rc::new(VecModel::from(labels))));
     ui.set_display_ids(ModelRc::new(Rc::new(VecModel::from(ids))));
 
-    let group = &groups[active];
     let desired = if group.stream_only {
         STREAM_ONLY_ID
     } else {
@@ -109,7 +126,7 @@ pub(super) fn set_target_options(
                 .is_some_and(|id| id.as_str() == desired)
         })
         .or_else(|| (!candidates.is_empty()).then_some(0))
-        .unwrap_or(candidates.len());
+        .unwrap_or(stream_index);
     ui.set_selected_display(selected as i32);
     ui.set_stream_only(
         ui.get_display_ids()
@@ -128,14 +145,30 @@ pub(super) fn hydrate_group(
         return;
     };
     set_target_options(ui, displays, groups, active);
+    ui.set_high_performance_sampling(group.rendering.high_performance_sampling());
+    ui.set_full_frame_copy(group.rendering.full_frame_copy);
+    ui.set_static_refresh(group.rendering.static_refresh);
     ui.set_stream_width(group.stream_width.as_str().into());
     ui.set_stream_height(group.stream_height.as_str().into());
     ui.set_stream_diagonal(group.stream_diagonal.as_str().into());
     ui.set_stream_refresh(group.stream_refresh.as_str().into());
     ui.set_stream_aspect_ratio_index(group.stream_aspect_ratio_index);
     ui.set_stream_rotation(group.stream_rotation_index);
-    if let Some(request) = group.sizing {
-        populate_geometry_fields(ui, request);
+    if let Some(reference) = group
+        .reference_geometry
+        .or(group.sizing.map(|request| request.reference))
+    {
+        populate_reference_fields(ui, reference);
+    } else {
+        ui.set_reference_width("".into());
+        ui.set_reference_height("".into());
+        ui.set_reference_diagonal("".into());
+        ui.set_reference_aspect_ratio(0);
+        ui.set_reference_rotation(0);
+    }
+    ui.set_sizing_strategy(sizing_strategy_index(group.sizing_strategy));
+    rebuild_reference_options(ui, displays, groups, group.reference_source.clone());
+    if let Ok(request) = group_sizing_request(group, displays) {
         match request.calculate() {
             Ok(result) => set_geometry_result(ui, result, true),
             Err(error) => {
@@ -146,7 +179,6 @@ pub(super) fn hydrate_group(
     } else {
         set_geometry_unconfigured(ui);
     }
-    rebuild_reference_options(ui, displays, group.reference_source.clone());
     update_reference_action(ui, displays);
     update_stream_suggestions(ui);
     if group.stream_only {
@@ -168,16 +200,43 @@ pub(super) fn snapshot_group(
     let target_id = selected_display_id(ui, ui.get_selected_display());
     group.stream_only = target_id.as_deref() == Some(STREAM_ONLY_ID);
     group.target_id = (!group.stream_only).then_some(target_id).flatten();
-    group.reference_source = selected_reference_source(ui);
-    group.sizing = geometry_request(ui, displays)
-        .ok()
-        .flatten()
-        .filter(|request| request.calculate().is_ok());
+    group
+        .rendering
+        .set_effective_sampling(ui.get_high_performance_sampling());
+    group.rendering.full_frame_copy = ui.get_full_frame_copy();
+    group.rendering.static_refresh = ui.get_static_refresh();
+    let source = selected_reference_source(ui);
+    let previous_reference = group
+        .reference_geometry
+        .or(group.sizing.map(|request| request.reference));
+    let reference = if source == Some(ReferenceSource::Manual)
+        && source == group.reference_source
+        && ui.get_page() != QuickAccessPage::Geometry
+    {
+        previous_reference
+    } else {
+        reference_geometry_from_ui(ui, displays)
+            .ok()
+            .flatten()
+            .or_else(|| {
+                (source == group.reference_source)
+                    .then_some(previous_reference)
+                    .flatten()
+            })
+    };
+    if let Ok(strategy) = sizing_strategy_from_index(ui.get_sizing_strategy()) {
+        group.sizing_strategy = strategy;
+        if let Some(request) = &mut group.sizing {
+            request.strategy = strategy;
+        }
+    }
     group.stream_width = ui.get_stream_width().to_string();
     group.stream_height = ui.get_stream_height().to_string();
     group.stream_diagonal = ui.get_stream_diagonal().to_string();
     group.stream_refresh = ui.get_stream_refresh().to_string();
     group.stream_aspect_ratio_index = ui.get_stream_aspect_ratio_index();
     group.stream_rotation_index = ui.get_stream_rotation();
-    group.tab_detail = group_tab_detail(group, displays);
+    set_shared_reference(groups, source, reference);
+    refresh_group_sizing(groups, displays);
+    refresh_group_tab_details(groups, displays);
 }

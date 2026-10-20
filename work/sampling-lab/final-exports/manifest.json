@@ -1,0 +1,3418 @@
+{
+  "scope": "Actual browser GPU output with native GDI fonts: SBMS mathematical reproduction versus final; not production SBMS execution, codec evaluation or FPS benchmark.",
+  "layout": "One unscaled RGBA8 atlas, top-down: eight CT scenarios by two sides. Six complete rows per panel with 32-pixel slots; 8-pixel gaps. Source offset (0,0) only; geometric row phases are recorded separately. Grayscale and all three source offsets are quantified in the main report.",
+  "cases": [
+    {
+      "scenario": "native",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-100-cleartype",
+      "dpi": 100,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080,
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "dpi": 100,
+        "area": false,
+        "native": true,
+        "up": false,
+        "dpr": 1,
+        "previewScale": 0.9185185185185185
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 632,
+        "y": 316,
+        "width": 560,
+        "height": 240,
+        "id": "windows-gdi-auto-100-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 644,
+            "y": 323,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 644,
+            "y": 323,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 105777,
+              "chromaAtLeast8": 1132,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 148651.57820000098,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 131267.96480000083
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 105777,
+              "chromaAtLeast8": 1132,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 148651.57820000098,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 131267.96480000083
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 644,
+            "y": 363,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 644,
+            "y": 363,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 105410,
+              "chromaAtLeast8": 1045,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 124644.00220000048,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 179699.48380000048
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 105410,
+              "chromaAtLeast8": 1045,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 124644.00220000048,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 179699.48380000048
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 644,
+            "y": 403,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 644,
+            "y": 403,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 92011,
+              "chromaAtLeast8": 976,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 126937.82920000095,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 123730.76920000082
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 92011,
+              "chromaAtLeast8": 976,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 126937.82920000095,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 123730.76920000082
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 644,
+            "y": 443,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 644,
+            "y": 443,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 105729,
+              "chromaAtLeast8": 1132,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 146373.78619999893,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 134968.17959999948
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 105729,
+              "chromaAtLeast8": 1132,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 146373.78619999893,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 134968.17959999948
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 644,
+            "y": 483,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 644,
+            "y": 483,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 103877,
+              "chromaAtLeast8": 1045,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125527.2875999998,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 183178.82740000114
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 103877,
+              "chromaAtLeast8": 1045,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125527.2875999998,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 183178.82740000114
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 644,
+            "y": 523,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 644,
+            "y": 523,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 90564,
+              "chromaAtLeast8": 976,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125964.44439999975,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 126510.7937999999
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 90564,
+              "chromaAtLeast8": 976,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125964.44439999975,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 126510.7937999999
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        536,
+        192
+      ]
+    },
+    {
+      "scenario": "up2",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-50-cleartype",
+      "dpi": 50,
+      "dimensions": {
+        "width": 3840,
+        "height": 2160,
+        "sourceWidth": 1920,
+        "sourceHeight": 1080,
+        "dpi": 50,
+        "area": false,
+        "native": false,
+        "up": true,
+        "dpr": 1,
+        "previewScale": 0.45925925925925926
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 665,
+        "y": 519,
+        "width": 280,
+        "height": 120,
+        "id": "windows-gdi-auto-50-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -6,
+          "outputEm": 12,
+          "source": {
+            "x": 671,
+            "y": 523,
+            "width": 268,
+            "height": 14
+          },
+          "output": {
+            "x": 1342,
+            "y": 1046,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 60591,
+              "chromaAtLeast8": 2036,
+              "maxChroma": 85,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 32150.35039999997,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 105304.13979999983
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 54226,
+              "chromaAtLeast8": 1872,
+              "maxChroma": 79,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 47724.666000000056,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 111292.95120000026
+            }
+          ],
+          "sourceLumaRange": [
+            86.67679999999999,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -6,
+          "outputEm": 12,
+          "source": {
+            "x": 671,
+            "y": 543,
+            "width": 268,
+            "height": 14
+          },
+          "output": {
+            "x": 1342,
+            "y": 1086,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 73770,
+              "chromaAtLeast8": 2351,
+              "maxChroma": 104,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 37472.90560000008,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 167922.05500000025
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 60144,
+              "chromaAtLeast8": 2023,
+              "maxChroma": 87,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 52668.571799999976,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 2,
+              "maxLumaOvershoot": 2.734799999999993,
+              "backgroundContrastAbsSum": 173036.36800000045
+            }
+          ],
+          "sourceLumaRange": [
+            65.8582,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -6,
+          "outputEm": 12,
+          "source": {
+            "x": 671,
+            "y": 563,
+            "width": 268,
+            "height": 14
+          },
+          "output": {
+            "x": 1342,
+            "y": 1126,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 61445,
+              "chromaAtLeast8": 2082,
+              "maxChroma": 83,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 39629.22320000004,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 106655.9746
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 51840,
+              "chromaAtLeast8": 1879,
+              "maxChroma": 83,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 56149.97140000002,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0.2768000000000086,
+              "backgroundContrastAbsSum": 114806.40359999992
+            }
+          ],
+          "sourceLumaRange": [
+            75,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -6,
+          "outputEm": 12,
+          "source": {
+            "x": 671,
+            "y": 583,
+            "width": 268,
+            "height": 14
+          },
+          "output": {
+            "x": 1342,
+            "y": 1166,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 66306,
+              "chromaAtLeast8": 2151,
+              "maxChroma": 91,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 36118.48239999996,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 121953.50019999994
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 58858,
+              "chromaAtLeast8": 1950,
+              "maxChroma": 88,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 54567.56959999999,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 396,
+              "maxLumaOvershoot": 5.9999999999999964,
+              "backgroundContrastAbsSum": 129459.20159999987
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            197.6016
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -6,
+          "outputEm": 12,
+          "source": {
+            "x": 671,
+            "y": 603,
+            "width": 268,
+            "height": 14
+          },
+          "output": {
+            "x": 1342,
+            "y": 1206,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 79594,
+              "chromaAtLeast8": 2422,
+              "maxChroma": 112,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 40668.20399999996,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 191415.50260000007
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 63485,
+              "chromaAtLeast8": 2061,
+              "maxChroma": 94,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 58092.48920000005,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 367,
+              "maxLumaOvershoot": 8.093,
+              "backgroundContrastAbsSum": 197912.27999999965
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            213.5906
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -6,
+          "outputEm": 12,
+          "source": {
+            "x": 671,
+            "y": 623,
+            "width": 268,
+            "height": 14
+          },
+          "output": {
+            "x": 1342,
+            "y": 1246,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 67098,
+              "chromaAtLeast8": 2173,
+              "maxChroma": 88,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 43947.02600000011,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 122203.92560000008
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 55496,
+              "chromaAtLeast8": 1932,
+              "maxChroma": 79,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 63593.726800000026,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 525,
+              "maxLumaOvershoot": 6.6614,
+              "backgroundContrastAbsSum": 132194.28419999976
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            207
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        536,
+        192
+      ]
+    },
+    {
+      "scenario": "up15",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-66_667-cleartype",
+      "dpi": 66.66666666666667,
+      "dimensions": {
+        "width": 3840,
+        "height": 2160,
+        "sourceWidth": 2560,
+        "sourceHeight": 1440,
+        "dpi": 66.66666666666667,
+        "area": false,
+        "native": false,
+        "up": true,
+        "dpr": 1,
+        "previewScale": 0.45925925925925926
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 1273,
+        "y": 651,
+        "width": 373,
+        "height": 160,
+        "id": "windows-gdi-auto-66_667-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -8,
+          "outputEm": 12,
+          "source": {
+            "x": 1281,
+            "y": 656,
+            "width": 357,
+            "height": 19
+          },
+          "output": {
+            "x": 1921,
+            "y": 984,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0.5,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 78330,
+              "chromaAtLeast8": 1845,
+              "maxChroma": 116,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 54803.83960000001,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 112659.10000000002
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 60882,
+              "chromaAtLeast8": 1574,
+              "maxChroma": 116,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 73929.69420000006,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 120152.36319999989
+            }
+          ],
+          "sourceLumaRange": [
+            55.9232,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -8,
+          "outputEm": 12,
+          "source": {
+            "x": 1281,
+            "y": 682,
+            "width": 357,
+            "height": 19
+          },
+          "output": {
+            "x": 1921,
+            "y": 1023,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0.5,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 72402,
+              "chromaAtLeast8": 2044,
+              "maxChroma": 122,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 57558.24900000003,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 156661.042
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 54314,
+              "chromaAtLeast8": 1686,
+              "maxChroma": 110,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 78706.98059999991,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 1,
+              "maxLumaOvershoot": 2.938600000000001,
+              "backgroundContrastAbsSum": 162222.1618
+            }
+          ],
+          "sourceLumaRange": [
+            35.1046,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -8,
+          "outputEm": 12,
+          "source": {
+            "x": 1281,
+            "y": 709,
+            "width": 357,
+            "height": 19
+          },
+          "output": {
+            "x": 1921,
+            "y": 1063,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0.5,
+            0.5
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 65901,
+              "chromaAtLeast8": 1785,
+              "maxChroma": 116,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 59744.0128,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 113868.72760000006
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 49737,
+              "chromaAtLeast8": 1441,
+              "maxChroma": 104,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 77862.21060000006,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 122357.62219999984
+            }
+          ],
+          "sourceLumaRange": [
+            44.2464,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -8,
+          "outputEm": 12,
+          "source": {
+            "x": 1281,
+            "y": 736,
+            "width": 357,
+            "height": 19
+          },
+          "output": {
+            "x": 1921,
+            "y": 1104,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0.5,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 83579,
+              "chromaAtLeast8": 1871,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 59424.74380000011,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 126697.52719999997
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 63887,
+              "chromaAtLeast8": 1614,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 82002.77840000016,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 481,
+              "maxLumaOvershoot": 10.000000000000002,
+              "backgroundContrastAbsSum": 135824.21399999995
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            219.7728
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -8,
+          "outputEm": 12,
+          "source": {
+            "x": 1281,
+            "y": 762,
+            "width": 357,
+            "height": 19
+          },
+          "output": {
+            "x": 1921,
+            "y": 1143,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0.5,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 76522,
+              "chromaAtLeast8": 2061,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 61477.67239999995,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 175596.57520000017
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 57037,
+              "chromaAtLeast8": 1716,
+              "maxChroma": 111,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 85644.43260000007,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 327,
+              "maxLumaOvershoot": 11.1596,
+              "backgroundContrastAbsSum": 182161.91640000013
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            235.7618
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -8,
+          "outputEm": 12,
+          "source": {
+            "x": 1281,
+            "y": 789,
+            "width": 357,
+            "height": 19
+          },
+          "output": {
+            "x": 1921,
+            "y": 1183,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0.5,
+            0.5
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 69316,
+              "chromaAtLeast8": 1792,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 63533.278000000086,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 125197.36279999984
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 52108,
+              "chromaAtLeast8": 1490,
+              "maxChroma": 113,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 84677.41600000007,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 526,
+              "maxLumaOvershoot": 9.3228,
+              "backgroundContrastAbsSum": 135209.50379999986
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            229.1712
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        536,
+        192
+      ]
+    },
+    {
+      "scenario": "down75",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-133_333-cleartype",
+      "dpi": 133.33333333333334,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080,
+        "sourceWidth": 2560,
+        "sourceHeight": 1440,
+        "dpi": 133.33333333333334,
+        "area": true,
+        "native": false,
+        "up": false,
+        "dpr": 1,
+        "previewScale": 0.9185185185185185
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 825,
+        "y": 403,
+        "width": 747,
+        "height": 320,
+        "id": "windows-gdi-auto-133_333-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -16,
+          "outputEm": 12,
+          "source": {
+            "x": 841,
+            "y": 412,
+            "width": 715,
+            "height": 37
+          },
+          "output": {
+            "x": 630,
+            "y": 309,
+            "width": 537,
+            "height": 28
+          },
+          "phase": [
+            0.75,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 537,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15036,
+              "chromaSum": 64987,
+              "chromaAtLeast8": 1329,
+              "maxChroma": 117,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 110446.31280000019,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 113409.70659999996
+            },
+            {
+              "pixels": 15036,
+              "chromaSum": 23058,
+              "chromaAtLeast8": 575,
+              "maxChroma": 115,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125347.19160000024,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 1,
+              "maxLumaOvershoot": 5.081399999999999,
+              "backgroundContrastAbsSum": 123014.1050000001
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -16,
+          "outputEm": 12,
+          "source": {
+            "x": 841,
+            "y": 466,
+            "width": 715,
+            "height": 37
+          },
+          "output": {
+            "x": 630,
+            "y": 349,
+            "width": 537,
+            "height": 29
+          },
+          "phase": [
+            0.75,
+            0.5
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 537,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15573,
+              "chromaSum": 64562,
+              "chromaAtLeast8": 1380,
+              "maxChroma": 117,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 101496.94900000004,
+              "horizontalPairs": 15544,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0.06820000000000448,
+              "backgroundContrastAbsSum": 158994.2447999998
+            },
+            {
+              "pixels": 15573,
+              "chromaSum": 26270,
+              "chromaAtLeast8": 659,
+              "maxChroma": 120,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 115813.16940000017,
+              "horizontalPairs": 15544,
+              "lumaOutsideSourceByOver1": 4,
+              "maxLumaOvershoot": 32,
+              "backgroundContrastAbsSum": 168314.40459999983
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -16,
+          "outputEm": 12,
+          "source": {
+            "x": 841,
+            "y": 519,
+            "width": 715,
+            "height": 37
+          },
+          "output": {
+            "x": 630,
+            "y": 389,
+            "width": 537,
+            "height": 28
+          },
+          "phase": [
+            0.75,
+            0.25
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 537,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15036,
+              "chromaSum": 56850,
+              "chromaAtLeast8": 1162,
+              "maxChroma": 117,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 98493.36839999988,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 107082.34420000017
+            },
+            {
+              "pixels": 15036,
+              "chromaSum": 15154,
+              "chromaAtLeast8": 354,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 112126.07220000005,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 4,
+              "maxLumaOvershoot": 15.068200000000001,
+              "backgroundContrastAbsSum": 117170.3536000002
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -16,
+          "outputEm": 12,
+          "source": {
+            "x": 841,
+            "y": 572,
+            "width": 715,
+            "height": 37
+          },
+          "output": {
+            "x": 630,
+            "y": 429,
+            "width": 537,
+            "height": 28
+          },
+          "phase": [
+            0.75,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 537,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15036,
+              "chromaSum": 63185,
+              "chromaAtLeast8": 1345,
+              "maxChroma": 112,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 111875.97080000004,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0.14039999999999964,
+              "backgroundContrastAbsSum": 116485.67459999968
+            },
+            {
+              "pixels": 15036,
+              "chromaSum": 27251,
+              "chromaAtLeast8": 671,
+              "maxChroma": 118,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 139446.80680000008,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 845,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 134997.49920000008
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -16,
+          "outputEm": 12,
+          "source": {
+            "x": 841,
+            "y": 626,
+            "width": 715,
+            "height": 37
+          },
+          "output": {
+            "x": 630,
+            "y": 469,
+            "width": 537,
+            "height": 29
+          },
+          "phase": [
+            0.75,
+            0.5
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 537,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15573,
+              "chromaSum": 63122,
+              "chromaAtLeast8": 1390,
+              "maxChroma": 112,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 102139.62539999992,
+              "horizontalPairs": 15544,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0.14039999999999964,
+              "backgroundContrastAbsSum": 160180.24379999982
+            },
+            {
+              "pixels": 15573,
+              "chromaSum": 28427,
+              "chromaAtLeast8": 727,
+              "maxChroma": 111,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 127200.76060000007,
+              "horizontalPairs": 15544,
+              "lumaOutsideSourceByOver1": 772,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 177637.78479999994
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -16,
+          "outputEm": 12,
+          "source": {
+            "x": 841,
+            "y": 679,
+            "width": 715,
+            "height": 37
+          },
+          "output": {
+            "x": 630,
+            "y": 509,
+            "width": 537,
+            "height": 28
+          },
+          "phase": [
+            0.75,
+            0.25
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 537,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15036,
+              "chromaSum": 56334,
+              "chromaAtLeast8": 1170,
+              "maxChroma": 112,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 98196.8375999999,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0.14039999999999964,
+              "backgroundContrastAbsSum": 108626.16219999974
+            },
+            {
+              "pixels": 15036,
+              "chromaSum": 17927,
+              "chromaAtLeast8": 415,
+              "maxChroma": 109,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 124349.78500000048,
+              "horizontalPairs": 15008,
+              "lumaOutsideSourceByOver1": 880,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 127720.04540000035
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        537,
+        192
+      ]
+    },
+    {
+      "scenario": "down50",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-200-cleartype",
+      "dpi": 200,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080,
+        "sourceWidth": 3840,
+        "sourceHeight": 2160,
+        "dpi": 200,
+        "area": true,
+        "native": false,
+        "up": false,
+        "dpr": 1,
+        "previewScale": 0.9185185185185185
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 1210,
+        "y": 578,
+        "width": 1120,
+        "height": 480,
+        "id": "windows-gdi-auto-200-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -24,
+          "outputEm": 12,
+          "source": {
+            "x": 1234,
+            "y": 592,
+            "width": 1072,
+            "height": 56
+          },
+          "output": {
+            "x": 617,
+            "y": 296,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 51362,
+              "chromaAtLeast8": 1146,
+              "maxChroma": 78,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 132335.09319999994,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 117789.30800000034
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 11231,
+              "chromaAtLeast8": 310,
+              "maxChroma": 62,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 133050.29840000017,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 1,
+              "maxLumaOvershoot": 15.570800000000002,
+              "backgroundContrastAbsSum": 125970.63180000005
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -24,
+          "outputEm": 12,
+          "source": {
+            "x": 1234,
+            "y": 672,
+            "width": 1072,
+            "height": 56
+          },
+          "output": {
+            "x": 617,
+            "y": 336,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 57184,
+              "chromaAtLeast8": 1245,
+              "maxChroma": 87,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125436.21239999961,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 167008.98060000013
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 11662,
+              "chromaAtLeast8": 425,
+              "maxChroma": 78,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 127397.55720000013,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 4,
+              "maxLumaOvershoot": 27.4922,
+              "backgroundContrastAbsSum": 175524.37560000014
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -24,
+          "outputEm": 12,
+          "source": {
+            "x": 1234,
+            "y": 752,
+            "width": 1072,
+            "height": 56
+          },
+          "output": {
+            "x": 617,
+            "y": 376,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 46254,
+              "chromaAtLeast8": 1016,
+              "maxChroma": 78,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 118072.27859999976,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 121189.10399999985
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 3913,
+              "chromaAtLeast8": 95,
+              "maxChroma": 56,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 122498.12879999996,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 3,
+              "maxLumaOvershoot": 17.212600000000002,
+              "backgroundContrastAbsSum": 130434.69960000007
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -24,
+          "outputEm": 12,
+          "source": {
+            "x": 1234,
+            "y": 832,
+            "width": 1072,
+            "height": 56
+          },
+          "output": {
+            "x": 617,
+            "y": 416,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 50614,
+              "chromaAtLeast8": 1148,
+              "maxChroma": 75,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 130607.13639999962,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 118274.04279999997
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 12809,
+              "chromaAtLeast8": 349,
+              "maxChroma": 63,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 143900.6220000004,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 766,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 133763.63060000027
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -24,
+          "outputEm": 12,
+          "source": {
+            "x": 1234,
+            "y": 912,
+            "width": 1072,
+            "height": 56
+          },
+          "output": {
+            "x": 617,
+            "y": 456,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 56143,
+              "chromaAtLeast8": 1242,
+              "maxChroma": 80,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 123884.80540000006,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 170057.0134000003
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 12476,
+              "chromaAtLeast8": 430,
+              "maxChroma": 70,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 137083.81360000014,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 745,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 186299.57860000036
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -24,
+          "outputEm": 12,
+          "source": {
+            "x": 1234,
+            "y": 992,
+            "width": 1072,
+            "height": 56
+          },
+          "output": {
+            "x": 617,
+            "y": 496,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 45098,
+              "chromaAtLeast8": 1019,
+              "maxChroma": 75,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 115710.95979999991,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 120495.5809999998
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 4518,
+              "chromaAtLeast8": 104,
+              "maxChroma": 56,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 133551.7774000003,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 817,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 137938.35400000014
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        536,
+        192
+      ]
+    },
+    {
+      "scenario": "down33",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-300-cleartype",
+      "dpi": 300,
+      "dimensions": {
+        "width": 1920,
+        "height": 1080,
+        "sourceWidth": 5760,
+        "sourceHeight": 3240,
+        "dpi": 300,
+        "area": false,
+        "native": false,
+        "up": false,
+        "dpr": 1,
+        "previewScale": 0.9185185185185185
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 1788,
+        "y": 1662,
+        "width": 1680,
+        "height": 720,
+        "id": "windows-gdi-auto-300-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -36,
+          "outputEm": 12,
+          "source": {
+            "x": 1824,
+            "y": 1683,
+            "width": 1608,
+            "height": 84
+          },
+          "output": {
+            "x": 608,
+            "y": 561,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 40452,
+              "chromaAtLeast8": 464,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 167989.01840000006,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 125252.77560000046
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 2081,
+              "chromaAtLeast8": 24,
+              "maxChroma": 13,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 135487.08560000005,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 1,
+              "maxLumaOvershoot": 6.356999999999999,
+              "backgroundContrastAbsSum": 127443.64920000022
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -36,
+          "outputEm": 12,
+          "source": {
+            "x": 1824,
+            "y": 1803,
+            "width": 1608,
+            "height": 84
+          },
+          "output": {
+            "x": 608,
+            "y": 601,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 47086,
+              "chromaAtLeast8": 537,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 166626.3724000001,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 167969.83000000016
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 2623,
+              "chromaAtLeast8": 24,
+              "maxChroma": 23,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 131056.23600000008,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 3,
+              "maxLumaOvershoot": 32,
+              "backgroundContrastAbsSum": 177758.9554000002
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -36,
+          "outputEm": 12,
+          "source": {
+            "x": 1824,
+            "y": 1923,
+            "width": 1608,
+            "height": 84
+          },
+          "output": {
+            "x": 608,
+            "y": 641,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 36312,
+              "chromaAtLeast8": 420,
+              "maxChroma": 156,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 145325.71760000024,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 124750.0004000004
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 1676,
+              "chromaAtLeast8": 13,
+              "maxChroma": 13,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 125467.43479999994,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 8,
+              "maxLumaOvershoot": 28,
+              "backgroundContrastAbsSum": 132116.1744
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -36,
+          "outputEm": 12,
+          "source": {
+            "x": 1824,
+            "y": 2043,
+            "width": 1608,
+            "height": 84
+          },
+          "output": {
+            "x": 608,
+            "y": 681,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 38479,
+              "chromaAtLeast8": 464,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 163295.9744000003,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 123598.01179999998
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 2375,
+              "chromaAtLeast8": 22,
+              "maxChroma": 14,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 146341.66420000014,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 777,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 134378.3516000002
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -36,
+          "outputEm": 12,
+          "source": {
+            "x": 1824,
+            "y": 2163,
+            "width": 1608,
+            "height": 84
+          },
+          "output": {
+            "x": 608,
+            "y": 721,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 45321,
+              "chromaAtLeast8": 537,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 163100.9295999999,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 168640.08940000017
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 2965,
+              "chromaAtLeast8": 25,
+              "maxChroma": 23,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 140355.02040000012,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 755,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 186210.65920000026
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -36,
+          "outputEm": 12,
+          "source": {
+            "x": 1824,
+            "y": 2283,
+            "width": 1608,
+            "height": 84
+          },
+          "output": {
+            "x": 608,
+            "y": 761,
+            "width": 536,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 536,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 15008,
+              "chromaSum": 34503,
+              "chromaAtLeast8": 420,
+              "maxChroma": 150,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 140291.72839999982,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 123054.35899999984
+            },
+            {
+              "pixels": 15008,
+              "chromaSum": 1966,
+              "chromaAtLeast8": 12,
+              "maxChroma": 12,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 135862.20960000012,
+              "horizontalPairs": 14980,
+              "lumaOutsideSourceByOver1": 864,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 138686.4870000001
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        536,
+        192
+      ]
+    },
+    {
+      "scenario": "6k2k",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-240-cleartype",
+      "dpi": 240,
+      "dimensions": {
+        "width": 2560,
+        "height": 1440,
+        "sourceWidth": 6144,
+        "sourceHeight": 3456,
+        "dpi": 240,
+        "area": false,
+        "native": false,
+        "up": false,
+        "dpr": 1,
+        "previewScale": 0.6888888888888889
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 2851,
+        "y": 1348,
+        "width": 1344,
+        "height": 576,
+        "id": "windows-gdi-auto-240-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -29,
+          "outputEm": 12.083333333333334,
+          "source": {
+            "x": 2880,
+            "y": 1365,
+            "width": 1286,
+            "height": 67
+          },
+          "output": {
+            "x": 1200,
+            "y": 568,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0,
+            0.75
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 52232,
+              "chromaAtLeast8": 864,
+              "maxChroma": 141,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 144828.44,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 122902.51539999996
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 3350,
+              "chromaAtLeast8": 80,
+              "maxChroma": 38,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 137322.06979999976,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 1,
+              "maxLumaOvershoot": 4.787400000000002,
+              "backgroundContrastAbsSum": 131182.32400000005
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -29,
+          "outputEm": 12.083333333333334,
+          "source": {
+            "x": 2880,
+            "y": 1461,
+            "width": 1286,
+            "height": 67
+          },
+          "output": {
+            "x": 1200,
+            "y": 608,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0,
+            0.75
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 55587,
+              "chromaAtLeast8": 1015,
+              "maxChroma": 141,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 142392.9547999998,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 167243.49219999986
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 6751,
+              "chromaAtLeast8": 203,
+              "maxChroma": 51,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 129711.02739999998,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 5,
+              "maxLumaOvershoot": 32,
+              "backgroundContrastAbsSum": 179997.97459999996
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -29,
+          "outputEm": 12.083333333333334,
+          "source": {
+            "x": 2880,
+            "y": 1557,
+            "width": 1286,
+            "height": 67
+          },
+          "output": {
+            "x": 1200,
+            "y": 648,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0,
+            0.75
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 45452,
+              "chromaAtLeast8": 803,
+              "maxChroma": 140,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 132213.00480000023,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 119802.60080000015
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 3235,
+              "chromaAtLeast8": 65,
+              "maxChroma": 57,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 124608.77279999988,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 7,
+              "maxLumaOvershoot": 32,
+              "backgroundContrastAbsSum": 125542.12639999992
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -29,
+          "outputEm": 12.083333333333334,
+          "source": {
+            "x": 2880,
+            "y": 1653,
+            "width": 1286,
+            "height": 67
+          },
+          "output": {
+            "x": 1200,
+            "y": 688,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0,
+            0.75
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 49039,
+              "chromaAtLeast8": 854,
+              "maxChroma": 135,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 142854.64279999986,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 122848.42699999992
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 3802,
+              "chromaAtLeast8": 88,
+              "maxChroma": 39,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 151374.35700000005,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 861,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 140254.40240000005
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -29,
+          "outputEm": 12.083333333333334,
+          "source": {
+            "x": 2880,
+            "y": 1749,
+            "width": 1286,
+            "height": 67
+          },
+          "output": {
+            "x": 1200,
+            "y": 728,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0,
+            0.75
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 54239,
+              "chromaAtLeast8": 1015,
+              "maxChroma": 135,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 139778.29940000002,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 169308.73059999984
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 7549,
+              "chromaAtLeast8": 223,
+              "maxChroma": 55,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 139663.77360000007,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 781,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 190413.97100000014
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -29,
+          "outputEm": 12.083333333333334,
+          "source": {
+            "x": 2880,
+            "y": 1845,
+            "width": 1286,
+            "height": 67
+          },
+          "output": {
+            "x": 1200,
+            "y": 768,
+            "width": 536,
+            "height": 29
+          },
+          "phase": [
+            0,
+            0.75
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 536,
+            "height": 29
+          },
+          "metrics": [
+            {
+              "pixels": 15544,
+              "chromaSum": 43391,
+              "chromaAtLeast8": 796,
+              "maxChroma": 135,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 129539.16239999991,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 119105.62059999998
+            },
+            {
+              "pixels": 15544,
+              "chromaSum": 4070,
+              "chromaAtLeast8": 81,
+              "maxChroma": 62,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 136000.11279999997,
+              "horizontalPairs": 15515,
+              "lumaOutsideSourceByOver1": 855,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 132510.23820000008
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        536,
+        192
+      ]
+    },
+    {
+      "scenario": "x75",
+      "kind": "cleartype",
+      "asset": "windows-gdi-auto-100-cleartype",
+      "dpi": 100,
+      "dimensions": {
+        "width": 1920,
+        "height": 1440,
+        "sourceWidth": 2560,
+        "sourceHeight": 1440,
+        "dpi": 100,
+        "area": false,
+        "native": false,
+        "up": false,
+        "dpr": 1,
+        "previewScale": 0.6888888888888889
+      },
+      "sourceMotion": [
+        0,
+        0
+      ],
+      "sourceTile": {
+        "x": 1240,
+        "y": 614,
+        "width": 560,
+        "height": 240,
+        "id": "windows-gdi-auto-100-cleartype",
+        "size": 280,
+        "background": "#181818"
+      },
+      "rows": [
+        {
+          "id": "light-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 1252,
+            "y": 621,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 939,
+            "y": 621,
+            "width": 402,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 0,
+            "width": 402,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 11256,
+              "chromaSum": 61427,
+              "chromaAtLeast8": 1096,
+              "maxChroma": 130,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 100211.68219999985,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 98063.67980000004
+            },
+            {
+              "pixels": 11256,
+              "chromaSum": 40018,
+              "chromaAtLeast8": 778,
+              "maxChroma": 129,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 105007.84920000036,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 54,
+              "maxLumaOvershoot": 26.643,
+              "backgroundContrastAbsSum": 103108.82120000022
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 1252,
+            "y": 661,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 939,
+            "y": 661,
+            "width": 402,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 32,
+            "width": 402,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 11256,
+              "chromaSum": 52656,
+              "chromaAtLeast8": 1015,
+              "maxChroma": 130,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 87265.3999999999,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 132001.09339999998
+            },
+            {
+              "pixels": 11256,
+              "chromaSum": 25669,
+              "chromaAtLeast8": 631,
+              "maxChroma": 119,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 92532.96899999998,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 97,
+              "maxLumaOvershoot": 25,
+              "backgroundContrastAbsSum": 138302.45339999997
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "light-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 1252,
+            "y": 701,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 939,
+            "y": 701,
+            "width": 402,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 64,
+            "width": 402,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 11256,
+              "chromaSum": 56389,
+              "chromaAtLeast8": 980,
+              "maxChroma": 130,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 97556.91679999977,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 92528.55280000003
+            },
+            {
+              "pixels": 11256,
+              "chromaSum": 20759,
+              "chromaAtLeast8": 463,
+              "maxChroma": 127,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 102878.51940000024,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 69,
+              "maxLumaOvershoot": 26.643,
+              "backgroundContrastAbsSum": 98008.2366000001
+            }
+          ],
+          "sourceLumaRange": [
+            32,
+            254.99999999999997
+          ],
+          "backgroundLuma": 255
+        },
+        {
+          "id": "dark-english",
+          "text": "File Edit View  The quick brown fox  0123456789",
+          "font": "Segoe UI",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 1252,
+            "y": 741,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 939,
+            "y": 741,
+            "width": 402,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 96,
+            "width": 402,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 11256,
+              "chromaSum": 62189,
+              "chromaAtLeast8": 1097,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 98608.31460000004,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 100624.95239999998
+            },
+            {
+              "pixels": 11256,
+              "chromaSum": 44119,
+              "chromaAtLeast8": 912,
+              "maxChroma": 127,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 111481.10840000017,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 398,
+              "maxLumaOvershoot": 23.9278,
+              "backgroundContrastAbsSum": 108847.74719999997
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-chinese",
+          "text": "显示设置  虚拟屏幕  抗锯齿测试  中文小字",
+          "font": "微软雅黑",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 1252,
+            "y": 781,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 939,
+            "y": 781,
+            "width": 402,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 128,
+            "width": 402,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 11256,
+              "chromaSum": 52556,
+              "chromaAtLeast8": 1048,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 88584.45300000014,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 134303.78319999995
+            },
+            {
+              "pixels": 11256,
+              "chromaSum": 28008,
+              "chromaAtLeast8": 673,
+              "maxChroma": 109,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 100315.86179999991,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 417,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 143644.65200000006
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        },
+        {
+          "id": "dark-code",
+          "text": "const ratio = 1.25;  Il1| O0  {} [] <>  0123456789",
+          "font": "Consolas",
+          "fontHeightPx": -12,
+          "outputEm": 12,
+          "source": {
+            "x": 1252,
+            "y": 821,
+            "width": 536,
+            "height": 28
+          },
+          "output": {
+            "x": 939,
+            "y": 821,
+            "width": 402,
+            "height": 28
+          },
+          "phase": [
+            0,
+            0
+          ],
+          "export": {
+            "x": 0,
+            "y": 160,
+            "width": 402,
+            "height": 28
+          },
+          "metrics": [
+            {
+              "pixels": 11256,
+              "chromaSum": 56295,
+              "chromaAtLeast8": 979,
+              "maxChroma": 125,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 97575.36100000002,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 0,
+              "maxLumaOvershoot": 0,
+              "backgroundContrastAbsSum": 94431.36880000011
+            },
+            {
+              "pixels": 11256,
+              "chromaSum": 22682,
+              "chromaAtLeast8": 553,
+              "maxChroma": 118,
+              "alphaMin": 255,
+              "alphaMax": 255,
+              "horizontalLumaGradientSum": 112628.91660000016,
+              "horizontalPairs": 11228,
+              "lumaOutsideSourceByOver1": 540,
+              "maxLumaOvershoot": 24,
+              "backgroundContrastAbsSum": 104147.87460000018
+            }
+          ],
+          "sourceLumaRange": [
+            24,
+            238
+          ],
+          "backgroundLuma": 24
+        }
+      ],
+      "imageSize": [
+        402,
+        192
+      ]
+    }
+  ],
+  "screenshots": [
+    "demo-default.png",
+    "demo-settings.png",
+    "demo-narrow.png"
+  ],
+  "atlas": {
+    "file": "ct-atlas.png",
+    "width": 1082,
+    "height": 1592,
+    "panels": [
+      {
+        "scenario": "native",
+        "side": "sbms",
+        "x": 0,
+        "y": 0,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "native",
+        "side": "final",
+        "x": 545,
+        "y": 0,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "up2",
+        "side": "sbms",
+        "x": 0,
+        "y": 200,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "up2",
+        "side": "final",
+        "x": 545,
+        "y": 200,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "up15",
+        "side": "sbms",
+        "x": 0,
+        "y": 400,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "up15",
+        "side": "final",
+        "x": 545,
+        "y": 400,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "down75",
+        "side": "sbms",
+        "x": 0,
+        "y": 600,
+        "width": 537,
+        "height": 192
+      },
+      {
+        "scenario": "down75",
+        "side": "final",
+        "x": 545,
+        "y": 600,
+        "width": 537,
+        "height": 192
+      },
+      {
+        "scenario": "down50",
+        "side": "sbms",
+        "x": 0,
+        "y": 800,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "down50",
+        "side": "final",
+        "x": 545,
+        "y": 800,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "down33",
+        "side": "sbms",
+        "x": 0,
+        "y": 1000,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "down33",
+        "side": "final",
+        "x": 545,
+        "y": 1000,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "6k2k",
+        "side": "sbms",
+        "x": 0,
+        "y": 1200,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "6k2k",
+        "side": "final",
+        "x": 545,
+        "y": 1200,
+        "width": 536,
+        "height": 192
+      },
+      {
+        "scenario": "x75",
+        "side": "sbms",
+        "x": 0,
+        "y": 1400,
+        "width": 402,
+        "height": 192
+      },
+      {
+        "scenario": "x75",
+        "side": "final",
+        "x": 545,
+        "y": 1400,
+        "width": 402,
+        "height": 192
+      }
+    ]
+  }
+}

@@ -245,6 +245,26 @@ pub(super) fn geometry_request(
     } else {
         automatic_target_geometry(ui, displays, "Target")?
     };
+    let Some(reference) = reference_geometry_from_ui(ui, displays)? else {
+        return Ok(None);
+    };
+    Ok(Some(SizingRequest {
+        reference,
+        target,
+        strategy: sizing_strategy_from_index(ui.get_sizing_strategy())?,
+        alignment: 2,
+        preferred_refresh_millihz: Some(
+            stream
+                .map(|fields| fields.screen.refresh_millihz)
+                .unwrap_or(240_000),
+        ),
+    }))
+}
+
+pub(super) fn reference_geometry_from_ui(
+    ui: &QuickAccess,
+    displays: &[DisplayOption],
+) -> Result<Option<DisplayGeometry>, String> {
     let reference = if ui.get_reference_manual() {
         let values = [
             ui.get_reference_width(),
@@ -270,17 +290,7 @@ pub(super) fn geometry_request(
             .ok_or_else(|| "Reference display is not selected".to_string())?;
         automatic_display_geometry(displays, reference_index, "Reference")?
     };
-    Ok(Some(SizingRequest {
-        reference,
-        target,
-        strategy: sizing_strategy_from_index(ui.get_sizing_strategy())?,
-        alignment: 2,
-        preferred_refresh_millihz: Some(
-            stream
-                .map(|fields| fields.screen.refresh_millihz)
-                .unwrap_or(240_000),
-        ),
-    }))
+    Ok(Some(reference))
 }
 
 pub(super) fn stream_target_geometry(
@@ -371,6 +381,11 @@ pub(super) fn selected_reference_display_index(
     let Some(ReferenceSource::Display(id)) = selected_reference_source(ui) else {
         return None;
     };
+    if !ui.get_stream_only()
+        && selected_display_id(ui, ui.get_selected_display()).as_deref() == Some(id.as_str())
+    {
+        return None;
+    }
     displays
         .iter()
         .position(|display| display.id == id)
@@ -405,19 +420,14 @@ pub(super) fn sizing_strategy_index(strategy: SizingStrategy) -> i32 {
     }
 }
 
-pub(super) fn populate_geometry_fields(ui: &QuickAccess, request: SizingRequest) {
-    ui.set_reference_width(request.reference.native_pixels.width.to_string().into());
-    ui.set_reference_height(request.reference.native_pixels.height.to_string().into());
+pub(super) fn populate_reference_fields(ui: &QuickAccess, reference: DisplayGeometry) {
+    ui.set_reference_width(reference.native_pixels.width.to_string().into());
+    ui.set_reference_height(reference.native_pixels.height.to_string().into());
     ui.set_reference_diagonal(
-        format!(
-            "{:.1}",
-            diagonal_mm(request.reference) / MILLIMETERS_PER_INCH
-        )
-        .into(),
+        format!("{:.1}", diagonal_mm(reference) / MILLIMETERS_PER_INCH).into(),
     );
-    ui.set_reference_aspect_ratio(aspect_ratio_index(request.reference));
-    ui.set_reference_rotation(rotation_index(request.reference.rotation));
-    ui.set_sizing_strategy(sizing_strategy_index(request.strategy));
+    ui.set_reference_aspect_ratio(aspect_ratio_index(reference));
+    ui.set_reference_rotation(rotation_index(reference.rotation));
 }
 
 pub(super) fn diagonal_mm(display: DisplayGeometry) -> f64 {

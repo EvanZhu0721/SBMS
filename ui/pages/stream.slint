@@ -1,4 +1,4 @@
-import { LineEdit } from "std-widgets.slint";
+import { LineEdit } from "../vendor/material/std-widgets.slint";
 import {
     BackButton,
     CompactComboBox,
@@ -147,6 +147,8 @@ export component StreamPage inherits FocusScope {
                                         "Portrait (counter-clockwise)",
                                     ];
                                     current-index <=> root.stream-rotation;
+                                    popup-width: 328px;
+                                    popup-align-right: true;
                                     field-label: "Streaming screen orientation";
                                     selected => { root.stream-edited(); }
                                 }

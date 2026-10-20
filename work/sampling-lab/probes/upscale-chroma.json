@@ -1,0 +1,3178 @@
+{
+  "scope": "GPU exploration of upscale chroma reconstruction, same source and EWA luminance; not a production benchmark.",
+  "cases": [
+    {
+      "asset": "windows-gdi-auto-50-cleartype",
+      "scenario": "up2",
+      "dpi": 50,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1342,
+            "y": 1046,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 60591,
+              "count8": 2036,
+              "peak": 85
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 83470,
+              "count8": 2044,
+              "peak": 124
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 54226,
+              "count8": 1872,
+              "peak": 79
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 53417,
+              "count8": 1836,
+              "peak": 78
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1342,
+            "y": 1086,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 73770,
+              "count8": 2351,
+              "peak": 104
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 93050,
+              "count8": 2238,
+              "peak": 144
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 60144,
+              "count8": 2023,
+              "peak": 87
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 58930,
+              "count8": 1962,
+              "peak": 88
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1342,
+            "y": 1126,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 61445,
+              "count8": 2082,
+              "peak": 83
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 75874,
+              "count8": 2001,
+              "peak": 127
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 51840,
+              "count8": 1879,
+              "peak": 83
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 50658,
+              "count8": 1814,
+              "peak": 83
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1342,
+            "y": 1166,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 66306,
+              "count8": 2151,
+              "peak": 91
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 91662,
+              "count8": 2091,
+              "peak": 136
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 58858,
+              "count8": 1950,
+              "peak": 88
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 57652,
+              "count8": 1875,
+              "peak": 88
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1342,
+            "y": 1206,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 79594,
+              "count8": 2422,
+              "peak": 112
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 99017,
+              "count8": 2253,
+              "peak": 143
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 63485,
+              "count8": 2061,
+              "peak": 94
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 61999,
+              "count8": 1975,
+              "peak": 93
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1342,
+            "y": 1246,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 67098,
+              "count8": 2173,
+              "peak": 88
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 81966,
+              "count8": 2024,
+              "peak": 125
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 55496,
+              "count8": 1932,
+              "peak": 79
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 53898,
+              "count8": 1837,
+              "peak": 79
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 90048,
+          "chroma": 408804,
+          "count8": 13215,
+          "peak": 112,
+          "meanLumaDelta": 1.7445388814854377,
+          "maxLumaDelta": 47.21379999999999
+        },
+        "previous": {
+          "pixels": 90048,
+          "chroma": 525039,
+          "count8": 12651,
+          "peak": 144,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 90048,
+          "chroma": 344049,
+          "count8": 11717,
+          "peak": 94,
+          "meanLumaDelta": 0.05597308546552711,
+          "maxLumaDelta": 3.8267999999999915
+        },
+        "capped-chroma": {
+          "pixels": 90048,
+          "chroma": 336554,
+          "count8": 11299,
+          "peak": 93,
+          "meanLumaDelta": 0.044009217306325794,
+          "maxLumaDelta": 0.9317999999999991
+        }
+      },
+      "image": "upscale-probe-windows-gdi-auto-50-cleartype-up2-181818.png"
+    },
+    {
+      "asset": "windows-gdi-auto-66_667-cleartype",
+      "scenario": "up15",
+      "dpi": 66.66666666666667,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1921,
+            "y": 984,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 78330,
+              "count8": 1845,
+              "peak": 116
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 90824,
+              "count8": 1677,
+              "peak": 159
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 60882,
+              "count8": 1574,
+              "peak": 116
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 59963,
+              "count8": 1523,
+              "peak": 116
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1921,
+            "y": 1023,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 72402,
+              "count8": 2044,
+              "peak": 122
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 79248,
+              "count8": 1848,
+              "peak": 154
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 54314,
+              "count8": 1686,
+              "peak": 110
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 53076,
+              "count8": 1618,
+              "peak": 110
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1921,
+            "y": 1063,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 65901,
+              "count8": 1785,
+              "peak": 116
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 69434,
+              "count8": 1493,
+              "peak": 160
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 49737,
+              "count8": 1441,
+              "peak": 104
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 47787,
+              "count8": 1334,
+              "peak": 104
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1921,
+            "y": 1104,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 83579,
+              "count8": 1871,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 96140,
+              "count8": 1725,
+              "peak": 171
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 63887,
+              "count8": 1614,
+              "peak": 125
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 62523,
+              "count8": 1544,
+              "peak": 125
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1921,
+            "y": 1143,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 76522,
+              "count8": 2061,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 83476,
+              "count8": 1890,
+              "peak": 158
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 57037,
+              "count8": 1716,
+              "peak": 111
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 55449,
+              "count8": 1628,
+              "peak": 110
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1921,
+            "y": 1183,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 69316,
+              "count8": 1792,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 72294,
+              "count8": 1534,
+              "peak": 158
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 52108,
+              "count8": 1490,
+              "peak": 113
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 49570,
+              "count8": 1359,
+              "peak": 113
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 93264,
+          "chroma": 446050,
+          "count8": 11398,
+          "peak": 125,
+          "meanLumaDelta": 1.7424863484302568,
+          "maxLumaDelta": 54.81100000000001
+        },
+        "previous": {
+          "pixels": 93264,
+          "chroma": 491416,
+          "count8": 10167,
+          "peak": 171,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 93264,
+          "chroma": 337965,
+          "count8": 9521,
+          "peak": 125,
+          "meanLumaDelta": 0.05116648009950127,
+          "maxLumaDelta": 5.752199999999988
+        },
+        "capped-chroma": {
+          "pixels": 93264,
+          "chroma": 328368,
+          "count8": 9006,
+          "peak": 125,
+          "meanLumaDelta": 0.036031135271916634,
+          "maxLumaDelta": 0.927800000000019
+        }
+      }
+    },
+    {
+      "asset": "windows-gdi-100-cleartype",
+      "scenario": "up2",
+      "dpi": 100,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1288,
+            "y": 646,
+            "width": 1072,
+            "height": 56
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 60032,
+              "chroma": 311998,
+              "count8": 6764,
+              "peak": 117
+            },
+            "previous": {
+              "pixels": 60032,
+              "chroma": 267192,
+              "count8": 5160,
+              "peak": 196
+            },
+            "linear-chroma": {
+              "pixels": 60032,
+              "chroma": 192542,
+              "count8": 5008,
+              "peak": 117
+            },
+            "capped-chroma": {
+              "pixels": 60032,
+              "chroma": 185261,
+              "count8": 4698,
+              "peak": 117
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1288,
+            "y": 726,
+            "width": 1072,
+            "height": 56
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 60032,
+              "chroma": 299648,
+              "count8": 6866,
+              "peak": 117
+            },
+            "previous": {
+              "pixels": 60032,
+              "chroma": 207146,
+              "count8": 4282,
+              "peak": 166
+            },
+            "linear-chroma": {
+              "pixels": 60032,
+              "chroma": 140744,
+              "count8": 4026,
+              "peak": 105
+            },
+            "capped-chroma": {
+              "pixels": 60032,
+              "chroma": 133551,
+              "count8": 3593,
+              "peak": 105
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1288,
+            "y": 806,
+            "width": 1072,
+            "height": 56
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 60032,
+              "chroma": 282329,
+              "count8": 6429,
+              "peak": 117
+            },
+            "previous": {
+              "pixels": 60032,
+              "chroma": 136878,
+              "count8": 3039,
+              "peak": 192
+            },
+            "linear-chroma": {
+              "pixels": 60032,
+              "chroma": 100002,
+              "count8": 2831,
+              "peak": 117
+            },
+            "capped-chroma": {
+              "pixels": 60032,
+              "chroma": 93647,
+              "count8": 2560,
+              "peak": 117
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1288,
+            "y": 886,
+            "width": 1072,
+            "height": 56
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 60032,
+              "chroma": 316047,
+              "count8": 6777,
+              "peak": 113
+            },
+            "previous": {
+              "pixels": 60032,
+              "chroma": 271116,
+              "count8": 5257,
+              "peak": 173
+            },
+            "linear-chroma": {
+              "pixels": 60032,
+              "chroma": 196188,
+              "count8": 5043,
+              "peak": 109
+            },
+            "capped-chroma": {
+              "pixels": 60032,
+              "chroma": 187543,
+              "count8": 4779,
+              "peak": 109
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1288,
+            "y": 966,
+            "width": 1072,
+            "height": 56
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 60032,
+              "chroma": 296314,
+              "count8": 6971,
+              "peak": 113
+            },
+            "previous": {
+              "pixels": 60032,
+              "chroma": 204016,
+              "count8": 4211,
+              "peak": 158
+            },
+            "linear-chroma": {
+              "pixels": 60032,
+              "chroma": 139198,
+              "count8": 4025,
+              "peak": 113
+            },
+            "capped-chroma": {
+              "pixels": 60032,
+              "chroma": 130925,
+              "count8": 3589,
+              "peak": 113
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1288,
+            "y": 1046,
+            "width": 1072,
+            "height": 56
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 60032,
+              "chroma": 282254,
+              "count8": 6500,
+              "peak": 113
+            },
+            "previous": {
+              "pixels": 60032,
+              "chroma": 133909,
+              "count8": 3015,
+              "peak": 164
+            },
+            "linear-chroma": {
+              "pixels": 60032,
+              "chroma": 98405,
+              "count8": 2854,
+              "peak": 112
+            },
+            "capped-chroma": {
+              "pixels": 60032,
+              "chroma": 91609,
+              "count8": 2571,
+              "peak": 113
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 360192,
+          "chroma": 1788590,
+          "count8": 40307,
+          "peak": 117,
+          "meanLumaDelta": 2.4667752282115414,
+          "maxLumaDelta": 67.21079999999999
+        },
+        "previous": {
+          "pixels": 360192,
+          "chroma": 1220257,
+          "count8": 24964,
+          "peak": 196,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 360192,
+          "chroma": 867079,
+          "count8": 23787,
+          "peak": 117,
+          "meanLumaDelta": 0.04234545797797471,
+          "maxLumaDelta": 7.015800000000013
+        },
+        "capped-chroma": {
+          "pixels": 360192,
+          "chroma": 822536,
+          "count8": 21790,
+          "peak": 117,
+          "meanLumaDelta": 0.02596700648542969,
+          "maxLumaDelta": 0.9318000000000097
+        }
+      },
+      "image": "upscale-probe-windows-gdi-100-cleartype-up2-181818.png"
+    },
+    {
+      "asset": "windows-gdi-100-cleartype",
+      "scenario": "up15",
+      "dpi": 100,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1878,
+            "y": 931,
+            "width": 804,
+            "height": 43
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 34572,
+              "chroma": 177658,
+              "count8": 3674,
+              "peak": 130
+            },
+            "previous": {
+              "pixels": 34572,
+              "chroma": 147097,
+              "count8": 2766,
+              "peak": 189
+            },
+            "linear-chroma": {
+              "pixels": 34572,
+              "chroma": 109841,
+              "count8": 2711,
+              "peak": 130
+            },
+            "capped-chroma": {
+              "pixels": 34572,
+              "chroma": 105877,
+              "count8": 2490,
+              "peak": 130
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1878,
+            "y": 991,
+            "width": 804,
+            "height": 43
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 34572,
+              "chroma": 169239,
+              "count8": 3619,
+              "peak": 127
+            },
+            "previous": {
+              "pixels": 34572,
+              "chroma": 110755,
+              "count8": 2293,
+              "peak": 173
+            },
+            "linear-chroma": {
+              "pixels": 34572,
+              "chroma": 78930,
+              "count8": 2127,
+              "peak": 117
+            },
+            "capped-chroma": {
+              "pixels": 34572,
+              "chroma": 74696,
+              "count8": 1874,
+              "peak": 118
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1878,
+            "y": 1051,
+            "width": 804,
+            "height": 43
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 34572,
+              "chroma": 158345,
+              "count8": 3488,
+              "peak": 130
+            },
+            "previous": {
+              "pixels": 34572,
+              "chroma": 74198,
+              "count8": 1576,
+              "peak": 200
+            },
+            "linear-chroma": {
+              "pixels": 34572,
+              "chroma": 56370,
+              "count8": 1502,
+              "peak": 130
+            },
+            "capped-chroma": {
+              "pixels": 34572,
+              "chroma": 52761,
+              "count8": 1329,
+              "peak": 130
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1878,
+            "y": 1111,
+            "width": 804,
+            "height": 43
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 34572,
+              "chroma": 180104,
+              "count8": 3661,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 34572,
+              "chroma": 150031,
+              "count8": 2816,
+              "peak": 167
+            },
+            "linear-chroma": {
+              "pixels": 34572,
+              "chroma": 112276,
+              "count8": 2735,
+              "peak": 123
+            },
+            "capped-chroma": {
+              "pixels": 34572,
+              "chroma": 107484,
+              "count8": 2543,
+              "peak": 123
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1878,
+            "y": 1171,
+            "width": 804,
+            "height": 43
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 34572,
+              "chroma": 167696,
+              "count8": 3634,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 34572,
+              "chroma": 109632,
+              "count8": 2246,
+              "peak": 167
+            },
+            "linear-chroma": {
+              "pixels": 34572,
+              "chroma": 78564,
+              "count8": 2079,
+              "peak": 125
+            },
+            "capped-chroma": {
+              "pixels": 34572,
+              "chroma": 73670,
+              "count8": 1856,
+              "peak": 125
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1878,
+            "y": 1231,
+            "width": 804,
+            "height": 43
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 34572,
+              "chroma": 159231,
+              "count8": 3514,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 34572,
+              "chroma": 73276,
+              "count8": 1575,
+              "peak": 177
+            },
+            "linear-chroma": {
+              "pixels": 34572,
+              "chroma": 55752,
+              "count8": 1492,
+              "peak": 120
+            },
+            "capped-chroma": {
+              "pixels": 34572,
+              "chroma": 52040,
+              "count8": 1330,
+              "peak": 120
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 207432,
+          "chroma": 1012273,
+          "count8": 21590,
+          "peak": 130,
+          "meanLumaDelta": 2.1741005505418594,
+          "maxLumaDelta": 64.62119999999999
+        },
+        "previous": {
+          "pixels": 207432,
+          "chroma": 664989,
+          "count8": 13272,
+          "peak": 200,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 207432,
+          "chroma": 491733,
+          "count8": 12646,
+          "peak": 130,
+          "meanLumaDelta": 0.04085444000925348,
+          "maxLumaDelta": 7.653599999999983
+        },
+        "capped-chroma": {
+          "pixels": 207432,
+          "chroma": 466528,
+          "count8": 11422,
+          "peak": 130,
+          "meanLumaDelta": 0.02482021963824196,
+          "maxLumaDelta": 0.927800000000019
+        }
+      }
+    },
+    {
+      "asset": "windows-gdi-125-cleartype",
+      "scenario": "up2",
+      "dpi": 125,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1584,
+            "y": 782,
+            "width": 1340,
+            "height": 70
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 93800,
+              "chroma": 461035,
+              "count8": 8941,
+              "peak": 117
+            },
+            "previous": {
+              "pixels": 93800,
+              "chroma": 217724,
+              "count8": 4479,
+              "peak": 186
+            },
+            "linear-chroma": {
+              "pixels": 93800,
+              "chroma": 160749,
+              "count8": 4168,
+              "peak": 115
+            },
+            "capped-chroma": {
+              "pixels": 93800,
+              "chroma": 152506,
+              "count8": 3743,
+              "peak": 116
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1584,
+            "y": 882,
+            "width": 1340,
+            "height": 70
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 93800,
+              "chroma": 422356,
+              "count8": 9051,
+              "peak": 117
+            },
+            "previous": {
+              "pixels": 93800,
+              "chroma": 204240,
+              "count8": 4074,
+              "peak": 186
+            },
+            "linear-chroma": {
+              "pixels": 93800,
+              "chroma": 136902,
+              "count8": 3574,
+              "peak": 117
+            },
+            "capped-chroma": {
+              "pixels": 93800,
+              "chroma": 130524,
+              "count8": 3231,
+              "peak": 117
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1584,
+            "y": 982,
+            "width": 1340,
+            "height": 70
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 93800,
+              "chroma": 394893,
+              "count8": 7936,
+              "peak": 117
+            },
+            "previous": {
+              "pixels": 93800,
+              "chroma": 155852,
+              "count8": 3095,
+              "peak": 200
+            },
+            "linear-chroma": {
+              "pixels": 93800,
+              "chroma": 115529,
+              "count8": 2959,
+              "peak": 117
+            },
+            "capped-chroma": {
+              "pixels": 93800,
+              "chroma": 108167,
+              "count8": 2599,
+              "peak": 117
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1584,
+            "y": 1082,
+            "width": 1340,
+            "height": 70
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 93800,
+              "chroma": 448614,
+              "count8": 9122,
+              "peak": 112
+            },
+            "previous": {
+              "pixels": 93800,
+              "chroma": 224534,
+              "count8": 4457,
+              "peak": 169
+            },
+            "linear-chroma": {
+              "pixels": 93800,
+              "chroma": 168583,
+              "count8": 4275,
+              "peak": 113
+            },
+            "capped-chroma": {
+              "pixels": 93800,
+              "chroma": 157778,
+              "count8": 3887,
+              "peak": 113
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1584,
+            "y": 1182,
+            "width": 1340,
+            "height": 70
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 93800,
+              "chroma": 411730,
+              "count8": 9201,
+              "peak": 112
+            },
+            "previous": {
+              "pixels": 93800,
+              "chroma": 197657,
+              "count8": 4036,
+              "peak": 171
+            },
+            "linear-chroma": {
+              "pixels": 93800,
+              "chroma": 133893,
+              "count8": 3611,
+              "peak": 113
+            },
+            "capped-chroma": {
+              "pixels": 93800,
+              "chroma": 126245,
+              "count8": 3247,
+              "peak": 113
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1584,
+            "y": 1282,
+            "width": 1340,
+            "height": 70
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 93800,
+              "chroma": 383931,
+              "count8": 8073,
+              "peak": 112
+            },
+            "previous": {
+              "pixels": 93800,
+              "chroma": 157453,
+              "count8": 3074,
+              "peak": 172
+            },
+            "linear-chroma": {
+              "pixels": 93800,
+              "chroma": 118771,
+              "count8": 3059,
+              "peak": 113
+            },
+            "capped-chroma": {
+              "pixels": 93800,
+              "chroma": 109852,
+              "count8": 2711,
+              "peak": 113
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 562800,
+          "chroma": 2522559,
+          "count8": 52324,
+          "peak": 117,
+          "meanLumaDelta": 2.0519967331201214,
+          "maxLumaDelta": 71.32239999999999
+        },
+        "previous": {
+          "pixels": 562800,
+          "chroma": 1157460,
+          "count8": 23215,
+          "peak": 200,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 562800,
+          "chroma": 834427,
+          "count8": 21646,
+          "peak": 117,
+          "meanLumaDelta": 0.031006910092399424,
+          "maxLumaDelta": 8.50399999999999
+        },
+        "capped-chroma": {
+          "pixels": 562800,
+          "chroma": 785072,
+          "count8": 19418,
+          "peak": 117,
+          "meanLumaDelta": 0.0184807565742728,
+          "maxLumaDelta": 0.9318000000000097
+        }
+      }
+    },
+    {
+      "asset": "windows-gdi-125-cleartype",
+      "scenario": "up15",
+      "dpi": 125,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1188,
+            "y": 1132,
+            "width": 1005,
+            "height": 53
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 53265,
+              "chroma": 259185,
+              "count8": 4842,
+              "peak": 130
+            },
+            "previous": {
+              "pixels": 53265,
+              "chroma": 119061,
+              "count8": 2395,
+              "peak": 193
+            },
+            "linear-chroma": {
+              "pixels": 53265,
+              "chroma": 90735,
+              "count8": 2254,
+              "peak": 129
+            },
+            "capped-chroma": {
+              "pixels": 53265,
+              "chroma": 86293,
+              "count8": 2004,
+              "peak": 128
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1188,
+            "y": 1207,
+            "width": 1005,
+            "height": 53
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 53265,
+              "chroma": 236735,
+              "count8": 4865,
+              "peak": 130
+            },
+            "previous": {
+              "pixels": 53265,
+              "chroma": 109787,
+              "count8": 2217,
+              "peak": 178
+            },
+            "linear-chroma": {
+              "pixels": 53265,
+              "chroma": 77200,
+              "count8": 1885,
+              "peak": 118
+            },
+            "capped-chroma": {
+              "pixels": 53265,
+              "chroma": 74011,
+              "count8": 1701,
+              "peak": 118
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1188,
+            "y": 1282,
+            "width": 1005,
+            "height": 53
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 53265,
+              "chroma": 224070,
+              "count8": 4272,
+              "peak": 130
+            },
+            "previous": {
+              "pixels": 53265,
+              "chroma": 86332,
+              "count8": 1680,
+              "peak": 201
+            },
+            "linear-chroma": {
+              "pixels": 53265,
+              "chroma": 65772,
+              "count8": 1615,
+              "peak": 130
+            },
+            "capped-chroma": {
+              "pixels": 53265,
+              "chroma": 61564,
+              "count8": 1428,
+              "peak": 130
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1188,
+            "y": 1357,
+            "width": 1005,
+            "height": 53
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 53265,
+              "chroma": 253721,
+              "count8": 4821,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 53265,
+              "chroma": 124111,
+              "count8": 2392,
+              "peak": 174
+            },
+            "linear-chroma": {
+              "pixels": 53265,
+              "chroma": 95703,
+              "count8": 2267,
+              "peak": 125
+            },
+            "capped-chroma": {
+              "pixels": 53265,
+              "chroma": 89972,
+              "count8": 2056,
+              "peak": 125
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1188,
+            "y": 1432,
+            "width": 1005,
+            "height": 53
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 53265,
+              "chroma": 231770,
+              "count8": 4853,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 53265,
+              "chroma": 106753,
+              "count8": 2186,
+              "peak": 176
+            },
+            "linear-chroma": {
+              "pixels": 53265,
+              "chroma": 75607,
+              "count8": 1909,
+              "peak": 125
+            },
+            "capped-chroma": {
+              "pixels": 53265,
+              "chroma": 71695,
+              "count8": 1713,
+              "peak": 125
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1188,
+            "y": 1507,
+            "width": 1005,
+            "height": 53
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 53265,
+              "chroma": 218411,
+              "count8": 4266,
+              "peak": 125
+            },
+            "previous": {
+              "pixels": 53265,
+              "chroma": 87695,
+              "count8": 1666,
+              "peak": 175
+            },
+            "linear-chroma": {
+              "pixels": 53265,
+              "chroma": 67710,
+              "count8": 1611,
+              "peak": 125
+            },
+            "capped-chroma": {
+              "pixels": 53265,
+              "chroma": 62916,
+              "count8": 1461,
+              "peak": 125
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 319590,
+          "chroma": 1423892,
+          "count8": 27919,
+          "peak": 130,
+          "meanLumaDelta": 1.8160969435839773,
+          "maxLumaDelta": 64.7542
+        },
+        "previous": {
+          "pixels": 319590,
+          "chroma": 633739,
+          "count8": 12536,
+          "peak": 201,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 319590,
+          "chroma": 472727,
+          "count8": 11541,
+          "peak": 130,
+          "meanLumaDelta": 0.03034070653024321,
+          "maxLumaDelta": 8.7166
+        },
+        "capped-chroma": {
+          "pixels": 319590,
+          "chroma": 446451,
+          "count8": 10363,
+          "peak": 130,
+          "meanLumaDelta": 0.01777299101974281,
+          "maxLumaDelta": 0.927800000000019
+        }
+      }
+    },
+    {
+      "asset": "windows-gdi-auto-50-grayscale",
+      "scenario": "up2",
+      "dpi": 50,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1342,
+            "y": 1046,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1342,
+            "y": 1086,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1342,
+            "y": 1126,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1342,
+            "y": 1166,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1342,
+            "y": 1206,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1342,
+            "y": 1246,
+            "width": 536,
+            "height": 28
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15008,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 90048,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 1.8001621357498223,
+          "maxLumaDelta": 55.00000000000003
+        },
+        "previous": {
+          "pixels": 90048,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 90048,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "capped-chroma": {
+          "pixels": 90048,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        }
+      }
+    },
+    {
+      "asset": "windows-gdi-auto-66_667-grayscale",
+      "scenario": "up15",
+      "dpi": 66.66666666666667,
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "light-english",
+            "x": 1921,
+            "y": 984,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-chinese",
+            "x": 1921,
+            "y": 1023,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "light-code",
+            "x": 1921,
+            "y": 1063,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-english",
+            "x": 1921,
+            "y": 1104,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-chinese",
+            "x": 1921,
+            "y": 1143,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        },
+        {
+          "roi": {
+            "id": "dark-code",
+            "x": 1921,
+            "y": 1183,
+            "width": 536,
+            "height": 29
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "previous": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "linear-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            },
+            "capped-chroma": {
+              "pixels": 15544,
+              "chroma": 0,
+              "count8": 0,
+              "peak": 0
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 93264,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 1.7950120089209127,
+          "maxLumaDelta": 68
+        },
+        "previous": {
+          "pixels": 93264,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 93264,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "capped-chroma": {
+          "pixels": 93264,
+          "chroma": 0,
+          "count8": 0,
+          "peak": 0,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        }
+      }
+    },
+    {
+      "asset": "tiktok",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "tiktok",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 157630,
+              "count8": 1772,
+              "peak": 202
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 160717,
+              "count8": 1519,
+              "peak": 220
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 153755,
+              "count8": 1643,
+              "peak": 202
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 146832,
+              "count8": 1513,
+              "peak": 202
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 157630,
+          "count8": 1772,
+          "peak": 202,
+          "meanLumaDelta": 1.5466555772569481,
+          "maxLumaDelta": 30.288600000000002
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 160717,
+          "count8": 1519,
+          "peak": 220,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 153755,
+          "count8": 1643,
+          "peak": 202,
+          "meanLumaDelta": 0.164275412326389,
+          "maxLumaDelta": 3.866000000000014
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 146832,
+          "count8": 1513,
+          "peak": 202,
+          "meanLumaDelta": 0.03612035590277743,
+          "maxLumaDelta": 0.8265999999999849
+        }
+      }
+    },
+    {
+      "asset": "tiktok",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "tiktok",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 157630,
+              "count8": 1772,
+              "peak": 202
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 160717,
+              "count8": 1519,
+              "peak": 220
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 153755,
+              "count8": 1643,
+              "peak": 202
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 146832,
+              "count8": 1513,
+              "peak": 202
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 157630,
+          "count8": 1772,
+          "peak": 202,
+          "meanLumaDelta": 1.5466555772569481,
+          "maxLumaDelta": 30.288600000000002
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 160717,
+          "count8": 1519,
+          "peak": 220,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 153755,
+          "count8": 1643,
+          "peak": 202,
+          "meanLumaDelta": 0.164275412326389,
+          "maxLumaDelta": 3.866000000000014
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 146832,
+          "count8": 1513,
+          "peak": 202,
+          "meanLumaDelta": 0.03612035590277743,
+          "maxLumaDelta": 0.8265999999999849
+        }
+      },
+      "image": "upscale-probe-tiktok-up2-181818.png"
+    },
+    {
+      "asset": "vlc",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "vlc",
+            "x": 1862,
+            "y": 938,
+            "width": 84,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 8064,
+              "chroma": 685708,
+              "count8": 4184,
+              "peak": 255
+            },
+            "previous": {
+              "pixels": 8064,
+              "chroma": 686783,
+              "count8": 4133,
+              "peak": 255
+            },
+            "linear-chroma": {
+              "pixels": 8064,
+              "chroma": 683385,
+              "count8": 4132,
+              "peak": 255
+            },
+            "capped-chroma": {
+              "pixels": 8064,
+              "chroma": 676683,
+              "count8": 4001,
+              "peak": 255
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 8064,
+          "chroma": 685708,
+          "count8": 4184,
+          "peak": 255,
+          "meanLumaDelta": 1.546721651785729,
+          "maxLumaDelta": 21.88600000000001
+        },
+        "previous": {
+          "pixels": 8064,
+          "chroma": 686783,
+          "count8": 4133,
+          "peak": 255,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 8064,
+          "chroma": 683385,
+          "count8": 4132,
+          "peak": 255,
+          "meanLumaDelta": 0.13001121031746052,
+          "maxLumaDelta": 2.6590000000000202
+        },
+        "capped-chroma": {
+          "pixels": 8064,
+          "chroma": 676683,
+          "count8": 4001,
+          "peak": 255,
+          "meanLumaDelta": 0.05008035714285716,
+          "maxLumaDelta": 0.8596000000000288
+        }
+      }
+    },
+    {
+      "asset": "vlc",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "vlc",
+            "x": 1862,
+            "y": 938,
+            "width": 84,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 8064,
+              "chroma": 685649,
+              "count8": 4186,
+              "peak": 255
+            },
+            "previous": {
+              "pixels": 8064,
+              "chroma": 684463,
+              "count8": 4050,
+              "peak": 255
+            },
+            "linear-chroma": {
+              "pixels": 8064,
+              "chroma": 681621,
+              "count8": 4060,
+              "peak": 255
+            },
+            "capped-chroma": {
+              "pixels": 8064,
+              "chroma": 674305,
+              "count8": 3919,
+              "peak": 255
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 8064,
+          "chroma": 685649,
+          "count8": 4186,
+          "peak": 255,
+          "meanLumaDelta": 1.5993200892857242,
+          "maxLumaDelta": 20.5788
+        },
+        "previous": {
+          "pixels": 8064,
+          "chroma": 684463,
+          "count8": 4050,
+          "peak": 255,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 8064,
+          "chroma": 681621,
+          "count8": 4060,
+          "peak": 255,
+          "meanLumaDelta": 0.1253347966269851,
+          "maxLumaDelta": 0.8006000000000029
+        },
+        "capped-chroma": {
+          "pixels": 8064,
+          "chroma": 674305,
+          "count8": 3919,
+          "peak": 255,
+          "meanLumaDelta": 0.055830753968253995,
+          "maxLumaDelta": 0.8137999999999863
+        }
+      },
+      "image": "upscale-probe-vlc-up2-181818.png"
+    },
+    {
+      "asset": "firefox",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "firefox",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 1110763,
+              "count8": 6567,
+              "peak": 238
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 1119209,
+              "count8": 6432,
+              "peak": 242
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 1107061,
+              "count8": 6501,
+              "peak": 238
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 1101333,
+              "count8": 6430,
+              "peak": 238
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 1110763,
+          "count8": 6567,
+          "peak": 238,
+          "meanLumaDelta": 1.6388389322916828,
+          "maxLumaDelta": 26.2624
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 1119209,
+          "count8": 6432,
+          "peak": 242,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 1107061,
+          "count8": 6501,
+          "peak": 238,
+          "meanLumaDelta": 0.19858057725694567,
+          "maxLumaDelta": 4.2923999999999864
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 1101333,
+          "count8": 6430,
+          "peak": 238,
+          "meanLumaDelta": 0.06291028645833302,
+          "maxLumaDelta": 0.7874000000000194
+        }
+      }
+    },
+    {
+      "asset": "firefox",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "firefox",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 1110695,
+              "count8": 6568,
+              "peak": 238
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 1119342,
+              "count8": 6428,
+              "peak": 239
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 1109543,
+              "count8": 6567,
+              "peak": 238
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 1101472,
+              "count8": 6426,
+              "peak": 238
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 1110695,
+          "count8": 6568,
+          "peak": 238,
+          "meanLumaDelta": 1.7975909288195,
+          "maxLumaDelta": 37.1096
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 1119342,
+          "count8": 6428,
+          "peak": 239,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 1109543,
+          "count8": 6567,
+          "peak": 238,
+          "meanLumaDelta": 0.15609882812500053,
+          "maxLumaDelta": 1.8363999999999692
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 1101472,
+          "count8": 6426,
+          "peak": 238,
+          "meanLumaDelta": 0.06520772569444405,
+          "maxLumaDelta": 0.8596000000000288
+        }
+      }
+    },
+    {
+      "asset": "git",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "git",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 819166,
+              "count8": 5093,
+              "peak": 194
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 820413,
+              "count8": 4902,
+              "peak": 200
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 813364,
+              "count8": 4932,
+              "peak": 194
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 808974,
+              "count8": 4902,
+              "peak": 194
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 819166,
+          "count8": 5093,
+          "peak": 194,
+          "meanLumaDelta": 1.865899283854146,
+          "maxLumaDelta": 22.616799999999984
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 820413,
+          "count8": 4902,
+          "peak": 200,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 813364,
+          "count8": 4932,
+          "peak": 194,
+          "meanLumaDelta": 0.19315462239583409,
+          "maxLumaDelta": 4.371400000000023
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 808974,
+          "count8": 4902,
+          "peak": 194,
+          "meanLumaDelta": 0.047918684895832696,
+          "maxLumaDelta": 0.7874000000000194
+        }
+      }
+    },
+    {
+      "asset": "git",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "git",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 818986,
+              "count8": 5090,
+              "peak": 194
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 820981,
+              "count8": 4900,
+              "peak": 199
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 819032,
+              "count8": 5093,
+              "peak": 194
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 809231,
+              "count8": 4900,
+              "peak": 194
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 818986,
+          "count8": 5090,
+          "peak": 194,
+          "meanLumaDelta": 0.8625268880208175,
+          "maxLumaDelta": 10.170600000000007
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 820981,
+          "count8": 4900,
+          "peak": 199,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 819032,
+          "count8": 5093,
+          "peak": 194,
+          "meanLumaDelta": 0.09338496093749933,
+          "maxLumaDelta": 0.8320000000000043
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 809231,
+          "count8": 4900,
+          "peak": 194,
+          "meanLumaDelta": 0.05249544270833363,
+          "maxLumaDelta": 0.8109999999999928
+        }
+      }
+    },
+    {
+      "asset": "vscode",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "vscode",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 1000274,
+              "count8": 5706,
+              "peak": 213
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 999910,
+              "count8": 5519,
+              "peak": 219
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 998045,
+              "count8": 5634,
+              "peak": 213
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 990675,
+              "count8": 5517,
+              "peak": 213
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 1000274,
+          "count8": 5706,
+          "peak": 213,
+          "meanLumaDelta": 1.5096100911458417,
+          "maxLumaDelta": 26.3724
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 999910,
+          "count8": 5519,
+          "peak": 219,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 998045,
+          "count8": 5634,
+          "peak": 213,
+          "meanLumaDelta": 0.10100351562499842,
+          "maxLumaDelta": 1.4881999999999778
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 990675,
+          "count8": 5517,
+          "peak": 213,
+          "meanLumaDelta": 0.042193120659721854,
+          "maxLumaDelta": 0.7965999999999838
+        }
+      }
+    },
+    {
+      "asset": "vscode",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "vscode",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 1000233,
+              "count8": 5712,
+              "peak": 213
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 1000368,
+              "count8": 5519,
+              "peak": 216
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 999968,
+              "count8": 5708,
+              "peak": 213
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 990956,
+              "count8": 5517,
+              "peak": 213
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 1000233,
+          "count8": 5712,
+          "peak": 213,
+          "meanLumaDelta": 1.0012873046874944,
+          "maxLumaDelta": 16.61039999999999
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 1000368,
+          "count8": 5519,
+          "peak": 216,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 999968,
+          "count8": 5708,
+          "peak": 213,
+          "meanLumaDelta": 0.0832129774305548,
+          "maxLumaDelta": 0.8464000000000027
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 990956,
+          "count8": 5517,
+          "peak": 213,
+          "meanLumaDelta": 0.04054427083333338,
+          "maxLumaDelta": 0.8464000000000027
+        }
+      }
+    },
+    {
+      "asset": "rainbow-flag",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "rainbow-flag",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 1155091,
+              "count8": 6990,
+              "peak": 255
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 1154824,
+              "count8": 6821,
+              "peak": 255
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 1150406,
+              "count8": 6972,
+              "peak": 255
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 1145057,
+              "count8": 6821,
+              "peak": 255
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 1155091,
+          "count8": 6990,
+          "peak": 255,
+          "meanLumaDelta": 1.929096267361143,
+          "maxLumaDelta": 28.23059999999999
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 1154824,
+          "count8": 6821,
+          "peak": 255,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 1150406,
+          "count8": 6972,
+          "peak": 255,
+          "meanLumaDelta": 0.20406805555555735,
+          "maxLumaDelta": 5.367399999999975
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 1145057,
+          "count8": 6821,
+          "peak": 255,
+          "meanLumaDelta": 0.05293771701388904,
+          "maxLumaDelta": 0.7886000000000024
+        }
+      }
+    },
+    {
+      "asset": "rainbow-flag",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "rainbow-flag",
+            "x": 1856,
+            "y": 938,
+            "width": 96,
+            "height": 96
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 9216,
+              "chroma": 1155734,
+              "count8": 6990,
+              "peak": 255
+            },
+            "previous": {
+              "pixels": 9216,
+              "chroma": 1156004,
+              "count8": 6821,
+              "peak": 255
+            },
+            "linear-chroma": {
+              "pixels": 9216,
+              "chroma": 1154678,
+              "count8": 6992,
+              "peak": 255
+            },
+            "capped-chroma": {
+              "pixels": 9216,
+              "chroma": 1145515,
+              "count8": 6821,
+              "peak": 255
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 9216,
+          "chroma": 1155734,
+          "count8": 6990,
+          "peak": 255,
+          "meanLumaDelta": 0.8592090277777581,
+          "maxLumaDelta": 8.186200000000014
+        },
+        "previous": {
+          "pixels": 9216,
+          "chroma": 1156004,
+          "count8": 6821,
+          "peak": 255,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 9216,
+          "chroma": 1154678,
+          "count8": 6992,
+          "peak": 255,
+          "meanLumaDelta": 0.12930154079860964,
+          "maxLumaDelta": 0.8544000000000018
+        },
+        "capped-chroma": {
+          "pixels": 9216,
+          "chroma": 1145515,
+          "count8": 6821,
+          "peak": 255,
+          "meanLumaDelta": 0.05442560763888989,
+          "maxLumaDelta": 0.7685999999999922
+        }
+      }
+    },
+    {
+      "asset": "astronaut",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#ffffff",
+      "rois": [
+        {
+          "roi": {
+            "id": "astronaut",
+            "x": 1872,
+            "y": 664,
+            "width": 512,
+            "height": 512
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 262144,
+              "chroma": 12965899,
+              "count8": 197247,
+              "peak": 182
+            },
+            "previous": {
+              "pixels": 262144,
+              "chroma": 12938588,
+              "count8": 194475,
+              "peak": 184
+            },
+            "linear-chroma": {
+              "pixels": 262144,
+              "chroma": 12926583,
+              "count8": 194510,
+              "peak": 182
+            },
+            "capped-chroma": {
+              "pixels": 262144,
+              "chroma": 12815369,
+              "count8": 193090,
+              "peak": 181
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 262144,
+          "chroma": 12965899,
+          "count8": 197247,
+          "peak": 182,
+          "meanLumaDelta": 1.682678846740417,
+          "maxLumaDelta": 47.57079999999999
+        },
+        "previous": {
+          "pixels": 262144,
+          "chroma": 12938588,
+          "count8": 194475,
+          "peak": 184,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 262144,
+          "chroma": 12926583,
+          "count8": 194510,
+          "peak": 182,
+          "meanLumaDelta": 0.12692452239984672,
+          "maxLumaDelta": 2.6193999999999997
+        },
+        "capped-chroma": {
+          "pixels": 262144,
+          "chroma": 12815369,
+          "count8": 193090,
+          "peak": 181,
+          "meanLumaDelta": 0.05292421035767659,
+          "maxLumaDelta": 0.9278
+        }
+      }
+    },
+    {
+      "asset": "astronaut",
+      "scenario": "up2",
+      "motion": [
+        0,
+        0
+      ],
+      "background": "#181818",
+      "rois": [
+        {
+          "roi": {
+            "id": "astronaut",
+            "x": 1872,
+            "y": 664,
+            "width": 512,
+            "height": 512
+          },
+          "stats": {
+            "sbms": {
+              "pixels": 262144,
+              "chroma": 12965899,
+              "count8": 197247,
+              "peak": 182
+            },
+            "previous": {
+              "pixels": 262144,
+              "chroma": 12938588,
+              "count8": 194475,
+              "peak": 184
+            },
+            "linear-chroma": {
+              "pixels": 262144,
+              "chroma": 12926583,
+              "count8": 194510,
+              "peak": 182
+            },
+            "capped-chroma": {
+              "pixels": 262144,
+              "chroma": 12815369,
+              "count8": 193090,
+              "peak": 181
+            }
+          }
+        }
+      ],
+      "metrics": {
+        "sbms": {
+          "pixels": 262144,
+          "chroma": 12965899,
+          "count8": 197247,
+          "peak": 182,
+          "meanLumaDelta": 1.682678846740417,
+          "maxLumaDelta": 47.57079999999999
+        },
+        "previous": {
+          "pixels": 262144,
+          "chroma": 12938588,
+          "count8": 194475,
+          "peak": 184,
+          "meanLumaDelta": 0,
+          "maxLumaDelta": 0
+        },
+        "linear-chroma": {
+          "pixels": 262144,
+          "chroma": 12926583,
+          "count8": 194510,
+          "peak": 182,
+          "meanLumaDelta": 0.12692452239984672,
+          "maxLumaDelta": 2.6193999999999997
+        },
+        "capped-chroma": {
+          "pixels": 262144,
+          "chroma": 12815369,
+          "count8": 193090,
+          "peak": 181,
+          "meanLumaDelta": 0.05292421035767659,
+          "maxLumaDelta": 0.9278
+        }
+      }
+    }
+  ],
+  "errors": []
+}
