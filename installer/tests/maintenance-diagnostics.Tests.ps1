@@ -47,6 +47,7 @@ Describe 'Maintenance failure diagnostics' {
         $source | Should Match '@LogMaintenanceOutput'
         $source | Should Match '\{commonappdata\}\\SBMS\\logs\\setup-'
         $source | Should Match '''Details: '' \+ MaintenanceLogPath'
-        $source | Should Not Match '-ExecutionPolicy'
+        $source | Should Match '-NonInteractive -ExecutionPolicy Bypass -File'
+        $source | Should Not Match 'Set-ExecutionPolicy'
     }
 }
