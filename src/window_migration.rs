@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    HMONITOR, MONITOR_DEFAULTTONULL, MonitorFromRect, MonitorFromWindow,
+    GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromRect,
+    MonitorFromWindow,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetClassNameW, GetDesktopWindow, GetShellWindow, GetWindowLongPtrW,
     GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
@@ -45,6 +47,9 @@ struct WindowSnapshot {
     thread_id: u32,
     class_name: String,
     placement: WINDOWPLACEMENT,
+    normal_anchor: Option<NormalAnchor>,
+    tool_window: bool,
+    restore_target: Option<RECT>,
     outer_rect: RECT,
     maximized: bool,
     moved: bool,
@@ -146,6 +151,7 @@ impl WindowMigration {
             if !claim_window(migration_id, identity.clone()) {
                 continue;
             }
+            log_window_state("snapshot", &entry, Some(target.rect));
             let result = move_entry(&mut entry, target.rect, source.rect);
             if entry.moved {
                 entries.push(entry);
@@ -251,7 +257,7 @@ impl WindowMigration {
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        shift_saved_rectangles(&mut entries, dx, dy)?;
+        shift_saved_rectangles(&mut entries, dx, dy, &placement_displays()?)?;
         drop(entries);
         self.target_rect = target.rect;
         self.stop_scanner = Arc::new(AtomicBool::new(false));
@@ -275,7 +281,9 @@ impl WindowMigration {
 
     pub fn restore(&mut self) -> Result<(), String> {
         self.prepare_restore();
-        let mut errors = std::mem::take(&mut self.scanner_errors);
+        // A successful final reconcile may supersede an intermediate move
+        // failure, but it must still report errors from the background scanner.
+        let mut errors = self.scanner_errors.clone();
         let mut entries = match self.entries.lock() {
             Ok(entries) => entries,
             Err(poisoned) => {
@@ -284,6 +292,8 @@ impl WindowMigration {
             }
         };
         for entry in entries.iter_mut().rev() {
+            let target_rect = entry.restore_target.unwrap_or(self.target_rect);
+            log_window_state("restore-before", entry, Some(target_rect));
             if !entry.moved {
                 continue;
             }
@@ -292,7 +302,7 @@ impl WindowMigration {
                 continue;
             }
             if entry.maximized {
-                if let Err(error) = restore_maximized(entry, self.target_rect) {
+                if let Err(error) = restore_maximized(entry, target_rect) {
                     errors.push(error);
                 } else {
                     entry.moved = false;
@@ -321,13 +331,20 @@ impl WindowMigration {
                     break;
                 }
             }
-            if exact && wait_for_monitor(entry, self.target_rect) {
+            if exact && wait_for_monitor(entry, target_rect) {
                 entry.moved = false;
             } else {
                 errors.push(describe(entry, "window placement was not restored"));
             }
         }
 
+        for entry in entries.iter() {
+            log_window_state(
+                "restore-after",
+                entry,
+                Some(entry.restore_target.unwrap_or(self.target_rect)),
+            );
+        }
         release_owner_claims(self.migration_id);
         self.restore_on_drop = false;
         if errors.is_empty() {
@@ -341,9 +358,25 @@ impl WindowMigration {
         &mut self,
         target: Option<&Display>,
     ) -> Result<(), String> {
-        let target = target.ok_or_else(|| {
-            "restored target display could not be resolved by stable ID".to_string()
-        })?;
+        let target_missing = target.is_none();
+        let fallback_displays;
+        let target = if let Some(target) = target {
+            target
+        } else {
+            fallback_displays =
+                crate::display::active_display_topology().map_err(|error| error.to_string())?;
+            crate::diagnostics::log(
+                crate::diagnostics::Level::Warn,
+                "windows",
+                "target-default",
+                None,
+                "Saved target display is unavailable; restoring windows to the primary display",
+            );
+            fallback_displays
+                .iter()
+                .find(|display| display.primary)
+                .ok_or("restored target and primary display are unavailable")?
+        };
         let dx = target
             .rect
             .left
@@ -364,16 +397,31 @@ impl WindowMigration {
                 poisoned.into_inner()
             }
         };
-        shift_saved_rectangles(&mut entries, dx, dy)?;
+        let displays = placement_displays()?;
+        shift_saved_rectangles(&mut entries, dx, dy, &displays)?;
+        if target_missing {
+            let work = displays
+                .iter()
+                .find(|display| display.id == target.id)
+                .ok_or("primary display work area is unavailable")?
+                .work;
+            for entry in entries.iter_mut().filter(|entry| entry.maximized) {
+                // The old maximized size may span adjacent monitors after its
+                // display disappears. Seed maximize inside the new work area.
+                entry.outer_rect = work;
+            }
+        }
         self.target_rect = target.rect;
 
         for entry in entries.iter_mut().rev() {
+            let target_rect = entry.restore_target.unwrap_or(self.target_rect);
+            log_window_state("reconcile-before", entry, Some(target_rect));
             if !same_window(entry) {
                 entry.moved = false;
                 continue;
             }
             if entry.maximized {
-                if let Err(error) = restore_maximized(entry, self.target_rect) {
+                if let Err(error) = restore_maximized(entry, target_rect) {
                     errors.push(error);
                 } else {
                     entry.moved = false;
@@ -427,7 +475,7 @@ impl WindowMigration {
             }
 
             if !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
-                || !wait_for_monitor(entry, self.target_rect)
+                || !wait_for_monitor(entry, target_rect)
             {
                 // Some app frameworks retain their virtual-display rectangle
                 // after the physical topology returns even though placement APIs
@@ -460,7 +508,7 @@ impl WindowMigration {
                     errors.push(error);
                     continue;
                 }
-                if !wait_for_monitor(entry, self.target_rect) {
+                if !wait_for_monitor(entry, target_rect) {
                     errors.push(describe(
                         entry,
                         "final fallback move missed the target monitor",
@@ -484,7 +532,7 @@ impl WindowMigration {
                     wait_for_window_state(entry, false) && wait_for_zoomed_state(entry, false);
                 if !state_restored
                     || !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
-                    || !wait_for_monitor(entry, self.target_rect)
+                    || !wait_for_monitor(entry, target_rect)
                 {
                     errors.push(describe(entry, "final window placement was not restored"));
                     continue;
@@ -493,6 +541,13 @@ impl WindowMigration {
             entry.moved = false;
         }
 
+        for entry in entries.iter() {
+            log_window_state(
+                "reconcile-after",
+                entry,
+                Some(entry.restore_target.unwrap_or(self.target_rect)),
+            );
+        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -501,19 +556,280 @@ impl WindowMigration {
     }
 }
 
-fn shift_saved_rectangles(entries: &mut [WindowSnapshot], dx: i32, dy: i32) -> Result<(), String> {
-    let shifted: Result<Vec<(RECT, RECT)>, String> = entries
+#[derive(Clone, Debug)]
+struct PlacementDisplay {
+    id: String,
+    rect: RECT,
+    work: RECT,
+    primary: bool,
+}
+
+#[derive(Clone, Debug)]
+struct NormalAnchor {
+    display_id: String,
+    origin: POINT,
+    defaulted: bool,
+}
+
+impl PlacementDisplay {
+    // WINDOWPLACEMENT uses workspace coordinates, except for tool windows.
+    fn origin(&self, tool_window: bool) -> POINT {
+        POINT {
+            x: self.rect.left
+                - if tool_window {
+                    0
+                } else {
+                    self.work.left - self.rect.left
+                },
+            y: self.rect.top
+                - if tool_window {
+                    0
+                } else {
+                    self.work.top - self.rect.top
+                },
+        }
+    }
+}
+
+fn placement_displays() -> Result<Vec<PlacementDisplay>, String> {
+    crate::display::active_display_topology()
+        .map_err(|error| format!("could not resolve window placement displays: {error}"))?
+        .into_iter()
+        .map(|display| {
+            let monitor = monitor_for_rect(display.rect, "window placement")?;
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+                return Err(format!("could not read work area for {}", display.id));
+            }
+            Ok(PlacementDisplay {
+                id: display.id,
+                rect: info.rcMonitor,
+                work: info.rcWork,
+                primary: display.primary,
+            })
+        })
+        .collect()
+}
+
+fn normal_anchor(
+    rect: RECT,
+    tool_window: bool,
+    displays: &[PlacementDisplay],
+) -> Result<NormalAnchor, String> {
+    if !normal_is_visible(rect, tool_window, displays) {
+        return Ok(NormalAnchor {
+            display_id: String::new(),
+            origin: POINT::default(),
+            defaulted: true,
+        });
+    }
+    let display = displays
+        .iter()
+        .max_by_key(|display| {
+            let origin = display.origin(tool_window);
+            let right =
+                i64::from(origin.x) + i64::from(display.rect.right) - i64::from(display.rect.left);
+            let bottom =
+                i64::from(origin.y) + i64::from(display.rect.bottom) - i64::from(display.rect.top);
+            let width = (i64::from(rect.right).min(right)
+                - i64::from(rect.left).max(i64::from(origin.x)))
+            .max(0);
+            let height = (i64::from(rect.bottom).min(bottom)
+                - i64::from(rect.top).max(i64::from(origin.y)))
+            .max(0);
+            width * height
+        })
+        .ok_or_else(|| "no display for saved normal rectangle".to_string())?;
+    Ok(NormalAnchor {
+        display_id: display.id.clone(),
+        origin: display.origin(tool_window),
+        defaulted: false,
+    })
+}
+
+fn rebase_normal(
+    rect: RECT,
+    anchor: &NormalAnchor,
+    tool_window: bool,
+    displays: &[PlacementDisplay],
+) -> Result<(RECT, NormalAnchor), String> {
+    let Some(display) = displays
+        .iter()
+        .find(|display| display.id == anchor.display_id)
+    else {
+        return default_normal(
+            rect,
+            tool_window,
+            displays,
+            "saved display is no longer active",
+        );
+    };
+    let origin = display.origin(tool_window);
+    let dx = origin
+        .x
+        .checked_sub(anchor.origin.x)
+        .ok_or("normal rectangle horizontal offset overflowed")?;
+    let dy = origin
+        .y
+        .checked_sub(anchor.origin.y)
+        .ok_or("normal rectangle vertical offset overflowed")?;
+    let shifted = offset_rect(rect, dx, dy)?;
+    if !normal_is_visible(shifted, tool_window, displays) {
+        return default_normal(
+            rect,
+            tool_window,
+            displays,
+            "saved rectangle is outside all work areas",
+        );
+    }
+    Ok((
+        shifted,
+        NormalAnchor {
+            display_id: anchor.display_id.clone(),
+            origin,
+            defaulted: false,
+        },
+    ))
+}
+
+fn normal_is_visible(rect: RECT, tool_window: bool, displays: &[PlacementDisplay]) -> bool {
+    displays.iter().any(|display| {
+        let inset_x = if tool_window {
+            0
+        } else {
+            display.work.left - display.rect.left
+        };
+        let inset_y = if tool_window {
+            0
+        } else {
+            display.work.top - display.rect.top
+        };
+        i64::from(rect.left) + i64::from(inset_x) < i64::from(display.work.right)
+            && i64::from(rect.right) + i64::from(inset_x) > i64::from(display.work.left)
+            && i64::from(rect.top) + i64::from(inset_y) < i64::from(display.work.bottom)
+            && i64::from(rect.bottom) + i64::from(inset_y) > i64::from(display.work.top)
+            && rect.right > rect.left
+            && rect.bottom > rect.top
+    })
+}
+
+fn default_normal(
+    rect: RECT,
+    tool_window: bool,
+    displays: &[PlacementDisplay],
+    reason: &str,
+) -> Result<(RECT, NormalAnchor), String> {
+    let display = displays
+        .iter()
+        .find(|display| display.primary)
+        .ok_or("no active primary display for default window placement")?;
+    let available_width = i64::from(display.work.right) - i64::from(display.work.left);
+    let available_height = i64::from(display.work.bottom) - i64::from(display.work.top);
+    if available_width <= 0 || available_height <= 0 {
+        return Err("primary display has no usable work area".into());
+    }
+    let saved_width = i64::from(rect.right) - i64::from(rect.left);
+    let width = if saved_width > 0 {
+        saved_width.min(available_width)
+    } else {
+        (available_width * 2 / 3).max(1)
+    };
+    let saved_height = i64::from(rect.bottom) - i64::from(rect.top);
+    let height = if saved_height > 0 {
+        saved_height.min(available_height)
+    } else {
+        (available_height * 2 / 3).max(1)
+    };
+    let left = i64::from(if tool_window {
+        display.work.left
+    } else {
+        display.rect.left
+    }) + (available_width - width) / 2;
+    let top = i64::from(if tool_window {
+        display.work.top
+    } else {
+        display.rect.top
+    }) + (available_height - height) / 2;
+    let result = RECT {
+        left: left as i32,
+        top: top as i32,
+        right: (left + width) as i32,
+        bottom: (top + height) as i32,
+    };
+    crate::diagnostics::log(
+        crate::diagnostics::Level::Warn,
+        "windows",
+        "placement-default",
+        None,
+        format!(
+            "{reason}; saved={rect:?}; primary={}; default={result:?}",
+            display.id
+        ),
+    );
+    Ok((
+        result,
+        NormalAnchor {
+            display_id: display.id.clone(),
+            origin: display.origin(tool_window),
+            defaulted: true,
+        },
+    ))
+}
+
+fn shift_saved_rectangles(
+    entries: &mut [WindowSnapshot],
+    dx: i32,
+    dy: i32,
+    displays: &[PlacementDisplay],
+) -> Result<(), String> {
+    let shifted: Result<Vec<_>, String> = entries
         .iter()
         .map(|entry| {
-            Ok((
-                offset_rect(entry.outer_rect, dx, dy)?,
-                offset_rect(entry.placement.rcNormalPosition, dx, dy)?,
-            ))
+            let anchor = entry
+                .normal_anchor
+                .as_ref()
+                .ok_or("saved normal rectangle has no display anchor")?;
+            let (normal_rect, anchor) = rebase_normal(
+                entry.placement.rcNormalPosition,
+                anchor,
+                entry.tool_window,
+                displays,
+            )?;
+            let mut outer = offset_rect(entry.outer_rect, dx, dy)?;
+            let mut restore_target = None;
+            if !entry.maximized && (anchor.defaulted || entry.restore_target.is_some()) {
+                let display = displays
+                    .iter()
+                    .find(|display| display.id == anchor.display_id)
+                    .ok_or("default window display is unavailable")?;
+                outer = offset_rect(
+                    normal_rect,
+                    if entry.tool_window {
+                        0
+                    } else {
+                        display.work.left - display.rect.left
+                    },
+                    if entry.tool_window {
+                        0
+                    } else {
+                        display.work.top - display.rect.top
+                    },
+                )?;
+                restore_target = Some(display.rect);
+            }
+            Ok((outer, normal_rect, anchor, restore_target))
         })
         .collect();
-    for (entry, (outer_rect, normal_rect)) in entries.iter_mut().zip(shifted?) {
+    for (entry, (outer_rect, normal_rect, anchor, restore_target)) in
+        entries.iter_mut().zip(shifted?)
+    {
         entry.outer_rect = outer_rect;
         entry.placement.rcNormalPosition = normal_rect;
+        entry.normal_anchor = Some(anchor);
+        entry.restore_target = restore_target;
     }
     Ok(())
 }
@@ -617,6 +933,7 @@ fn spawn_scanner(
                         }
                         continue;
                     }
+                    log_window_state("snapshot", &candidate, Some(target_rect));
                     let result = move_entry(&mut candidate, target_rect, source_rect);
                     if candidate.moved {
                         tracked.push(candidate);
@@ -657,6 +974,16 @@ fn enumerate_target_windows(target_monitor: HMONITOR) -> Result<Vec<WindowSnapsh
         return Err(error);
     }
     result.map_err(|error| format!("EnumWindows failed: {error}"))?;
+    if !enumeration.entries.is_empty() {
+        let displays = placement_displays()?;
+        for entry in &mut enumeration.entries {
+            entry.normal_anchor = Some(normal_anchor(
+                entry.placement.rcNormalPosition,
+                entry.tool_window,
+                &displays,
+            )?);
+        }
+    }
     Ok(enumeration.entries)
 }
 
@@ -741,16 +1068,20 @@ fn snapshot_window(
         format!("GetWindowPlacement failed for pid {pid} class {class_name}: {error}")
     })?;
 
-    Ok(Some(WindowSnapshot {
+    let snapshot = WindowSnapshot {
         hwnd,
         pid,
         thread_id,
         class_name,
         placement,
+        normal_anchor: None,
+        tool_window: extended_style & WS_EX_TOOLWINDOW.0 != 0,
+        restore_target: None,
         outer_rect,
         maximized: unsafe { IsZoomed(hwnd) }.as_bool(),
         moved: false,
-    }))
+    };
+    Ok(Some(snapshot))
 }
 
 fn move_entry(
@@ -944,13 +1275,30 @@ fn translated_rect(
 }
 
 fn restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), String> {
+    // The preliminary restore may already have succeeded and survived the
+    // topology change. Do not unmaximize and move an already restored window.
+    let target_monitor = monitor_for_rect(target_rect, "restore target")?;
+    if window_placement(entry).is_ok_and(|placement| {
+        maximized_state_matches(
+            unsafe { IsZoomed(entry.hwnd) }.as_bool(),
+            unsafe { IsIconic(entry.hwnd) }.as_bool(),
+            unsafe { MonitorFromWindow(entry.hwnd, MONITOR_DEFAULTTONULL) } == target_monitor,
+            placement.rcNormalPosition,
+            entry.placement.rcNormalPosition,
+        )
+    }) {
+        log_window_state("restore-already-matched", entry, Some(target_rect));
+        return Ok(());
+    }
+    log_window_state("restore-move-required", entry, Some(target_rect));
     unsafe {
         let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
     }
     if !wait_for_zoomed_state(entry, false) {
-        return Err(describe(
+        return Err(describe_restore_state(
             entry,
             "maximized window could not be restored for migration",
+            target_rect,
         ));
     }
     set_window_rect(
@@ -961,26 +1309,35 @@ fn restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), St
         entry.outer_rect.bottom - entry.outer_rect.top,
     )
     .map_err(|error| {
-        describe(
+        describe_restore_state(
             entry,
             &format!("maximized window return move failed: {error}"),
+            target_rect,
         )
     })?;
     if !wait_for_monitor(entry, target_rect) {
-        return Err(describe(
+        return Err(describe_restore_state(
             entry,
             "maximized window did not return to its original monitor",
+            target_rect,
         ));
-    }
-    // Maximize on the original monitor before restoring rcNormalPosition:
+    } // Maximize on the original monitor before restoring rcNormalPosition:
     // the saved normal rectangle is allowed to belong to a different monitor.
     unsafe {
         let _ = ShowWindowAsync(entry.hwnd, SHOW_WINDOW_CMD(entry.placement.showCmd as i32));
     }
-    if !wait_for_zoomed_state(entry, true) || !wait_for_monitor(entry, target_rect) {
-        return Err(describe(
+    if !wait_for_zoomed_state(entry, true) {
+        return Err(describe_restore_state(
             entry,
-            "window did not maximize on its original monitor",
+            "window did not maximize after its return move",
+            target_rect,
+        ));
+    }
+    if !wait_for_monitor(entry, target_rect) {
+        return Err(describe_restore_state(
+            entry,
+            "maximized window left its original monitor",
+            target_rect,
         ));
     }
     unsafe { SetWindowPlacement(entry.hwnd, &entry.placement) }.map_err(|error| {
@@ -989,13 +1346,78 @@ fn restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), St
             &format!("maximized placement restore failed: {error}"),
         )
     })?;
-    if !wait_for_zoomed_state(entry, true)
-        || !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
-        || !wait_for_monitor(entry, target_rect)
-    {
-        return Err(describe(entry, "maximized window state was not restored"));
+    if !wait_for_zoomed_state(entry, true) {
+        return Err(describe_restore_state(
+            entry,
+            "saved placement did not preserve maximization",
+            target_rect,
+        ));
+    }
+    if !wait_for_normal_rect(entry, entry.placement.rcNormalPosition) {
+        return Err(describe_restore_state(
+            entry,
+            "saved normal rectangle was not restored",
+            target_rect,
+        ));
+    }
+    if !wait_for_monitor(entry, target_rect) {
+        return Err(describe_restore_state(
+            entry,
+            "saved placement moved the maximized window off its original monitor",
+            target_rect,
+        ));
     }
     Ok(())
+}
+
+fn maximized_state_matches(
+    zoomed: bool,
+    iconic: bool,
+    on_target: bool,
+    actual_normal: RECT,
+    saved_normal: RECT,
+) -> bool {
+    zoomed && !iconic && on_target && actual_normal == saved_normal
+}
+
+fn log_window_state(stage: &str, entry: &WindowSnapshot, target_rect: Option<RECT>) {
+    crate::diagnostics::log(
+        crate::diagnostics::Level::Debug,
+        "windows",
+        stage,
+        None,
+        format!(
+            "host-pid={} pid={} hwnd={:?} class={} target={target_rect:?} saved-outer={:?} saved-normal={:?} normal-anchor={:?} saved-maximized={} moved={} same-window={} actual-outer={:?} actual-placement={:?} zoomed={} iconic={} dpi={}",
+            std::process::id(),
+            entry.pid,
+            entry.hwnd,
+            entry.class_name,
+            entry.outer_rect,
+            entry.placement.rcNormalPosition,
+            entry.normal_anchor,
+            entry.maximized,
+            entry.moved,
+            same_window(entry),
+            current_rect(entry),
+            window_placement(entry),
+            unsafe { IsZoomed(entry.hwnd) }.as_bool(),
+            unsafe { IsIconic(entry.hwnd) }.as_bool(),
+            unsafe { GetDpiForWindow(entry.hwnd) },
+        ),
+    );
+}
+
+fn describe_restore_state(entry: &WindowSnapshot, message: &str, target_rect: RECT) -> String {
+    describe(
+        entry,
+        &format!(
+            "{message}; target={target_rect:?}; saved-normal={:?}; actual-outer={:?}; actual-placement={:?}; zoomed={}",
+            entry.placement.rcNormalPosition,
+            current_rect(entry),
+            window_placement(entry),
+            unsafe { IsZoomed(entry.hwnd) }.as_bool(),
+        ),
+    )
 }
 
 fn wait_for_normal_rect(entry: &WindowSnapshot, expected: RECT) -> bool {
@@ -1207,6 +1629,203 @@ mod tests {
         }
     }
 
+    fn placement_display(
+        id: &str,
+        left: i32,
+        top: i32,
+        width: i32,
+        height: i32,
+        top_inset: i32,
+    ) -> super::PlacementDisplay {
+        super::PlacementDisplay {
+            id: id.into(),
+            primary: left == 0 && top == 0,
+            rect: RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            },
+            work: RECT {
+                left,
+                top: top + top_inset,
+                right: left + width,
+                bottom: top + height,
+            },
+        }
+    }
+
+    #[test]
+    fn firefox_normal_follows_g27k_instead_of_maximized_internal_screen() {
+        let before = [
+            placement_display("g27k", 0, 0, 3840, 2160, 0),
+            placement_display("internal", -2880, -1416, 2880, 1800, 0),
+        ];
+        let after = [
+            placement_display("g27k", -447, -2160, 3840, 2160, 0),
+            placement_display("internal", 0, 0, 2880, 1800, 0),
+        ];
+        let normal = RECT {
+            left: 1069,
+            top: 0,
+            right: 2891,
+            bottom: 1706,
+        };
+        let anchor = super::normal_anchor(normal, false, &before).unwrap();
+        assert_eq!(anchor.display_id, "g27k");
+        let (shifted, next) = super::rebase_normal(normal, &anchor, false, &after).unwrap();
+        assert_eq!(
+            shifted,
+            RECT {
+                left: 622,
+                top: -2160,
+                right: 2444,
+                bottom: -454
+            }
+        );
+        assert_eq!(
+            super::rebase_normal(shifted, &next, false, &before)
+                .unwrap()
+                .0,
+            normal
+        );
+        let on_internal = RECT {
+            left: -2879,
+            top: -1415,
+            right: -1,
+            bottom: 287,
+        };
+        let anchor = super::normal_anchor(on_internal, false, &before).unwrap();
+        assert_eq!(anchor.display_id, "internal");
+        assert_eq!(
+            super::rebase_normal(on_internal, &anchor, false, &after)
+                .unwrap()
+                .0,
+            RECT {
+                left: 1,
+                top: 1,
+                right: 2879,
+                bottom: 1703
+            }
+        );
+    }
+
+    #[test]
+    fn normal_anchor_accounts_for_taskbar_workspace_but_not_tool_windows() {
+        let before = [placement_display("screen", 0, 0, 1920, 1080, 40)];
+        let after = [placement_display("screen", -1920, 100, 1920, 1080, 60)];
+        let normal = RECT {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 700,
+        };
+        for (tool_window, expected_top) in [(false, 180), (true, 200)] {
+            let anchor = super::normal_anchor(normal, tool_window, &before).unwrap();
+            let (shifted, _) = super::rebase_normal(normal, &anchor, tool_window, &after).unwrap();
+            assert_eq!(shifted.left, -1820);
+            assert_eq!(shifted.top, expected_top);
+            assert_eq!(shifted.bottom - shifted.top, 600);
+        }
+        let mut left_before = before;
+        let mut left_after = after;
+        left_before[0].work.left += 30;
+        left_after[0].work.left += 50;
+        for (tool_window, expected_left) in [(false, -1840), (true, -1820)] {
+            let anchor = super::normal_anchor(normal, tool_window, &left_before).unwrap();
+            let (shifted, _) =
+                super::rebase_normal(normal, &anchor, tool_window, &left_after).unwrap();
+            assert_eq!(shifted.left, expected_left);
+        }
+    }
+
+    #[test]
+    fn vanished_normal_display_returns_to_primary_work_area() {
+        let before = [placement_display("normal", 0, 0, 1920, 1080, 0)];
+        let after = [placement_display("maximized", 0, 0, 1920, 1080, 0)];
+        let normal = RECT {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 700,
+        };
+        let anchor = super::normal_anchor(normal, false, &before).unwrap();
+        let (actual, anchor) = super::rebase_normal(normal, &anchor, false, &after).unwrap();
+        assert_eq!(
+            actual,
+            RECT {
+                left: 560,
+                top: 240,
+                right: 1360,
+                bottom: 840
+            }
+        );
+        assert_eq!(anchor.display_id, "maximized");
+    }
+
+    #[test]
+    fn invalid_normal_returns_visible_default_and_updates_nonmaximized_outer() {
+        let displays = [placement_display("primary", 0, 0, 1920, 1080, 40)];
+        let invalid = RECT {
+            left: 9000,
+            top: 9000,
+            right: 9000,
+            bottom: 9000,
+        };
+        let anchor = super::normal_anchor(invalid, false, &displays).unwrap();
+        assert!(anchor.display_id.is_empty());
+        let mut entries = [super::WindowSnapshot {
+            hwnd: super::HWND::default(),
+            pid: 0,
+            thread_id: 0,
+            class_name: "test".into(),
+            placement: super::WINDOWPLACEMENT {
+                rcNormalPosition: invalid,
+                ..Default::default()
+            },
+            normal_anchor: Some(anchor),
+            tool_window: false,
+            restore_target: None,
+            outer_rect: invalid,
+            maximized: false,
+            moved: true,
+        }];
+        super::shift_saved_rectangles(&mut entries, 0, 0, &displays).unwrap();
+        let entry = &entries[0];
+        let normal = entry.placement.rcNormalPosition;
+        assert_eq!(normal.right - normal.left, 1280);
+        assert_eq!(normal.bottom - normal.top, 693);
+        assert_eq!(entry.outer_rect, super::offset_rect(normal, 0, 40).unwrap());
+        assert_eq!(entry.restore_target, Some(displays[0].rect));
+        super::shift_saved_rectangles(&mut entries, 0, 0, &displays).unwrap();
+        assert_eq!(entries[0].placement.rcNormalPosition, normal);
+    }
+
+    #[test]
+    fn resized_display_offscreen_normal_is_clipped_only_by_default_fallback() {
+        let before = [placement_display("primary", 0, 0, 3840, 2160, 0)];
+        let after = [placement_display("primary", 0, 0, 1280, 720, 40)];
+        let normal = RECT {
+            left: 2000,
+            top: 900,
+            right: 3800,
+            bottom: 2100,
+        };
+        let anchor = super::normal_anchor(normal, false, &before).unwrap();
+        let (normal, anchor) = super::rebase_normal(normal, &anchor, false, &after).unwrap();
+        assert!(anchor.defaulted);
+        assert_eq!(
+            normal,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1280,
+                bottom: 680
+            }
+        );
+        assert!(super::normal_is_visible(normal, false, &after));
+    }
+
     #[test]
     fn a_window_can_only_be_claimed_by_one_owner() {
         let mut claims = WindowClaimRegistry::default();
@@ -1277,6 +1896,57 @@ mod tests {
         assert_eq!(shifted.top, 1130);
         assert_eq!(shifted.right, -1020);
         assert_eq!(shifted.bottom, 1730);
+    }
+
+    #[test]
+    fn maximized_restore_only_skips_a_complete_state_match() {
+        let saved = RECT {
+            left: -1920,
+            top: 100,
+            right: -1280,
+            bottom: 580,
+        };
+        // The saved restore position may legitimately be on another screen.
+        assert!(super::maximized_state_matches(
+            true, false, true, saved, saved
+        ));
+        assert!(!super::maximized_state_matches(
+            false, false, true, saved, saved
+        ));
+        assert!(!super::maximized_state_matches(
+            true, true, true, saved, saved
+        ));
+        assert!(!super::maximized_state_matches(
+            true, false, false, saved, saved
+        ));
+        let changed = RECT {
+            left: saved.left + 1,
+            ..saved
+        };
+        assert!(!super::maximized_state_matches(
+            true, false, true, changed, saved
+        ));
+    }
+
+    #[test]
+    fn intermediate_restore_preserves_scanner_errors_for_final_reconcile() {
+        let mut migration = super::WindowMigration {
+            migration_id: super::next_migration_id(),
+            entries: super::Arc::new(super::Mutex::new(Vec::new())),
+            stop_scanner: super::Arc::new(super::AtomicBool::new(true)),
+            scanner: None,
+            scanner_errors: vec!["scanner could not snapshot a window".into()],
+            restore_on_drop: true,
+            target_rect: RECT::default(),
+        };
+        assert_eq!(
+            migration.restore().unwrap_err(),
+            "scanner could not snapshot a window"
+        );
+        assert_eq!(
+            migration.scanner_errors,
+            ["scanner could not snapshot a window"]
+        );
     }
 }
 
@@ -1410,6 +2080,14 @@ mod native_tests {
                     );
                     restore_maximized(&original, target.rect).unwrap();
                 }
+                original.normal_anchor = Some(
+                    normal_anchor(
+                        original.placement.rcNormalPosition,
+                        original.tool_window,
+                        &placement_displays().unwrap(),
+                    )
+                    .unwrap(),
+                );
                 move_entry(&mut original, target.rect, source.rect).unwrap();
                 assert!(wait_for_zoomed_state(&original, true));
                 assert!(wait_for_monitor(&original, source.rect));
@@ -1447,6 +2125,182 @@ mod native_tests {
         }
         unsafe {
             let _ = SetThreadDpiAwarenessContext(previous_dpi);
+        }
+    }
+}
+
+#[cfg(test)]
+mod external_uwp_tests {
+    use super::*;
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::SW_MAXIMIZE;
+
+    fn legacy_restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), String> {
+        unsafe {
+            let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
+        }
+        if !wait_for_zoomed_state(entry, false) {
+            return Err(describe_restore_state(
+                entry,
+                "legacy restore failed",
+                target_rect,
+            ));
+        }
+        set_window_rect(
+            entry,
+            entry.outer_rect.left,
+            entry.outer_rect.top,
+            entry.outer_rect.right - entry.outer_rect.left,
+            entry.outer_rect.bottom - entry.outer_rect.top,
+        )
+        .map_err(|error| error.to_string())?;
+        if !wait_for_monitor(entry, target_rect) {
+            return Err(describe_restore_state(
+                entry,
+                "legacy return failed",
+                target_rect,
+            ));
+        }
+        unsafe {
+            let _ = ShowWindowAsync(entry.hwnd, SHOW_WINDOW_CMD(entry.placement.showCmd as i32));
+        }
+        if !wait_for_zoomed_state(entry, true) || !wait_for_monitor(entry, target_rect) {
+            return Err(describe_restore_state(
+                entry,
+                "legacy maximize failed",
+                target_rect,
+            ));
+        }
+        unsafe { SetWindowPlacement(entry.hwnd, &entry.placement) }
+            .map_err(|error| error.to_string())?;
+        if !wait_for_zoomed_state(entry, true)
+            || !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
+            || !wait_for_monitor(entry, target_rect)
+        {
+            return Err(describe_restore_state(
+                entry,
+                "legacy final placement failed",
+                target_rect,
+            ));
+        }
+        Ok(())
+    }
+
+    // Only use an explicitly launched disposable test app. The caller owns
+    // its lifetime; this never selects a user's existing window.
+    #[test]
+    #[ignore = "requires SBMS_TEST_OWNED_UWP_HWND and SBMS_TEST_OWNED_UWP_PID for a disposable app"]
+    fn native_owned_uwp_round_trip() {
+        unsafe {
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+        let hwnd = HWND(
+            std::env::var("SBMS_TEST_OWNED_UWP_HWND")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap() as *mut _,
+        );
+        let expected_pid = std::env::var("SBMS_TEST_OWNED_UWP_PID")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap();
+        let mut pid = 0;
+        unsafe {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
+        assert_eq!(pid, expected_pid);
+        assert_eq!(class_name(hwnd), "ApplicationFrameWindow");
+        let displays: Vec<_> = crate::display::active_displays()
+            .unwrap()
+            .into_iter()
+            .filter(|d| !d.virtual_display)
+            .collect();
+        assert!(displays.len() >= 2);
+        for reverse in [false, true] {
+            let (target, source) = if reverse {
+                (&displays[1], &displays[0])
+            } else {
+                (&displays[0], &displays[1])
+            };
+            for cross_monitor_normal in [false, true] {
+                unsafe {
+                    let _ = ShowWindowAsync(hwnd, SW_RESTORE);
+                }
+                let current_monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL) };
+                let mut initial = snapshot_window(hwnd, current_monitor, 0).unwrap().unwrap();
+                assert!(wait_for_zoomed_state(&initial, false));
+                // Fixture setup must finish the app's restore animation before
+                // relocating it and capturing the stable pre-migration state.
+                thread::sleep(Duration::from_millis(300));
+                let mut setup = window_placement(&initial).unwrap();
+                setup.showCmd = SW_RESTORE.0 as u32;
+                setup.rcNormalPosition = RECT {
+                    left: target.rect.left + 100,
+                    top: target.rect.top + 100,
+                    right: target.rect.left + 700,
+                    bottom: target.rect.top + 600,
+                };
+                unsafe { SetWindowPlacement(hwnd, &setup) }.unwrap();
+                assert!(wait_for_monitor(&initial, target.rect));
+                thread::sleep(Duration::from_millis(300));
+                unsafe {
+                    let _ = ShowWindowAsync(hwnd, SW_MAXIMIZE);
+                }
+                assert!(wait_for_zoomed_state(&initial, true));
+                thread::sleep(Duration::from_millis(300));
+                let target_monitor = monitor_for_rect(target.rect, "test").unwrap();
+                initial = snapshot_window(hwnd, target_monitor, 0).unwrap().unwrap();
+                if cross_monitor_normal {
+                    let mut placement = initial.placement;
+                    placement.rcNormalPosition = RECT {
+                        left: source.rect.left + 100,
+                        top: source.rect.top + 100,
+                        right: source.rect.left + 700,
+                        bottom: source.rect.top + 600,
+                    };
+                    unsafe { SetWindowPlacement(hwnd, &placement) }.unwrap();
+                    assert!(wait_for_normal_rect(&initial, placement.rcNormalPosition));
+                    initial = snapshot_window(hwnd, target_monitor, 0).unwrap().unwrap();
+                }
+                println!(
+                    "UWP before target={} reverse={} cross-normal={}: outer={:?} placement={:?}",
+                    target.device_name,
+                    reverse,
+                    cross_monitor_normal,
+                    initial.outer_rect,
+                    initial.placement
+                );
+                let move_result = move_entry(&mut initial, target.rect, source.rect);
+                println!(
+                    "UWP migrated: {:?}; outer={:?} placement={:?}",
+                    move_result,
+                    current_rect(&initial),
+                    window_placement(&initial)
+                );
+                move_result.unwrap();
+                let legacy = std::env::var_os("SBMS_TEST_LEGACY_RETURN").is_some();
+                let restore_result = if legacy {
+                    legacy_restore_maximized(&initial, target.rect)
+                } else {
+                    restore_maximized(&initial, target.rect)
+                };
+                println!("UWP legacy-return={legacy}");
+                println!(
+                    "UWP restored: {:?}; outer={:?} placement={:?}",
+                    restore_result,
+                    current_rect(&initial),
+                    window_placement(&initial)
+                );
+                restore_result.unwrap();
+                assert!(wait_for_zoomed_state(&initial, true));
+                assert!(wait_for_monitor(&initial, target.rect));
+                assert!(wait_for_normal_rect(
+                    &initial,
+                    initial.placement.rcNormalPosition
+                ));
+            }
         }
     }
 }

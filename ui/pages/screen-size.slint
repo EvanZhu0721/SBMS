@@ -7,6 +7,8 @@ export struct ScreenSizeRow {
     name: string,
     native-mode: string,
     detected-size: string,
+    detected-refresh: string,
+    manual-refresh: string,
     manual-inches: string,
     aspect-ratio: int,
     effective-size: string,
@@ -22,6 +24,7 @@ export component ScreenSizePage inherits FocusScope {
     callback close-screen-size();
     callback screen-size-edited(int, string, int);
     callback reset-screen-size(int);
+    callback screen-refresh-edited(int, string);
     callback reread-screen-size();
     callback save-screen-size();
 
@@ -50,7 +53,7 @@ export component ScreenSizePage inherits FocusScope {
                     clicked => { root.close-screen-size(); }
                 }
                 Text {
-                    text: "Screen size";
+                    text: "Displays";
                     color: MdTokens.on-surface;
                     font-size: MdTokens.type-title-large;
                     font-weight: MdTokens.weight-medium;
@@ -66,13 +69,13 @@ export component ScreenSizePage inherits FocusScope {
                 VerticalLayout {
                     spacing: MdTokens.space-1;
                     for screen[index] in root.screen-size-rows : card := Rectangle {
-                        height: 140px;
+                        height: 184px;
                         background: MdTokens.surface-container;
                         border-radius: MdTokens.shape-medium;
 
                         VerticalLayout {
-                            padding: 12px;
-                            spacing: 6px;
+                            padding: 10px;
+                            spacing: 4px;
                             VerticalLayout {
                                 height: 38px;
                                 spacing: 2px;
@@ -134,6 +137,27 @@ export component ScreenSizePage inherits FocusScope {
                                     }
                                 }
                             }
+                            HorizontalLayout {
+                                height: MdTokens.target;
+                                spacing: MdTokens.space-1;
+                                LineEdit {
+                                    horizontal-stretch: 1;
+                                    height: MdTokens.target;
+                                    text <=> screen.manual-refresh;
+                                    placeholder-text: screen.detected-refresh;
+                                    input-type: InputType.decimal;
+                                    enabled: !root.screen-size-save-blocked;
+                                    accessible-label: screen.name + " refresh rate in hertz; empty uses detected rate";
+                                    edited => { root.screen-refresh-edited(index, self.text); }
+                                }
+                                Text {
+                                    width: 24px;
+                                    text: "Hz";
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-small;
+                                    vertical-alignment: center;
+                                }
+                            }
                             Text {
                                 height: 16px;
                                 text: screen.error == ""
@@ -175,7 +199,7 @@ export component ScreenSizePage inherits FocusScope {
                     text: "Save";
                     enabled: root.screen-size-valid && !root.screen-size-save-blocked;
                     primary: true;
-                    accessible-label: "Save display sizes";
+                    accessible-label: "Save display settings";
                     clicked => { root.save-screen-size(); }
                 }
             }

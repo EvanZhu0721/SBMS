@@ -447,12 +447,12 @@ impl Pipeline {
         let sampling = SamplingPipeline::new(
             device.clone(),
             context.clone(),
-            config.rendering.high_performance_sampling,
+            config.rendering.high_performance_sampling(),
         )?;
         // Flip-discard back buffers do not preserve untouched pixels. Keep the
         // quality result in our own texture so partial sampling can reuse it.
         let cached_frame =
-            if config.rendering.static_refresh || !config.rendering.high_performance_sampling {
+            if config.rendering.static_refresh || !config.rendering.high_performance_sampling() {
                 Some(TextureTarget::new(
                     &device,
                     config.target_width,
@@ -489,6 +489,7 @@ impl Pipeline {
         let mut copy_stats = CopyStats::new();
         let mut metadata_buffers = FrameMetadataBuffers::default();
         let mut cache_valid = false;
+        let mut direct_source_active = None;
         let mut last_present: Option<Instant> = None;
         let refresh_interval =
             Duration::from_secs_f64(1000.0 / f64::from(self.config.target_refresh_millihz.max(1)));
@@ -529,13 +530,15 @@ impl Pipeline {
                     ));
                 }
             }
-            let frame = AcquiredFrame(&duplication);
+            // Keep ownership through sampling and Present. Releasing just
+            // before the next Acquire avoids redundant desktop updates to
+            // the duplication surface while presentation is waiting.
+            let _frame = AcquiredFrame(&duplication);
             if stop.load(Ordering::Acquire) {
                 break;
             }
             // Pointer-only events do not alter the captured desktop texture.
-            if frame_info.LastPresentTime == 0 && source_texture.is_some() {
-                drop(frame);
+            if frame_info.LastPresentTime == 0 && last_present.is_some() {
                 if self.config.rendering.static_refresh
                     && last_present.is_some_and(|time| time.elapsed() >= refresh_interval)
                 {
@@ -562,6 +565,80 @@ impl Pipeline {
                     description.Format.0
                 )));
             }
+            if use_identity_copy(
+                self.config.rendering.high_performance_sampling(),
+                &description,
+                [self.config.target_width, self.config.target_height],
+            ) {
+                copy_identity_frame(
+                    &self.context,
+                    &acquired,
+                    &self.back_buffer,
+                    self.cached_frame.as_ref().map(|frame| &frame.texture),
+                );
+                // If the source later changes size again, its dirty metadata
+                // cannot update an intermediate texture from before this path.
+                source_description = None;
+                source_texture = None;
+                source_view = None;
+                cache_valid = false;
+                self.present(1)?;
+                on_present().map_err(GpuRendererError::Failure)?;
+                last_present = Some(Instant::now());
+                copy_stats.record_full(description.Width, description.Height);
+                copy_stats.maybe_log(
+                    copy_mode,
+                    copy_stats_enabled,
+                    description.Width,
+                    description.Height,
+                );
+                continue;
+            }
+            if self.config.rendering.high_performance_sampling() {
+                let direct_view = if copy_mode == CopyMode::Full {
+                    None
+                } else {
+                    direct_source_view(&self.device, &acquired, description.BindFlags)
+                };
+                let direct = direct_view.is_some();
+                if direct_source_active != Some(direct) {
+                    diagnostics::log(
+                        Level::Info,
+                        "renderer",
+                        "legacy-source",
+                        None,
+                        if direct {
+                            "sampling acquired desktop texture directly; source copy bypassed"
+                        } else {
+                            "using copied desktop texture (full-copy requested or direct SRV unavailable)"
+                        },
+                    );
+                    direct_source_active = Some(direct);
+                }
+                if let Some(view) = direct_view {
+                    let output = self.cached_frame.as_ref()
+                        .map_or(&self.render_target, |frame| &frame.target);
+                    self.sampling.render_regions(
+                        &view,
+                        [description.Width, description.Height],
+                        output,
+                        [self.config.target_width, self.config.target_height],
+                        None,
+                    )?;
+                    source_description = None;
+                    source_texture = None;
+                    source_view = None;
+                    cache_valid = false;
+                    if self.cached_frame.is_some() {
+                        self.present_cached(1)?;
+                    } else {
+                        self.present(1)?;
+                    }
+                    on_present().map_err(GpuRendererError::Failure)?;
+                    last_present = Some(Instant::now());
+                    continue;
+                }
+            }
             let texture_rebuilt =
                 source_description != Some((description.Width, description.Height));
             if texture_rebuilt {
@@ -585,12 +662,11 @@ impl Pipeline {
                 &mut metadata_buffers,
                 &mut copy_stats,
             );
-            drop(frame);
 
             let view = source_view.as_ref().ok_or_else(|| {
                 GpuRendererError::Failure("source texture view was not initialized".into())
             })?;
-            let quality = !self.config.rendering.high_performance_sampling;
+            let quality = !self.config.rendering.high_performance_sampling();
             let full_region = metadata_buffers.regions.iter().any(|r| {
                 r.left == 0
                     && r.top == 0
@@ -737,6 +813,52 @@ impl Pipeline {
         present
             .ok()
             .map_err(|_| classify_hresult("IDXGISwapChain::Present", present))
+    }
+}
+
+fn use_identity_copy(
+    high_performance: bool,
+    source: &D3D11_TEXTURE2D_DESC,
+    target: [u32; 2],
+) -> bool {
+    high_performance
+        && [source.Width, source.Height] == target
+        && source.Format == DXGI_FORMAT_B8G8R8A8_UNORM
+        && source.MipLevels == 1
+        && source.ArraySize == 1
+        && source.SampleDesc.Count == 1
+        && source.SampleDesc.Quality == 0
+}
+
+fn direct_source_view(
+    device: &ID3D11Device,
+    source: &ID3D11Texture2D,
+    bind_flags: u32,
+) -> Option<ID3D11ShaderResourceView> {
+    if bind_flags & D3D11_BIND_SHADER_RESOURCE.0 as u32 == 0 {
+        return None;
+    }
+    let mut view = None;
+    unsafe { device.CreateShaderResourceView(source, None, Some(&mut view)) }.ok()?;
+    view
+}
+
+// A legacy 1:1 frame is already the final image. Avoid both the private source
+// texture and the full-screen sampling draw. Static refresh still needs its
+// own persistent copy because flip-discard back buffers are not preserved.
+fn copy_identity_frame(
+    context: &ID3D11DeviceContext,
+    source: &ID3D11Texture2D,
+    back_buffer: &ID3D11Texture2D,
+    cached: Option<&ID3D11Texture2D>,
+) {
+    unsafe {
+        if let Some(cached) = cached {
+            context.CopyResource(cached, source);
+            context.CopyResource(back_buffer, cached);
+        } else {
+            context.CopyResource(back_buffer, source);
+        }
     }
 }
 

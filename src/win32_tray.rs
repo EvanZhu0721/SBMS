@@ -29,6 +29,17 @@ use windows::core::{BOOL, PCWSTR, w};
 
 use crate::diagnostics::{self, Level};
 
+#[path = "win32_taskbar_meter.rs"]
+mod taskbar_meter;
+
+pub fn meter_rect() -> Option<RECT> {
+    taskbar_meter::meter_rect()
+}
+
+const WM_METER_TOGGLE: u32 = WM_APP + 3;
+const WM_METER_MENU: u32 = WM_APP + 4;
+const METER_TIMER_ID: usize = 2;
+
 const CLASS_NAME: PCWSTR = w!("SbmsTrayHostWindow");
 const TRAY_ICON_ID: u32 = 1;
 const WM_TRAY_ICON: u32 = WM_APP + 1;
@@ -54,24 +65,76 @@ pub enum TrayAction {
     Quit,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TrayMonitor {
+    pub fps: i32,
+    pub valid: bool,
+    pub running: bool,
+    pub error: bool,
+    pub not_a_number: bool,
+}
+
+impl TrayMonitor {
+    fn glyphs(self) -> [u8; 3] {
+        const DIGITS: [u8; 10] = [0x3f, 0x06, 0x5b, 0x4f, 0x66, 0x6d, 0x7d, 0x07, 0x7f, 0x6f];
+        if self.error {
+            [0x79, 0x50, 0x50]
+        } else if self.not_a_number {
+            [0x54, 0x77, 0x54]
+        } else if self.running && self.valid {
+            let fps = self.fps.clamp(0, 999) as usize;
+            [DIGITS[fps / 100], DIGITS[fps / 10 % 10], DIGITS[fps % 10]]
+        } else {
+            [0x40; 3]
+        }
+    }
+
+    fn reading(self) -> String {
+        if self.error {
+            "Err".into()
+        } else if self.not_a_number {
+            "nAn".into()
+        } else if self.running && self.valid {
+            format!("{:03} FPS", self.fps.clamp(0, 999))
+        } else {
+            "---".into()
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TrayHandle(Arc<TrayState>);
 
 impl TrayHandle {
     pub fn set_status(&self, status: &str) {
         let mut state = lock_state(&self.0);
-        state.tooltip = format!("SBMS · {status}");
-        let raw = state.hwnd;
-        if raw != 0 {
-            let _ = unsafe {
-                PostMessageW(
-                    Some(HWND(raw as *mut _)),
-                    WM_TRAY_STATUS,
-                    WPARAM(0),
-                    LPARAM(0),
-                )
-            };
+        if state.status == status {
+            return;
         }
+        state.status = status.into();
+        post_status_update(state.hwnd);
+    }
+
+    pub fn set_monitor(&self, monitor: TrayMonitor) {
+        let mut state = lock_state(&self.0);
+        if state.monitor == monitor {
+            return;
+        }
+        state.monitor = monitor;
+        post_status_update(state.hwnd);
+    }
+}
+
+fn post_status_update(raw: isize) {
+    if raw != 0 {
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(raw as *mut _)),
+                WM_TRAY_STATUS,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
     }
 }
 
@@ -82,6 +145,7 @@ pub struct NativeTray {
 struct Inner {
     hwnd: HWND,
     hicon: HICON,
+    meter: taskbar_meter::TaskbarMeter,
     hmenu: HMENU,
     state: Arc<TrayState>,
     registered: Cell<bool>,
@@ -97,7 +161,14 @@ struct TrayState {
 
 struct SharedTrayState {
     hwnd: isize,
-    tooltip: String,
+    status: String,
+    monitor: TrayMonitor,
+}
+
+impl SharedTrayState {
+    fn tooltip(&self) -> String {
+        format!("SBMS · {} · {}", self.status, self.monitor.reading())
+    }
 }
 
 impl NativeTray {
@@ -161,12 +232,14 @@ impl NativeTray {
         let state = Arc::new(TrayState {
             shared: Mutex::new(SharedTrayState {
                 hwnd: hwnd.0 as isize,
-                tooltip: "SBMS · Stopped".into(),
+                status: "Stopped".into(),
+                monitor: TrayMonitor::default(),
             }),
         });
         let inner = Box::new(Inner {
             hwnd,
             hicon,
+            meter: taskbar_meter::TaskbarMeter::new(hwnd),
             hmenu,
             state,
             registered: Cell::new(false),
@@ -178,6 +251,8 @@ impl NativeTray {
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*inner as *const Inner as _) };
         CURRENT_HWND.store(hwnd.0 as isize, Ordering::Release);
         inner.begin_registration("startup");
+        inner.meter.refresh(TrayMonitor::default());
+        unsafe { SetTimer(Some(hwnd), METER_TIMER_ID, 500, None) };
 
         Ok(Self { inner })
     }
@@ -193,6 +268,7 @@ impl Drop for NativeTray {
         state.hwnd = 0;
         unsafe {
             let _ = KillTimer(Some(self.inner.hwnd), MAINTENANCE_TIMER_ID);
+            let _ = KillTimer(Some(self.inner.hwnd), METER_TIMER_ID);
             let _ = Shell_NotifyIconW(NIM_DELETE, &identity_data(self.inner.hwnd));
             SetWindowLongPtrW(self.inner.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyMenu(self.inner.hmenu);
@@ -228,7 +304,8 @@ impl Inner {
     fn try_register(&self, attempt: usize) -> bool {
         let reason = self.registration_reason.get();
         let state = lock_state(&self.state);
-        let data = notify_icon_data(self.hwnd, self.hicon, &state.tooltip);
+        self.meter.refresh(state.monitor);
+        let data = notify_icon_data(self.hwnd, self.hicon, &state.tooltip());
         drop(state);
         if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
             diagnostics::log(
@@ -329,7 +406,8 @@ impl Inner {
         }
 
         let state = lock_state(&self.state);
-        let data = notify_icon_data(self.hwnd, self.hicon, &state.tooltip);
+        self.meter.refresh(state.monitor);
+        let data = notify_icon_data(self.hwnd, self.hicon, &state.tooltip());
         drop(state);
         if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
             diagnostics::log(
@@ -430,6 +508,29 @@ unsafe extern "system" fn wnd_proc(
         return LRESULT(0);
     }
 
+    if message == WM_METER_TOGGLE || message == WM_METER_MENU {
+        if let Some(inner) = unsafe { inner(hwnd) } {
+            if message == WM_METER_TOGGLE {
+                (inner.action)(TrayAction::Toggle);
+            } else if let Some(rect) = meter_rect() {
+                show_menu(
+                    inner,
+                    POINT {
+                        x: rect.left,
+                        y: rect.top,
+                    },
+                );
+            }
+        }
+        return LRESULT(0);
+    }
+    if message == WM_TIMER && wparam.0 == METER_TIMER_ID {
+        if let Some(inner) = unsafe { inner(hwnd) } {
+            let monitor = lock_state(&inner.state).monitor;
+            inner.meter.refresh(monitor);
+        }
+        return LRESULT(0);
+    }
     if message == WM_TIMER && wparam.0 == MAINTENANCE_TIMER_ID {
         if let Some(inner) = unsafe { inner(hwnd) } {
             inner.maintain_registration();
@@ -660,6 +761,68 @@ fn identity_data(hwnd: HWND) -> NOTIFYICONDATAW {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_matches_gui_readings_and_state_precedence() {
+        let running = TrayMonitor {
+            fps: 60,
+            valid: true,
+            running: true,
+            ..Default::default()
+        };
+        assert_eq!(running.reading(), "060 FPS");
+        assert_eq!(running.glyphs(), [0x3f, 0x7d, 0x3f]);
+        assert_eq!(
+            TrayMonitor {
+                fps: 120,
+                ..running
+            }
+            .reading(),
+            "120 FPS"
+        );
+        assert_eq!(
+            TrayMonitor {
+                fps: 1000,
+                ..running
+            }
+            .reading(),
+            "999 FPS"
+        );
+        assert_eq!(TrayMonitor { fps: -1, ..running }.reading(), "000 FPS");
+        assert_eq!(
+            TrayMonitor {
+                valid: false,
+                ..running
+            }
+            .glyphs(),
+            [0x40; 3]
+        );
+        assert_eq!(
+            TrayMonitor {
+                running: false,
+                ..running
+            }
+            .reading(),
+            "---"
+        );
+        assert_eq!(
+            TrayMonitor {
+                not_a_number: true,
+                ..running
+            }
+            .glyphs(),
+            [0x54, 0x77, 0x54]
+        );
+        assert_eq!(
+            TrayMonitor {
+                error: true,
+                not_a_number: true,
+                ..running
+            }
+            .glyphs(),
+            [0x79, 0x50, 0x50],
+        );
+    }
 
     #[test]
     fn retry_backoff_is_bounded_and_increasing() {

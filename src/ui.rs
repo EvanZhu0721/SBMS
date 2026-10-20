@@ -23,10 +23,8 @@ use crate::mapping::{MappingPlan, MappingRoute};
 use crate::network::preferred_lan_ipv4;
 use crate::session_gate::VirtualMode;
 use crate::win32_flyout;
-use crate::win32_tray::{NativeTray, TrayAction, TrayHandle};
-use slint::winit_030::winit::event::WindowEvent;
+use crate::win32_tray::{NativeTray, TrayAction, TrayHandle, TrayMonitor};
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
-use slint::winit_030::{EventResult as WinitEventResult, WinitWindowAccessor};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 slint::include_modules!();
 
@@ -141,43 +139,41 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         });
     })?;
     let flyout = QuickAccess::new()?;
+    let outside_click_flyout = flyout.as_weak();
+    let _outside_click_observer = win32_flyout::OutsideClickObserver::new(move |point| {
+        if let Some(flyout) = outside_click_flyout.upgrade()
+            && flyout.window().is_visible()
+            && win32_flyout::should_dismiss_on_press(flyout.window(), point)
+        {
+            // Return from the native hook before touching the Slint window.
+            let flyout = flyout.as_weak();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(flyout) = flyout.upgrade() {
+                    diagnostics::log(
+                        Level::Debug,
+                        "ui",
+                        "flyout-dismiss",
+                        None,
+                        "mouse pressed on desktop, taskbar, or fullscreen window",
+                    );
+                    let _ = flyout.hide();
+                }
+            });
+        }
+    })?;
     let auto_map_on_login = ConfigProfileStore::default_store()
         .and_then(|store| store.list())
         .map(|profiles| profiles.auto_map_on_login)
         .unwrap_or(false);
     flyout.set_auto_map_on_login(auto_map_on_login);
     let pending_login_start = Arc::new(AtomicBool::new(login_start && auto_map_on_login));
-    let intro_disabled = Arc::new(AtomicBool::new(
-        ConfigProfileStore::default_store()
+    // Each tray host may play the intro only on its first panel open.
+    let intro_pending = Arc::new(AtomicBool::new(
+        !ConfigProfileStore::default_store()
             .and_then(|store| store.list())
             .map(|profiles| profiles.launch_intro_disabled)
             .unwrap_or(false),
     ));
-    let dismiss_flyout = flyout.as_weak();
-    flyout.window().on_winit_window_event(move |_, event| {
-        if matches!(event, WindowEvent::Focused(false)) {
-            let flyout = dismiss_flyout.clone();
-            slint::Timer::single_shot(Duration::from_millis(50), move || {
-                if let Some(flyout) = flyout.upgrade()
-                    && flyout.window().is_visible()
-                    && flyout
-                        .window()
-                        .with_winit_window(|window| !window.has_focus())
-                        .unwrap_or(false)
-                {
-                    diagnostics::log(
-                        Level::Debug,
-                        "ui",
-                        "flyout-dismiss",
-                        None,
-                        "window lost focus",
-                    );
-                    let _ = flyout.hide();
-                }
-            });
-        }
-        WinitEventResult::Propagate
-    });
     flyout.set_max_group_count(MAX_OUTPUTS as i32);
     let loaded = load_group_config(&flyout);
     let override_store = DisplayOverrideStore::default_store()?;
@@ -199,24 +195,24 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     );
 
     let flyout_weak = flyout.as_weak();
-    let tray_intro_disabled = intro_disabled.clone();
+    let tray_intro_pending = intro_pending.clone();
     let tray = NativeTray::new(move |action| {
         let flyout_weak = flyout_weak.clone();
-        let intro_disabled = tray_intro_disabled.clone();
+        let intro_pending = tray_intro_pending.clone();
         if let Err(error) = slint::invoke_from_event_loop(move || match action {
             TrayAction::Toggle => {
                 if let Some(flyout) = flyout_weak.upgrade() {
                     if flyout.window().is_visible() {
                         let _ = flyout.hide();
                     } else {
-                        let play_intro = !intro_disabled.load(Ordering::Acquire);
+                        let play_intro = intro_pending.swap(false, Ordering::AcqRel);
                         show_flyout(&flyout, play_intro);
                     }
                 }
             }
             TrayAction::Open => {
                 if let Some(flyout) = flyout_weak.upgrade() {
-                    let play_intro = !intro_disabled.load(Ordering::Acquire);
+                    let play_intro = intro_pending.swap(false, Ordering::AcqRel);
                     show_flyout(&flyout, play_intro);
                 }
             }
@@ -235,6 +231,26 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         }
     })?;
     let tray_handle = tray.handle();
+    let tray_monitor_timer = slint::Timer::default();
+    let monitor_ui = flyout.as_weak();
+    let monitor_tray = tray_handle.clone();
+    tray_monitor_timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(250),
+        move || {
+            if let Some(ui) = monitor_ui.upgrade() {
+                // Read the final GUI projection so tab changes and non-FPS
+                // transitions (stop, errors, stream-only) stay in sync too.
+                monitor_tray.set_monitor(TrayMonitor {
+                    fps: ui.get_mapping_fps(),
+                    valid: ui.get_mapping_fps_valid(),
+                    running: ui.get_running(),
+                    error: ui.get_mapping_fps_error(),
+                    not_a_number: ui.get_mapping_fps_nan(),
+                });
+            }
+        },
+    );
 
     let ui = flyout.as_weak();
     let error_revision = Arc::new(AtomicU64::new(0));
@@ -392,10 +408,10 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     );
     {
         let flyout_weak = flyout.as_weak();
-        let intro_disabled = intro_disabled.clone();
+        let intro_pending = intro_pending.clone();
         flyout.on_disable_launch_intro(move || {
             INTRO_GENERATION.fetch_add(1, Ordering::AcqRel);
-            intro_disabled.store(true, Ordering::Release);
+            intro_pending.store(false, Ordering::Release);
             let Some(ui) = flyout_weak.upgrade() else {
                 return;
             };
@@ -447,7 +463,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
 
     sender.refresh();
     if open_on_start {
-        let play_intro = !intro_disabled.load(Ordering::Acquire);
+        let play_intro = intro_pending.swap(false, Ordering::AcqRel);
         show_flyout(&flyout, play_intro);
     }
     diagnostics::log(
@@ -848,6 +864,7 @@ fn is_guid(value: &str) -> bool {
 
 fn apply_display_overrides(displays: &mut [DisplayOption], overrides: &DisplayOverrides) {
     for display in displays {
+        display.refresh_override_millihz = overrides.refresh_for(&display.id);
         display.physical_width_mm = display.detected_physical_width_mm;
         display.physical_height_mm = display.detected_physical_height_mm;
         let display_override = overrides.override_for(&display.id);
@@ -965,10 +982,15 @@ fn group_sizing_request(
         preferred_refresh_millihz: if group.stream_only {
             Some(parse_stream_refresh_millihz(&group.stream_refresh)?)
         } else {
-            group
-                .sizing
-                .and_then(|request| request.preferred_refresh_millihz)
-                .or(Some(240_000))
+            displays
+                .iter()
+                .find(|display| Some(&display.id) == group.target_id.as_ref())
+                .map(|display| {
+                    display
+                        .refresh_override_millihz
+                        .or(display.preferred_refresh_millihz)
+                        .unwrap_or(display.current_refresh_millihz)
+                })
         },
     })
 }
@@ -1026,6 +1048,29 @@ fn screen_size_rows(displays: &[DisplayOption], drafts: &[ScreenSizeRow]) -> Vec
                 name: display.name.as_str().into(),
                 native_mode: format!("{} × {}", display.native_width, display.native_height).into(),
                 detected_size: detected_size.into(),
+                detected_refresh: format!(
+                    "{} · {}",
+                    if display.preferred_refresh_millihz.is_some() {
+                        "EDID"
+                    } else {
+                        "Current"
+                    },
+                    format_refresh(
+                        display
+                            .preferred_refresh_millihz
+                            .unwrap_or(display.current_refresh_millihz)
+                    )
+                )
+                .into(),
+                manual_refresh: draft
+                    .map(|row| row.manual_refresh.clone())
+                    .unwrap_or_else(|| {
+                        display
+                            .refresh_override_millihz
+                            .map(format_refresh)
+                            .unwrap_or_default()
+                            .into()
+                    }),
                 manual_inches: draft
                     .map(|row| row.manual_inches.clone())
                     .unwrap_or_else(|| {
@@ -1063,8 +1108,26 @@ fn screen_size_row_override(
     Ok(Some((diagonal, ratio)))
 }
 
+fn format_refresh(millihz: u32) -> String {
+    format!("{:.3}", f64::from(millihz) / 1000.0)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+fn screen_refresh_override(row: &ScreenSizeRow) -> Result<Option<u32>, String> {
+    if row.manual_refresh.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse_stream_refresh_millihz(row.manual_refresh.as_str()).map(Some)
+    }
+}
+
 fn update_screen_size_row_preview(display: &DisplayOption, row: &mut ScreenSizeRow) {
     row.error = "".into();
+    if let Err(error) = screen_refresh_override(row) {
+        row.error = error.into();
+    }
     let effective = match screen_size_row_override(display, row) {
         Ok(Some((diagonal, ratio))) => dimensions_from_diagonal(display, diagonal, ratio),
         Ok(None) => display
@@ -1149,6 +1212,9 @@ fn screen_size_override_candidate(
             .iter()
             .find(|row| row.display_id.eq_ignore_ascii_case(&display.id))
             .ok_or_else(|| format!("{}: screen is no longer available", display.name))?;
+        candidate
+            .set_refresh(display.id.clone(), screen_refresh_override(row)?)
+            .map_err(|error| error.to_string())?;
         match screen_size_row_override(display, row)
             .map_err(|error| format!("{}: {error}", display.name))?
         {
@@ -1803,8 +1869,75 @@ mod tests {
             physical_height_mm: Some(296.0),
             physical_override_inches: None,
             physical_override_aspect_ratio: None,
+            preferred_refresh_millihz: Some(60_000),
+            current_refresh_millihz: 60_000,
+            refresh_override_millihz: None,
             rotation: Rotation::Deg0,
         }
+    }
+
+    #[test]
+    fn mirror_refresh_uses_edid_then_override_without_stale_240hz() {
+        let mut display = display_option("panel", "Panel");
+        display.preferred_refresh_millihz = Some(119_880);
+        display.current_refresh_millihz = 60_000;
+        let mut group = GroupDraft::new(0);
+        group.target_id = Some(display.id.clone());
+        group.reference_source = Some(ReferenceSource::Manual);
+        group.reference_geometry = Some(test_geometry(3840, 2160));
+        let mut old = super::group_sizing_request(&group, &[display.clone()]).unwrap();
+        old.preferred_refresh_millihz = Some(240_000);
+        group.sizing = Some(old);
+        assert_eq!(
+            super::group_sizing_request(&group, &[display.clone()])
+                .unwrap()
+                .preferred_refresh_millihz,
+            Some(119_880)
+        );
+        display.refresh_override_millihz = Some(90_000);
+        let mut groups = vec![group];
+        super::refresh_group_sizing(&mut groups, &[display.clone()]);
+        let validated = super::validate_group_drafts(&groups).unwrap();
+        let plan = super::build_mapping_plan(&validated).unwrap();
+        assert_eq!(plan.groups[0].mode.refresh_numerator, 90);
+        display.refresh_override_millihz = None;
+        display.preferred_refresh_millihz = None;
+        assert_eq!(
+            super::group_sizing_request(&groups[0], &[display])
+                .unwrap()
+                .preferred_refresh_millihz,
+            Some(60_000)
+        );
+    }
+
+    #[test]
+    fn refresh_override_roundtrips_without_size_override_and_resets_to_edid() {
+        let mut displays = vec![display_option("panel", "Panel")];
+        let original: crate::config::DisplayOverrides =
+            serde_json::from_str(r#"{"version":1,"displays":[]}"#).unwrap();
+        let mut rows = super::screen_size_rows(&displays, &[]);
+        rows[0].manual_refresh = "119.88".into();
+        let candidate = super::screen_size_override_candidate(&original, &displays, &rows).unwrap();
+        let encoded = serde_json::to_string(&candidate).unwrap();
+        let restored = serde_json::from_str(&encoded).unwrap();
+        super::apply_display_overrides(&mut displays, &restored);
+        assert!(candidate.override_for("panel").is_none());
+        assert_eq!(candidate.refresh_for("PANEL"), Some(119_880));
+        assert_eq!(
+            super::screen_size_rows(&displays, &[])[0].manual_refresh,
+            "119.88"
+        );
+        rows[0].manual_refresh = "".into();
+        assert_eq!(
+            super::screen_size_override_candidate(&candidate, &displays, &rows)
+                .unwrap()
+                .refresh_for("panel"),
+            None
+        );
+        rows[0].manual_refresh = "0".into();
+        super::update_screen_size_row_preview(&displays[0], &mut rows[0]);
+        assert!(!rows[0].error.is_empty());
+        assert!(super::screen_size_override_candidate(&candidate, &displays, &rows).is_err());
     }
 
     #[test]
@@ -2345,7 +2478,7 @@ mod tests {
         let mut first = GroupDraft::new(0);
         first.target_id = Some("physical-a".into());
         first.rendering = crate::config::RenderingOptions {
-            high_performance_sampling: true,
+            high_performance_sampling: Some(true),
             full_frame_copy: true,
             static_refresh: true,
         };
@@ -2566,6 +2699,9 @@ mod tests {
             next_reference,
         ]));
         let mut drafts = vec![GroupDraft::new(0), GroupDraft::new(3)];
+        for draft in &mut drafts {
+            draft.rendering.high_performance_sampling = Some(false);
+        }
         drafts[0].target_id = Some("target-a".into());
         drafts[1].target_id = Some("target-b".into());
         drafts[1].sizing_strategy = SizingStrategy::RoundedScale;
@@ -2674,7 +2810,10 @@ mod tests {
         );
         assert_eq!(restored.groups[0].target_id.as_deref(), Some("target-b"));
         assert!(restored.groups[0].rendering.full_frame_copy);
-        assert!(!restored.groups[0].rendering.high_performance_sampling);
+        assert_eq!(
+            restored.groups[0].rendering.high_performance_sampling,
+            Some(false)
+        );
         assert!(!restored.groups[0].rendering.static_refresh);
         assert_eq!(
             restored.groups[0].sizing.unwrap().strategy,

@@ -11,6 +11,8 @@ pub(crate) struct NativeBenchmark {
     pub warmup_ms: f64,
     pub frames_ms: Vec<f64>,
     pub adapter_name: String,
+    pub output_bgra: Vec<u8>,
+    pub srv_creation_us: Vec<f64>,
 }
 
 fn query(device: &ID3D11Device, kind: D3D11_QUERY) -> Result<ID3D11Query, String> {
@@ -38,6 +40,29 @@ pub(crate) fn benchmark_sample_rgba(
     high_performance: bool,
     iterations: usize,
 ) -> Result<NativeBenchmark, String> {
+    benchmark_operation(source, sw, sh, tw, th, high_performance, iterations, BenchmarkOperation::Sampling)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BenchmarkOperation {
+    Sampling,
+    LegacyCopyDraw,
+    LegacyDirectDraw,
+    IdentityCopy,
+    IdentityCachedCopy,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn benchmark_operation(
+    source: &[u8],
+    sw: u32,
+    sh: u32,
+    tw: u32,
+    th: u32,
+    high_performance: bool,
+    iterations: usize,
+    operation: BenchmarkOperation,
+) -> Result<NativeBenchmark, String> {
     let setup = Instant::now();
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| e.to_string())?;
     let adapter = unsafe { factory.EnumAdapters1(0) }.map_err(|e| e.to_string())?;
@@ -55,6 +80,50 @@ pub(crate) fn benchmark_sample_rgba(
         .map_err(|e| e.to_string())?;
     let output = TextureTarget::new(&device, tw, th, DXGI_FORMAT_B8G8R8A8_UNORM)
         .map_err(|e| e.to_string())?;
+    let intermediate = if matches!(
+        operation,
+        BenchmarkOperation::LegacyCopyDraw | BenchmarkOperation::IdentityCachedCopy
+    ) {
+        Some(TextureTarget::new(&device, sw, sh, DXGI_FORMAT_B8G8R8A8_UNORM)
+            .map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let prepare_view = || {
+        if operation == BenchmarkOperation::LegacyDirectDraw {
+            Some(direct_source_view(
+                &device, &input.texture, D3D11_BIND_SHADER_RESOURCE.0 as u32,
+            ).expect("direct source SRV"))
+        } else {
+            None
+        }
+    };
+    let mut render = |direct: Option<&ID3D11ShaderResourceView>| -> Result<(), String> {
+        match operation {
+            BenchmarkOperation::Sampling => sampling
+                .render(&input.view, [sw, sh], &output.target, [tw, th])
+                .map_err(|e| e.to_string()),
+            BenchmarkOperation::LegacyCopyDraw => {
+                let intermediate = intermediate.as_ref().unwrap();
+                unsafe { context.CopyResource(&intermediate.texture, &input.texture) };
+                sampling
+                    .render(&intermediate.view, [sw, sh], &output.target, [tw, th])
+                    .map_err(|e| e.to_string())
+            }
+            BenchmarkOperation::LegacyDirectDraw => sampling
+                .render(direct.unwrap(), [sw, sh], &output.target, [tw, th])
+                .map_err(|e| e.to_string()),
+            BenchmarkOperation::IdentityCopy | BenchmarkOperation::IdentityCachedCopy => {
+                copy_identity_frame(
+                    &context,
+                    &input.texture,
+                    &output.texture,
+                    intermediate.as_ref().map(|frame| &frame.texture),
+                );
+                Ok(())
+            }
+        }
+    };
     if source.len() != sw as usize * sh as usize * 4 {
         return Err("Invalid benchmark RGBA buffer".into());
     }
@@ -95,21 +164,24 @@ pub(crate) fn benchmark_sample_rgba(
     // leave their idle state. Warmup is reported separately from setup/frames.
     let warmup = Instant::now();
     while warmup.elapsed() < Duration::from_secs(1) {
-        sampling
-            .render(&input.view, [sw, sh], &output.target, [tw, th])
-            .map_err(|e| e.to_string())?;
+        let direct = prepare_view();
+        render(direct.as_ref())?;
         wait_gpu()?;
     }
     let warmup_ms = warmup.elapsed().as_secs_f64() * 1000.0;
     let mut frames_ms = Vec::with_capacity(iterations);
+    let mut srv_creation_us = Vec::new();
     for _ in 0..iterations {
+        let srv_start = Instant::now();
+        let direct = prepare_view();
+        if direct.is_some() {
+            srv_creation_us.push(srv_start.elapsed().as_secs_f64() * 1_000_000.);
+        }
         unsafe {
             context.Begin(&disjoint);
             context.End(&start);
         }
-        sampling
-            .render(&input.view, [sw, sh], &output.target, [tw, th])
-            .map_err(|e| e.to_string())?;
+        render(direct.as_ref())?;
         unsafe {
             context.End(&finish);
             context.End(&disjoint);
@@ -151,12 +223,161 @@ pub(crate) fn benchmark_sample_rgba(
         }
         frames_ms.push((end - begin) as f64 / timing.Frequency as f64 * 1000.0);
     }
+    // The final readback was submitted after the measured interval.
+    let output_bgra = {
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .map_err(|e| e.to_string())?;
+        }
+        let mut pixels = Vec::with_capacity(tw as usize * th as usize * 4);
+        for y in 0..th as usize {
+            let actual = unsafe {
+                slice::from_raw_parts(
+                    mapped.pData.cast::<u8>().add(y * mapped.RowPitch as usize),
+                    tw as usize * 4,
+                )
+            };
+            pixels.extend_from_slice(actual);
+        }
+        unsafe { context.Unmap(&staging, 0) };
+        pixels
+    };
+    if operation != BenchmarkOperation::Sampling && [sw, sh] == [tw, th] && output_bgra != bgra {
+        return Err("Identity output differs from source pixels".into());
+    }
     Ok(NativeBenchmark {
         setup_ms,
         warmup_ms,
         frames_ms,
         adapter_name,
+        output_bgra,
+        srv_creation_us,
     })
+}
+
+#[test]
+fn identity_copy_preserves_quality_mode_and_scaling() {
+    let mut description = D3D11_TEXTURE2D_DESC {
+        Width: 3840,
+        Height: 2160,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        MipLevels: 1,
+        ArraySize: 1,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        ..Default::default()
+    };
+    assert!(use_identity_copy(true, &description, [3840, 2160]));
+    assert!(!use_identity_copy(false, &description, [3840, 2160]));
+    assert!(!use_identity_copy(true, &description, [2560, 1440]));
+    assert!(!use_identity_copy(true, &description, [2160, 3840]));
+    description.ArraySize = 2;
+    assert!(!use_identity_copy(true, &description, [3840, 2160]));
+    description.ArraySize = 1;
+    description.SampleDesc.Count = 4;
+    assert!(!use_identity_copy(true, &description, [3840, 2160]));
+}
+
+#[test]
+#[ignore = "offscreen GPU copy/draw pixel equivalence and timestamp benchmark"]
+fn native_identity_copy_benchmark() {
+    use serde_json::json;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("work/identity-copy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut results = Vec::new();
+    for (width, height) in [(3840, 2160), (641, 359)] {
+        let source: Vec<u8> = (0..width * height)
+            .flat_map(|pixel| {
+                [
+                    (pixel * 17 % 256) as u8,
+                    (pixel * 31 % 256) as u8,
+                    (pixel * 73 % 256) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        for round in 0..3 {
+            let mut operations = [
+                ("legacy-copy-draw", BenchmarkOperation::LegacyCopyDraw),
+                ("identity-copy", BenchmarkOperation::IdentityCopy),
+                ("identity-cached-copy", BenchmarkOperation::IdentityCachedCopy),
+            ];
+            operations.rotate_left(round);
+            for (name, operation) in operations {
+                let result = benchmark_operation(
+                    &source, width, height, width, height, true, 60, operation,
+                ).unwrap();
+                let mut times = result.frames_ms;
+                times.sort_by(f64::total_cmp);
+                println!(
+                    "{width}x{height} {name} round {round}: {:.4} ms GPU",
+                    times[times.len() / 2],
+                );
+                results.push(json!({
+                    "size": [width, height], "operation": name, "round": round,
+                    "adapter": result.adapter_name, "median_gpu_ms": times[times.len() / 2],
+                    "frames_gpu_ms": times, "byte_exact": true,
+                }));
+            }
+        }
+    }
+    std::fs::write(
+        dir.join("results.json"),
+        serde_json::to_vec_pretty(&json!({
+            "scope": "Offscreen production copy helper versus source-copy plus legacy sampling. Alternating order, one-second warmup per operation, GPU timestamps exclude upload, readback and presentation. Not end-to-end or Arc 140V performance.",
+            "results": results,
+        })).unwrap(),
+    ).unwrap();
+}
+
+#[test]
+#[ignore = "offscreen legacy scaled direct-SRV pixel comparison and GPU benchmark"]
+fn native_legacy_direct_source_benchmark() {
+    use serde_json::json;
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("work/identity-copy");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (sw, sh, tw, th) = (3840, 2160, 2880, 1800);
+    let source: Vec<u8> = (0..sw * sh).flat_map(|pixel| [
+        (pixel * 17 % 256) as u8,
+        (pixel * 31 % 256) as u8,
+        (pixel * 73 % 256) as u8,
+        255,
+    ]).collect();
+    let mut reference = None;
+    let mut results = Vec::new();
+    for round in 0..3 {
+        let mut operations = [
+            ("legacy-copy-draw", BenchmarkOperation::LegacyCopyDraw),
+            ("legacy-direct-draw", BenchmarkOperation::LegacyDirectDraw),
+        ];
+        if round % 2 == 1 { operations.reverse(); }
+        for (name, operation) in operations {
+            let mut result = benchmark_operation(
+                &source, sw, sh, tw, th, true, 60, operation,
+            ).unwrap();
+            if let Some(expected) = &reference {
+                assert!(&result.output_bgra == expected, "Direct SRV changed output pixels");
+            } else {
+                reference = Some(result.output_bgra.clone());
+            }
+            result.frames_ms.sort_by(f64::total_cmp);
+            result.srv_creation_us.sort_by(f64::total_cmp);
+            let srv_us = result.srv_creation_us.get(result.srv_creation_us.len() / 2).copied();
+            println!("{name} round {round}: {:.4} ms GPU, SRV creation {srv_us:?} us CPU",
+                result.frames_ms[result.frames_ms.len() / 2]);
+            results.push(json!({
+                "operation": name, "round": round, "adapter": result.adapter_name,
+                "median_gpu_ms": result.frames_ms[result.frames_ms.len() / 2],
+                "frames_gpu_ms": result.frames_ms, "median_srv_creation_cpu_us": srv_us,
+                "byte_exact_to_legacy": true,
+            }));
+        }
+    }
+    std::fs::write(dir.join("scaled-direct-results.json"), serde_json::to_vec_pretty(&json!({
+        "source": [sw, sh], "target": [tw, th],
+        "scope": "Offscreen source copy plus legacy draw versus unchanged legacy draw from direct SRV. SRV creation measured separately with CPU clock, outside GPU interval. Excludes acquisition, presentation, source upload and readback. Not Arc 140V or end-to-end timing.",
+        "results": results,
+    })).unwrap()).unwrap();
 }
 
 #[test]
@@ -200,7 +421,7 @@ fn native_static_refresh_keeps_target_cadence() {
                 bottom: 64,
             },
             rendering: RenderingOptions {
-                high_performance_sampling: true,
+                high_performance_sampling: Some(true),
                 full_frame_copy: false,
                 static_refresh: true,
             },

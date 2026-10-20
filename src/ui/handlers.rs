@@ -673,6 +673,35 @@ pub(super) fn register_screen_size_handlers(
         }
     });
 
+    let flyout_weak = flyout.as_weak();
+    let screen_displays = state.displays.clone();
+    flyout.on_screen_refresh_edited(move |index, refresh| {
+        let Some(ui) = flyout_weak.upgrade() else {
+            return;
+        };
+        if ui.get_running() || ui.get_busy() || ui.get_screen_size_save_blocked() {
+            return;
+        }
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let rows = ui.get_screen_size_rows();
+        let Some(mut row) = rows.row_data(index) else {
+            return;
+        };
+        let displays = screen_displays.lock().expect("display metadata poisoned");
+        let Some(display) = displays
+            .iter()
+            .find(|display| row.display_id.eq_ignore_ascii_case(&display.id))
+        else {
+            return;
+        };
+        row.manual_refresh = refresh;
+        update_screen_size_row_preview(display, &mut row);
+        rows.set_row_data(index, row);
+        update_screen_size_validity(&ui);
+    });
+
     let reread_sender = sender.clone();
     let flyout_weak = flyout.as_weak();
     flyout.on_reread_screen_size(move || {

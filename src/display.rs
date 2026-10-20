@@ -19,7 +19,8 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE180,
     DISPLAYCONFIG_ROTATION_ROTATE270, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
     DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GUID_DEVINTERFACE_MONITOR,
-    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
+    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig, SDC_APPLY,
+    SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SetDisplayConfig,
 };
 use windows::Win32::Devices::Properties::{
     DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID, DEVPROPTYPE,
@@ -41,6 +42,7 @@ use windows::Win32::System::Registry::{
 };
 use windows::core::{GUID, PCWSTR, w};
 
+use crate::diagnostics::{self, Level};
 use crate::geometry::Rotation;
 use crate::limits::MAX_OUTPUTS;
 use crate::session_gate::VirtualMode;
@@ -57,6 +59,7 @@ pub struct Display {
     pub native_height: u32,
     pub physical_width_mm: Option<f64>,
     pub physical_height_mm: Option<f64>,
+    pub preferred_refresh_millihz: Option<u32>,
     pub rotation: Rotation,
     pub refresh_numerator: u32,
     pub refresh_denominator: u32,
@@ -182,7 +185,105 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
 }
 
 pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError> {
-    let current = active_displays()?;
+    trace_topology("restore saved", expected);
+    let current = match active_displays() {
+        Ok(current) => current,
+        Err(error) => {
+            trace_restore(&format!("initial read failed: {error}"));
+            return Err(error);
+        }
+    };
+    trace_topology("restore current", &current);
+    for saved in expected.iter().filter(|display| !display.virtual_display) {
+        if !current
+            .iter()
+            .any(|actual| actual.id.eq_ignore_ascii_case(&saved.id))
+        {
+            trace_restore(&format!(
+                "missing saved physical display: device={} id={}; existing restore policy skips absent displays",
+                saved.device_name, saved.id
+            ));
+        }
+    }
+    let result = restore_display_topology_inner(expected, &current);
+    trace_restore(&format!("restore result={result:?}"));
+    match active_displays() {
+        Ok(displays) => {
+            trace_topology("restore final readback", &displays);
+            for saved in expected.iter().filter(|display| !display.virtual_display) {
+                if !displays
+                    .iter()
+                    .any(|actual| actual.id.eq_ignore_ascii_case(&saved.id))
+                {
+                    trace_restore(&format!(
+                        "final readback missing saved physical display: device={} id={}",
+                        saved.device_name, saved.id
+                    ));
+                }
+            }
+        }
+        Err(error) => trace_restore(&format!("final readback failed: {error}")),
+    }
+    result
+}
+
+fn trace_restore(message: &str) {
+    diagnostics::log(
+        Level::Debug,
+        "display",
+        "topology-restore",
+        None,
+        format!("pid={} {message}", std::process::id()),
+    );
+}
+
+pub(crate) fn trace_topology(stage: &str, displays: &[Display]) {
+    trace_restore(&format!("{stage}: count={}", displays.len()));
+    for display in displays {
+        trace_restore(&format!(
+            "{stage}: device={} id={} rect={:?} primary={} refresh={}/{} rotation={:?} virtual={}",
+            display.device_name,
+            display.id,
+            display.rect,
+            display.primary,
+            display.refresh_numerator,
+            display.refresh_denominator,
+            display.rotation,
+            display.virtual_display,
+        ));
+    }
+}
+
+fn restore_display_topology_inner(
+    expected: &[Display],
+    current: &[Display],
+) -> Result<(), DisplayError> {
+    let pairs: Vec<_> = expected
+        .iter()
+        .filter(|d| !d.virtual_display)
+        .filter_map(|saved| {
+            current
+                .iter()
+                .find(|actual| actual.id.eq_ignore_ascii_case(&saved.id))
+                .map(|actual| (saved, actual))
+        })
+        .collect();
+    if pairs
+        .iter()
+        .all(|(saved, actual)| same_desktop_mode(saved, actual))
+    {
+        if pairs
+            .iter()
+            .any(|(saved, actual)| saved.rect != actual.rect || saved.primary != actual.primary)
+        {
+            trace_restore("branch=CCD position-only");
+            restore_desktop_positions(expected)?;
+        } else {
+            trace_restore("branch=no-op matched physical displays already restored");
+        }
+        return Ok(());
+    }
+    trace_restore("branch=GDI mode-change");
     let mut pending = false;
     for display in expected.iter().filter(|display| !display.virtual_display) {
         let Some(actual) = current
@@ -233,15 +334,34 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
         if !same_mode {
             prepare_topology_mode(&mut mode, display);
         }
+        let flags = topology_restore_flags(display, actual);
+        trace_restore(&format!(
+            "GDI stage device={} id={} flags={:#x} fields={:#x} position=({}, {}) mode={}x{}@{} bpp={} position_only={}",
+            actual.device_name,
+            actual.id,
+            flags.0,
+            mode.dmFields.0,
+            unsafe { mode.Anonymous1.Anonymous2.dmPosition.x },
+            unsafe { mode.Anonymous1.Anonymous2.dmPosition.y },
+            mode.dmPelsWidth,
+            mode.dmPelsHeight,
+            mode.dmDisplayFrequency,
+            mode.dmBitsPerPel,
+            same_mode,
+        ));
         let result = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(device_name.as_ptr()),
                 Some(&raw const mode),
                 None,
-                topology_restore_flags(display, actual),
+                flags,
                 None,
             )
         };
+        trace_restore(&format!(
+            "ChangeDisplaySettingsExW stage device={} flags={:#x} status={}",
+            actual.device_name, flags.0, result.0
+        ));
         if result != DISP_CHANGE_SUCCESSFUL {
             return Err(DisplayError(format!(
                 "could not stage saved topology for {}: status {}; saved={:?} {:?} @{}/{} primary={}; current={:?} {:?} @{}/{} primary={}; submitted={}x{}@{} bpp={} fields={:#x} position_only={}",
@@ -271,10 +391,128 @@ pub fn restore_display_topology(expected: &[Display]) -> Result<(), DisplayError
         let result = unsafe {
             ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE::default(), None)
         };
+        trace_restore(&format!(
+            "ChangeDisplaySettingsExW apply flags=0x0 status={}",
+            result.0
+        ));
         if result != DISP_CHANGE_SUCCESSFUL {
             return Err(DisplayError(format!(
                 "could not apply saved physical topology: status {}",
                 result.0
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn restore_desktop_positions(expected: &[Display]) -> Result<(), DisplayError> {
+    let (mut path_count, mut mode_count) = (0, 0);
+    let status = unsafe {
+        GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
+    };
+    trace_restore(&format!(
+        "GetDisplayConfigBufferSizes flags={:#x} status={} paths={} modes={}",
+        QDC_ONLY_ACTIVE_PATHS.0, status.0, path_count, mode_count
+    ));
+    if status != ERROR_SUCCESS {
+        return Err(win32_error(
+            "GetDisplayConfigBufferSizes(restore)",
+            status.0,
+        ));
+    }
+    let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
+    let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
+    let status = unsafe {
+        QueryDisplayConfig(
+            QDC_ONLY_ACTIVE_PATHS,
+            &mut path_count,
+            paths.as_mut_ptr(),
+            &mut mode_count,
+            modes.as_mut_ptr(),
+            None,
+        )
+    };
+    trace_restore(&format!(
+        "QueryDisplayConfig flags={:#x} status={} paths={} modes={}",
+        QDC_ONLY_ACTIVE_PATHS.0, status.0, path_count, mode_count
+    ));
+    if status != ERROR_SUCCESS {
+        return Err(win32_error("QueryDisplayConfig(restore)", status.0));
+    }
+    paths.truncate(path_count as usize);
+    modes.truncate(mode_count as usize);
+    for path in &paths {
+        let target = target_name(path.targetInfo.adapterId, path.targetInfo.id)?;
+        let id = wide_string(&target.monitorDevicePath);
+        let Some(saved) = expected
+            .iter()
+            .find(|d| !d.virtual_display && d.id.eq_ignore_ascii_case(&id))
+        else {
+            continue;
+        };
+        let index = unsafe { path.sourceInfo.Anonymous.modeInfoIdx } as usize;
+        let source = modes
+            .get_mut(index)
+            .filter(|mode| mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
+            .ok_or_else(|| {
+                DisplayError(format!(
+                    "missing source mode while restoring {}",
+                    saved.device_name
+                ))
+            })?;
+        trace_restore(&format!(
+            "CCD source device={} id={} source_index={} position=({}, {}) -> ({}, {})",
+            saved.device_name,
+            saved.id,
+            index,
+            unsafe { source.Anonymous.sourceMode.position.x },
+            unsafe { source.Anonymous.sourceMode.position.y },
+            saved.rect.left,
+            saved.rect.top,
+        ));
+        source.Anonymous.sourceMode.position.x = saved.rect.left;
+        source.Anonymous.sourceMode.position.y = saved.rect.top;
+    }
+    // Submit the complete active layout at once. Preserve exact panel timings,
+    // rotations and unrelated outputs; do not allow Windows to choose new modes.
+    let flags = SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE;
+    let status = unsafe { SetDisplayConfig(Some(&paths), Some(&modes), flags) };
+    trace_restore(&format!(
+        "SetDisplayConfig flags={:#x} status={} paths={} modes={}",
+        flags.0,
+        status,
+        paths.len(),
+        modes.len()
+    ));
+    if status != 0 {
+        return Err(DisplayError(format!(
+            "could not restore complete desktop positions: status {}; requested={:?}",
+            status,
+            expected
+                .iter()
+                .filter(|d| !d.virtual_display)
+                .map(|d| (&d.device_name, d.rect, d.primary))
+                .collect::<Vec<_>>()
+        )));
+    }
+    let actual = active_displays()?;
+    for saved in expected.iter().filter(|d| !d.virtual_display) {
+        if let Some(current) = actual.iter().find(|d| d.id.eq_ignore_ascii_case(&saved.id))
+            && (current.rect != saved.rect
+                || current.primary != saved.primary
+                || !same_desktop_mode(current, saved))
+        {
+            return Err(DisplayError(format!(
+                "desktop restore verification failed for {}: saved={:?} primary={} @{}/{}; actual={:?} primary={} @{}/{}",
+                current.device_name,
+                saved.rect,
+                saved.primary,
+                saved.refresh_numerator,
+                saved.refresh_denominator,
+                current.rect,
+                current.primary,
+                current.refresh_numerator,
+                current.refresh_denominator
             )));
         }
     }
@@ -488,19 +726,22 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
             } else {
                 target.connectorInstance
             };
-            let (physical_size, sunshine_id) = if include_identity {
+            let (physical_size, preferred_refresh_millihz, sunshine_id) = if include_identity {
                 let monitor_identity = monitor_identity(&id);
                 (
                     monitor_identity
                         .as_ref()
                         .and_then(|identity| edid_dimensions_mm(&identity.edid)),
+                    monitor_identity
+                        .as_ref()
+                        .and_then(|identity| edid_preferred_refresh_millihz(&identity.edid)),
                     sunshine_display_id(&sunshine_device_id_payload(
                         &id,
                         monitor_identity.as_ref(),
                     )),
                 )
             } else {
-                (None, None)
+                (None, None, None)
             };
             displays.push(Display {
                 id,
@@ -513,6 +754,7 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
                 native_height,
                 physical_width_mm: physical_size.map(|size| size.0),
                 physical_height_mm: physical_size.map(|size| size.1),
+                preferred_refresh_millihz,
                 rotation,
                 refresh_numerator: path.targetInfo.refreshRate.Numerator,
                 refresh_denominator: path.targetInfo.refreshRate.Denominator,
@@ -876,6 +1118,30 @@ fn sunshine_display_id(payload: &[u8]) -> Option<String> {
     ))
 }
 
+fn edid_preferred_refresh_millihz(edid: &[u8]) -> Option<u32> {
+    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    if edid.len() < 128 || edid[..8] != HEADER || edid[24] & 0x02 == 0 {
+        return None;
+    }
+    let timing = &edid[54..72];
+    let clock = u64::from(u16::from_le_bytes([timing[0], timing[1]])) * 10_000;
+    // Virtual desktop outputs are progressive. Do not mislabel an interlaced
+    // preferred timing's field rate as a progressive frame rate.
+    if clock == 0 || timing[17] & 0x80 != 0 {
+        return None;
+    }
+    let h_active = u64::from(timing[2]) + (u64::from(timing[4] >> 4) << 8);
+    let h_blank = u64::from(timing[3]) + (u64::from(timing[4] & 0x0f) << 8);
+    let v_active = u64::from(timing[5]) + (u64::from(timing[7] >> 4) << 8);
+    let v_blank = u64::from(timing[6]) + (u64::from(timing[7] & 0x0f) << 8);
+    let pixels = (h_active + h_blank) * (v_active + v_blank);
+    if h_active == 0 || v_active == 0 || pixels == 0 {
+        return None;
+    }
+    let rate = u32::try_from((clock * 1000 + pixels / 2) / pixels).ok()?;
+    crate::limits::valid_refresh_millihz(rate).then_some(rate)
+}
+
 fn edid_dimensions_mm(edid: &[u8]) -> Option<(f64, f64)> {
     const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
     if edid.len() < 128 || edid[..8] != HEADER {
@@ -1035,6 +1301,7 @@ mod tests {
             native_height: 1080,
             physical_width_mm: None,
             physical_height_mm: None,
+            preferred_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 60,
             refresh_denominator: 1,
@@ -1179,6 +1446,31 @@ mod tests {
             unique_physical_display(&[display("virtual", r"\\.\DISPLAY2", true)], "virtual",)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn preferred_refresh_uses_edid_timing_not_a_fixed_default() {
+        let mut value = edid();
+        value[24] = 0x02;
+        let timing = &mut value[54..72];
+        timing[..2].copy_from_slice(&14850u16.to_le_bytes());
+        timing[2] = 0x80; // 1920 active + 280 blank = 2200.
+        timing[3] = 0x18;
+        timing[4] = 0x71;
+        timing[5] = 0x38; // 1080 active + 45 blank = 1125.
+        timing[6] = 0x2d;
+        timing[7] = 0x40;
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(60_000));
+        value[54..56].copy_from_slice(&59400u16.to_le_bytes());
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(240_000));
+        value[54..56].copy_from_slice(&14835u16.to_le_bytes());
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(59_939));
+        value[71] = 0x80;
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), None);
+        value[71] = 0;
+        value[24] = 0;
+        assert_eq!(super::edid_preferred_refresh_millihz(&value), None);
+        assert_eq!(super::edid_preferred_refresh_millihz(&[0; 128]), None);
     }
 
     #[test]

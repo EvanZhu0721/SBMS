@@ -36,6 +36,9 @@ pub struct DisplayOption {
     pub physical_height_mm: Option<f64>,
     pub physical_override_inches: Option<f64>,
     pub physical_override_aspect_ratio: Option<AspectRatio>,
+    pub preferred_refresh_millihz: Option<u32>,
+    pub current_refresh_millihz: u32,
+    pub refresh_override_millihz: Option<u32>,
     pub rotation: Rotation,
 }
 
@@ -1176,6 +1179,11 @@ fn refresh(emit: &impl Fn(ControllerEvent)) {
                     physical_height_mm: display.physical_height_mm,
                     physical_override_inches: None,
                     physical_override_aspect_ratio: None,
+                    preferred_refresh_millihz: display.preferred_refresh_millihz,
+                    current_refresh_millihz: ((u64::from(display.refresh_numerator) * 1000)
+                        / u64::from(display.refresh_denominator.max(1)))
+                        as u32,
+                    refresh_override_millihz: None,
                     rotation: display.rotation,
                     label: format!(
                         "{} · {}×{}{}",

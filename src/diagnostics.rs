@@ -68,6 +68,21 @@ pub fn init() -> io::Result<&'static Path> {
     let path = default_log_path()?;
     let diagnostics = Diagnostics::open(path, DEFAULT_MAX_FILE_BYTES, DEFAULT_MEMORY_RECORDS)?;
     let _ = DIAGNOSTICS.set(diagnostics);
+    log(
+        Level::Info,
+        "process",
+        "build",
+        None,
+        format!(
+            "pid={} version={} build={} executable={}",
+            std::process::id(),
+            env!("CARGO_PKG_VERSION"),
+            env!("SBMS_BUILD_STAMP"),
+            std::env::current_exe()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        ),
+    );
     Ok(&DIAGNOSTICS
         .get()
         .expect("diagnostics must be initialized")

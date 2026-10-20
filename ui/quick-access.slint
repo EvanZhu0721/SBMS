@@ -144,6 +144,7 @@ export component QuickAccess inherits Window {
     callback close-screen-size();
     callback screen-size-edited(int, string, int);
     callback reset-screen-size(int);
+    callback screen-refresh-edited(int, string);
     callback reread-screen-size();
     callback save-screen-size();
     callback create-profile(string);
@@ -245,6 +246,7 @@ export component QuickAccess inherits Window {
 
         close-screen-size => { root.close-screen-size(); }
         screen-size-edited(index, inches, ratio) => { root.screen-size-edited(index, inches, ratio); }
+        screen-refresh-edited(index, refresh) => { root.screen-refresh-edited(index, refresh); }
         reset-screen-size(index) => { root.reset-screen-size(index); }
         reread-screen-size => { root.reread-screen-size(); }
         save-screen-size => { root.save-screen-size(); }

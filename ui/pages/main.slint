@@ -701,7 +701,7 @@ export component MainPage inherits FocusScope {
                             control-enabled: !root.running && !root.busy;
                             field-label: root.stream-only
                                 ? "Configure stream-only screen"
-                                : "Configure target screen size";
+                                : "Configure displays";
                             clicked => {
                                 if root.stream-only { root.open-stream-config(); }
                                 else { root.open-screen-size(); }

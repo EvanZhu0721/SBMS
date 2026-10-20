@@ -75,12 +75,28 @@ pub struct GroupConfig {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RenderingOptions {
-    pub high_performance_sampling: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub high_performance_sampling: Option<bool>,
     pub full_frame_copy: bool,
     pub static_refresh: bool,
 }
 
 impl RenderingOptions {
+    pub fn high_performance_sampling(&self) -> bool {
+        self.high_performance_sampling
+            .unwrap_or_else(crate::gpu_preference::prefer_high_performance)
+    }
+
+    pub fn effective_with_default(&self, automatic: bool) -> bool {
+        self.high_performance_sampling.unwrap_or(automatic)
+    }
+
+    pub fn set_effective_sampling(&mut self, enabled: bool) {
+        if enabled != self.high_performance_sampling() {
+            self.high_performance_sampling = Some(enabled);
+        }
+    }
+
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -237,10 +253,19 @@ pub struct DisplayOverride {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct DisplayRefreshOverride {
+    pub display_id: String,
+    pub refresh_millihz: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DisplayOverrides {
     pub version: u32,
     #[serde(default)]
     pub displays: Vec<DisplayOverride>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refresh_rates: Vec<DisplayRefreshOverride>,
 }
 
 #[derive(Clone, Debug)]
@@ -534,11 +559,40 @@ impl Default for DisplayOverrides {
         Self {
             version: DISPLAY_OVERRIDES_VERSION,
             displays: Vec::new(),
+            refresh_rates: Vec::new(),
         }
     }
 }
 
 impl DisplayOverrides {
+    pub fn refresh_for(&self, display_id: &str) -> Option<u32> {
+        self.refresh_rates
+            .iter()
+            .find(|entry| entry.display_id.eq_ignore_ascii_case(display_id))
+            .map(|entry| entry.refresh_millihz)
+    }
+
+    pub fn set_refresh(
+        &mut self,
+        display_id: String,
+        refresh: Option<u32>,
+    ) -> Result<(), ConfigError> {
+        if refresh.is_some_and(|value| !valid_refresh_millihz(value)) {
+            return Err(ConfigError(
+                "Refresh rate is outside the supported range".into(),
+            ));
+        }
+        self.refresh_rates
+            .retain(|entry| !entry.display_id.eq_ignore_ascii_case(&display_id));
+        if let Some(refresh_millihz) = refresh {
+            self.refresh_rates.push(DisplayRefreshOverride {
+                display_id,
+                refresh_millihz,
+            });
+        }
+        Ok(())
+    }
+
     pub fn override_for(&self, display_id: &str) -> Option<&DisplayOverride> {
         self.displays
             .iter()
@@ -585,6 +639,18 @@ impl DisplayOverrides {
                 "unsupported display override version {}",
                 self.version
             )));
+        }
+        for (index, entry) in self.refresh_rates.iter().enumerate() {
+            if entry.display_id.trim().is_empty()
+                || !valid_refresh_millihz(entry.refresh_millihz)
+                || self.refresh_rates[..index]
+                    .iter()
+                    .any(|other| other.display_id.eq_ignore_ascii_case(&entry.display_id))
+            {
+                return Err(ConfigError(
+                    "Invalid or duplicate display refresh override".into(),
+                ));
+            }
         }
         if self.displays.len() > 256 {
             return Err(ConfigError("too many display overrides".into()));
@@ -1720,7 +1786,45 @@ mod tests {
     }
 
     #[test]
-    fn rendering_options_default_off_for_existing_configs() {
+    fn automatic_sampling_preserves_manual_choices_and_legacy_json() {
+        let automatic = RenderingOptions::default();
+        assert!(automatic.effective_with_default(true));
+        assert!(!automatic.effective_with_default(false));
+        for enabled in [false, true] {
+            let options: RenderingOptions = serde_json::from_value(serde_json::json!({
+                "high_performance_sampling": enabled
+            }))
+            .unwrap();
+            assert_eq!(options.high_performance_sampling, Some(enabled));
+            assert_eq!(options.effective_with_default(true), enabled);
+            assert_eq!(options.effective_with_default(false), enabled);
+            assert_eq!(
+                serde_json::to_value(options).unwrap()["high_performance_sampling"],
+                enabled
+            );
+        }
+        let json = serde_json::to_value(automatic).unwrap();
+        assert!(json.get("high_performance_sampling").is_none());
+        assert_eq!(
+            serde_json::from_value::<RenderingOptions>(json).unwrap(),
+            automatic
+        );
+    }
+
+    #[test]
+    fn collecting_unchanged_sampling_preserves_automatic_mode() {
+        let mut options = RenderingOptions::default();
+        let effective = options.high_performance_sampling();
+        options.set_effective_sampling(effective);
+        assert_eq!(options.high_performance_sampling, None);
+        options.set_effective_sampling(!effective);
+        assert_eq!(options.high_performance_sampling, Some(!effective));
+        options.set_effective_sampling(effective);
+        assert_eq!(options.high_performance_sampling, Some(effective));
+    }
+
+    #[test]
+    fn rendering_options_default_automatic_for_existing_configs() {
         let mut json = serde_json::to_value(AppConfig::default()).unwrap();
         assert!(json["groups"][0].get("rendering").is_none());
         let restored: AppConfig = serde_json::from_value(json.clone()).unwrap();
@@ -1742,7 +1846,7 @@ mod tests {
         let store = test_store("rendering-options");
         let mut config = AppConfig::default();
         config.groups[0].rendering = RenderingOptions {
-            high_performance_sampling: true,
+            high_performance_sampling: Some(true),
             full_frame_copy: true,
             static_refresh: true,
         };

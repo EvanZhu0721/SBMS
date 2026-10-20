@@ -145,7 +145,7 @@ pub(super) fn hydrate_group(
         return;
     };
     set_target_options(ui, displays, groups, active);
-    ui.set_high_performance_sampling(group.rendering.high_performance_sampling);
+    ui.set_high_performance_sampling(group.rendering.high_performance_sampling());
     ui.set_full_frame_copy(group.rendering.full_frame_copy);
     ui.set_static_refresh(group.rendering.static_refresh);
     ui.set_stream_width(group.stream_width.as_str().into());
@@ -200,7 +200,9 @@ pub(super) fn snapshot_group(
     let target_id = selected_display_id(ui, ui.get_selected_display());
     group.stream_only = target_id.as_deref() == Some(STREAM_ONLY_ID);
     group.target_id = (!group.stream_only).then_some(target_id).flatten();
-    group.rendering.high_performance_sampling = ui.get_high_performance_sampling();
+    group
+        .rendering
+        .set_effective_sampling(ui.get_high_performance_sampling());
     group.rendering.full_frame_copy = ui.get_full_frame_copy();
     group.rendering.static_refresh = ui.get_static_refresh();
     let source = selected_reference_source(ui);
