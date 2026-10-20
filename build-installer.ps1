@@ -7,6 +7,9 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'Unsigned')]
     [switch]$Unsigned,
 
+    [ValidatePattern('^[-a-zA-Z0-9.]*$')]
+    [string]$OutputSuffix = '',
+
     [string]$InnoCompiler = (
         Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'
     )
@@ -65,7 +68,7 @@ if ($signedBuild) {
     }
 }
 
-& cargo.exe build --release --bins --locked
+& cargo.exe build --release --bins --locked -j 1 --manifest-path $cargoManifest
 if ($LASTEXITCODE -ne 0) {
     throw "cargo build failed with exit code $LASTEXITCODE"
 }
@@ -120,14 +123,24 @@ if ($signedBuild) {
 }
 
 New-Item -ItemType Directory -Path $installer -Force | Out-Null
-$packageSuffix = if ($signedBuild) { '' } else { '-unsigned' }
+$packageSuffix = if ($signedBuild) { $OutputSuffix } else { '-unsigned' + $OutputSuffix }
 $package = Join-Path $installer "SBMS-Setup-$version-x64$packageSuffix.exe"
 if (Test-Path -LiteralPath $package) {
     Remove-Item -LiteralPath $package -Force
 }
 $versionDefinition = "/DAppVersion=$version"
 $compilerArguments = @($versionDefinition)
+$compilerArguments += "/DOutputSuffix=$packageSuffix"
 if ($signedBuild) {
+    $driverSignature = Get-AuthenticodeSignature -LiteralPath (Join-Path $driver 'SBMSIndirectDisplay.cat')
+    $signer = $driverSignature.SignerCertificate
+    if ($signer.Subject -eq $signer.Issuer) {
+        # Ship only the public certificate; Setup requires explicit trust consent.
+        [IO.File]::WriteAllBytes(
+            (Join-Path $driver 'SBMS.cer'),
+            $signer.Export([Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+        $compilerArguments += "/DLocalCertificateThumbprint=$($signer.Thumbprint)"
+    }
     $compilerArguments += (
         '/Ssbmssign=$q{0}$q sign /sha1 {1} /fd SHA256 $f' -f
             $signTool, $SigningCertificateThumbprint
@@ -135,7 +148,6 @@ if ($signedBuild) {
 }
 else {
     $compilerArguments += '/DUnsignedBuild=1'
-    $compilerArguments += '/DOutputSuffix=-unsigned'
 }
 $compilerArguments += $manifest
 & $InnoCompiler @compilerArguments
@@ -158,12 +170,5 @@ if ($signedBuild) {
         }
     }
 }
-$hash = Get-Sha256Hex -LiteralPath $package
-$hashFile = "$package.sha256"
-$hashLine = "$hash  $([IO.Path]::GetFileName($package))`n"
-$utf8 = New-Object Text.UTF8Encoding($false)
-[IO.File]::WriteAllText($hashFile, $hashLine, $utf8)
 Write-Host "installer_package=$package"
 Write-Host "installer_signed=$signedBuild"
-Write-Host "installer_sha256=$hash"
-Write-Host "installer_sha256_file=$hashFile"

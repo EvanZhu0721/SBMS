@@ -50,9 +50,22 @@ foreach ($line in $environmentLines) {
     }
 }
 
-$wdfInclude = Join-Path $kitsRoot 'Include\wdf\umdf\2.25'
+# Use the same UMDF target for headers, stub library and INF. Merely lowering
+# the INF does not change the version requested by the linked driver.
+# IddCx 1.4 needs WDF_STRUCT_INFO from UMDF 2.25 or later.
+# UMDF 2.25 ships with Windows 10 1803; our minimum 19041 already has 2.31.
+$umdfVersion = '2.25'
+$umdfMinor = 25
+$sourceInf = Join-Path $driver 'SBMSIndirectDisplay.inf'
+$infVersion = [regex]::Match(
+    (Get-Content -LiteralPath $sourceInf -Raw -Encoding UTF8),
+    '(?m)^UmdfLibraryVersion\s*=\s*(\d+\.\d+)\s*$').Groups[1].Value
+if ($infVersion -ne $umdfVersion) {
+    throw "INF UMDF version $infVersion does not match build target $umdfVersion."
+}
+$wdfInclude = Join-Path $kitsRoot "Include\wdf\umdf\$umdfVersion"
 $iddInclude = Join-Path $kitsRoot "Include\$sdkVersion\um\iddcx\1.4"
-$wdfLibrary = Join-Path $kitsRoot 'Lib\wdf\umdf\x64\2.25\WdfDriverStubUm.lib'
+$wdfLibrary = Join-Path $kitsRoot "Lib\wdf\umdf\x64\$umdfVersion\WdfDriverStubUm.lib"
 $iddLibrary = Join-Path $kitsRoot `
     "Lib\$sdkVersion\um\x64\iddcx\1.4\IddCxStub.lib"
 $apiValidator = Join-Path $kitsRoot "bin\$sdkVersion\x64\ApiValidator.exe"
@@ -77,6 +90,10 @@ if ($SigningCertificateThumbprint -and
 }
 
 if (Test-Path -LiteralPath $output) {
+    $expectedOutput = [IO.Path]::GetFullPath((Join-Path $repository 'target\driver'))
+    if ((Resolve-Path -LiteralPath $output).Path -ne $expectedOutput) {
+        throw "Unexpected driver output directory: $output"
+    }
     Remove-Item -LiteralPath $output -Recurse -Force
 }
 New-Item -ItemType Directory -Path $output | Out-Null
@@ -90,8 +107,8 @@ $compileArguments = @(
     '/W4', '/WX',
     '/wd4005', '/wd4324',
     '/D_WIN64', '/D_AMD64_', '/DAMD64', '/DUMDF_DRIVER',
-    '/DUMDF_VERSION_MAJOR=2', '/DUMDF_VERSION_MINOR=25',
-    '/DUMDF_MINIMUM_VERSION_REQUIRED=25', '/DUMDF_USING_NTSTATUS',
+    '/DUMDF_VERSION_MAJOR=2', "/DUMDF_VERSION_MINOR=$umdfMinor",
+    "/DUMDF_MINIMUM_VERSION_REQUIRED=$umdfMinor", '/DUMDF_USING_NTSTATUS',
     '/D_UNICODE', '/DUNICODE',
     '/DIDDCX_VERSION_MAJOR=1', '/DIDDCX_VERSION_MINOR=4',
     '/DIDDCX_MINIMUM_VERSION_REQUIRED=4',
@@ -130,17 +147,20 @@ foreach ($mode in '/w', '/u', '/h') {
     }
 }
 
+if ($SigningCertificateThumbprint) {
+    & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $binary
+    if ($LASTEXITCODE -ne 0) {
+        throw "Signing the driver DLL failed with exit code $LASTEXITCODE"
+    }
+}
+
+# The catalog must describe the final signed DLL, not the unsigned input.
 & $inf2Cat "/driver:$output" /os:10_X64
 if ($LASTEXITCODE -ne 0) {
     throw "Inf2Cat failed with exit code $LASTEXITCODE"
 }
 
 if ($SigningCertificateThumbprint) {
-    & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $binary
-    if ($LASTEXITCODE -ne 0) {
-        throw "Signing the driver DLL failed with exit code $LASTEXITCODE"
-    }
-
     $catalog = Join-Path $output 'SBMSIndirectDisplay.cat'
     & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $catalog
     if ($LASTEXITCODE -ne 0) {
@@ -151,6 +171,12 @@ if ($SigningCertificateThumbprint) {
         & $signTool verify /pa $file
         if ($LASTEXITCODE -ne 0) {
             throw "Signature verification failed for $file"
+        }
+    }
+    foreach ($member in @($binary, $inf)) {
+        & $signTool verify /pa /c $catalog $member
+        if ($LASTEXITCODE -ne 0) {
+            throw "Catalog membership verification failed for $member"
         }
     }
 }
