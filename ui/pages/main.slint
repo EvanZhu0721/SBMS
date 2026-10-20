@@ -1,4 +1,4 @@
-import { Button, LineEdit, ProgressIndicator } from "std-widgets.slint";
+import { Button, LineEdit, Palette, ProgressIndicator, Spinner, Switch } from "std-widgets.slint";
 import {
     CompactComboBox,
     DialogActionButton,
@@ -195,7 +195,7 @@ component ProfileEntryButton inherits FocusScope {
     callback clicked();
 
     width: 144px;
-    height: 64px;
+    height: MdTokens.target + MdTokens.space-1;
 
     Rectangle {
         width: root.width;
@@ -207,9 +207,9 @@ component ProfileEntryButton inherits FocusScope {
             y: 0px;
             width: root.width;
             height: root.height;
-            background: root.expanded ? MdTokens.primary-container : MdTokens.surface-container;
-            border-width: root.expanded ? 2px : 0px;
-            border-color: root.expanded ? MdTokens.primary : MdTokens.outline-variant;
+            background: root.expanded ? MdTokens.primary-container : MdTokens.profile-container;
+            border-width: root.expanded ? 2px : (Palette.color-scheme == ColorScheme.dark ? 0px : 1px);
+            border-color: root.expanded ? MdTokens.primary : MdTokens.profile-outline;
             border-radius: MdTokens.shape-medium;
             animate background, border-color { duration: 150ms; easing: ease-in-out; }
 
@@ -223,29 +223,32 @@ component ProfileEntryButton inherits FocusScope {
             }
 
             Path {
-                x: parent.width - self.width - 12px;
+                x: parent.width - self.width - MdTokens.space-2;
                 y: (parent.height - self.height) / 2;
-                width: 24px;
-                height: 24px;
+                width: 18px;
+                height: 18px;
                 viewbox-width: 24;
                 viewbox-height: 24;
-                commands: "M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2ZM13 3.5L18.5 9H13V3.5ZM16 18H8V16H16V18ZM16 14H8V12H16V14Z";
+                commands: root.expanded
+                    ? "M7.41 15.41L12 10.83L16.59 15.41L18 14L12 8L6 14Z"
+                    : "M7.41 8.59L12 13.17L16.59 8.59L18 10L12 16L6 10Z";
                 fill: root.expanded ? MdTokens.on-primary-container : MdTokens.on-surface;
                 accessible-role: none;
             }
 
-            VerticalLayout {
-                x: 12px;
-                width: parent.width - 60px;
+            HorizontalLayout {
+                x: MdTokens.space-2;
+                width: parent.width - 2 * MdTokens.space-2 - 18px - MdTokens.space-1;
                 height: parent.height;
-                alignment: center;
-                spacing: 3px;
+                spacing: 4px;
 
                 Text {
-                    text: "Profile";
+                    text: "Profile -";
+                    horizontal-stretch: 0;
+                    vertical-alignment: center;
                     color: root.expanded ? MdTokens.on-primary-container : MdTokens.on-surface;
-                    font-size: MdTokens.type-title-medium;
-                    font-weight: MdTokens.weight-medium;
+                    font-size: MdTokens.type-body-large;
+                    opacity: 0.72;
                     horizontal-alignment: left;
                     overflow: elide;
                     accessible-role: none;
@@ -253,8 +256,11 @@ component ProfileEntryButton inherits FocusScope {
 
                 Text {
                     text: root.current-name;
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
                     color: root.expanded ? MdTokens.on-primary-container : MdTokens.on-surface-variant;
-                    font-size: MdTokens.type-body-small;
+                    font-size: MdTokens.type-body-large;
+                    font-weight: MdTokens.weight-medium;
                     horizontal-alignment: left;
                     overflow: elide;
                     accessible-role: none;
@@ -323,6 +329,7 @@ export component MainPage inherits FocusScope {
     in property <[string]> profile-names;
     in property <string> active-profile-name: "default";
     in property <bool> profile-saving: false;
+    in property <bool> auto-map-on-login: false;
     in property <int> max-profile-count: 3;
     in-out property <int> profile-dialog-mode: 0; // 1 new, 2 rename, 3 delete, 4 switch
     in-out property <string> profile-dialog-target-name: "";
@@ -337,6 +344,7 @@ export component MainPage inherits FocusScope {
     callback reference-selected();
     callback strategy-selected();
     callback calculate-geometry();
+    callback open-rendering();
     callback open-manual-geometry();
     callback dismiss();
     callback open-diagnostics();
@@ -348,6 +356,7 @@ export component MainPage inherits FocusScope {
     callback open-display-settings();
     callback open-screen-size();
     callback open-profile-directory();
+    callback set-auto-map-on-login(bool);
     callback create-profile(string);
     callback rename-profile(string, string);
     callback delete-profile(string);
@@ -647,7 +656,7 @@ export component MainPage inherits FocusScope {
                                 ProgressIndicator {
                                     y: (parent.height - self.height) / 2;
                                     width: 24px;
-                                    height: 24px;
+                                    height: 20px;
                                     indeterminate: true;
                                 }
                             }
@@ -708,12 +717,26 @@ export component MainPage inherits FocusScope {
                             height: 20px;
                             spacing: MdTokens.space-1;
     
-                            Text {
-                                text: "Reference display";
-                                color: MdTokens.on-surface-variant;
-                                font-size: MdTokens.type-body-medium;
-                                font-weight: MdTokens.weight-medium;
-                                vertical-alignment: bottom;
+                            HorizontalLayout {
+                                spacing: 0px;
+                                Text {
+                                    text: "Shared reference";
+                                    color: MdTokens.on-surface-variant;
+                                    font-size: MdTokens.type-body-medium;
+                                    font-weight: MdTokens.weight-medium;
+                                    vertical-alignment: bottom;
+                                }
+                                if root.reference-manual : MaterialIconButton {
+                                    width: 24px;
+                                    height: 24px;
+                                    icon-kind: 3;
+                                    background: transparent;
+                                    border-width: 0px;
+                                    control-enabled: root.reference-action-enabled
+                                        && !root.running && !root.busy;
+                                    field-label: "Configure manual reference display";
+                                    clicked => { root.open-manual-geometry(); }
+                                }
                             }
     
                             Text {
@@ -742,7 +765,7 @@ export component MainPage inherits FocusScope {
                                 collapsed-model: root.reference-names;
                                 current-index <=> root.selected-reference;
                                 control-enabled: !root.running && !root.busy && root.reference-labels.length > 0;
-                                field-label: "Reference display";
+                                field-label: "Shared reference display";
                                 popup-width: 352px;
                                 selected => { root.reference-selected(); }
                             }
@@ -762,42 +785,37 @@ export component MainPage inherits FocusScope {
                             }
     
                             MaterialIconButton {
-                                icon-kind: root.reference-manual ? 2 : 5;
-                                control-enabled: root.reference-action-enabled
-                                    && !root.running && !root.busy;
-                                field-label: root.reference-manual
-                                    ? "Configure manual reference display"
-                                    : "Calculate virtual display geometry";
-                                clicked => {
-                                    if root.reference-manual {
-                                        root.open-manual-geometry();
-                                    } else {
-                                        root.calculate-geometry();
-                                    }
-                                }
+                                icon-kind: 2;
+                                visible: !root.stream-only;
+                                control-enabled: !root.running && !root.busy;
+                                field-label: "Rendering settings";
+                                clicked => { root.open-rendering(); }
                             }
                         }
                     }
 
                     HorizontalLayout {
-                        height: 64px;
+                        height: MdTokens.target + MdTokens.space-1;
                         spacing: MdTokens.space-1;
 
                         Rectangle {
                             horizontal-stretch: 1;
-                            background: MdTokens.surface-container;
+                            background: MdTokens.profile-container;
                             border-radius: MdTokens.shape-medium;
+                            border-width: Palette.color-scheme == ColorScheme.dark ? 0px : 1px;
+                            border-color: MdTokens.profile-outline;
 
                             HorizontalLayout {
-                                padding: MdTokens.space-2;
-                                spacing: 12px;
+                                spacing: 0px;
+
+                                Rectangle { horizontal-stretch: 1; }
 
                                 Rectangle {
-                                    width: 24px;
+                                    width: 36px;
                                     background: transparent;
 
-                                    ProgressIndicator {
-                                        x: 2px;
+                                    Spinner {
+                                        x: (parent.width - self.width) / 2;
                                         y: (parent.height - self.height) / 2;
                                         width: 20px;
                                         height: 20px;
@@ -812,8 +830,8 @@ export component MainPage inherits FocusScope {
 
                                     Rectangle {
                                         y: (parent.height - self.height) / 2;
-                                        width: 24px;
-                                        height: 24px;
+                                        width: 36px;
+                                        height: 36px;
                                         border-radius: MdTokens.shape-full;
                                         background: MdTokens.success-container;
                                         opacity: root.profile-saving ? 0 : 1;
@@ -824,10 +842,10 @@ export component MainPage inherits FocusScope {
                                         }
 
                                         Path {
-                                            x: 3px;
-                                            y: 3px;
-                                            width: 18px;
-                                            height: 18px;
+                                            x: 4px;
+                                            y: 4px;
+                                            width: 28px;
+                                            height: 28px;
                                             viewbox-width: 24;
                                             viewbox-height: 24;
                                             commands: "M9 16.17L4.83 12L3.41 13.41L9 19L21 7L19.59 5.59L9 16.17Z";
@@ -837,37 +855,30 @@ export component MainPage inherits FocusScope {
                                     }
                                 }
 
-                                VerticalLayout {
-                                    horizontal-stretch: 1;
-                                    alignment: center;
-                                    spacing: 3px;
+                                Rectangle { horizontal-stretch: 1; }
 
-                                    Text {
-                                        text: "Virtual display";
+                                Rectangle {
+                                    // Exclude the glyph side bearings from the spacing calculation.
+                                    width: save-label.preferred-width - 3.5px;
+                                    save-label := Text {
+                                        x: root.profile-saving ? -1px : -3px;
+                                        width: self.preferred-width;
+                                        height: parent.height;
+                                        vertical-alignment: center;
+                                        text: root.profile-saving ? "Saving…" : "Saved";
                                         color: MdTokens.on-surface;
-                                        font-size: MdTokens.type-title-medium;
+                                        font-size: 18px;
                                         font-weight: MdTokens.weight-medium;
                                     }
-
-                                    Text {
-                                        text: root.profile-saving ? "Saving…" : "Saved";
-                                        color: root.profile-saving
-                                            ? MdTokens.on-surface
-                                            : MdTokens.on-surface-variant;
-                                        font-size: MdTokens.type-body-small;
-                                        overflow: elide;
-
-                                        animate color {
-                                            duration: 150ms;
-                                        }
-                                    }
                                 }
+
+                                Rectangle { horizontal-stretch: 1; }
                             }
                         }
 
                         profile-entry-anchor := Rectangle {
-                            min-width: 144px;
-                            max-width: 144px;
+                            min-width: 144px + MdTokens.space-1 + MdTokens.target;
+                            max-width: 144px + MdTokens.space-1 + MdTokens.target;
                             horizontal-stretch: 0;
                             background: transparent;
 
@@ -940,15 +951,15 @@ export component MainPage inherits FocusScope {
             profile-menu := Rectangle {
                 z: 21;
                 x: parent.width - self.width - MdTokens.space-2;
-                y: root.profile-menu-open
+                y: max(4px, root.profile-menu-open
                     ? (root.error-text != "" || root.restart-available
                         ? 332px - self.height
                         : 316px - self.height)
                     : (root.error-text != "" || root.restart-available
                         ? 340px - self.height
-                        : 324px - self.height);
+                        : 324px - self.height));
                 width: 248px;
-                height: 153px + root.profile-names.length * 48px;
+                height: 201px + root.profile-names.length * 48px;
                 visible: root.profile-menu-open || self.opacity > 0;
                 opacity: root.profile-menu-open ? 1 : 0;
                 background: MdTokens.surface;
@@ -1047,6 +1058,24 @@ export component MainPage inherits FocusScope {
                         clicked => {
                             root.profile-menu-open = false;
                             root.open-profile-directory();
+                        }
+                    }
+
+                    Rectangle {
+                        height: 48px;
+                        background: transparent;
+
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 12px;
+                            alignment: center;
+
+                            Switch {
+                                text: "Map on login";
+                                checked: root.auto-map-on-login;
+                                enabled: !root.profile-saving;
+                                toggled => { root.set-auto-map-on-login(self.checked); }
+                            }
                         }
                     }
                 }

@@ -8,10 +8,11 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
+use windows::Win32::Foundation::{CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, HWND};
 use windows::Win32::Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+    CreateMutexW, GetCurrentProcess, OpenMutexW, OpenProcess, OpenProcessToken,
+    PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZATION_SYNCHRONIZE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowThreadProcessId, MB_ICONERROR, MB_OK, MessageBoxW,
@@ -23,9 +24,49 @@ use crate::diagnostics::{self, Level};
 use crate::win32_tray::{find_host_window, request_open};
 
 pub const REGISTERED_TASK_NAME: &str = r"\SBMS\Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A";
+const MANUAL_LAUNCH_BROKER_MUTEX: &str = r"Local\SBMS-Manual-Launch-Broker-7EB4D7A8";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+struct ManualLaunchGuard(HANDLE);
+
+impl Drop for ManualLaunchGuard {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+fn acquire_manual_launch_guard() -> Result<ManualLaunchGuard, LaunchError> {
+    let name = wide(MANUAL_LAUNCH_BROKER_MUTEX);
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+        .map_err(|error| LaunchError(format!("Could not acquire launch broker marker: {error}")))?;
+    Ok(ManualLaunchGuard(handle))
+}
+
+fn is_manual_launch_active() -> Result<bool, LaunchError> {
+    let name = wide(MANUAL_LAUNCH_BROKER_MUTEX);
+    match unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) } {
+        Ok(handle) => {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            Ok(true)
+        }
+        Err(error) if error.code() == ERROR_FILE_NOT_FOUND.to_hresult() => Ok(false),
+        Err(error) => Err(LaunchError(format!(
+            "Could not read launch broker marker: {error}"
+        ))),
+    }
+}
+
+pub fn is_logon_startup(open_requested: bool) -> Result<bool, LaunchError> {
+    Ok(!open_requested && !is_manual_launch_active()?)
+}
 
 pub enum LaunchDisposition {
     RunHere(TrayInstance),
@@ -65,6 +106,7 @@ pub fn route_tray(open_requested: bool) -> Result<LaunchDisposition, LaunchError
         None,
         "starting the registered elevated tray task",
     );
+    let _guard = acquire_manual_launch_guard()?;
     start_registered_task()?;
 
     let deadline = Instant::now() + START_TIMEOUT;
@@ -284,6 +326,16 @@ mod tests {
         assert!(tray_open_requested([]).unwrap());
         assert!(tray_open_requested(["--open".into()]).unwrap());
         assert!(!tray_open_requested(["--background".into()]).unwrap());
+    }
+
+    #[test]
+    fn manual_launch_marker_suppresses_background_mapping_until_released() {
+        assert!(is_logon_startup(false).unwrap());
+        assert!(!is_logon_startup(true).unwrap());
+        let guard = acquire_manual_launch_guard().unwrap();
+        assert!(!is_logon_startup(false).unwrap());
+        drop(guard);
+        assert!(is_logon_startup(false).unwrap());
     }
 
     #[test]

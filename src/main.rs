@@ -126,10 +126,12 @@ fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
                 MappingEvent::Renderer {
                     id,
                     event: RendererEvent::Fps(fps),
+                    ..
                 } => println!("group={id} fps={fps}"),
                 MappingEvent::Renderer {
                     id,
                     event: RendererEvent::Failed(error),
+                    ..
                 } => {
                     diagnostics::log(
                         Level::Error,
@@ -143,6 +145,7 @@ fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
                 MappingEvent::Renderer {
                     id,
                     event: RendererEvent::TopologyLost,
+                    ..
                 } => {
                     diagnostics::log(
                         Level::Warn,
@@ -287,12 +290,12 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
         configured_map_plan(target).map_err(|error| log_map_preflight_error(session_id, error))?;
     let reporter = Arc::new(move |event| match event {
         MappingEvent::Renderer {
-            id: 0,
             event: RendererEvent::Fps(fps),
+            ..
         } => println!("fps={fps}"),
         MappingEvent::Renderer {
-            id: 0,
             event: RendererEvent::Failed(error),
+            ..
         } => {
             diagnostics::log(
                 Level::Error,
@@ -304,8 +307,8 @@ fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>
             eprintln!("renderer_error={error}");
         }
         MappingEvent::Renderer {
-            id: 0,
             event: RendererEvent::TopologyLost,
+            ..
         } => {
             diagnostics::log(
                 Level::Warn,
@@ -357,7 +360,7 @@ fn configured_map_plan(target: Option<String>) -> Result<MappingPlan, MapPreflig
     let target = match target {
         Some(target) => target,
         None => {
-            let output_one = snapshot.config.group(0).ok_or_else(|| {
+            let output_one = snapshot.config.groups.first().ok_or_else(|| {
                 MapPreflightError::new(
                     "config",
                     "Output 1 is not present in the saved configuration",
@@ -382,16 +385,15 @@ fn configured_map_plan(target: Option<String>) -> Result<MappingPlan, MapPreflig
             }
         }
     };
-    let sizing = snapshot.config.groups.iter().find_map(|group| {
+    let group = snapshot.config.groups.iter().find(|group| {
         matches!(
             &group.route,
             GroupRouteConfig::Mirror {
                 target_id: Some(configured_target)
             } if configured_target.eq_ignore_ascii_case(&target)
         )
-        .then_some(group.sizing)
-        .flatten()
     });
+    let sizing = group.and_then(|group| group.sizing);
     let mode = match sizing {
         Some(sizing) => {
             let result = sizing
@@ -411,10 +413,11 @@ fn configured_map_plan(target: Option<String>) -> Result<MappingPlan, MapPreflig
         None => VirtualMode::default(),
     };
     MappingPlan::new(vec![MappingGroupRequest {
-        id: 0,
+        id: group.map_or(0, |group| group.id),
         mode,
-        rotation: Rotation::Deg0,
+        rotation: sizing.map_or(Rotation::Deg0, |sizing| sizing.target.rotation),
         route: MappingRoute::Mirror { target },
+        rendering: group.map(|group| group.rendering).unwrap_or_default(),
     }])
     .map_err(|error| MapPreflightError::new(error.stage(), error.message()))
 }
@@ -609,7 +612,7 @@ fn config(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
             }
             validate_physical_target(&target)?;
             let snapshot = store.update_active(|config| {
-                let output_one = config.group_mut(0).ok_or_else(|| {
+                let output_one = config.groups.first_mut().ok_or_else(|| {
                     ConfigError::new("Output 1 is not present in the saved configuration")
                 })?;
                 output_one.route = GroupRouteConfig::Mirror {
@@ -626,7 +629,7 @@ fn config(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
         }
         Some("clear-target") if arguments.next().is_none() => {
             let snapshot = store.update_active(|config| {
-                let output_one = config.group_mut(0).ok_or_else(|| {
+                let output_one = config.groups.first_mut().ok_or_else(|| {
                     ConfigError::new("Output 1 is not present in the saved configuration")
                 })?;
                 output_one.route = GroupRouteConfig::Mirror { target_id: None };

@@ -1,0 +1,191 @@
+import { BackButton } from "../controls.slint";
+import { MdTokens } from "../theme.slint";
+
+component RenderingSwitch inherits Rectangle {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> control-enabled: true;
+    in-out property <bool> checked: false;
+    callback toggled();
+
+    height: 88px;
+    background: transparent;
+    forward-focus: switch-focus;
+    accessible-role: switch;
+    accessible-label: root.text;
+    accessible-description: root.detail;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.control-enabled;
+    accessible-action-default => {
+        if root.control-enabled {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        border-radius: MdTokens.shape-medium;
+        background: MdTokens.on-surface;
+        opacity: !root.control-enabled ? 0
+            : (switch-touch.pressed || switch-focus.has-focus ? 0.12
+                : (switch-touch.has-hover ? 0.08 : 0));
+        animate opacity { duration: 100ms; easing: ease-in-out; }
+    }
+
+    VerticalLayout {
+        x: 16px;
+        width: parent.width - 100px;
+        height: parent.height;
+        spacing: 4px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: MdTokens.on-surface;
+            font-size: MdTokens.type-body-large;
+            font-weight: MdTokens.weight-medium;
+            wrap: word-wrap;
+            opacity: root.control-enabled ? 1 : 0.38;
+            accessible-role: none;
+        }
+        Text {
+            text: root.detail;
+            color: MdTokens.on-surface-variant;
+            font-size: MdTokens.type-body-small;
+            wrap: word-wrap;
+            opacity: root.control-enabled ? 1 : 0.38;
+            accessible-role: none;
+        }
+    }
+
+    Rectangle {
+        x: parent.width - 68px;
+        y: (parent.height - self.height) / 2;
+        width: 52px;
+        height: 32px;
+        border-radius: 16px;
+        background: root.checked ? MdTokens.primary : MdTokens.surface;
+        border-color: root.checked ? MdTokens.primary : MdTokens.outline-variant;
+        border-width: 2px;
+        opacity: root.control-enabled ? 1 : 0.38;
+        Rectangle {
+            x: root.checked ? 24px : 8px;
+            y: (parent.height - self.height) / 2;
+            width: root.checked ? 24px : 16px;
+            height: self.width;
+            border-radius: self.width / 2;
+            background: root.checked ? MdTokens.on-primary : MdTokens.outline-variant;
+            animate x, width { duration: 100ms; easing: ease-in-out; }
+        }
+    }
+
+    switch-focus := FocusScope {
+        enabled: root.control-enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.checked = !root.checked;
+                root.toggled();
+                return accept;
+            }
+            return reject;
+        }
+        switch-touch := TouchArea {
+            enabled: root.control-enabled;
+            clicked => {
+                switch-focus.focus();
+                root.checked = !root.checked;
+                root.toggled();
+            }
+        }
+    }
+}
+
+export component RenderingPage inherits FocusScope {
+    in property <int> group-number: 1;
+    in property <bool> controls-enabled: true;
+    in-out property <bool> high-performance-sampling: false;
+    in-out property <bool> full-frame-copy: false;
+    in-out property <bool> static-refresh: false;
+    callback edited();
+    callback close();
+
+    key-pressed(event) => {
+        if event.text == Key.Escape {
+            root.close();
+            return accept;
+        }
+        return reject;
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: MdTokens.surface;
+        VerticalLayout {
+            padding: MdTokens.space-2;
+            spacing: MdTokens.space-1;
+            HorizontalLayout {
+                height: MdTokens.target;
+                spacing: MdTokens.space-1;
+                BackButton {
+                    accessible-label: "Back to quick access";
+                    clicked => { root.close(); }
+                }
+                VerticalLayout {
+                    spacing: 0px;
+                    alignment: center;
+                    Text {
+                        text: "Rendering";
+                        color: MdTokens.on-surface;
+                        font-size: MdTokens.type-title-large;
+                        font-weight: MdTokens.weight-medium;
+                    }
+                    Text {
+                        text: "Group " + root.group-number;
+                        color: MdTokens.on-surface-variant;
+                        font-size: MdTokens.type-body-small;
+                    }
+                }
+            }
+            Rectangle {
+                height: 264px;
+                background: MdTokens.surface-container;
+                border-radius: MdTokens.shape-large;
+                VerticalLayout {
+                    spacing: 0px;
+                    RenderingSwitch {
+                        text: "High-performance sampling";
+                        detail: "Legacy filter";
+                        control-enabled: root.controls-enabled;
+                        checked <=> root.high-performance-sampling;
+                        toggled => { root.edited(); }
+                    }
+                    RenderingSwitch {
+                        text: "Full-frame copy";
+                        detail: "Copy the entire frame";
+                        control-enabled: root.controls-enabled;
+                        checked <=> root.full-frame-copy;
+                        toggled => { root.edited(); }
+                    }
+                    RenderingSwitch {
+                        text: "Static refresh";
+                        detail: "Refresh unchanged frames";
+                        control-enabled: root.controls-enabled;
+                        checked <=> root.static-refresh;
+                        toggled => { root.edited(); }
+                    }
+                }
+            }
+            if !root.controls-enabled : Text {
+                height: 28px;
+                text: "Read-only";
+                color: MdTokens.on-surface-variant;
+                font-size: MdTokens.type-body-small;
+                vertical-alignment: center;
+            }
+            Rectangle { vertical-stretch: 1; background: transparent; }
+        }
+    }
+}

@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
+#[path = "controller/desktop.rs"]
+mod desktop_state;
 use crate::diagnostics::{self, Level, MappingSessionId};
 use crate::display::active_displays;
 use crate::geometry::{AspectRatio, Rotation};
@@ -13,9 +16,12 @@ use crate::mapping::{
 };
 use crate::renderer::RendererEvent;
 use crate::sunshine::{self, CaptureBackend, DeploymentEvent};
+use desktop_state::{DesktopEvent, DesktopMonitor, DesktopState};
 
 const DESKTOP_DUPLICATION_PROCESS_LIMIT: usize = 4;
 const MAX_RECONNECT_ATTEMPTS: u8 = 2;
+const RENDERER_RECOVERY_WINDOW: Duration = Duration::from_secs(30);
+const RENDERER_RECOVERY_ATTEMPTS: u8 = 4;
 
 #[derive(Clone, Debug)]
 pub struct DisplayOption {
@@ -95,6 +101,7 @@ enum Message {
         event: MappingEvent,
     },
     Sunshine(DeploymentEvent),
+    Desktop(DesktopEvent),
 }
 
 #[derive(Clone)]
@@ -118,6 +125,56 @@ struct ActiveRun {
     sunshine_ports: HashMap<u32, u16>,
     sunshine_capture: CaptureBackend,
     cancel: Arc<AtomicBool>,
+    recovery: HashMap<u32, PendingRecovery>,
+    interrupted_failure: Option<MappingError>,
+}
+
+/// A pending group belongs to its ActiveRun, so Stop also discards all timers.
+/// Only desktop transitions may rearm an exhausted transient failure.
+struct PendingRecovery {
+    next: Option<Instant>,
+    deadline: Option<Instant>,
+    attempts: u8,
+    error: Option<String>,
+    resumable: bool,
+}
+
+impl PendingRecovery {
+    fn new(now: Instant, available: bool) -> Self {
+        Self {
+            next: available.then_some(now),
+            deadline: None,
+            attempts: 0,
+            error: None,
+            resumable: true,
+        }
+    }
+
+    fn desktop_changed(&mut self, now: Instant, available: bool) {
+        if self.resumable {
+            *self = Self::new(now, available);
+        }
+    }
+
+    fn begin_attempt(&mut self, now: Instant) -> Instant {
+        self.next = None;
+        self.attempts += 1;
+        *self.deadline.get_or_insert(now + RENDERER_RECOVERY_WINDOW)
+    }
+
+    fn failed(&mut self, now: Instant, error: String, retryable: bool) {
+        self.error = Some(error);
+        self.resumable = retryable;
+        let delay = Duration::from_millis(500 * u64::from(self.attempts.max(1)));
+        self.next = (retryable
+            && self.attempts < RENDERER_RECOVERY_ATTEMPTS
+            && self.deadline.is_some_and(|deadline| now + delay < deadline))
+        .then_some(now + delay);
+    }
+
+    fn exhausted(&self) -> bool {
+        self.next.is_none() && self.error.is_some()
+    }
 }
 
 impl ControllerSender {
@@ -205,189 +262,331 @@ impl Controller {
             let mut active = None;
             let mut restart_plan = None::<MappingPlan>;
             let mut next_generation = 0_u64;
-            while let Ok(message) = rx.recv() {
+            let desktop_tx = worker_tx.clone();
+            let mut desktop_monitor_error = None;
+            let desktop_monitor = DesktopMonitor::start(move |event| {
+                let _ = desktop_tx.send(Message::Desktop(event));
+            })
+            .map_err(|error| {
+                desktop_monitor_error = Some(error.clone());
+                diagnostics::log(Level::Error, "controller", "desktop-monitor", None, &error);
+                emit(state(
+                    "Stopped",
+                    "Desktop monitor unavailable".into(),
+                    false,
+                    false,
+                    error,
+                ));
+            })
+            .ok();
+            let desktop = desktop_monitor.as_ref().map(DesktopMonitor::state);
+            let mut observed_desktop = desktop_snapshot(desktop.as_deref());
+            loop {
+                let timeout = active.as_ref().and_then(next_recovery_delay);
+                let message = match timeout {
+                    Some(timeout) => rx.recv_timeout(timeout),
+                    None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                };
+                synchronize_desktop(
+                    &mut active,
+                    desktop.as_deref(),
+                    &mut observed_desktop,
+                    &emit,
+                );
                 match message {
-                    Message::Command(Command::Refresh) => refresh(&emit),
-                    Message::Command(Command::Start {
-                        plan,
-                        cancel,
-                        reason,
-                    }) => {
-                        if active.is_some() {
-                            continue;
-                        }
-                        if reason == StartReason::User {
-                            restart_plan = None;
-                        }
-                        let sunshine_ports = match plan
-                            .groups
-                            .iter()
-                            .enumerate()
-                            .map(|(slot, group)| {
-                                sunshine::default_port_for_slot(slot).map(|port| (group.id, port))
-                            })
-                            .collect::<Result<HashMap<_, _>, _>>()
-                        {
-                            Ok(ports) => ports,
-                            Err(error) => {
-                                diagnostics::log(
-                                    Level::Error,
-                                    "controller",
-                                    "sunshine-ports",
-                                    None,
-                                    error.as_str(),
-                                );
-                                if let Some(attempt) = reason.reconnect_attempt() {
-                                    if !queue_reconnect_after_failure(
-                                        attempt,
-                                        &plan,
-                                        error.as_str(),
-                                        &worker_tx,
-                                        &emit,
-                                        None,
-                                        &cancel,
-                                    ) {
-                                        restart_plan = Some(plan);
-                                    }
-                                    continue;
-                                }
-                                if reason == StartReason::ManualRestart {
-                                    restart_plan = Some(plan);
-                                    emit(restartable_state("Manual restart failed", error));
-                                    continue;
-                                }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Ok(message) => match message {
+                        Message::Command(Command::Refresh) => refresh(&emit),
+                        Message::Command(Command::Start {
+                            plan,
+                            cancel,
+                            reason,
+                        }) => {
+                            if active.is_some() {
+                                continue;
+                            }
+                            if let Some(error) = &desktop_monitor_error
+                                && plan
+                                    .groups
+                                    .iter()
+                                    .any(|group| matches!(group.route, MappingRoute::Mirror { .. }))
+                            {
                                 emit(state(
                                     "Stopped",
-                                    "Couldn’t reserve streaming ports".into(),
+                                    "Desktop monitor unavailable; restart SBMS".into(),
                                     false,
                                     false,
                                     error,
                                 ));
                                 continue;
                             }
-                        };
-                        let sunshine_capture = capture_backend_for_plan(&plan);
-                        next_generation = next_generation.wrapping_add(1);
-                        let generation = next_generation;
-                        let session_id = diagnostics::new_mapping_session_id();
-                        diagnostics::log(
-                            Level::Info,
-                            "controller",
-                            if reason.reconnect_attempt().is_some() {
-                                "reconnect-start"
-                            } else {
-                                "start"
-                            },
-                            Some(session_id),
-                            format!("mapping plan requested with {} group(s)", plan.groups.len()),
-                        );
-                        diagnostics::log(
-                            Level::Info,
-                            "controller",
-                            "sunshine-capture",
-                            Some(session_id),
-                            format!(
-                                "selected capture={} for {} managed Sunshine instance(s); projected DDA processes={} (limit={})",
-                                sunshine_capture.as_str(),
-                                plan.groups.len(),
-                                projected_desktop_duplication_processes(&plan),
-                                DESKTOP_DUPLICATION_PROCESS_LIMIT,
-                            ),
-                        );
-                        for group in &plan.groups {
+                            if reason == StartReason::User {
+                                restart_plan = None;
+                            }
+                            let sunshine_ports = match plan
+                                .groups
+                                .iter()
+                                .enumerate()
+                                .map(|(slot, group)| {
+                                    sunshine::default_port_for_slot(slot)
+                                        .map(|port| (group.id, port))
+                                })
+                                .collect::<Result<HashMap<_, _>, _>>()
+                            {
+                                Ok(ports) => ports,
+                                Err(error) => {
+                                    diagnostics::log(
+                                        Level::Error,
+                                        "controller",
+                                        "sunshine-ports",
+                                        None,
+                                        error.as_str(),
+                                    );
+                                    if let Some(attempt) = reason.reconnect_attempt() {
+                                        if !queue_reconnect_after_failure(
+                                            attempt,
+                                            &plan,
+                                            error.as_str(),
+                                            &worker_tx,
+                                            &emit,
+                                            None,
+                                            &cancel,
+                                        ) {
+                                            restart_plan = Some(plan);
+                                        }
+                                        continue;
+                                    }
+                                    if reason == StartReason::ManualRestart {
+                                        restart_plan = Some(plan);
+                                        emit(restartable_state("Manual restart failed", error));
+                                        continue;
+                                    }
+                                    emit(state(
+                                        "Stopped",
+                                        "Couldn’t reserve streaming ports".into(),
+                                        false,
+                                        false,
+                                        error,
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let sunshine_capture = capture_backend_for_plan(&plan);
+                            next_generation = next_generation.wrapping_add(1);
+                            let generation = next_generation;
+                            let session_id = diagnostics::new_mapping_session_id();
                             diagnostics::log(
                                 Level::Info,
                                 "controller",
-                                "plan",
-                                Some(session_id),
-                                format_mapping_group_plan(group),
-                            );
-                        }
-                        if let Some(attempt) = reason.reconnect_attempt() {
-                            emit(state(
-                                "Reconnecting",
-                                format!("Reconnect attempt {attempt} of {MAX_RECONNECT_ATTEMPTS}…"),
-                                false,
-                                true,
-                                "",
-                            ));
-                        } else {
-                            emit(state(
-                                "Starting",
-                                if reason == StartReason::ManualRestart {
-                                    "Restarting mapping…".into()
+                                if reason.reconnect_attempt().is_some() {
+                                    "reconnect-start"
                                 } else {
-                                    "Creating virtual display…".into()
+                                    "start"
                                 },
-                                false,
-                                true,
-                                "",
-                            ));
-                        }
-                        let report_tx = worker_tx.clone();
-                        let reporter: MappingReporter = Arc::new(move |event| {
-                            if let MappingEvent::Topology { message } = &event {
+                                Some(session_id),
+                                format!(
+                                    "mapping plan requested with {} group(s)",
+                                    plan.groups.len()
+                                ),
+                            );
+                            diagnostics::log(
+                                Level::Info,
+                                "controller",
+                                "sunshine-capture",
+                                Some(session_id),
+                                format!(
+                                    "selected capture={} for {} managed Sunshine instance(s); projected DDA processes={} (limit={})",
+                                    sunshine_capture.as_str(),
+                                    plan.groups.len(),
+                                    projected_desktop_duplication_processes(&plan),
+                                    DESKTOP_DUPLICATION_PROCESS_LIMIT,
+                                ),
+                            );
+                            for group in &plan.groups {
                                 diagnostics::log(
-                                    Level::Debug,
-                                    "mapping",
-                                    "topology",
+                                    Level::Info,
+                                    "controller",
+                                    "plan",
                                     Some(session_id),
-                                    message,
+                                    format_mapping_group_plan(group),
                                 );
-                                return;
                             }
-                            if let MappingEvent::Renderer { id, event } = &event {
-                                match event {
-                                    RendererEvent::Failed(error) => diagnostics::log(
-                                        Level::Error,
-                                        "renderer",
-                                        "renderer",
-                                        Some(session_id),
-                                        format!("group {id}: {error}"),
+                            if let Some(attempt) = reason.reconnect_attempt() {
+                                emit(state(
+                                    "Reconnecting",
+                                    format!(
+                                        "Reconnect attempt {attempt} of {MAX_RECONNECT_ATTEMPTS}…"
                                     ),
-                                    RendererEvent::TopologyLost => diagnostics::log(
-                                        Level::Warn,
-                                        "renderer",
-                                        "topology-lost",
+                                    false,
+                                    true,
+                                    "",
+                                ));
+                            } else {
+                                emit(state(
+                                    "Starting",
+                                    if reason == StartReason::ManualRestart {
+                                        "Restarting mapping…".into()
+                                    } else {
+                                        "Creating virtual display…".into()
+                                    },
+                                    false,
+                                    true,
+                                    "",
+                                ));
+                            }
+                            let report_tx = worker_tx.clone();
+                            let reporter: MappingReporter = Arc::new(move |event| {
+                                if let MappingEvent::Topology { message } = &event {
+                                    diagnostics::log(
+                                        Level::Debug,
+                                        "mapping",
+                                        "topology",
                                         Some(session_id),
-                                        format!(
-                                            "group {id}: desktop duplication topology was lost"
-                                        ),
-                                    ),
-                                    RendererEvent::Fps(_) => {}
+                                        message,
+                                    );
+                                    return;
                                 }
-                            }
-                            let _ = report_tx.send(Message::Mapping { generation, event });
-                        });
-                        match MappingSession::start_plan_with_reporter_cancellable(
-                            plan.clone(),
-                            Arc::clone(&reporter),
-                            &cancel,
-                        ) {
-                            Ok(mut started) => {
-                                if worker_shutdown.load(Ordering::Acquire)
-                                    || cancel.load(Ordering::Acquire)
-                                {
-                                    match started.stop() {
-                                        Ok(()) => {
+                                if let MappingEvent::Renderer { id, event, .. } = &event {
+                                    match event {
+                                        RendererEvent::Failed(error) => diagnostics::log(
+                                            Level::Error,
+                                            "renderer",
+                                            "renderer",
+                                            Some(session_id),
+                                            format!("group {id}: {error}"),
+                                        ),
+                                        RendererEvent::TopologyLost => diagnostics::log(
+                                            Level::Warn,
+                                            "renderer",
+                                            "topology-lost",
+                                            Some(session_id),
+                                            format!(
+                                                "group {id}: desktop duplication topology was lost"
+                                            ),
+                                        ),
+                                        RendererEvent::Fps(_) => {}
+                                    }
+                                }
+                                let _ = report_tx.send(Message::Mapping { generation, event });
+                            });
+                            match MappingSession::start_plan_with_reporter_cancellable(
+                                plan.clone(),
+                                Arc::clone(&reporter),
+                                &cancel,
+                            ) {
+                                Ok(mut started) => {
+                                    if worker_shutdown.load(Ordering::Acquire)
+                                        || cancel.load(Ordering::Acquire)
+                                    {
+                                        match started.stop() {
+                                            Ok(()) => {
+                                                diagnostics::log(
+                                                    Level::Info,
+                                                    "controller",
+                                                    "cancelled",
+                                                    Some(session_id),
+                                                    "mapping completed while cancellation was pending and was stopped",
+                                                );
+                                                if !worker_shutdown.load(Ordering::Acquire) {
+                                                    emit(state(
+                                                        "Stopped",
+                                                        "Choose a display to start".into(),
+                                                        false,
+                                                        false,
+                                                        "",
+                                                    ));
+                                                }
+                                            }
+                                            Err(error) => {
+                                                diagnostics::log(
+                                                    Level::Error,
+                                                    "controller",
+                                                    error.stage(),
+                                                    Some(session_id),
+                                                    error.to_string(),
+                                                );
+                                                if !worker_shutdown.load(Ordering::Acquire) {
+                                                    emit(state(
+                                                        "Stopped",
+                                                        "Cleanup completed with errors".into(),
+                                                        false,
+                                                        false,
+                                                        error.to_string(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    active = Some(ActiveRun {
+                                        session: started,
+                                        reporter,
+                                        generation,
+                                        session_id,
+                                        sunshine_ports,
+                                        sunshine_capture,
+                                        cancel,
+                                        recovery: HashMap::new(),
+                                        interrupted_failure: None,
+                                    });
+                                    restart_plan = None;
+                                    diagnostics::log(
+                                        Level::Info,
+                                        "controller",
+                                        "running",
+                                        Some(session_id),
+                                        "mapping is active",
+                                    );
+                                    emit(state(
+                                        "Running",
+                                        "Mapping is active".into(),
+                                        true,
+                                        false,
+                                        "",
+                                    ));
+                                }
+                                Err(error) => {
+                                    if worker_shutdown.load(Ordering::Acquire) {
+                                        let clean_cancel = error.is_clean_cancellation();
+                                        diagnostics::log(
+                                            if clean_cancel {
+                                                Level::Info
+                                            } else {
+                                                Level::Error
+                                            },
+                                            "controller",
+                                            if clean_cancel {
+                                                "shutdown"
+                                            } else {
+                                                error.stage()
+                                            },
+                                            Some(session_id),
+                                            if clean_cancel {
+                                                "mapping startup cancelled during shutdown".into()
+                                            } else {
+                                                error.to_string()
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                    if cancel.load(Ordering::Acquire) {
+                                        if error.is_clean_cancellation() {
                                             diagnostics::log(
                                                 Level::Info,
                                                 "controller",
                                                 "cancelled",
                                                 Some(session_id),
-                                                "mapping completed while cancellation was pending and was stopped",
+                                                "mapping startup cancelled",
                                             );
-                                            if !worker_shutdown.load(Ordering::Acquire) {
-                                                emit(state(
-                                                    "Stopped",
-                                                    "Choose a display to start".into(),
-                                                    false,
-                                                    false,
-                                                    "",
-                                                ));
-                                            }
-                                        }
-                                        Err(error) => {
+                                            emit(state(
+                                                "Stopped",
+                                                "Choose a display to start".into(),
+                                                false,
+                                                false,
+                                                "",
+                                            ));
+                                        } else {
                                             diagnostics::log(
                                                 Level::Error,
                                                 "controller",
@@ -395,315 +594,227 @@ impl Controller {
                                                 Some(session_id),
                                                 error.to_string(),
                                             );
-                                            if !worker_shutdown.load(Ordering::Acquire) {
-                                                emit(state(
-                                                    "Stopped",
-                                                    "Cleanup completed with errors".into(),
-                                                    false,
-                                                    false,
-                                                    error.to_string(),
-                                                ));
-                                            }
+                                            emit(state(
+                                                "Stopped",
+                                                "Cleanup completed with errors".into(),
+                                                false,
+                                                false,
+                                                error.to_string(),
+                                            ));
                                         }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                                active = Some(ActiveRun {
-                                    session: started,
-                                    reporter,
-                                    generation,
-                                    session_id,
-                                    sunshine_ports,
-                                    sunshine_capture,
-                                    cancel,
-                                });
-                                restart_plan = None;
-                                diagnostics::log(
-                                    Level::Info,
-                                    "controller",
-                                    "running",
-                                    Some(session_id),
-                                    "mapping is active",
-                                );
-                                emit(state(
-                                    "Running",
-                                    "Mapping is active".into(),
-                                    true,
-                                    false,
-                                    "",
-                                ));
-                            }
-                            Err(error) => {
-                                if worker_shutdown.load(Ordering::Acquire) {
-                                    let clean_cancel = error.is_clean_cancellation();
-                                    diagnostics::log(
-                                        if clean_cancel {
-                                            Level::Info
-                                        } else {
-                                            Level::Error
-                                        },
-                                        "controller",
-                                        if clean_cancel {
-                                            "shutdown"
-                                        } else {
-                                            error.stage()
-                                        },
-                                        Some(session_id),
-                                        if clean_cancel {
-                                            "mapping startup cancelled during shutdown".into()
-                                        } else {
-                                            error.to_string()
-                                        },
-                                    );
-                                    continue;
-                                }
-                                if cancel.load(Ordering::Acquire) {
-                                    if error.is_clean_cancellation() {
-                                        diagnostics::log(
-                                            Level::Info,
-                                            "controller",
-                                            "cancelled",
-                                            Some(session_id),
-                                            "mapping startup cancelled",
-                                        );
-                                        emit(state(
-                                            "Stopped",
-                                            "Choose a display to start".into(),
-                                            false,
-                                            false,
-                                            "",
-                                        ));
-                                    } else {
-                                        diagnostics::log(
-                                            Level::Error,
-                                            "controller",
-                                            error.stage(),
-                                            Some(session_id),
-                                            error.to_string(),
-                                        );
-                                        emit(state(
-                                            "Stopped",
-                                            "Cleanup completed with errors".into(),
-                                            false,
-                                            false,
-                                            error.to_string(),
-                                        ));
-                                    }
-                                    continue;
-                                }
-                                diagnostics::log(
-                                    Level::Error,
-                                    "controller",
-                                    error.stage(),
-                                    Some(session_id),
-                                    error.to_string(),
-                                );
-                                if let Some(attempt) = reason.reconnect_attempt() {
-                                    if !queue_reconnect_after_failure(
-                                        attempt,
-                                        &plan,
-                                        error.to_string(),
-                                        &worker_tx,
-                                        &emit,
-                                        Some(session_id),
-                                        &cancel,
-                                    ) {
-                                        restart_plan = Some(plan);
-                                    }
-                                    continue;
-                                }
-                                if reason == StartReason::ManualRestart {
-                                    restart_plan = Some(plan);
-                                    emit(restartable_state(
-                                        "Manual restart failed",
-                                        error.to_string(),
-                                    ));
-                                    continue;
-                                }
-                                emit(state(
-                                    "Stopped",
-                                    "Couldn’t start mapping".into(),
-                                    false,
-                                    false,
-                                    error.to_string(),
-                                ));
-                            }
-                        }
-                    }
-                    Message::Command(Command::Stop) => {
-                        restart_plan = None;
-                        stop_with_state(&mut active, &sunshine_sender, &emit);
-                    }
-                    Message::Command(Command::RestartMapping { cancel }) => {
-                        if active.is_none()
-                            && !cancel.load(Ordering::Acquire)
-                            && let Some(plan) = restart_plan.take()
-                        {
-                            let _ = worker_tx.send(Message::Command(Command::Start {
-                                plan,
-                                cancel,
-                                reason: StartReason::ManualRestart,
-                            }));
-                        }
-                    }
-                    Message::Command(Command::Shutdown) => {
-                        stop_with_state(&mut active, &sunshine_sender, &emit);
-                        break;
-                    }
-                    Message::Mapping { generation, event }
-                        if active
-                            .as_ref()
-                            .is_some_and(|active| active.generation == generation) =>
-                    {
-                        match event {
-                            MappingEvent::GroupReady(group) => {
-                                let active = active.as_ref().expect("guard checked active run");
-                                if let (Some(display_id), Some(port)) = (
-                                    group.sunshine_id.clone(),
-                                    active.sunshine_ports.get(&group.id).copied(),
-                                ) {
-                                    sunshine_sender.start(
-                                        generation,
-                                        group.id,
-                                        display_id,
-                                        port,
-                                        active.sunshine_capture,
-                                    );
-                                }
-                                emit(ControllerEvent::GroupReady(group));
-                            }
-                            MappingEvent::Renderer {
-                                id,
-                                event: RendererEvent::Fps(fps),
-                            } => {
-                                emit(ControllerEvent::Fps {
-                                    id,
-                                    fps: fps.min(999),
-                                });
-                            }
-                            MappingEvent::Renderer {
-                                id,
-                                event: RendererEvent::TopologyLost,
-                            } => {
-                                let active_run = active.as_mut().expect("guard checked active run");
-                                if active_run.cancel.load(Ordering::Acquire) {
-                                    continue;
-                                }
-                                emit(state(
-                                    "Reconnecting",
-                                    format!("Output {} changed · rebinding renderer…", id + 1),
-                                    false,
-                                    true,
-                                    "",
-                                ));
-                                let mut recovery = active_run.session.recover_group_topology(
-                                    id,
-                                    Arc::clone(&active_run.reporter),
-                                    &active_run.cancel,
-                                );
-                                if recovery.is_err() && !active_run.cancel.load(Ordering::Acquire) {
-                                    diagnostics::log(
-                                        Level::Warn,
-                                        "controller",
-                                        "renderer-retry",
-                                        Some(active_run.session_id),
-                                        format!(
-                                            "group {id}: first in-place renderer recovery failed; retrying once"
-                                        ),
-                                    );
-                                    recovery = active_run.session.recover_group_topology(
-                                        id,
-                                        Arc::clone(&active_run.reporter),
-                                        &active_run.cancel,
-                                    );
-                                }
-                                match recovery {
-                                    Ok(_) => {
-                                        diagnostics::log(
-                                            Level::Info,
-                                            "controller",
-                                            "renderer-recovered",
-                                            Some(active_run.session_id),
-                                            format!(
-                                                "group {id}: renderer rebound without recreating the virtual display"
-                                            ),
-                                        );
-                                        emit(state(
-                                            "Running",
-                                            format!("Output {} recovered", id + 1),
-                                            true,
-                                            false,
-                                            "",
-                                        ));
-                                    }
-                                    Err(error) => {
-                                        diagnostics::log(
-                                            Level::Error,
-                                            "controller",
-                                            error.stage(),
-                                            Some(active_run.session_id),
-                                            error.to_string(),
-                                        );
-                                        emit(state(
-                                            "Degraded",
-                                            format!("Output {} needs attention", id + 1),
-                                            true,
-                                            false,
-                                            error.to_string(),
-                                        ));
-                                    }
-                                }
-                            }
-                            MappingEvent::Renderer {
-                                id,
-                                event: RendererEvent::Failed(error),
-                            } => {
-                                let (stopped_session_id, cleanup) =
-                                    stop_active(&mut active, &sunshine_sender)
-                                        .expect("guard checked active run");
-                                let session_id = Some(stopped_session_id);
-                                let cleanup_error = cleanup.err().map(|cleanup| {
                                     diagnostics::log(
                                         Level::Error,
                                         "controller",
-                                        cleanup.stage(),
-                                        session_id,
-                                        cleanup.to_string(),
+                                        error.stage(),
+                                        Some(session_id),
+                                        error.to_string(),
                                     );
-                                    cleanup.to_string()
-                                });
-                                let error = match cleanup_error {
-                                    Some(cleanup) => {
-                                        format!("{error}; cleanup also failed: {cleanup}")
+                                    if let Some(attempt) = reason.reconnect_attempt() {
+                                        if !queue_reconnect_after_failure(
+                                            attempt,
+                                            &plan,
+                                            error.to_string(),
+                                            &worker_tx,
+                                            &emit,
+                                            Some(session_id),
+                                            &cancel,
+                                        ) {
+                                            restart_plan = Some(plan);
+                                        }
+                                        continue;
                                     }
-                                    None => error,
-                                };
-                                emit(state(
-                                    "Stopped",
-                                    format!("Output {} stopped unexpectedly", id + 1),
-                                    false,
-                                    false,
-                                    error,
-                                ));
+                                    if reason == StartReason::ManualRestart {
+                                        restart_plan = Some(plan);
+                                        emit(restartable_state(
+                                            "Manual restart failed",
+                                            error.to_string(),
+                                        ));
+                                        continue;
+                                    }
+                                    emit(state(
+                                        "Stopped",
+                                        "Couldn’t start mapping".into(),
+                                        false,
+                                        false,
+                                        error.to_string(),
+                                    ));
+                                }
                             }
-                            MappingEvent::Topology { .. } => {}
                         }
-                    }
-                    Message::Sunshine(event)
-                        if active
-                            .as_ref()
-                            .is_some_and(|active| active.generation == event.generation) =>
-                    {
-                        emit(ControllerEvent::Sunshine {
-                            id: event.group_id,
-                            display_id: event.display_id,
-                            requested_port: event.requested_port,
-                            port: event.port,
-                            error: event.error,
-                        });
-                    }
-                    Message::Sunshine(_) => {}
-                    Message::Mapping { .. } => {}
+                        Message::Command(Command::Stop) => {
+                            restart_plan = None;
+                            stop_with_state(&mut active, &sunshine_sender, &emit);
+                        }
+                        Message::Command(Command::RestartMapping { cancel }) => {
+                            if active.is_none()
+                                && !cancel.load(Ordering::Acquire)
+                                && let Some(plan) = restart_plan.take()
+                            {
+                                let _ = worker_tx.send(Message::Command(Command::Start {
+                                    plan,
+                                    cancel,
+                                    reason: StartReason::ManualRestart,
+                                }));
+                            }
+                        }
+                        Message::Command(Command::Shutdown) => {
+                            stop_with_state(&mut active, &sunshine_sender, &emit);
+                            break;
+                        }
+                        Message::Mapping { generation, event }
+                            if active
+                                .as_ref()
+                                .is_some_and(|active| active.generation == generation) =>
+                        {
+                            if let MappingEvent::Renderer {
+                                id, renderer_id, ..
+                            } = &event
+                                && !active
+                                    .as_ref()
+                                    .expect("guard checked active run")
+                                    .session
+                                    .accepts_renderer_event(*id, *renderer_id)
+                            {
+                                continue;
+                            }
+                            match event {
+                                MappingEvent::GroupReady(group) => {
+                                    let active = active.as_ref().expect("guard checked active run");
+                                    if let (Some(display_id), Some(port)) = (
+                                        group.sunshine_id.clone(),
+                                        active.sunshine_ports.get(&group.id).copied(),
+                                    ) {
+                                        sunshine_sender.start(
+                                            generation,
+                                            group.id,
+                                            display_id,
+                                            port,
+                                            active.sunshine_capture,
+                                        );
+                                    }
+                                    emit(ControllerEvent::GroupReady(group));
+                                }
+                                MappingEvent::Renderer {
+                                    id,
+                                    event: RendererEvent::Fps(fps),
+                                    ..
+                                } => {
+                                    emit(ControllerEvent::Fps {
+                                        id,
+                                        fps: fps.min(999),
+                                    });
+                                }
+                                MappingEvent::Renderer {
+                                    id,
+                                    event: RendererEvent::TopologyLost,
+                                    ..
+                                } => {
+                                    let active_run =
+                                        active.as_mut().expect("guard checked active run");
+                                    if active_run.cancel.load(Ordering::Acquire) {
+                                        continue;
+                                    }
+                                    let (available, _) = desktop_snapshot(desktop.as_deref());
+                                    queue_renderer_recovery(active_run, id, available);
+                                    emit_recovery_state(active_run, available, &emit);
+                                }
+                                MappingEvent::Renderer {
+                                    id,
+                                    event: RendererEvent::Failed(error),
+                                    ..
+                                } => {
+                                    let output_number = active
+                                        .as_ref()
+                                        .expect("guard checked active run")
+                                        .session
+                                        .groups()
+                                        .position(|group| group.id == id)
+                                        .expect("accepted renderer belongs to an active group")
+                                        + 1;
+                                    let (stopped_session_id, cleanup) =
+                                        stop_active(&mut active, &sunshine_sender)
+                                            .expect("guard checked active run");
+                                    let session_id = Some(stopped_session_id);
+                                    let cleanup_error = cleanup.err().map(|cleanup| {
+                                        diagnostics::log(
+                                            Level::Error,
+                                            "controller",
+                                            cleanup.stage(),
+                                            session_id,
+                                            cleanup.to_string(),
+                                        );
+                                        cleanup.to_string()
+                                    });
+                                    let error = match cleanup_error {
+                                        Some(cleanup) => {
+                                            format!("{error}; cleanup also failed: {cleanup}")
+                                        }
+                                        None => error,
+                                    };
+                                    emit(state(
+                                        "Stopped",
+                                        format!("Output {output_number} stopped unexpectedly"),
+                                        false,
+                                        false,
+                                        error,
+                                    ));
+                                }
+                                MappingEvent::Topology { .. } => {}
+                            }
+                        }
+                        Message::Sunshine(event)
+                            if active
+                                .as_ref()
+                                .is_some_and(|active| active.generation == event.generation) =>
+                        {
+                            emit(ControllerEvent::Sunshine {
+                                id: event.group_id,
+                                display_id: event.display_id,
+                                requested_port: event.requested_port,
+                                port: event.port,
+                                error: event.error,
+                            });
+                        }
+                        Message::Desktop(DesktopEvent::MonitorFailed) => {
+                            let error = desktop_monitor_error.get_or_insert_with(||
+                            "Desktop monitor stopped; restart SBMS. See diagnostics for the failed API.".into());
+                            if let Some(active) = active.as_mut() {
+                                // A Start command may have preceded this failure in
+                                // the queue, so include newly started mirror groups.
+                                let ids: Vec<_> = active
+                                    .session
+                                    .groups()
+                                    .filter(|group| {
+                                        matches!(group.route, MappingRoute::Mirror { .. })
+                                    })
+                                    .map(|group| group.id)
+                                    .collect();
+                                for id in ids {
+                                    queue_renderer_recovery(active, id, false);
+                                }
+                                for pending in active.recovery.values_mut() {
+                                    pending.failed(Instant::now(), error.clone(), false);
+                                }
+                                if !active.recovery.is_empty() {
+                                    emit_recovery_state(active, false, &emit);
+                                }
+                            }
+                        }
+                        Message::Desktop(_) => {}
+                        Message::Sunshine(_) => {}
+                        Message::Mapping { .. } => {}
+                    },
+                }
+                synchronize_desktop(
+                    &mut active,
+                    desktop.as_deref(),
+                    &mut observed_desktop,
+                    &emit,
+                );
+                if let Some(active) = active.as_mut() {
+                    recover_due_renderer(active, desktop.as_deref(), observed_desktop, &emit);
                 }
             }
             sunshine.shutdown();
@@ -727,6 +838,281 @@ impl Controller {
             let _ = worker.join();
         }
     }
+}
+
+fn desktop_snapshot(desktop: Option<&DesktopState>) -> (bool, u64) {
+    desktop
+        .map(|desktop| (desktop.can_capture(), desktop.revision()))
+        .unwrap_or((true, 0))
+}
+
+fn synchronize_desktop(
+    active: &mut Option<ActiveRun>,
+    desktop: Option<&DesktopState>,
+    observed: &mut (bool, u64),
+    emit: &impl Fn(ControllerEvent),
+) {
+    let snapshot = desktop_snapshot(desktop);
+    if snapshot == *observed {
+        return;
+    }
+    *observed = snapshot;
+    let Some(active) = active
+        .as_mut()
+        .filter(|active| !active.cancel.load(Ordering::Acquire))
+    else {
+        return;
+    };
+    diagnostics::log(
+        Level::Info,
+        "controller",
+        "desktop-state",
+        Some(active.session_id),
+        format!("capture_allowed={}, revision={}", snapshot.0, snapshot.1),
+    );
+    let ids: Vec<_> = active
+        .session
+        .groups()
+        .filter(|group| matches!(group.route, MappingRoute::Mirror { .. }))
+        .map(|group| group.id)
+        .collect();
+    for id in ids {
+        queue_renderer_recovery(active, id, snapshot.0);
+        active
+            .recovery
+            .get_mut(&id)
+            .expect("pending group inserted")
+            .desktop_changed(Instant::now(), snapshot.0);
+    }
+    if !active.recovery.is_empty() {
+        emit_recovery_state(active, snapshot.0, emit);
+    }
+}
+
+fn next_recovery_delay(active: &ActiveRun) -> Option<Duration> {
+    if active.cancel.load(Ordering::Acquire) {
+        return None;
+    }
+    active
+        .recovery
+        .values()
+        .filter_map(|pending| pending.next)
+        .min()
+        .map(|next| next.saturating_duration_since(Instant::now()))
+}
+
+fn queue_renderer_recovery(active: &mut ActiveRun, id: u32, available: bool) {
+    active
+        .recovery
+        .entry(id)
+        .or_insert_with(|| PendingRecovery::new(Instant::now(), available));
+    if let Err(error) = active.session.pause_group_renderer(id) {
+        diagnostics::log(
+            Level::Error,
+            "controller",
+            error.stage(),
+            Some(active.session_id),
+            error.to_string(),
+        );
+        active
+            .recovery
+            .get_mut(&id)
+            .expect("pending group inserted")
+            .failed(Instant::now(), error.to_string(), false);
+    }
+}
+
+fn emit_recovery_state(active: &ActiveRun, available: bool, emit: &impl Fn(ControllerEvent)) {
+    if active.recovery.is_empty() {
+        emit(state(
+            "Running",
+            "Mapping is active".into(),
+            true,
+            false,
+            "",
+        ));
+    } else if let Some((id, pending)) = active
+        .recovery
+        .iter()
+        .find(|(_, pending)| pending.exhausted())
+    {
+        let output_number = active
+            .session
+            .groups()
+            .position(|group| group.id == *id)
+            .expect("pending recovery belongs to an active group")
+            + 1;
+        emit(state(
+            "Degraded",
+            format!("Output {output_number} needs attention"),
+            true,
+            false,
+            pending.error.as_deref().unwrap_or_default(),
+        ));
+    } else {
+        // Keep Stop enabled while waiting; the virtual mapping is still active.
+        emit(state(
+            "Reconnecting",
+            if available {
+                "Restoring capture…"
+            } else {
+                "Waiting for desktop…"
+            }
+            .into(),
+            true,
+            false,
+            "",
+        ));
+    }
+}
+
+fn recover_due_renderer(
+    active: &mut ActiveRun,
+    desktop: Option<&DesktopState>,
+    observed_desktop: (bool, u64),
+    emit: &impl Fn(ControllerEvent),
+) {
+    if active.cancel.load(Ordering::Acquire) {
+        return;
+    }
+    let now = Instant::now();
+    let Some(id) = active
+        .recovery
+        .iter()
+        .filter(|(_, pending)| pending.next.is_some_and(|next| next <= now))
+        .min_by_key(|(id, pending)| (pending.next, **id))
+        .map(|(id, _)| *id)
+    else {
+        return;
+    };
+    let before = desktop_snapshot(desktop);
+    if before != observed_desktop {
+        return;
+    }
+    let pending = active
+        .recovery
+        .get_mut(&id)
+        .expect("pending group selected");
+    if !before.0 {
+        pending.desktop_changed(now, false);
+        emit_recovery_state(active, false, emit);
+        return;
+    }
+    let deadline = pending.begin_attempt(now);
+    diagnostics::log(
+        Level::Info,
+        "controller",
+        "renderer-recovery",
+        Some(active.session_id),
+        format!(
+            "group {id}: in-place attempt {}, desktop revision {}",
+            pending.attempts, before.1
+        ),
+    );
+    let result = active
+        .session
+        .recover_group_topology(id, Arc::clone(&active.reporter), || {
+            active.cancel.load(Ordering::Acquire)
+                || desktop_snapshot(desktop) != before
+                || Instant::now() >= deadline
+        });
+    if active.cancel.load(Ordering::Acquire) {
+        if let Err(error) = result
+            && !error.is_clean_cancellation()
+            && !error.is_retryable()
+        {
+            diagnostics::log(
+                Level::Error,
+                "controller",
+                error.stage(),
+                Some(active.session_id),
+                error.to_string(),
+            );
+            active.interrupted_failure = Some(error);
+        }
+        return;
+    }
+    let after = desktop_snapshot(desktop);
+    // A genuine failure (including incomplete cleanup) must remain visible even
+    // when a desktop transition happens concurrently.
+    let fatal = result
+        .as_ref()
+        .err()
+        .is_some_and(|error| !error.is_clean_cancellation() && !error.is_retryable());
+    if after != before && !fatal {
+        if let Err(error) = active.session.pause_group_renderer(id) {
+            diagnostics::log(
+                Level::Error,
+                "controller",
+                error.stage(),
+                Some(active.session_id),
+                error.to_string(),
+            );
+            active
+                .recovery
+                .get_mut(&id)
+                .expect("pending group selected")
+                .failed(Instant::now(), error.to_string(), false);
+        } else {
+            active
+                .recovery
+                .get_mut(&id)
+                .expect("pending group selected")
+                .desktop_changed(Instant::now(), after.0);
+            diagnostics::log(
+                Level::Info,
+                "controller",
+                "renderer-wait-desktop",
+                Some(active.session_id),
+                format!("group {id}: recovery interrupted by desktop transition"),
+            );
+        }
+    } else {
+        match result {
+            Ok(_) => {
+                active.recovery.remove(&id);
+                diagnostics::log(
+                    Level::Info,
+                    "controller",
+                    "renderer-recovered",
+                    Some(active.session_id),
+                    format!("group {id}: first frame presented; virtual display retained"),
+                );
+            }
+            Err(error) => {
+                let retryable = error.is_retryable() || error.is_clean_cancellation();
+                let pending = active
+                    .recovery
+                    .get_mut(&id)
+                    .expect("pending group selected");
+                let message = if error.is_clean_cancellation() {
+                    format!(
+                        "desktop recovery exceeded 30 seconds; last failure: {}",
+                        pending.error.as_deref().unwrap_or("first frame not ready")
+                    )
+                } else {
+                    error.to_string()
+                };
+                pending.failed(Instant::now(), message.clone(), retryable);
+                diagnostics::log(
+                    if pending.exhausted() {
+                        Level::Error
+                    } else {
+                        Level::Warn
+                    },
+                    "controller",
+                    if pending.exhausted() {
+                        "renderer-recovery-failed"
+                    } else {
+                        "renderer-retry"
+                    },
+                    Some(active.session_id),
+                    format!("group {id}: {message}"),
+                );
+            }
+        }
+    }
+    emit_recovery_state(active, after.0, emit);
 }
 
 fn format_mapping_group_plan(group: &MappingGroupRequest) -> String {
@@ -819,7 +1205,17 @@ fn stop_active(
     sunshine_sender.stop_all();
     let mut active = active.take()?;
     let session_id = active.session_id;
-    Some((session_id, active.session.stop()))
+    let cleanup = active.session.stop();
+    let result = match active.interrupted_failure.take() {
+        Some(mut error) => {
+            if let Err(cleanup) = cleanup {
+                error.record_cleanup_failure(cleanup);
+            }
+            Err(error)
+        }
+        None => cleanup,
+    };
+    Some((session_id, result))
 }
 
 fn stop_with_state(
@@ -968,6 +1364,7 @@ mod tests {
                 .enumerate()
                 .map(|(id, route)| MappingGroupRequest {
                     id: id as u32,
+                    rendering: Default::default(),
                     mode: VirtualMode::default(),
                     rotation: crate::geometry::Rotation::Deg0,
                     route,
@@ -1113,5 +1510,76 @@ mod tests {
             &cancel,
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn locked_time_does_not_consume_recovery_budget() {
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, false);
+        assert!(pending.next.is_none());
+        assert!(pending.deadline.is_none());
+        let unlocked = now + Duration::from_secs(3600);
+        pending.desktop_changed(unlocked, true);
+        assert_eq!(pending.next, Some(unlocked));
+        assert_eq!(
+            pending.begin_attempt(unlocked),
+            unlocked + RENDERER_RECOVERY_WINDOW
+        );
+    }
+
+    #[test]
+    fn transient_recovery_is_bounded_and_next_desktop_transition_rearms_it() {
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        for attempt in 0..RENDERER_RECOVERY_ATTEMPTS {
+            let time = now + Duration::from_secs(u64::from(attempt) * 2);
+            pending.begin_attempt(time);
+            pending.failed(time, "DuplicateOutput: E_ACCESSDENIED".into(), true);
+        }
+        assert!(pending.exhausted());
+        assert!(pending.next.is_none());
+        pending.desktop_changed(now + Duration::from_secs(60), true);
+        assert_eq!(pending.attempts, 0);
+        assert!(pending.error.is_none());
+        assert!(pending.next.is_some());
+    }
+
+    #[test]
+    fn repeated_retry_does_not_extend_first_attempt_deadline() {
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        let deadline = pending.begin_attempt(now);
+        pending.failed(now, "access denied".into(), true);
+        assert_eq!(
+            pending.begin_attempt(now + Duration::from_secs(25)),
+            deadline
+        );
+        pending.failed(deadline, "access denied".into(), true);
+        assert!(pending.exhausted());
+    }
+
+    #[test]
+    fn relocking_resets_the_awake_budget_without_scheduling_gpu_work() {
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        pending.begin_attempt(now);
+        pending.failed(now, "access lost".into(), true);
+        pending.desktop_changed(now + Duration::from_secs(1), false);
+        assert!(pending.next.is_none());
+        assert!(pending.deadline.is_none());
+        assert_eq!(pending.attempts, 0);
+        assert!(!pending.exhausted());
+    }
+
+    #[test]
+    fn genuine_failure_is_not_retried_after_unlock() {
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        pending.begin_attempt(now);
+        pending.failed(now, "device removed".into(), false);
+        pending.desktop_changed(now, false);
+        pending.desktop_changed(now + Duration::from_secs(1), true);
+        assert!(pending.exhausted());
+        assert_eq!(pending.error.as_deref(), Some("device removed"));
     }
 }

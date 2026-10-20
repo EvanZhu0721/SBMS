@@ -54,8 +54,9 @@ use handlers::{
 use projection::{hydrate_group, project_group_telemetry, snapshot_group, update_tab_projection};
 use state::{
     GroupDraft, LoadedGroups, SunshineState, ValidatedGroupDraft, ValidatedStreamFields,
-    aspect_ratio_from_index, aspect_ratio_option_index, parse_screen_diagonal,
-    parse_stream_refresh_millihz, parse_u32, rotation_from_index, rotation_index, rotation_label,
+    aspect_ratio_from_index, aspect_ratio_option_index, normalize_shared_reference,
+    parse_screen_diagonal, parse_stream_refresh_millihz, parse_u32, rotation_from_index,
+    rotation_index, rotation_label, set_shared_reference,
 };
 
 type ConfigStateRefs<'a> = (
@@ -66,7 +67,56 @@ type ConfigStateRefs<'a> = (
     &'a Arc<AtomicBool>,
 );
 
+fn take_login_start(pending: &AtomicBool, event: &ControllerEvent) -> bool {
+    match event {
+        ControllerEvent::Displays(_) => pending.swap(false, Ordering::AcqRel),
+        ControllerEvent::State { error, .. } if !error.is_empty() => {
+            pending.store(false, Ordering::Release);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn validate_login_displays(
+    groups: &[GroupDraft],
+    displays: &[DisplayOption],
+) -> Result<(), String> {
+    for (index, group) in groups.iter().enumerate() {
+        if !group.stream_only
+            && !group
+                .target_id
+                .as_ref()
+                .is_some_and(|id| displays.iter().any(|d| &d.id == id))
+        {
+            return Err(format!(
+                "Group {}: saved target screen is unavailable",
+                index + 1
+            ));
+        }
+        if let Some(ReferenceSource::Display(id)) = &group.reference_source
+            && !displays.iter().any(|d| &d.id == id)
+        {
+            return Err(format!(
+                "Group {}: saved reference screen is unavailable",
+                index + 1
+            ));
+        }
+        if let Some(ReferenceSource::Display(id)) = &group.reference_source
+            && groups
+                .iter()
+                .any(|target| !target.stream_only && target.target_id.as_ref() == Some(id))
+        {
+            return Err("The reference screen is also selected as an output target".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<dyn Error>> {
+    // Read before publishing the host window: a manual launcher releases its
+    // marker as soon as that window becomes discoverable.
+    let login_start = crate::launch_broker::is_logon_startup(open_on_start)?;
     slint::BackendSelector::new()
         .backend_name("winit".into())
         .renderer_name("software".into())
@@ -91,6 +141,12 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         });
     })?;
     let flyout = QuickAccess::new()?;
+    let auto_map_on_login = ConfigProfileStore::default_store()
+        .and_then(|store| store.list())
+        .map(|profiles| profiles.auto_map_on_login)
+        .unwrap_or(false);
+    flyout.set_auto_map_on_login(auto_map_on_login);
+    let pending_login_start = Arc::new(AtomicBool::new(login_start && auto_map_on_login));
     let intro_disabled = Arc::new(AtomicBool::new(
         ConfigProfileStore::default_store()
             .and_then(|store| store.list())
@@ -243,6 +299,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let event_pending_config_reload = pending_config_reload.clone();
     let event_pending_profile_restart = pending_profile_restart.clone();
     let controller = Controller::spawn(move |event| {
+        let pending_login_start = pending_login_start.clone();
         let ui = ui.clone();
         let tray = tray_handle.clone();
         let error_revision = event_error_revision.clone();
@@ -255,6 +312,15 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         let pending_profile_restart = event_pending_profile_restart.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = ui.upgrade() {
+                let auto_start = take_login_start(&pending_login_start, &event);
+                // UI hydration may select a different available screen for manual
+                // editing. Automatic startup must never save or use that fallback.
+                let login_displays = if auto_start && let ControllerEvent::Displays(found) = &event
+                {
+                    validate_login_displays(&groups.lock().expect("group drafts poisoned"), found)
+                } else {
+                    Ok(())
+                };
                 apply_event(
                     &ui,
                     tray,
@@ -269,6 +335,19 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
                     ),
                     event,
                 );
+                if auto_start
+                    && !ui.get_geometry_save_blocked()
+                    && !ui.get_running()
+                    && !ui.get_busy()
+                {
+                    match login_displays {
+                        Ok(()) => ui.invoke_start(),
+                        Err(error) => {
+                            ui.set_error_text(error.into());
+                            ui.set_state_detail("Login mapping needs attention".into());
+                        }
+                    }
+                }
             }
         });
     });
@@ -282,6 +361,22 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         profile_revision.clone(),
     );
     register_lifecycle_handlers(&flyout, &sender, &handler_state, &error_revision);
+    {
+        let ui = flyout.as_weak();
+        flyout.on_set_auto_map_on_login(move |enabled| {
+            let Some(ui) = ui.upgrade() else {
+                return;
+            };
+            match ConfigProfileStore::default_store()
+                .and_then(|store| store.set_auto_map_on_login(enabled))
+            {
+                Ok(()) => ui.set_auto_map_on_login(enabled),
+                Err(error) => {
+                    ui.set_error_text(format!("Couldn’t save login preference: {error}").into())
+                }
+            }
+        });
+    }
     register_geometry_handlers(&flyout, &handler_state);
     register_stream_handlers(&flyout, &handler_state);
     register_screen_size_handlers(&flyout, &sender, &handler_state, &override_store);
@@ -394,6 +489,27 @@ fn active_after_removal(current: usize, removed: usize, remaining: usize) -> usi
     }
 }
 
+fn new_group_draft(id: u32, groups: &[GroupDraft], displays: &[DisplayOption]) -> GroupDraft {
+    let mut group = GroupDraft::new(id);
+    if let Some(shared) = groups.first() {
+        group.reference_source = shared.reference_source.clone();
+        group.reference_geometry = shared
+            .reference_geometry
+            .or(shared.sizing.map(|request| request.reference));
+    }
+    group.target_id = displays
+        .iter()
+        .find(|display| {
+            group.reference_source.as_ref() != Some(&ReferenceSource::Display(display.id.clone()))
+                && !groups.iter().any(|group| {
+                    !group.stream_only && group.target_id.as_deref() == Some(display.id.as_str())
+                })
+        })
+        .map(|display| display.id.clone());
+    group.stream_only = group.target_id.is_none();
+    group
+}
+
 fn apply_event(
     ui: &QuickAccess,
     tray: TrayHandle,
@@ -415,6 +531,26 @@ fn apply_event(
     ) = config_state;
     match event {
         ControllerEvent::Displays(mut displays) => {
+            let geometry_edit = (ui.get_page() == QuickAccessPage::Geometry).then(|| {
+                (
+                    ui.get_reference_width(),
+                    ui.get_reference_height(),
+                    ui.get_reference_diagonal(),
+                    ui.get_reference_aspect_ratio(),
+                    ui.get_reference_rotation(),
+                    ui.get_sizing_strategy(),
+                )
+            });
+            let stream_edit = (ui.get_page() == QuickAccessPage::Stream).then(|| {
+                (
+                    ui.get_stream_width(),
+                    ui.get_stream_height(),
+                    ui.get_stream_diagonal(),
+                    ui.get_stream_refresh(),
+                    ui.get_stream_aspect_ratio_index(),
+                    ui.get_stream_rotation(),
+                )
+            });
             apply_display_overrides(
                 &mut displays,
                 &display_overrides
@@ -432,6 +568,26 @@ fn apply_event(
             refresh_group_sizing(&mut groups, &displays);
             refresh_group_tab_details(&mut groups, &displays);
             hydrate_group(ui, &displays, &groups, active);
+            if let Some((width, height, diagonal, aspect, rotation, strategy)) = geometry_edit {
+                ui.set_reference_width(width);
+                ui.set_reference_height(height);
+                ui.set_reference_diagonal(diagonal);
+                ui.set_reference_aspect_ratio(aspect);
+                ui.set_reference_rotation(rotation);
+                ui.set_sizing_strategy(strategy);
+                update_geometry_preview(ui, &displays);
+            }
+            if let Some((width, height, diagonal, refresh, aspect, rotation)) = stream_edit {
+                ui.set_stream_width(width);
+                ui.set_stream_height(height);
+                ui.set_stream_diagonal(diagonal);
+                ui.set_stream_refresh(refresh);
+                ui.set_stream_aspect_ratio_index(aspect);
+                ui.set_stream_rotation(rotation);
+                update_stream_suggestions(ui);
+                update_reference_action(ui, &displays);
+                validate_stream_fields(ui, &displays);
+            }
             if !ui.get_restart_available() {
                 ui.set_error_text("".into());
                 if !ui.get_running() && !ui.get_busy() {
@@ -447,7 +603,7 @@ fn apply_event(
                 }
             }
             if ui.get_page() == QuickAccessPage::ScreenSize {
-                populate_screen_size_page(ui, &displays);
+                populate_screen_size_page(ui, &displays, true);
             }
             *display_metadata.lock().expect("display metadata poisoned") = displays;
         }
@@ -482,20 +638,20 @@ fn apply_event(
             error,
         } => {
             let mut groups = group_state.lock().expect("group drafts poisoned");
-            let mut group_number = id + 1;
-            if let Some(group) = groups.iter_mut().find(|group| {
+            let Some((index, group)) = groups.iter_mut().enumerate().find(|(_, group)| {
                 group.id == id
                     && group.telemetry.sunshine_id.as_deref() == Some(display_id.as_str())
-            }) {
-                group_number = group.id + 1;
-                group.telemetry.sunshine_port = Some(port.unwrap_or(requested_port));
-                if error.is_some() {
-                    group.telemetry.sunshine_state = SunshineState::Failed;
-                    group.telemetry.error = true;
-                } else {
-                    group.telemetry.sunshine_state = SunshineState::Ready;
-                    group.telemetry.error = false;
-                }
+            }) else {
+                return;
+            };
+            let group_number = index + 1;
+            group.telemetry.sunshine_port = Some(port.unwrap_or(requested_port));
+            if error.is_some() {
+                group.telemetry.sunshine_state = SunshineState::Failed;
+                group.telemetry.error = true;
+            } else {
+                group.telemetry.sunshine_state = SunshineState::Ready;
+                group.telemetry.error = false;
             }
             let active = *active_group.lock().expect("active group poisoned");
             project_group_telemetry(ui, &groups, active);
@@ -760,168 +916,249 @@ fn dimensions_from_diagonal(
     })
 }
 
-fn refresh_group_sizing(groups: &mut [GroupDraft], displays: &[DisplayOption]) {
-    for group in groups {
-        let Some(mut sizing) = group.sizing else {
-            continue;
-        };
-        let target_geometry = if group.stream_only {
-            match stream_target_geometry(
-                &group.stream_width,
-                &group.stream_height,
-                &group.stream_diagonal,
-                match aspect_ratio_from_index(group.stream_aspect_ratio_index) {
-                    Ok(aspect_ratio) => aspect_ratio,
-                    Err(_) => {
-                        group.sizing = None;
-                        continue;
-                    }
-                },
-                match rotation_from_index(group.stream_rotation_index) {
-                    Ok(rotation) => rotation,
-                    Err(_) => {
-                        group.sizing = None;
-                        continue;
-                    }
-                },
-            ) {
-                Ok(target) => target,
-                Err(_) => {
-                    group.sizing = None;
-                    continue;
-                }
+fn group_sizing_request(
+    group: &GroupDraft,
+    displays: &[DisplayOption],
+) -> Result<SizingRequest, String> {
+    let target = if group.stream_only {
+        stream_target_geometry(
+            &group.stream_width,
+            &group.stream_height,
+            &group.stream_diagonal,
+            aspect_ratio_from_index(group.stream_aspect_ratio_index)?,
+            rotation_from_index(group.stream_rotation_index)?,
+        )?
+    } else {
+        let target = displays
+            .iter()
+            .find(|display| Some(&display.id) == group.target_id.as_ref())
+            .ok_or_else(|| "Target screen is unavailable".to_string())?;
+        display_geometry(target, "Target")?
+    };
+    let reference = match &group.reference_source {
+        Some(ReferenceSource::Display(id)) => {
+            if !group.stream_only && group.target_id.as_ref() == Some(id) {
+                return Err("The reference screen is also selected as an output target".into());
             }
+            let display = displays
+                .iter()
+                .find(|display| &display.id == id)
+                .ok_or_else(|| "Reference screen is unavailable".to_string())?;
+            display_geometry(display, "Reference")?
+        }
+        Some(ReferenceSource::Manual) => group
+            .reference_geometry
+            .or(group.sizing.map(|request| request.reference))
+            .ok_or_else(|| "Configure the manual reference geometry".to_string())?,
+        None => return Err("Choose a reference screen".into()),
+    };
+    Ok(SizingRequest {
+        reference,
+        target,
+        strategy: group
+            .sizing
+            .map(|request| request.strategy)
+            .unwrap_or(group.sizing_strategy),
+        alignment: group.sizing.map(|request| request.alignment).unwrap_or(2),
+        preferred_refresh_millihz: if group.stream_only {
+            Some(parse_stream_refresh_millihz(&group.stream_refresh)?)
         } else {
-            let Some(target_id) = group.target_id.as_deref() else {
-                group.sizing = None;
-                continue;
-            };
-            let Some(target) = displays.iter().find(|display| display.id == target_id) else {
-                continue;
-            };
-            let Ok(target) = display_geometry(target, "Target") else {
-                group.sizing = None;
-                continue;
-            };
-            target
-        };
-        sizing.target = target_geometry;
-        if let Some(ReferenceSource::Display(reference_id)) = &group.reference_source {
-            let Some(reference) = displays.iter().find(|display| display.id == *reference_id)
-            else {
-                continue;
-            };
-            let Ok(reference_geometry) = display_geometry(reference, "Reference") else {
-                group.sizing = None;
-                continue;
-            };
-            sizing.reference = reference_geometry;
+            group
+                .sizing
+                .and_then(|request| request.preferred_refresh_millihz)
+                .or(Some(240_000))
+        },
+    })
+}
+
+fn refresh_group_sizing(groups: &mut [GroupDraft], displays: &[DisplayOption]) {
+    let source = groups
+        .first()
+        .and_then(|group| group.reference_source.clone());
+    if let Some(ReferenceSource::Display(id)) = &source
+        && let Some(reference) = displays.iter().find(|display| &display.id == id)
+        && let Ok(geometry) = display_geometry(reference, "Reference")
+    {
+        set_shared_reference(groups, source, Some(geometry));
+    }
+    for group in groups {
+        // Keep the last complete request for lossless old-format persistence while
+        // a screen is disconnected. Starting always validates current displays.
+        if let Ok(request) = group_sizing_request(group, displays) {
+            group.sizing = Some(request);
         }
-        group.sizing = Some(sizing);
     }
 }
 
-fn populate_screen_size_page(ui: &QuickAccess, displays: &[DisplayOption]) {
-    let Some(display) = selected_option(ui, displays, ui.get_selected_display()) else {
-        ui.set_screen_size_target("Display unavailable".into());
-        ui.set_screen_size_detected_mm("Not reported".into());
-        ui.set_screen_size_detected_inches("Physical size unavailable".into());
-        ui.set_screen_size_error("Target screen is no longer available".into());
-        return;
+fn validate_live_group_sizing(
+    groups: &[GroupDraft],
+    displays: &[DisplayOption],
+) -> Result<(), String> {
+    validate_login_displays(groups, displays)?;
+    for (index, group) in groups.iter().enumerate() {
+        group_sizing_request(group, displays)
+            .and_then(|request| request.calculate().map_err(|error| error.to_string()))
+            .map_err(|error| format!("Group {}: {error}", index + 1))?;
+    }
+    Ok(())
+}
+
+fn screen_size_rows(displays: &[DisplayOption], drafts: &[ScreenSizeRow]) -> Vec<ScreenSizeRow> {
+    displays
+        .iter()
+        .map(|display| {
+            let draft = drafts
+                .iter()
+                .find(|row| row.display_id.eq_ignore_ascii_case(&display.id));
+            let detected_size = match (
+                display.detected_physical_width_mm,
+                display.detected_physical_height_mm,
+            ) {
+                (Some(width), Some(height)) => {
+                    format!("{:.1}", width.hypot(height) / MILLIMETERS_PER_INCH)
+                }
+                _ => String::new(),
+            };
+            let mut row = ScreenSizeRow {
+                display_id: display.id.as_str().into(),
+                name: display.name.as_str().into(),
+                native_mode: format!("{} × {}", display.native_width, display.native_height).into(),
+                detected_size: detected_size.into(),
+                manual_inches: draft
+                    .map(|row| row.manual_inches.clone())
+                    .unwrap_or_else(|| {
+                        display
+                            .physical_override_inches
+                            .map(|value| value.to_string())
+                            .unwrap_or_default()
+                            .into()
+                    }),
+                aspect_ratio: draft.map(|row| row.aspect_ratio).unwrap_or_else(|| {
+                    display
+                        .physical_override_aspect_ratio
+                        .map(|ratio| aspect_ratio_option_index(ratio) + 1)
+                        .unwrap_or(0)
+                }),
+                ..Default::default()
+            };
+            update_screen_size_row_preview(display, &mut row);
+            row
+        })
+        .collect()
+}
+
+fn screen_size_row_override(
+    display: &DisplayOption,
+    row: &ScreenSizeRow,
+) -> Result<Option<(f64, Option<AspectRatio>)>, String> {
+    if row.manual_inches.trim().is_empty() {
+        return Ok(None);
+    }
+    let diagonal = parse_screen_diagonal(row.manual_inches.as_str())?;
+    let ratio = screen_override_aspect_ratio(row.aspect_ratio)?;
+    dimensions_from_diagonal(display, diagonal, ratio)
+        .ok_or_else(|| "Native aspect ratio unavailable".to_string())?;
+    Ok(Some((diagonal, ratio)))
+}
+
+fn update_screen_size_row_preview(display: &DisplayOption, row: &mut ScreenSizeRow) {
+    row.error = "".into();
+    let effective = match screen_size_row_override(display, row) {
+        Ok(Some((diagonal, ratio))) => dimensions_from_diagonal(display, diagonal, ratio),
+        Ok(None) => display
+            .detected_physical_width_mm
+            .zip(display.detected_physical_height_mm),
+        Err(error) => {
+            row.error = error.into();
+            row.effective_size = "".into();
+            return;
+        }
     };
-    ui.set_screen_size_target(display.name.as_str().into());
-    ui.set_screen_size_native_mode(
-        format!("{} × {}", display.native_width, display.native_height).into(),
+    row.effective_size = effective
+        .map(|(width, height)| format!("{width:.0} × {height:.0} mm"))
+        .unwrap_or_else(|| "Size unavailable".into())
+        .into();
+}
+
+fn populate_screen_size_page(ui: &QuickAccess, displays: &[DisplayOption], preserve_drafts: bool) {
+    let drafts = if preserve_drafts {
+        ui.get_screen_size_rows().iter().collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    ui.set_screen_size_rows(ModelRc::new(VecModel::from(screen_size_rows(
+        displays, &drafts,
+    ))));
+    update_screen_size_validity(ui);
+}
+
+fn update_screen_size_validity(ui: &QuickAccess) {
+    let rows = ui.get_screen_size_rows();
+    ui.set_screen_size_valid(
+        !ui.get_screen_size_save_blocked()
+            && rows.row_count() > 0
+            && rows.iter().all(|row| row.error.is_empty()),
     );
-    if let (Some(width), Some(height)) = (
-        display.detected_physical_width_mm,
-        display.detected_physical_height_mm,
-    ) {
-        ui.set_screen_size_detected_mm(format!("{width:.0} × {height:.0} mm").into());
-        ui.set_screen_size_detected_inches(
-            format!(
-                "{:.1} in diagonal",
-                width.hypot(height) / MILLIMETERS_PER_INCH
-            )
-            .into(),
-        );
-    } else {
-        ui.set_screen_size_detected_mm("Not reported".into());
-        ui.set_screen_size_detected_inches("No physical size in EDID".into());
+    // A corrupt override file must remain visible even while previewing edits.
+    if !ui.get_screen_size_save_blocked() {
+        ui.set_screen_size_error("".into());
     }
-    if ui.get_page() != QuickAccessPage::ScreenSize {
-        ui.set_screen_size_manual_inches(
-            display
-                .physical_override_inches
-                .map(|value| format!("{value:.1}"))
-                .unwrap_or_default()
-                .into(),
-        );
-        ui.set_screen_size_aspect_ratio(
-            display
-                .physical_override_aspect_ratio
-                .map(|ratio| aspect_ratio_option_index(ratio) + 1)
-                .unwrap_or(0),
-        );
-    }
-    update_screen_size_preview(ui, displays);
 }
 
-fn update_screen_size_preview(ui: &QuickAccess, displays: &[DisplayOption]) {
-    if ui.get_screen_size_save_blocked() {
-        return;
-    }
-    let Some(display) = selected_option(ui, displays, ui.get_selected_display()) else {
-        ui.set_screen_size_error("Target screen is no longer available".into());
-        ui.set_screen_size_valid(false);
+fn edit_screen_size_row(
+    ui: &QuickAccess,
+    displays: &[DisplayOption],
+    index: i32,
+    manual_inches: SharedString,
+    aspect_ratio: i32,
+) {
+    let Ok(index) = usize::try_from(index) else {
         return;
     };
-    let manual = ui.get_screen_size_manual_inches();
-    let effective = if manual.trim().is_empty() {
-        ui.set_screen_size_source("EDID".into());
-        match (
-            display.detected_physical_width_mm,
-            display.detected_physical_height_mm,
-        ) {
-            (Some(width), Some(height)) => {
-                Some((width, height, width.hypot(height) / MILLIMETERS_PER_INCH))
-            }
-            _ => None,
-        }
-    } else {
-        match parse_screen_diagonal(manual.as_str())
-            .ok()
-            .and_then(|diagonal| {
-                let aspect_ratio =
-                    screen_override_aspect_ratio(ui.get_screen_size_aspect_ratio()).ok()?;
-                dimensions_from_diagonal(display, diagonal, aspect_ratio)
-                    .map(|(width, height)| (width, height, diagonal))
-            }) {
-            Some(value) => {
-                ui.set_screen_size_source("Manual override".into());
-                Some(value)
-            }
+    let rows = ui.get_screen_size_rows();
+    let Some(mut row) = rows.row_data(index) else {
+        return;
+    };
+    let Some(display) = displays
+        .iter()
+        .find(|display| row.display_id.eq_ignore_ascii_case(&display.id))
+    else {
+        return;
+    };
+    row.manual_inches = manual_inches;
+    row.aspect_ratio = aspect_ratio;
+    update_screen_size_row_preview(display, &mut row);
+    // Keep the model and its other rows stable while the user types.
+    rows.set_row_data(index, row);
+    update_screen_size_validity(ui);
+}
+
+fn screen_size_override_candidate(
+    current: &DisplayOverrides,
+    displays: &[DisplayOption],
+    rows: &[ScreenSizeRow],
+) -> Result<DisplayOverrides, String> {
+    if displays.is_empty() {
+        return Err("No connected screens".into());
+    }
+    let mut candidate = current.clone();
+    for display in displays {
+        let row = rows
+            .iter()
+            .find(|row| row.display_id.eq_ignore_ascii_case(&display.id))
+            .ok_or_else(|| format!("{}: screen is no longer available", display.name))?;
+        match screen_size_row_override(display, row)
+            .map_err(|error| format!("{}: {error}", display.name))?
+        {
+            Some((diagonal, ratio)) => candidate
+                .upsert(display.id.clone(), diagonal, ratio)
+                .map_err(|error| error.to_string())?,
             None => {
-                ui.set_screen_size_error("Enter a valid diagonal in inches".into());
-                ui.set_screen_size_valid(false);
-                return;
+                candidate.remove(&display.id);
             }
         }
-    };
-    match effective {
-        Some((width, height, diagonal)) => {
-            ui.set_screen_size_effective_mm(format!("{width:.0} × {height:.0} mm").into());
-            ui.set_screen_size_effective_inches(format!("{diagonal:.1} in diagonal").into());
-            ui.set_screen_size_error("".into());
-            ui.set_screen_size_valid(true);
-        }
-        None => {
-            ui.set_screen_size_effective_mm("Physical size unavailable".into());
-            ui.set_screen_size_effective_inches("Enter a manual diagonal".into());
-            ui.set_screen_size_error("".into());
-            ui.set_screen_size_valid(true);
-        }
     }
+    Ok(candidate)
 }
 
 fn switch_group(
@@ -1031,13 +1268,18 @@ fn update_stream_suggestions(ui: &QuickAccess) {
 }
 
 fn validate_group_drafts(groups: &[GroupDraft]) -> Result<Vec<ValidatedGroupDraft>, String> {
-    groups.iter().map(GroupDraft::validate).collect()
+    groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| group.validate(index + 1))
+        .collect()
 }
 
 fn build_mapping_plan(groups: &[ValidatedGroupDraft]) -> Result<MappingPlan, String> {
     let requests = groups
         .iter()
-        .map(ValidatedGroupDraft::to_mapping_request)
+        .enumerate()
+        .map(|(index, group)| group.to_mapping_request(index + 1))
         .collect::<Result<Vec<_>, String>>()?;
     MappingPlan::new(requests).map_err(|error| error.to_string())
 }
@@ -1065,10 +1307,19 @@ fn selected_reference_source(ui: &QuickAccess) -> Option<ReferenceSource> {
 fn rebuild_reference_options(
     ui: &QuickAccess,
     displays: &[DisplayOption],
+    groups: &[GroupDraft],
     desired_source: Option<ReferenceSource>,
 ) {
     let target_id = selected_display_id(ui, ui.get_selected_display());
-    let candidate_indices = reference_candidate_indices(displays, target_id.as_deref());
+    let candidate_indices: Vec<_> = reference_candidate_indices(displays, target_id.as_deref())
+        .into_iter()
+        .filter(|index| {
+            !groups.iter().any(|group| {
+                !group.stream_only
+                    && group.target_id.as_deref() == Some(displays[*index].id.as_str())
+            })
+        })
+        .collect();
     let candidates: Vec<_> = candidate_indices
         .iter()
         .map(|index| &displays[*index])
@@ -1089,12 +1340,21 @@ fn rebuild_reference_options(
             )
         })
         .collect();
-    let ids: Vec<_> = candidates
+    let mut ids: Vec<_> = candidates
         .iter()
         .map(|display| SharedString::from(display.id.as_str()))
         .collect();
-    let selected_index =
-        reference_selection_index(displays, &candidate_indices, desired_source.as_ref());
+    let selected_index = if let Some(ReferenceSource::Display(id)) = &desired_source
+        && !candidates.iter().any(|display| &display.id == id)
+    {
+        let index = ids.len() as i32;
+        names.push("Unavailable".into());
+        labels.push("Unavailable · Saved reference screen".into());
+        ids.push(id.as_str().into());
+        index
+    } else {
+        reference_selection_index(displays, &candidate_indices, desired_source.as_ref())
+    };
     names.push("Manual".into());
     labels.push("Manual · Enter display geometry".into());
     ui.set_reference_names(ModelRc::new(Rc::new(VecModel::from(names))));
@@ -1153,7 +1413,7 @@ fn load_group_config(ui: &QuickAccess) -> LoadedGroups {
 }
 
 fn loaded_groups(snapshot: crate::config::ProfileSnapshot) -> LoadedGroups {
-    let groups = snapshot
+    let mut groups = snapshot
         .config
         .groups
         .iter()
@@ -1164,6 +1424,7 @@ fn loaded_groups(snapshot: crate::config::ProfileSnapshot) -> LoadedGroups {
         .selected_group_id
         .and_then(|id| groups.iter().position(|group| group.id == id))
         .unwrap_or(0);
+    normalize_shared_reference(&mut groups, active);
     LoadedGroups {
         groups,
         active,
@@ -1337,7 +1598,7 @@ fn finish_profile_save(ui: slint::Weak<QuickAccess>, generation: u64, succeeded:
     if succeeded {
         // Keep the real write transition visible long enough to be perceived.
         // The timer only controls presentation; success still comes from the store.
-        slint::Timer::single_shot(Duration::from_millis(400), finish);
+        slint::Timer::single_shot(Duration::from_millis(800), finish);
     } else {
         finish();
     }
@@ -1377,6 +1638,10 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
         return;
     }
 
+    // A display-mode change can leave a hidden HWND with pending monitor state.
+    // ShowWindow/winit applies that state while showing and may overwrite the
+    // pre-show position, so correct it once the native window is visible.
+    win32_flyout::position(ui.window());
     let activated = win32_flyout::activate(ui.window());
     diagnostics::log(
         Level::Debug,
@@ -1386,6 +1651,17 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
         format!("attempt=immediate foreground={activated}"),
     );
     ui.window().request_redraw();
+
+    // Explorer's tray rectangle and the monitor work area can settle one event
+    // loop turn after a refresh-rate/topology change. Re-read both instead of
+    // retaining coordinates from before the window became visible.
+    let reposition_ui = ui.as_weak();
+    slint::Timer::single_shot(Duration::ZERO, move || {
+        if let Some(ui) = reposition_ui.upgrade() {
+            win32_flyout::position(ui.window());
+            ui.window().request_redraw();
+        }
+    });
 
     if let Some(generation) = intro_generation {
         play_launch_intro(ui.as_weak(), generation);
@@ -1434,6 +1710,65 @@ fn play_launch_intro(ui: slint::Weak<QuickAccess>, generation: u64) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn login_mapping_never_substitutes_a_missing_saved_screen() {
+        let displays = vec![display_option("other", "Other monitor")];
+        let mut group = super::GroupDraft::new(0);
+        group.target_id = Some("saved".into());
+        assert!(super::validate_login_displays(&[group.clone()], &displays).is_err());
+        group.target_id = Some("other".into());
+        assert!(super::validate_login_displays(&[group.clone()], &displays).is_ok());
+        group.reference_source = Some(crate::config::ReferenceSource::Display("missing".into()));
+        assert!(super::validate_login_displays(&[group.clone()], &displays).is_err());
+        group.stream_only = true;
+        group.reference_source = None;
+        assert!(super::validate_login_displays(&[group], &[]).is_ok());
+    }
+
+    #[test]
+    fn login_mapping_waits_for_displays_and_runs_only_once() {
+        use crate::controller::ControllerEvent;
+        use std::sync::atomic::AtomicBool;
+        let pending = AtomicBool::new(true);
+        assert!(!super::take_login_start(
+            &pending,
+            &ControllerEvent::Fps { id: 0, fps: 60 }
+        ));
+        assert!(super::take_login_start(
+            &pending,
+            &ControllerEvent::Displays(vec![])
+        ));
+        assert!(!super::take_login_start(
+            &pending,
+            &ControllerEvent::Displays(vec![])
+        ));
+        let disabled = AtomicBool::new(false);
+        assert!(!super::take_login_start(
+            &disabled,
+            &ControllerEvent::Displays(vec![])
+        ));
+    }
+
+    #[test]
+    fn failed_initial_refresh_cancels_login_mapping() {
+        use crate::controller::ControllerEvent;
+        use std::sync::atomic::AtomicBool;
+        let pending = AtomicBool::new(true);
+        let failure = ControllerEvent::State {
+            state: "Error",
+            detail: String::new(),
+            running: false,
+            busy: false,
+            error: "Display enumeration failed".into(),
+            restart_available: false,
+        };
+        assert!(!super::take_login_start(&pending, &failure));
+        assert!(!super::take_login_start(
+            &pending,
+            &ControllerEvent::Displays(vec![])
+        ));
+    }
+
     use super::{
         COMMON_HEIGHTS, COMMON_WIDTHS, DISPLAY_SETTINGS_URI, GroupDraft, active_after_removal,
         aspect_ratio_from_index, build_mapping_plan, dimensions_from_diagonal,
@@ -1468,6 +1803,88 @@ mod tests {
             physical_override_aspect_ratio: None,
             rotation: Rotation::Deg0,
         }
+    }
+
+    #[test]
+    fn screen_size_batch_applies_each_display_and_retains_disconnected_overrides() {
+        let displays = vec![display_option("a", "Alpha"), display_option("b", "Beta")];
+        let mut current = crate::config::DisplayOverrides::default();
+        current.upsert("offline".into(), 32.0, None).unwrap();
+        let original = current.clone();
+        let mut rows = super::screen_size_rows(&displays, &[]);
+        rows[0].manual_inches = "24.25".into();
+        rows[1].manual_inches = "15.6".into();
+        rows[1].aspect_ratio = 2;
+
+        let candidate = super::screen_size_override_candidate(&current, &displays, &rows).unwrap();
+        assert_eq!(current, original);
+        assert_eq!(candidate.override_for("a").unwrap().diagonal_inches, 24.25);
+        assert_eq!(candidate.override_for("a").unwrap().aspect_ratio, None);
+        assert_eq!(candidate.override_for("b").unwrap().diagonal_inches, 15.6);
+        assert_eq!(
+            candidate.override_for("b").unwrap().aspect_ratio,
+            Some(AspectRatio {
+                width: 16,
+                height: 10,
+            })
+        );
+        assert_eq!(
+            candidate.override_for("offline"),
+            current.override_for("offline")
+        );
+
+        let mut applied = displays;
+        super::apply_display_overrides(&mut applied, &candidate);
+        let reopened = super::screen_size_rows(&applied, &[]);
+        assert_eq!(reopened[0].manual_inches, "24.25");
+        assert_eq!(reopened[1].manual_inches, "15.6");
+        assert_eq!(reopened[1].aspect_ratio, 2);
+    }
+
+    #[test]
+    fn screen_size_batch_rejects_one_invalid_row_without_changing_overrides() {
+        let displays = vec![display_option("a", "Alpha"), display_option("b", "Beta")];
+        let mut current = crate::config::DisplayOverrides::default();
+        current.upsert("a".into(), 24.0, None).unwrap();
+        let original = current.clone();
+        let mut rows = super::screen_size_rows(&displays, &[]);
+        rows[0].manual_inches = "27".into();
+        rows[1].manual_inches = "invalid".into();
+        super::update_screen_size_row_preview(&displays[1], &mut rows[1]);
+        assert!(!rows[1].error.is_empty());
+        assert!(rows[1].effective_size.is_empty());
+
+        assert!(
+            super::screen_size_override_candidate(&current, &displays, &rows)
+                .unwrap_err()
+                .starts_with("Beta:")
+        );
+        assert_eq!(current, original);
+    }
+
+    #[test]
+    fn screen_size_refresh_preserves_drafts_by_id_when_displays_reorder() {
+        let displays = vec![display_option("a", "Alpha"), display_option("b", "Beta")];
+        let mut rows = super::screen_size_rows(&displays, &[]);
+        rows[0].manual_inches = "27.".into();
+        rows[0].aspect_ratio = 2;
+        rows[1].manual_inches = "invalid".into();
+        let mut changed = display_option("A", "Alpha updated");
+        changed.native_width = 3840;
+        changed.native_height = 2160;
+        let refreshed = super::screen_size_rows(
+            &[displays[1].clone(), changed, display_option("c", "Gamma")],
+            &rows,
+        );
+        assert_eq!(refreshed[0].display_id, "b");
+        assert_eq!(refreshed[0].manual_inches, "invalid");
+        assert!(!refreshed[0].error.is_empty());
+        assert_eq!(refreshed[1].manual_inches, "27.");
+        assert_eq!(refreshed[1].aspect_ratio, 2);
+        assert_eq!(refreshed[1].name, "Alpha updated");
+        assert_eq!(refreshed[1].native_mode, "3840 × 2160");
+        assert!(refreshed[2].manual_inches.is_empty());
+        assert_eq!(refreshed[2].aspect_ratio, 0);
     }
 
     fn test_geometry(width: u32, height: u32) -> DisplayGeometry {
@@ -1887,7 +2304,7 @@ mod tests {
             preferred_refresh_millihz: Some(119_880),
         });
 
-        let config = original.validate().unwrap().to_config();
+        let config = original.validate(1).unwrap().to_config();
         let restored = GroupDraft::from_config(&config);
         assert_eq!(restored.id, 5);
         assert!(restored.stream_only);
@@ -1922,10 +2339,391 @@ mod tests {
     }
 
     #[test]
+    fn rendering_options_survive_draft_and_mapping_plan() {
+        let mut first = GroupDraft::new(0);
+        first.target_id = Some("physical-a".into());
+        first.rendering = crate::config::RenderingOptions {
+            high_performance_sampling: true,
+            full_frame_copy: true,
+            static_refresh: true,
+        };
+        let mut second = GroupDraft::new(1);
+        second.target_id = Some("physical-b".into());
+        let validated = validate_group_drafts(&[first.clone(), second]).unwrap();
+        let restored = GroupDraft::from_config(&validated[0].to_config());
+        assert_eq!(restored.rendering, first.rendering);
+        let plan = build_mapping_plan(&validated).unwrap();
+        assert_eq!(plan.groups[0].rendering, first.rendering);
+        assert_eq!(plan.groups[1].rendering, Default::default());
+    }
+
+    #[test]
     fn invalid_stream_screen_is_rejected_before_controller_start() {
         let mut stream = GroupDraft::new(0);
         stream.stream_only = true;
         stream.stream_width = "4k".into();
         assert!(validate_group_drafts(&[stream]).is_err());
+    }
+
+    #[test]
+    fn sparse_group_ids_use_list_positions_in_errors() {
+        let mut first = GroupDraft::new(11);
+        first.target_id = Some("first".into());
+        let mut second = GroupDraft::new(14);
+        second.stream_only = true;
+        let mut groups = vec![first, second];
+        let validated = validate_group_drafts(&groups).unwrap();
+        assert_eq!(validated[0].id(), 11);
+        assert_eq!(validated[1].id(), 14);
+        assert!(
+            build_mapping_plan(&validated)
+                .unwrap_err()
+                .contains("Output 2")
+        );
+        groups[1].stream_width = "invalid".into();
+        let error = match validate_group_drafts(&groups) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid stream dimensions must be rejected"),
+        };
+        assert!(error.contains("Output 2"));
+        assert!(!error.contains("Output 15"));
+    }
+
+    #[test]
+    fn shared_reference_load_uses_selected_source_and_preserves_full_manual_geometry() {
+        let reference = DisplayGeometry {
+            aspect_ratio: Some(AspectRatio {
+                width: 21,
+                height: 9,
+            }),
+            rotation: Rotation::Deg90,
+            ..test_geometry(3840, 2160)
+        };
+        let mut first = GroupDraft::new(0);
+        first.reference_source = Some(ReferenceSource::Display("old".into()));
+        first.sizing = Some(SizingRequest {
+            reference: test_geometry(1920, 1080),
+            target: test_geometry(2560, 1440),
+            strategy: SizingStrategy::IntegerScale,
+            alignment: 4,
+            preferred_refresh_millihz: Some(120_000),
+        });
+        let original = first.sizing.unwrap();
+        let mut manual = GroupDraft::new(3);
+        manual.reference_source = Some(ReferenceSource::Manual);
+        manual.sizing = Some(SizingRequest {
+            reference,
+            ..original
+        });
+        let mut empty = GroupDraft::new(4);
+        empty.reference_source = Some(ReferenceSource::Manual);
+        // A transitional three-field seed must not overwrite complete legacy geometry.
+        empty.reference_geometry = Some(test_geometry(3840, 2160));
+        let mut groups = vec![first, manual, empty];
+        super::normalize_shared_reference(&mut groups, 2);
+        assert!(groups.iter().all(
+            |group| group.reference_source == Some(ReferenceSource::Manual)
+                && group.reference_geometry == Some(reference)
+        ));
+        assert_eq!(
+            groups[0].sizing,
+            Some(SizingRequest {
+                reference,
+                ..original
+            })
+        );
+        assert!(groups[2].sizing.is_none());
+        let persisted = groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| group.validate(index + 1).unwrap().to_config())
+            .collect::<Vec<_>>();
+        let mut restored = persisted
+            .iter()
+            .map(GroupDraft::from_config)
+            .collect::<Vec<_>>();
+        super::normalize_shared_reference(&mut restored, 2);
+        assert!(
+            restored
+                .iter()
+                .all(|group| group.reference_geometry == Some(reference))
+        );
+    }
+
+    #[test]
+    fn transitional_reference_seed_builds_real_geometry_and_keeps_unavailable_identity() {
+        let config: crate::config::GroupConfig = serde_json::from_value(serde_json::json!({
+            "id": 0,
+            "route": { "kind": "mirror", "target_id": "target" },
+            "reference_source": "manual",
+            "manual_reference": { "width": 2560, "height": 1440, "diagonal_inches": 27.0 },
+            "sizing_strategy": "rounded_scale"
+        }))
+        .unwrap();
+        let mut groups = vec![GroupDraft::from_config(&config)];
+        let draft = groups[0].validate(1).unwrap().to_config();
+        assert!(draft.sizing.is_none());
+        assert_eq!(
+            draft.manual_reference.unwrap().width,
+            config.manual_reference.unwrap().width
+        );
+        assert_eq!(draft.manual_reference.unwrap().diagonal_inches, 27.0);
+        let target = display_option("target", "Target");
+        super::refresh_group_sizing(&mut groups, std::slice::from_ref(&target));
+        let complete = groups[0].validate(1).unwrap().to_config();
+        assert!(complete.manual_reference.is_none());
+        assert!(complete.sizing_strategy.is_none());
+        assert_eq!(
+            complete.sizing.unwrap().strategy,
+            SizingStrategy::RoundedScale
+        );
+        assert_eq!(
+            complete.sizing.unwrap().target.native_pixels.width,
+            target.native_width
+        );
+        let reference = display_option("reference", "Reference");
+        super::set_shared_reference(
+            &mut groups,
+            Some(ReferenceSource::Display(reference.id.clone())),
+            Some(super::display_geometry(&reference, "Reference").unwrap()),
+        );
+        super::refresh_group_sizing(&mut groups, &[target.clone(), reference.clone()]);
+        let saved = groups[0].sizing;
+        super::refresh_group_sizing(&mut groups, std::slice::from_ref(&target));
+        assert_eq!(groups[0].sizing, saved);
+        assert!(
+            super::validate_live_group_sizing(&groups, std::slice::from_ref(&target))
+                .unwrap_err()
+                .contains("reference")
+        );
+        let mut changed = reference;
+        changed.native_width = 3840;
+        super::refresh_group_sizing(&mut groups, &[target.clone(), changed.clone()]);
+        assert_eq!(
+            groups[0].sizing.unwrap().reference.native_pixels.width,
+            3840
+        );
+        groups[0].target_id = Some(changed.id.clone());
+        assert!(
+            super::validate_live_group_sizing(&groups, &[target, changed])
+                .unwrap_err()
+                .contains("also selected")
+        );
+    }
+
+    #[test]
+    fn shared_reference_callbacks_preserve_groups_and_renumber_after_removal() {
+        const CHILD: &str = "SBMS_SHARED_REFERENCE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = std::env::temp_dir().join(format!(
+                "sbms-shared-reference-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "shared_reference_callbacks_preserve_groups_and_renumber_after_removal",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .env("LOCALAPPDATA", &directory)
+                .output()
+                .unwrap();
+            std::fs::remove_dir_all(&directory).unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        use slint::Model;
+        use std::sync::{Arc, Mutex};
+        slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name("software".into())
+            .select()
+            .unwrap();
+        let ui = super::QuickAccess::new().unwrap();
+        ui.set_max_group_count(16);
+        let store = crate::config::ConfigProfileStore::default_store().unwrap();
+        let profile = store.load_active().unwrap().profile;
+        let mut next_reference = display_option("reference-b", "Reference B");
+        next_reference.native_width = 3840;
+        next_reference.native_height = 2160;
+        let displays = Arc::new(Mutex::new(vec![
+            display_option("reference-a", "Reference A"),
+            display_option("target-a", "Target A"),
+            display_option("target-b", "Target B"),
+            next_reference,
+        ]));
+        let mut drafts = vec![GroupDraft::new(0), GroupDraft::new(3)];
+        drafts[0].target_id = Some("target-a".into());
+        drafts[1].target_id = Some("target-b".into());
+        drafts[1].sizing_strategy = SizingStrategy::RoundedScale;
+        super::set_shared_reference(
+            &mut drafts,
+            Some(ReferenceSource::Display("reference-a".into())),
+            None,
+        );
+        super::refresh_group_sizing(&mut drafts, &displays.lock().unwrap());
+        let groups = Arc::new(Mutex::new(drafts));
+        let active = Arc::new(Mutex::new(0));
+        let state = super::HandlerState::new(
+            displays.clone(),
+            groups.clone(),
+            active.clone(),
+            Arc::new(Mutex::new(crate::config::DisplayOverrides::default())),
+            Arc::new(Mutex::new(profile)),
+        );
+        super::hydrate_group(&ui, &displays.lock().unwrap(), &groups.lock().unwrap(), 0);
+        super::register_geometry_handlers(&ui, &state);
+        super::register_group_handlers(&ui, &state);
+        assert!(!ui.get_high_performance_sampling());
+        assert!(!ui.get_full_frame_copy());
+        assert!(!ui.get_static_refresh());
+        ui.set_high_performance_sampling(true);
+        ui.set_static_refresh(true);
+        ui.invoke_rendering_edited();
+        ui.invoke_tab_selected(1);
+        assert!(!ui.get_high_performance_sampling());
+        assert!(!ui.get_static_refresh());
+        ui.set_full_frame_copy(true);
+        ui.invoke_rendering_edited();
+        ui.invoke_tab_selected(0);
+        assert!(ui.get_high_performance_sampling());
+        assert!(ui.get_static_refresh());
+        assert!(!ui.get_full_frame_copy());
+        let selected = (0..ui.get_reference_ids().row_count())
+            .find(|index| ui.get_reference_ids().row_data(*index).unwrap() == "reference-b")
+            .unwrap();
+        ui.set_selected_reference(selected as i32);
+        ui.invoke_reference_selected();
+        assert!(
+            groups
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|group| group.reference_source
+                    == Some(ReferenceSource::Display("reference-b".into())))
+        );
+        assert_eq!(
+            groups.lock().unwrap()[1].sizing.unwrap().strategy,
+            SizingStrategy::RoundedScale
+        );
+        assert_eq!(
+            groups.lock().unwrap()[1].target_id.as_deref(),
+            Some("target-b")
+        );
+        ui.set_selected_reference(ui.get_reference_ids().row_count() as i32);
+        ui.invoke_reference_selected();
+        ui.invoke_open_manual_geometry();
+        ui.set_reference_width("3840".into());
+        ui.set_reference_height("2160".into());
+        ui.set_reference_diagonal("27".into());
+        ui.set_reference_aspect_ratio(4);
+        ui.set_reference_rotation(2);
+        ui.invoke_geometry_edited();
+        assert!(ui.get_geometry_valid(), "{}", ui.get_geometry_error());
+        ui.invoke_save_geometry();
+        assert_eq!(ui.get_page(), super::QuickAccessPage::Main);
+        let reference = groups.lock().unwrap()[0].reference_geometry.unwrap();
+        assert_eq!(
+            reference.aspect_ratio,
+            Some(AspectRatio {
+                width: 21,
+                height: 9
+            })
+        );
+        assert_eq!(reference.rotation, Rotation::Deg90);
+        for _ in 0..6 {
+            ui.invoke_add_group();
+        }
+        assert_eq!(groups.lock().unwrap().len(), 8);
+        assert!(
+            groups
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|group| group.reference_geometry == Some(reference))
+        );
+        ui.invoke_tab_selected(1);
+        assert_eq!(ui.get_reference_width(), "3840");
+        assert_eq!(ui.get_reference_aspect_ratio(), 4);
+        assert_eq!(ui.get_reference_rotation(), 2);
+        ui.invoke_remove_group(0);
+        assert_eq!(groups.lock().unwrap()[0].id, 3);
+        assert_eq!(ui.get_tab_labels().row_data(0).unwrap(), "1");
+        assert_eq!(ui.get_tab_labels().row_data(1).unwrap(), "2");
+        let mut restored = super::loaded_groups(store.load_active().unwrap());
+        super::refresh_group_sizing(&mut restored.groups, &displays.lock().unwrap());
+        assert_eq!(restored.groups.len(), 7);
+        assert!(
+            restored
+                .groups
+                .iter()
+                .all(|group| group.reference_geometry == Some(reference))
+        );
+        assert_eq!(restored.groups[0].target_id.as_deref(), Some("target-b"));
+        assert!(restored.groups[0].rendering.full_frame_copy);
+        assert!(!restored.groups[0].rendering.high_performance_sampling);
+        assert!(!restored.groups[0].rendering.static_refresh);
+        assert_eq!(
+            restored.groups[0].sizing.unwrap().strategy,
+            SizingStrategy::RoundedScale
+        );
+        // Only unfinished stream groups remain: the transitional seed must carry
+        // the full manual settings even when there is no sizing mirror left.
+        while groups
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|group| group.sizing.is_some())
+        {
+            ui.invoke_remove_group(0);
+        }
+        let restored = super::loaded_groups(store.load_active().unwrap());
+        assert!(!restored.groups.is_empty());
+        assert!(restored.groups.iter().all(|group| group.stream_only
+            && group.sizing.is_none()
+            && group.reference_geometry == Some(reference)));
+
+        // Exercise the actual model: editing and resetting one row retain the
+        // model instance and the other screen's draft, including invalid input.
+        let screens = vec![display_option("a", "Alpha"), display_option("b", "Beta")];
+        super::populate_screen_size_page(&ui, &screens, false);
+        let row_model = ui.get_screen_size_rows();
+        super::edit_screen_size_row(&ui, &screens, 0, "27".into(), 2);
+        super::edit_screen_size_row(&ui, &screens, 1, "invalid".into(), 0);
+        assert_eq!(row_model.row_data(0).unwrap().manual_inches, "27");
+        assert!(!row_model.row_data(1).unwrap().error.is_empty());
+        assert!(!ui.get_screen_size_valid());
+        super::edit_screen_size_row(&ui, &screens, 0, "".into(), 0);
+        let reset = row_model.row_data(0).unwrap();
+        assert!(reset.manual_inches.is_empty());
+        assert_eq!(reset.aspect_ratio, 0);
+        assert_eq!(reset.effective_size, "527 × 296 mm");
+        assert_eq!(row_model.row_data(1).unwrap().manual_inches, "invalid");
+        super::populate_screen_size_page(&ui, &screens, false);
+        assert!(
+            ui.get_screen_size_rows()
+                .iter()
+                .all(|row| row.manual_inches.is_empty())
+        );
+        assert!(ui.get_screen_size_valid());
+        ui.set_screen_size_error("Stored override file is invalid".into());
+        ui.set_screen_size_save_blocked(true);
+        super::populate_screen_size_page(&ui, &screens, true);
+        assert_eq!(
+            ui.get_screen_size_error(),
+            "Stored override file is invalid"
+        );
+        assert!(!ui.get_screen_size_valid());
     }
 }

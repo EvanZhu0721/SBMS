@@ -4,9 +4,7 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{
-    HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WAIT_FAILED, WPARAM,
-};
+use windows::Win32::Foundation::{HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, WAIT_FAILED, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -18,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{PCWSTR, w};
 
+use crate::config::RenderingOptions;
 use crate::display::Display;
 use crate::gpu_renderer::{GpuRendererConfig, GpuRendererError, run_gpu_renderer};
 use crate::input::{InputGuard, flush_movement, handle_message};
@@ -50,15 +49,17 @@ pub struct Renderer {
 enum StartWait {
     Ready,
     Failed(String),
+    Retryable(String),
     Cancelled,
     TimedOut,
     Disconnected,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RendererStartError {
     Cancelled { cleanup_error: Option<String> },
     Failed(String),
+    Retryable(String),
 }
 
 impl RendererStartError {
@@ -71,6 +72,22 @@ impl RendererStartError {
                 cleanup_error: Some(error),
             } => format!("renderer startup was cancelled; cleanup was incomplete: {error}"),
             Self::Failed(error) => error,
+            Self::Retryable(error) => error,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum WorkerRunError {
+    Failed(String),
+    Retryable(String),
+}
+
+impl WorkerRunError {
+    fn to_start_error(&self) -> RendererStartError {
+        match self {
+            Self::Failed(error) => RendererStartError::Failed(error.clone()),
+            Self::Retryable(error) => RendererStartError::Retryable(error.clone()),
         }
     }
 }
@@ -92,38 +109,77 @@ impl Renderer {
         reporter: RendererReporter,
         cancel: &AtomicBool,
     ) -> Result<Self, RendererStartError> {
+        Self::start_with_reporter_interruptible(target, source, reporter, || {
+            cancel.load(Ordering::Acquire)
+        })
+    }
+
+    pub(crate) fn start_with_reporter_interruptible(
+        target: Display,
+        source: Display,
+        reporter: RendererReporter,
+        interrupted: impl Fn() -> bool,
+    ) -> Result<Self, RendererStartError> {
+        Self::start_with_options_interruptible(
+            target,
+            source,
+            reporter,
+            RenderingOptions::default(),
+            interrupted,
+        )
+    }
+
+    pub(crate) fn start_with_options_interruptible(
+        target: Display,
+        source: Display,
+        reporter: RendererReporter,
+        rendering: RenderingOptions,
+        interrupted: impl Fn() -> bool,
+    ) -> Result<Self, RendererStartError> {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let wake_event = Arc::new(create_wake_event().map_err(RendererStartError::Failed)?);
         let worker_wake_event = Arc::clone(&wake_event);
         let (ready_tx, ready_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let worker_reporter = Arc::clone(&reporter);
         let thread = thread::spawn(move || {
             let result = run(
-                target.rect,
-                source.rect,
+                target,
+                source,
+                rendering,
                 &worker_stop,
                 &worker_wake_event,
                 &ready_tx,
-                &reporter,
+                &worker_reporter,
             );
             if let Err(error) = &result {
-                let _ = ready_tx.send(Err(error.clone()));
+                let _ = ready_tx.send(Err(error.to_start_error()));
             }
-            let failure = result.as_ref().err().cloned();
-            if let Some(error) = failure {
-                reporter(RendererEvent::Failed(error));
+            if let Err(WorkerRunError::Failed(error)) = &result {
+                worker_reporter(RendererEvent::Failed(error.clone()));
             }
-            let _ = done_tx.send(result);
+            let done_result = match result {
+                Ok(()) => Ok(()),
+                Err(WorkerRunError::Retryable(_)) => Ok(()),
+                Err(WorkerRunError::Failed(error)) => Err(error),
+            };
+            let _ = done_tx.send(done_result);
         });
 
-        match wait_for_start(&ready_rx, cancel, START_TIMEOUT) {
+        match wait_for_start(&ready_rx, &interrupted, START_TIMEOUT) {
             StartWait::Ready => Ok(Self {
                 stop,
                 wake_event,
                 done: done_rx,
                 thread: Some(thread),
             }),
+            StartWait::Retryable(error) => {
+                stop.store(true, Ordering::Release);
+                signal_event(&wake_event);
+                let _ = thread.join();
+                Err(RendererStartError::Retryable(error))
+            }
             StartWait::Failed(error) => {
                 stop.store(true, Ordering::Release);
                 signal_event(&wake_event);
@@ -200,20 +256,28 @@ impl Renderer {
 }
 
 fn wait_for_start(
-    ready: &mpsc::Receiver<Result<(), String>>,
-    cancel: &AtomicBool,
+    ready: &mpsc::Receiver<Result<(), RendererStartError>>,
+    interrupted: impl Fn() -> bool,
     timeout: Duration,
 ) -> StartWait {
     let deadline = Instant::now() + timeout;
     loop {
+        if interrupted() {
+            return StartWait::Cancelled;
+        }
         match ready.try_recv() {
-            Ok(Ok(())) => return StartWait::Ready,
-            Ok(Err(error)) => return StartWait::Failed(error),
+            Ok(Ok(())) => {
+                return if interrupted() {
+                    StartWait::Cancelled
+                } else {
+                    StartWait::Ready
+                };
+            }
+            Ok(Err(RendererStartError::Retryable(error))) => return StartWait::Retryable(error),
+            Ok(Err(RendererStartError::Failed(error))) => return StartWait::Failed(error),
+            Ok(Err(RendererStartError::Cancelled { .. })) => return StartWait::Cancelled,
             Err(mpsc::TryRecvError::Disconnected) => return StartWait::Disconnected,
             Err(mpsc::TryRecvError::Empty) => {}
-        }
-        if cancel.load(Ordering::Acquire) {
-            return StartWait::Cancelled;
         }
         let now = Instant::now();
         if now >= deadline {
@@ -221,9 +285,31 @@ fn wait_for_start(
         }
         let wait = (deadline - now).min(START_CANCEL_POLL_INTERVAL);
         match ready.recv_timeout(wait) {
-            Ok(Ok(())) => return StartWait::Ready,
-            Ok(Err(error)) => return StartWait::Failed(error),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return StartWait::Disconnected,
+            Ok(Ok(())) => {
+                if interrupted() {
+                    return StartWait::Cancelled;
+                }
+                return StartWait::Ready;
+            }
+            Ok(Err(RendererStartError::Retryable(error))) => {
+                if interrupted() {
+                    return StartWait::Cancelled;
+                }
+                return StartWait::Retryable(error);
+            }
+            Ok(Err(RendererStartError::Failed(error))) => {
+                if interrupted() {
+                    return StartWait::Cancelled;
+                }
+                return StartWait::Failed(error);
+            }
+            Ok(Err(RendererStartError::Cancelled { .. })) => return StartWait::Cancelled,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if interrupted() {
+                    return StartWait::Cancelled;
+                }
+                return StartWait::Disconnected;
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
@@ -237,23 +323,32 @@ fn abort_start(
 ) -> Result<(), String> {
     stop.store(true, Ordering::Release);
     signal_event(wake_event);
-    let exceeded_timeout = match done.recv_timeout(STOP_TIMEOUT) {
-        Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => false,
+    let (result, exceeded_timeout) = match done.recv_timeout(STOP_TIMEOUT) {
+        Ok(result) => (result, false),
+        Err(mpsc::RecvTimeoutError::Disconnected) => (
+            Err("renderer stopped without reporting a result".to_string()),
+            false,
+        ),
         Err(mpsc::RecvTimeoutError::Timeout) => {
             // Startup failure cannot hand an unowned live renderer to the caller.
             // Wait for definitive termination before mapping rollback changes the
             // virtual display or physical topology.
-            let _ = done.recv();
-            true
+            let result = done
+                .recv()
+                .unwrap_or_else(|_| Err("renderer stopped without reporting a result".to_string()));
+            (result, true)
         }
     };
     thread
         .join()
         .map_err(|_| "renderer thread panicked while stopping".to_string())?;
-    if exceeded_timeout {
-        Err("renderer needed more than 2 seconds to stop".into())
-    } else {
-        Ok(())
+    match (result, exceeded_timeout) {
+        (Ok(()), false) => Ok(()),
+        (Ok(()), true) => Err("renderer needed more than 2 seconds to stop".into()),
+        (Err(error), false) => Err(error),
+        (Err(error), true) => Err(format!(
+            "renderer needed more than 2 seconds to stop; renderer failed: {error}"
+        )),
     }
 }
 
@@ -264,15 +359,24 @@ impl Drop for Renderer {
 }
 
 fn run(
-    target: RECT,
-    source: RECT,
+    target: Display,
+    source: Display,
+    rendering: RenderingOptions,
     stop: &AtomicBool,
     wake_event: &OwnedHandle,
-    ready: &mpsc::Sender<Result<(), String>>,
+    ready: &mpsc::Sender<Result<(), RendererStartError>>,
     reporter: &RendererReporter,
-) -> Result<(), String> {
+) -> Result<(), WorkerRunError> {
+    let target_refresh_millihz = if target.refresh_numerator == 0 || target.refresh_denominator == 0
+    {
+        60_000
+    } else {
+        (u64::from(target.refresh_numerator) * 1000 / u64::from(target.refresh_denominator)) as u32
+    };
+    let target = target.rect;
+    let source = source.rect;
     let instance = unsafe { GetModuleHandleW(None) }
-        .map_err(|error| format!("GetModuleHandleW failed: {error}"))?;
+        .map_err(|error| WorkerRunError::Failed(format!("GetModuleHandleW failed: {error}")))?;
     let instance = HINSTANCE(instance.0);
     let class_name_storage =
         window_class_name(WINDOW_CLASS_SEQUENCE.fetch_add(1, Ordering::Relaxed));
@@ -285,10 +389,10 @@ fn run(
         ..Default::default()
     };
     if unsafe { RegisterClassW(&class) } == 0 {
-        return Err(format!(
+        return Err(WorkerRunError::Failed(format!(
             "RegisterClassW failed: {}",
             windows::core::Error::from_thread()
-        ));
+        )));
     }
 
     let width = target.right - target.left;
@@ -313,7 +417,7 @@ fn run(
         unsafe {
             let _ = UnregisterClassW(class_name, Some(instance));
         }
-        format!("CreateWindowExW failed: {error}")
+        WorkerRunError::Failed(format!("CreateWindowExW failed: {error}"))
     })?;
     unsafe {
         let _ = ShowWindow(window, SW_SHOW);
@@ -326,7 +430,7 @@ fn run(
                 let _ = DestroyWindow(window);
                 let _ = UnregisterClassW(class_name, Some(instance));
             }
-            return Err(error);
+            return Err(WorkerRunError::Failed(error));
         }
     };
     let result = thread::scope(|scope| {
@@ -334,7 +438,19 @@ fn run(
         let window_value = window.0 as usize;
         let draw_thread = scope.spawn(move || {
             let window = HWND(window_value as *mut _);
-            let result = draw_frames(window, width, height, source, stop, ready, reporter);
+            let result = draw_frames(
+                GpuRendererConfig {
+                    target_window: window,
+                    target_width: width as u32,
+                    target_height: height as u32,
+                    source_rect: source,
+                    rendering,
+                    target_refresh_millihz,
+                },
+                stop,
+                ready,
+                reporter,
+            );
             let _ = draw_done_tx.send(result);
             signal_event(wake_event);
         });
@@ -343,9 +459,11 @@ fn run(
                 break result;
             }
             if stop.load(Ordering::Acquire) {
-                break draw_done_rx
-                    .recv()
-                    .map_err(|_| "renderer draw worker exited without a result".to_string())?;
+                break draw_done_rx.recv().map_err(|_| {
+                    WorkerRunError::Failed(
+                        "renderer draw worker exited without a result".to_string(),
+                    )
+                })?;
             }
             if !pump_messages() {
                 stop.store(true, Ordering::Release);
@@ -355,12 +473,12 @@ fn run(
             if let Err(error) = wait_for_message(wake_event) {
                 stop.store(true, Ordering::Release);
                 let _ = draw_done_rx.recv();
-                break Err(error);
+                break Err(WorkerRunError::Failed(error));
             }
         };
         draw_thread
             .join()
-            .map_err(|_| "renderer draw worker panicked".to_string())?;
+            .map_err(|_| WorkerRunError::Failed("renderer draw worker panicked".to_string()))?;
         draw_result
     });
     drop(input);
@@ -401,56 +519,56 @@ fn signal_event(wake_event: &OwnedHandle) {
 }
 
 fn draw_frames(
-    window: HWND,
-    target_width: i32,
-    target_height: i32,
-    source: RECT,
+    config: GpuRendererConfig,
     stop: &AtomicBool,
-    ready: &mpsc::Sender<Result<(), String>>,
+    ready: &mpsc::Sender<Result<(), RendererStartError>>,
     reporter: &RendererReporter,
-) -> Result<(), String> {
+) -> Result<(), WorkerRunError> {
     let mut first_frame = true;
     let mut frames = 0_u32;
     let mut sample_started = Instant::now();
-    let result = run_gpu_renderer(
-        GpuRendererConfig {
-            target_window: window,
-            target_width: target_width as u32,
-            target_height: target_height as u32,
-            source_rect: source,
-        },
-        stop,
-        || {
-            frames = frames.saturating_add(1);
-            if first_frame {
-                ready
-                    .send(Ok(()))
-                    .map_err(|_| "mapping start was cancelled".to_string())?;
-                first_frame = false;
-            }
-            let elapsed = sample_started.elapsed();
-            if elapsed >= Duration::from_secs(1) {
-                reporter(RendererEvent::Fps(measured_fps(frames, elapsed)));
-                frames = 0;
-                sample_started = Instant::now();
-            }
-            Ok(())
-        },
-    );
-    finish_gpu_renderer(result, reporter)
+    let result = run_gpu_renderer(config, stop, || {
+        frames = frames.saturating_add(1);
+        if first_frame {
+            ready
+                .send(Ok(()))
+                .map_err(|_| "mapping start was cancelled".to_string())?;
+            first_frame = false;
+        }
+        let elapsed = sample_started.elapsed();
+        if elapsed >= Duration::from_secs(1) {
+            reporter(RendererEvent::Fps(measured_fps(frames, elapsed)));
+            frames = 0;
+            sample_started = Instant::now();
+        }
+        Ok(())
+    });
+    finish_gpu_renderer(result, reporter, first_frame, ready)
 }
 
 fn finish_gpu_renderer(
     result: Result<(), GpuRendererError>,
     reporter: &RendererReporter,
-) -> Result<(), String> {
+    first_frame: bool,
+    ready: &mpsc::Sender<Result<(), RendererStartError>>,
+) -> Result<(), WorkerRunError> {
     match result {
         Ok(()) => Ok(()),
-        Err(GpuRendererError::AccessLost) => {
+        Err(error) if first_frame => {
+            let message = error.to_string();
+            if error.is_retryable() {
+                let _ = ready.send(Err(RendererStartError::Retryable(message.clone())));
+                Err(WorkerRunError::Retryable(message))
+            } else {
+                let _ = ready.send(Err(RendererStartError::Failed(message.clone())));
+                Err(WorkerRunError::Failed(message))
+            }
+        }
+        Err(error) if error.is_retryable() => {
             reporter(RendererEvent::TopologyLost);
             Ok(())
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(WorkerRunError::Failed(error.to_string())),
     }
 }
 
@@ -509,9 +627,9 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        Renderer, RendererEvent, RendererReporter, StartWait, create_wake_event,
-        finish_gpu_renderer, measured_fps, signal_event, wait_for_message, wait_for_start,
-        window_class_name,
+        Renderer, RendererEvent, RendererReporter, RendererStartError, StartWait, WorkerRunError,
+        abort_start, create_wake_event, finish_gpu_renderer, measured_fps, signal_event,
+        wait_for_message, wait_for_start, window_class_name,
     };
     use crate::gpu_renderer::GpuRendererError;
     use std::sync::Arc;
@@ -533,17 +651,91 @@ mod tests {
     }
 
     #[test]
-    fn access_lost_reports_recoverable_topology_loss() {
+    fn running_access_lost_reports_recoverable_topology_loss() {
         let (event_tx, event_rx) = mpsc::channel();
         let reporter: RendererReporter = Arc::new(move |event| {
             event_tx.send(event).unwrap();
         });
+        let (ready_tx, _ready_rx) = mpsc::channel();
+        let error = GpuRendererError::AccessLost(
+            "IDXGIOutputDuplication::AcquireNextFrame failed: HRESULT(0x887A0026)".into(),
+        );
 
-        assert!(finish_gpu_renderer(Err(GpuRendererError::AccessLost), &reporter).is_ok());
+        assert!(finish_gpu_renderer(Err(error), &reporter, false, &ready_tx).is_ok());
         assert!(matches!(
             event_rx.recv().unwrap(),
             RendererEvent::TopologyLost
         ));
+    }
+
+    #[test]
+    fn access_lost_before_first_frame_reports_retryable_instead_of_disconnected() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let reporter: RendererReporter = Arc::new(move |event| {
+            event_tx.send(event).unwrap();
+        });
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let error = GpuRendererError::AccessLost(
+            "IDXGIOutputDuplication::AcquireNextFrame failed: HRESULT(0x887A0026)".into(),
+        );
+
+        let result = finish_gpu_renderer(Err(error), &reporter, true, &ready_tx);
+        assert!(matches!(result, Err(WorkerRunError::Retryable(_))));
+        assert!(event_rx.try_recv().is_err());
+
+        let wait_result = wait_for_start(&ready_rx, || false, Duration::from_secs(1));
+        assert_eq!(
+            wait_result,
+            StartWait::Retryable(
+                "IDXGIOutputDuplication::AcquireNextFrame failed: HRESULT(0x887A0026)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn duplicate_output_access_denied_before_first_frame_reports_retryable() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let reporter: RendererReporter = Arc::new(move |event| {
+            event_tx.send(event).unwrap();
+        });
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let error = GpuRendererError::DuplicateOutputAccessDenied(
+            "IDXGIOutput1::DuplicateOutput failed: HRESULT(0x80070005)".into(),
+        );
+
+        let result = finish_gpu_renderer(Err(error), &reporter, true, &ready_tx);
+        assert!(matches!(result, Err(WorkerRunError::Retryable(_))));
+        assert!(event_rx.try_recv().is_err());
+
+        let wait_result = wait_for_start(&ready_rx, || false, Duration::from_secs(1));
+        assert_eq!(
+            wait_result,
+            StartWait::Retryable(
+                "IDXGIOutput1::DuplicateOutput failed: HRESULT(0x80070005)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn failure_before_first_frame_reports_explicit_failed_start() {
+        let (event_tx, event_rx) = mpsc::channel();
+        let reporter: RendererReporter = Arc::new(move |event| {
+            event_tx.send(event).unwrap();
+        });
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let error = GpuRendererError::Failure(
+            "ID3D11Device::CreateTexture2D failed: HRESULT(0x80070005)".into(),
+        );
+
+        let result = finish_gpu_renderer(Err(error), &reporter, true, &ready_tx);
+        assert!(matches!(result, Err(WorkerRunError::Failed(_))));
+        assert!(event_rx.try_recv().is_err());
+
+        let wait_result = wait_for_start(&ready_rx, || false, Duration::from_secs(1));
+        assert_eq!(
+            wait_result,
+            StartWait::Failed("ID3D11Device::CreateTexture2D failed: HRESULT(0x80070005)".into())
+        );
     }
 
     #[test]
@@ -556,36 +748,48 @@ mod tests {
     }
 
     #[test]
-    fn ready_frame_wins_a_simultaneous_start_cancellation() {
+    fn first_frame_and_cancellation_race_prefers_cancellation() {
         let (ready_tx, ready_rx) = mpsc::channel();
         ready_tx.send(Ok(())).unwrap();
-        let cancel = AtomicBool::new(true);
         assert_eq!(
-            wait_for_start(&ready_rx, &cancel, Duration::from_secs(1)),
-            StartWait::Ready
+            wait_for_start(&ready_rx, || true, Duration::from_secs(1)),
+            StartWait::Cancelled
+        );
+    }
+
+    #[test]
+    fn cancellation_during_ready_receive_prevents_start() {
+        let (ready_tx, ready_rx) = mpsc::channel();
+        ready_tx.send(Ok(())).unwrap();
+        let checked = AtomicBool::new(false);
+        assert_eq!(
+            wait_for_start(
+                &ready_rx,
+                || checked.swap(true, Ordering::AcqRel),
+                Duration::from_secs(1)
+            ),
+            StartWait::Cancelled
         );
     }
 
     #[test]
     fn renderer_start_wait_distinguishes_cancel_timeout_and_disconnect() {
         let (_ready_tx, ready_rx) = mpsc::channel();
-        let cancel = AtomicBool::new(true);
         assert_eq!(
-            wait_for_start(&ready_rx, &cancel, Duration::from_secs(1)),
+            wait_for_start(&ready_rx, || true, Duration::from_secs(1)),
             StartWait::Cancelled
         );
 
         let (_ready_tx, ready_rx) = mpsc::channel();
-        let cancel = AtomicBool::new(false);
         assert_eq!(
-            wait_for_start(&ready_rx, &cancel, Duration::from_millis(1)),
+            wait_for_start(&ready_rx, || false, Duration::from_millis(1)),
             StartWait::TimedOut
         );
 
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), RendererStartError>>();
         drop(ready_tx);
         assert_eq!(
-            wait_for_start(&ready_rx, &cancel, Duration::from_secs(1)),
+            wait_for_start(&ready_rx, || false, Duration::from_secs(1)),
             StartWait::Disconnected
         );
     }
@@ -633,5 +837,33 @@ mod tests {
         let error = renderer.stop().unwrap_err();
         assert!(error.contains("needed more than"));
         assert!(renderer.thread.is_none());
+    }
+
+    #[test]
+    fn abort_start_with_retryable_exit_does_not_report_cleanup_failure() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let wake_event = Arc::new(create_wake_event().unwrap());
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let thread = thread::spawn(move || {
+            // Worker simulates exiting after transient Retryable failure
+            done_tx.send(Ok(())).unwrap();
+        });
+
+        let cleanup = abort_start(&stop, &wake_event, &done_rx, thread);
+        assert!(cleanup.is_ok());
+    }
+
+    #[test]
+    fn abort_start_preserves_worker_failure() {
+        let stop = AtomicBool::new(false);
+        let wake_event = create_wake_event().unwrap();
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let thread = thread::spawn(move || {
+            done_tx.send(Err("D3D11 device removed".into())).unwrap();
+        });
+        assert_eq!(
+            abort_start(&stop, &wake_event, &done_rx, thread),
+            Err("D3D11 device removed".into())
+        );
     }
 }

@@ -46,6 +46,7 @@ Source: "..\NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}\licenses"; DestName: "GPL-3.0.txt"; Flags: ignoreversion
 Source: "..\LICENSES\MS-PL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSES\Apache-2.0.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\LICENSES\LGPL-2.1.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "maintenance.ps1"; DestName: "sbms-maintenance.ps1"; Flags: dontcopy
 
 [InstallDelete]

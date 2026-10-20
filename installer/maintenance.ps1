@@ -399,6 +399,31 @@ function Restore-SbmsTasks {
     }
 }
 
+function Test-SbmsTrayReady {
+    param([int[]]$ProcessIds)
+    if (-not ('SBMS.TrayStartup' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace SBMS {
+    public static class TrayStartup {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string title);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+        public static int HostProcessId() {
+            uint processId;
+            GetWindowThreadProcessId(FindWindow("SbmsTrayHostWindow", null), out processId);
+            return (int)processId;
+        }
+    }
+}
+'@
+    }
+    $hostProcessId = [SBMS.TrayStartup]::HostProcessId()
+    $hostProcessId -gt 0 -and $hostProcessId -in $ProcessIds
+}
+
 function Install-SbmsTask {
     $interactive = Assert-InstallIdentity
     if (Get-OwnedTask) {
@@ -423,28 +448,36 @@ function Install-SbmsTask {
         Get-InstalledSbmsProcesses |
             ForEach-Object { $_.Id }
     )
-    Register-ScheduledTask `
-        -TaskPath $taskPath `
-        -TaskName $taskName `
-        -Action $taskAction `
-        -Trigger $trigger `
-        -Principal $principal `
-        -Settings $settings `
-        -Description 'Starts the SBMS tray with the privileges required by its protected session gate.' |
-        Out-Null
-    Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
-    $deadline = [DateTime]::UtcNow.AddSeconds(10)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $started = @(
-            Get-InstalledSbmsProcesses |
-                Where-Object { $_.Id -notin $existingProcessIds }
-        )
-        if ($started.Count -gt 0) {
-            return
+    $brokerMarker = [System.Threading.Mutex]::new($false, 'Local\SBMS-Manual-Launch-Broker-7EB4D7A8')
+    try {
+        Register-ScheduledTask `
+            -TaskPath $taskPath `
+            -TaskName $taskName `
+            -Action $taskAction `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Description 'Starts the SBMS tray with the privileges required by its protected session gate.' |
+            Out-Null
+        Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $started = @(
+                Get-InstalledSbmsProcesses |
+                    Where-Object { $_.Id -notin $existingProcessIds }
+            )
+            # Keep the marker alive until the new tray has read it and published
+            # its host window, not merely until its process exists.
+            if ($started.Count -gt 0 -and (Test-SbmsTrayReady -ProcessIds @($started.Id))) {
+                return
+            }
+            Start-Sleep -Milliseconds 200
         }
-        Start-Sleep -Milliseconds 200
+        throw 'The SBMS tray did not start from its registered logon task.'
     }
-    throw 'The SBMS tray did not start from its registered logon task.'
+    finally {
+        $brokerMarker.Dispose()
+    }
 }
 
 function Find-SbmsDriverPackages {

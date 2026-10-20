@@ -147,6 +147,8 @@ export component StreamPage inherits FocusScope {
                                         "Portrait (counter-clockwise)",
                                     ];
                                     current-index <=> root.stream-rotation;
+                                    popup-width: 328px;
+                                    popup-align-right: true;
                                     field-label: "Streaming screen orientation";
                                     selected => { root.stream-edited(); }
                                 }

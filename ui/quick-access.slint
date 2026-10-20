@@ -1,8 +1,10 @@
 import { MainPage } from "pages/main.slint";
-import { ScreenSizePage } from "pages/screen-size.slint";
+import { ScreenSizePage, ScreenSizeRow } from "pages/screen-size.slint";
+export { ScreenSizeRow }
 import { StreamPage } from "pages/stream.slint";
 import { GeometryPage } from "pages/geometry.slint";
 import { DiagnosticsPage } from "pages/diagnostics.slint";
+import { RenderingPage } from "pages/rendering.slint";
 import { RemoveGroupDialog } from "remove-group-dialog.slint";
 import { LaunchIntro } from "launch-intro.slint";
 import { MdTokens } from "theme.slint";
@@ -13,6 +15,7 @@ export enum QuickAccessPage {
     stream,
     geometry,
     diagnostics,
+    rendering,
 }
 
 export component QuickAccess inherits Window {
@@ -49,21 +52,16 @@ export component QuickAccess inherits Window {
     in property <string> state-detail: "Choose a target screen to begin";
     in property <bool> running: false;
     in property <bool> busy: false;
+    in-out property <bool> high-performance-sampling: false;
+    in-out property <bool> full-frame-copy: false;
+    in-out property <bool> static-refresh: false;
     in property <bool> restart-available: false;
     in property <string> error-text: "";
     in property <int> mapping-fps: 0;
     in property <bool> mapping-fps-valid: false;
     in property <bool> mapping-fps-error: false;
     in property <bool> mapping-fps-nan: false;
-    in property <string> screen-size-target: "";
-    in property <string> screen-size-native-mode: "";
-    in property <string> screen-size-detected-mm: "Not reported";
-    in property <string> screen-size-detected-inches: "";
-    in-out property <string> screen-size-manual-inches: "";
-    in-out property <int> screen-size-aspect-ratio: 0;
-    in property <string> screen-size-effective-mm: "";
-    in property <string> screen-size-effective-inches: "";
-    in property <string> screen-size-source: "";
+    in-out property <[ScreenSizeRow]> screen-size-rows;
     in property <string> screen-size-error: "";
     in property <bool> screen-size-valid: true;
     in property <bool> screen-size-save-blocked: false;
@@ -109,6 +107,7 @@ export component QuickAccess inherits Window {
     in property <[string]> profile-names;
     in property <string> active-profile-name: "default";
     in property <bool> profile-saving: false;
+    in property <bool> auto-map-on-login: false;
     in property <int> max-profile-count: 3;
 
     callback start();
@@ -118,6 +117,7 @@ export component QuickAccess inherits Window {
     callback reference-selected();
     callback strategy-selected();
     callback calculate-geometry();
+    callback rendering-edited();
     callback open-manual-geometry();
     callback dismiss();
     callback close-geometry();
@@ -139,10 +139,11 @@ export component QuickAccess inherits Window {
     callback disable-launch-intro();
     callback open-project-home();
     callback open-profile-directory();
+    callback set-auto-map-on-login(bool);
     callback open-screen-size();
     callback close-screen-size();
-    callback screen-size-edited();
-    callback reset-screen-size();
+    callback screen-size-edited(int, string, int);
+    callback reset-screen-size(int);
     callback reread-screen-size();
     callback save-screen-size();
     callback create-profile(string);
@@ -193,6 +194,7 @@ export component QuickAccess inherits Window {
         profile-names: root.profile-names;
         active-profile-name: root.active-profile-name;
         profile-saving: root.profile-saving;
+        auto-map-on-login: root.auto-map-on-login;
         max-profile-count: root.max-profile-count;
 
         start => { root.start(); }
@@ -202,6 +204,7 @@ export component QuickAccess inherits Window {
         reference-selected => { root.reference-selected(); }
         strategy-selected => { root.strategy-selected(); }
         calculate-geometry => { root.calculate-geometry(); }
+        open-rendering => { root.page = QuickAccessPage.rendering; }
         open-manual-geometry => { root.open-manual-geometry(); }
         dismiss => { root.dismiss(); }
         open-diagnostics => { root.open-diagnostics(); }
@@ -212,6 +215,7 @@ export component QuickAccess inherits Window {
         open-sunshine-panel => { root.open-sunshine-panel(); }
         open-display-settings => { root.open-display-settings(); }
         open-profile-directory => { root.open-profile-directory(); }
+        set-auto-map-on-login(enabled) => { root.set-auto-map-on-login(enabled); }
         open-screen-size => { root.open-screen-size(); }
         create-profile(name) => { root.create-profile(name); }
         rename-profile(old-name, new-name) => { root.rename-profile(old-name, new-name); }
@@ -219,25 +223,29 @@ export component QuickAccess inherits Window {
         activate-profile(name) => { root.activate-profile(name); }
     }
 
+    if root.page == QuickAccessPage.rendering : RenderingPage {
+        width: parent.width;
+        height: parent.height;
+        group-number: root.active-group-index + 1;
+        controls-enabled: !root.running && !root.busy;
+        high-performance-sampling <=> root.high-performance-sampling;
+        full-frame-copy <=> root.full-frame-copy;
+        static-refresh <=> root.static-refresh;
+        edited => { root.rendering-edited(); }
+        close => { root.page = QuickAccessPage.main; }
+    }
+
     if root.page == QuickAccessPage.screen-size : ScreenSizePage {
         width: parent.width;
         height: parent.height;
-        screen-size-target: root.screen-size-target;
-        screen-size-native-mode: root.screen-size-native-mode;
-        screen-size-detected-mm: root.screen-size-detected-mm;
-        screen-size-detected-inches: root.screen-size-detected-inches;
-        screen-size-manual-inches <=> root.screen-size-manual-inches;
-        screen-size-aspect-ratio <=> root.screen-size-aspect-ratio;
-        screen-size-effective-mm: root.screen-size-effective-mm;
-        screen-size-effective-inches: root.screen-size-effective-inches;
-        screen-size-source: root.screen-size-source;
+        screen-size-rows <=> root.screen-size-rows;
         screen-size-error: root.screen-size-error;
         screen-size-valid: root.screen-size-valid;
-        screen-size-save-blocked: root.screen-size-save-blocked;
+        screen-size-save-blocked: root.screen-size-save-blocked || root.running || root.busy;
 
         close-screen-size => { root.close-screen-size(); }
-        screen-size-edited => { root.screen-size-edited(); }
-        reset-screen-size => { root.reset-screen-size(); }
+        screen-size-edited(index, inches, ratio) => { root.screen-size-edited(index, inches, ratio); }
+        reset-screen-size(index) => { root.reset-screen-size(index); }
         reread-screen-size => { root.reread-screen-size(); }
         save-screen-size => { root.save-screen-size(); }
     }

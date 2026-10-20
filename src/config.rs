@@ -19,7 +19,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::{PCWSTR, w};
 
-use crate::geometry::{AspectRatio, Rotation, SizingRequest};
+use crate::geometry::{AspectRatio, Rotation, SizingRequest, SizingStrategy};
 use crate::limits::{
     MAX_OUTPUTS, MAX_REFRESH_MILLIHZ, MAX_VIRTUAL_DIMENSION, MILLIMETERS_PER_INCH,
     MIN_REFRESH_MILLIHZ, valid_physical_millimeters, valid_refresh_millihz,
@@ -58,10 +58,44 @@ pub struct AppConfig {
 pub struct GroupConfig {
     pub id: u32,
     pub route: GroupRouteConfig,
+    #[serde(default, skip_serializing_if = "RenderingOptions::is_default")]
+    pub rendering: RenderingOptions,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_source: Option<ReferenceSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sizing: Option<SizingRequest>,
+    // Read drafts saved by the short-lived simplified UI. Complete groups are
+    // saved in the original `sizing` format again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_reference: Option<ManualReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizing_strategy: Option<SizingStrategy>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RenderingOptions {
+    pub high_performance_sampling: bool,
+    pub full_frame_copy: bool,
+    pub static_refresh: bool,
+}
+
+impl RenderingOptions {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManualReference {
+    pub width: u32,
+    pub height: u32,
+    pub diagonal_inches: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<AspectRatio>,
+    #[serde(default)]
+    pub rotation: Rotation,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -77,7 +111,7 @@ pub enum GroupRouteConfig {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
+#[serde(from = "StoredStreamScreenConfig")]
 pub struct StreamScreenConfig {
     pub width: u32,
     pub height: u32,
@@ -87,6 +121,36 @@ pub struct StreamScreenConfig {
     pub aspect_ratio: AspectRatio,
     #[serde(default)]
     pub rotation: Rotation,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredStreamScreenConfig {
+    width: u32,
+    height: u32,
+    #[serde(default)]
+    diagonal_inches: Option<f64>,
+    refresh_millihz: u32,
+    #[serde(default)]
+    aspect_ratio: Option<AspectRatio>,
+    #[serde(default)]
+    rotation: Rotation,
+}
+
+impl From<StoredStreamScreenConfig> for StreamScreenConfig {
+    fn from(stored: StoredStreamScreenConfig) -> Self {
+        Self {
+            width: stored.width,
+            height: stored.height,
+            diagonal_inches: stored.diagonal_inches,
+            refresh_millihz: stored.refresh_millihz,
+            aspect_ratio: stored.aspect_ratio.unwrap_or(AspectRatio {
+                width: stored.width,
+                height: stored.height,
+            }),
+            rotation: stored.rotation,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +174,8 @@ pub struct ConfigProfiles {
     pub active_profile: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub launch_intro_disabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_map_on_login: bool,
     pub profiles: Vec<ConfigProfile>,
 }
 
@@ -226,8 +292,11 @@ impl Default for GroupConfig {
         Self {
             id: 0,
             route: GroupRouteConfig::Mirror { target_id: None },
+            rendering: RenderingOptions::default(),
             reference_source: None,
             sizing: None,
+            manual_reference: None,
+            sizing_strategy: None,
         }
     }
 }
@@ -341,6 +410,15 @@ impl GroupConfig {
                 ))
             })?;
         }
+        if let Some(reference) = self.manual_reference
+            && (reference.width == 0
+                || reference.height == 0
+                || reference.width > MAX_VIRTUAL_DIMENSION
+                || reference.height > MAX_VIRTUAL_DIMENSION
+                || !valid_physical_millimeters(reference.diagonal_inches * MILLIMETERS_PER_INCH))
+        {
+            return Err(ConfigError("invalid manual reference measurements".into()));
+        }
         Ok(())
     }
 }
@@ -421,6 +499,9 @@ impl From<LegacyAppConfig> for AppConfig {
                 },
                 reference_source: legacy.reference_source,
                 sizing: legacy.sizing,
+                manual_reference: None,
+                sizing_strategy: None,
+                rendering: RenderingOptions::default(),
             }],
             selected_group_id: Some(0),
         }
@@ -837,6 +918,13 @@ impl ConfigProfileStore {
         self.save_locked(&profiles)
     }
 
+    pub fn set_auto_map_on_login(&self, enabled: bool) -> Result<(), ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let mut profiles = self.load_or_initialize_locked()?;
+        profiles.auto_map_on_login = enabled;
+        self.save_locked(&profiles)
+    }
+
     pub fn load_profile(&self, id: &str) -> Result<ProfileSnapshot, ConfigError> {
         validate_profile_id(id)?;
         let _guard = CrossProcessConfigGuard::acquire()?;
@@ -1133,6 +1221,7 @@ impl ConfigProfileStore {
                 version: CONFIG_PROFILES_VERSION,
                 active_profile: "default".into(),
                 launch_intro_disabled: false,
+                auto_map_on_login: false,
                 profiles: vec![ConfigProfile {
                     id: "default".into(),
                     revision: 1,
@@ -1189,6 +1278,7 @@ impl ConfigProfileStore {
                     version: CONFIG_PROFILES_VERSION,
                     active_profile: "default".into(),
                     launch_intro_disabled: false,
+                    auto_map_on_login: false,
                     profiles: vec![ConfigProfile {
                         id: "default".into(),
                         revision: 1,
@@ -1500,6 +1590,45 @@ mod tests {
     use super::*;
     use crate::geometry::{DisplayGeometry, PhysicalMeasurement, PixelSize, SizingStrategy};
 
+    #[test]
+    fn simplified_drafts_load_without_discarding_reference_or_stream_measurements() {
+        let raw = r#"{
+            "version": 2,
+            "groups": [{
+                "id": 3,
+                "route": {"kind": "stream_only", "screen": {
+                    "width": 2880, "height": 1800, "diagonal_inches": 15.3,
+                    "refresh_millihz": 120000, "rotation": "deg270"
+                }},
+                "reference_source": "manual",
+                "manual_reference": {"width": 2560, "height": 1440, "diagonal_inches": 27.0},
+                "sizing_strategy": "integer_scale"
+            }],
+            "selected_group_id": 3
+        }"#;
+        let config: AppConfig = serde_json::from_str(raw).unwrap();
+        config.validate().unwrap();
+        let group = &config.groups[0];
+        assert_eq!(group.manual_reference.unwrap().diagonal_inches, 27.0);
+        assert_eq!(group.sizing_strategy, Some(SizingStrategy::IntegerScale));
+        let GroupRouteConfig::StreamOnly { screen } = group.route else {
+            panic!("stream draft changed route");
+        };
+        assert_eq!(
+            screen.aspect_ratio,
+            AspectRatio {
+                width: 2880,
+                height: 1800
+            }
+        );
+        assert_eq!(screen.rotation, Rotation::Deg270);
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AppConfig>(&serialized).unwrap(),
+            config
+        );
+    }
+
     fn test_store(name: &str) -> ConfigStore {
         let path = env::temp_dir().join(format!(
             "sbms-config-test-{}-{}-{}.json",
@@ -1591,6 +1720,44 @@ mod tests {
     }
 
     #[test]
+    fn rendering_options_default_off_for_existing_configs() {
+        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
+        assert!(json["groups"][0].get("rendering").is_none());
+        let restored: AppConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(restored.groups[0].rendering, RenderingOptions::default());
+
+        json["groups"][0]["rendering"] = serde_json::json!({"full_frame_copy": true});
+        let restored: AppConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            restored.groups[0].rendering,
+            RenderingOptions {
+                full_frame_copy: true,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn rendering_options_persist_independently_per_group() {
+        let store = test_store("rendering-options");
+        let mut config = AppConfig::default();
+        config.groups[0].rendering = RenderingOptions {
+            high_performance_sampling: true,
+            full_frame_copy: true,
+            static_refresh: true,
+        };
+        config.groups.push(GroupConfig {
+            id: 1,
+            ..Default::default()
+        });
+        store.save(&config).unwrap();
+        let outcome = store.load().unwrap();
+        assert_eq!(outcome.warning, None);
+        assert_eq!(outcome.config, config);
+        store.reset().unwrap();
+    }
+
+    #[test]
     fn round_trip_replaces_existing_file() {
         let store = test_store("round-trip");
         let mut config = AppConfig {
@@ -1603,6 +1770,7 @@ mod tests {
                     },
                     reference_source: Some(ReferenceSource::Display("reference-display-id".into())),
                     sizing: Some(test_sizing()),
+                    ..GroupConfig::default()
                 },
                 GroupConfig {
                     id: 3,
@@ -1621,6 +1789,7 @@ mod tests {
                     },
                     reference_source: Some(ReferenceSource::Manual),
                     sizing: Some(test_sizing()),
+                    ..GroupConfig::default()
                 },
             ],
             selected_group_id: Some(3),
@@ -2186,6 +2355,7 @@ mod tests {
                     },
                     reference_source: None,
                     sizing: None,
+                    ..GroupConfig::default()
                 },
             ],
             selected_group_id: Some(3),
@@ -2283,6 +2453,43 @@ mod tests {
 
         profiles.set_launch_intro_disabled(false).unwrap();
         assert!(!profiles.list().unwrap().launch_intro_disabled);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_map_on_login_defaults_off_for_existing_profile_stores() {
+        let (root, profiles) = test_profile_store("auto-map-compatibility");
+        profiles.load_active().unwrap();
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(profiles.path()).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("auto_map_on_login");
+        fs::write(profiles.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        assert!(!profiles.list().unwrap().auto_map_on_login);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn auto_map_on_login_is_persistent_and_survives_profile_switches() {
+        let (root, profiles) = test_profile_store("auto-map-preference");
+        let original = profiles.load_active().unwrap();
+        assert!(!profiles.list().unwrap().auto_map_on_login);
+        profiles.set_auto_map_on_login(true).unwrap();
+        assert_eq!(profiles.load_active().unwrap(), original);
+
+        profiles
+            .save_profile("gaming", &config_with_target("gaming"), false, false)
+            .unwrap();
+        profiles.activate("gaming").unwrap();
+        let reopened =
+            ConfigProfileStore::new(root.join(CONFIG_PROFILES_FILE), root.join(CONFIG_FILE));
+        assert!(reopened.list().unwrap().auto_map_on_login);
+        reopened.activate("default").unwrap();
+        assert!(reopened.list().unwrap().auto_map_on_login);
+        assert_eq!(reopened.load_active().unwrap(), original);
+
+        reopened.set_auto_map_on_login(false).unwrap();
+        assert!(!profiles.list().unwrap().auto_map_on_login);
         fs::remove_dir_all(root).unwrap();
     }
 
