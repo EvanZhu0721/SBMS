@@ -12,20 +12,27 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromWindow,
 };
 use windows::Win32::System::Threading::GetCurrentProcessId;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetDesktopWindow, GetShellWindow, GetWindowLongPtrW,
-    GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-    IsWindowVisible, IsZoomed, SHOW_WINDOW_CMD, SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
-    SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowPlacement, SetWindowPos, ShowWindowAsync,
-    WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_PER_MONITOR_AWARE,
+    GetAwarenessFromDpiAwarenessContext, GetDpiForWindow, GetWindowDpiAwarenessContext,
+    SetThreadDpiAwarenessContext,
 };
-use windows::core::BOOL;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, EnumWindows, GWL_EXSTYLE, GetClassNameW, GetDesktopWindow,
+    GetShellWindow, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId,
+    IsIconic, IsWindow, IsWindowVisible, IsZoomed, SW_SHOWNOACTIVATE, SWP_ASYNCWINDOWPOS,
+    SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowPlacement, SetWindowPos,
+    WINDOWPLACEMENT, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
+};
+#[cfg(test)]
+use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_RESTORE, ShowWindowAsync};
+use windows::core::{BOOL, w};
 
 use crate::display::Display;
 
 const MOVE_TIMEOUT: Duration = Duration::from_millis(1500);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
 static NEXT_MIGRATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -301,40 +308,9 @@ impl WindowMigration {
                 entry.moved = false;
                 continue;
             }
-            if entry.maximized {
-                if let Err(error) = restore_maximized(entry, target_rect) {
-                    errors.push(error);
-                } else {
-                    entry.moved = false;
-                }
-                continue;
-            }
-            let width = entry.outer_rect.right - entry.outer_rect.left;
-            let height = entry.outer_rect.bottom - entry.outer_rect.top;
-            let mut exact = false;
-            for _ in 0..3 {
-                if let Err(error) = set_window_rect(
-                    entry,
-                    entry.outer_rect.left,
-                    entry.outer_rect.top,
-                    width,
-                    height,
-                ) {
-                    errors.push(describe(
-                        entry,
-                        &format!("SetWindowPos restore failed: {error}"),
-                    ));
-                    break;
-                }
-                if wait_for_outer_rect(entry, entry.outer_rect) {
-                    exact = true;
-                    break;
-                }
-            }
-            if exact && wait_for_monitor(entry, target_rect) {
-                entry.moved = false;
-            } else {
-                errors.push(describe(entry, "window placement was not restored"));
+            match restore_entry(entry, target_rect) {
+                Ok(()) => entry.moved = false,
+                Err(error) => errors.push(error),
             }
         }
 
@@ -420,125 +396,10 @@ impl WindowMigration {
                 entry.moved = false;
                 continue;
             }
-            if entry.maximized {
-                if let Err(error) = restore_maximized(entry, target_rect) {
-                    errors.push(error);
-                } else {
-                    entry.moved = false;
-                }
-                continue;
+            match restore_entry(entry, target_rect) {
+                Ok(()) => entry.moved = false,
+                Err(error) => errors.push(error),
             }
-            if let Err(error) = unsafe { SetWindowPlacement(entry.hwnd, &entry.placement) } {
-                errors.push(describe(
-                    entry,
-                    &format!("final SetWindowPlacement failed: {error}"),
-                ));
-                continue;
-            }
-            unsafe {
-                let _ =
-                    ShowWindowAsync(entry.hwnd, SHOW_WINDOW_CMD(entry.placement.showCmd as i32));
-            }
-
-            let state_restored =
-                wait_for_window_state(entry, false) && wait_for_zoomed_state(entry, false);
-            if !state_restored {
-                errors.push(describe(entry, "final window state was not restored"));
-                continue;
-            }
-
-            let width = entry.outer_rect.right - entry.outer_rect.left;
-            let height = entry.outer_rect.bottom - entry.outer_rect.top;
-            let mut exact = false;
-            for _ in 0..3 {
-                if let Err(error) = set_window_rect(
-                    entry,
-                    entry.outer_rect.left,
-                    entry.outer_rect.top,
-                    width,
-                    height,
-                ) {
-                    errors.push(describe(
-                        entry,
-                        &format!("final SetWindowPos failed: {error}"),
-                    ));
-                    break;
-                }
-                if wait_for_outer_rect(entry, entry.outer_rect) {
-                    exact = true;
-                    break;
-                }
-            }
-            if !exact {
-                errors.push(describe(entry, "final outer rectangle was not restored"));
-                continue;
-            }
-
-            if !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
-                || !wait_for_monitor(entry, target_rect)
-            {
-                // Some app frameworks retain their virtual-display rectangle
-                // after the physical topology returns even though placement APIs
-                // report success. Reapply the saved restored rectangle first,
-                // then restore the original show state.
-                unsafe {
-                    let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
-                }
-                if !wait_for_zoomed_state(entry, false) {
-                    errors.push(describe(
-                        entry,
-                        "final window could not be restored for retry",
-                    ));
-                    continue;
-                }
-                if let Err(error) = set_window_rect(
-                    entry,
-                    entry.outer_rect.left,
-                    entry.outer_rect.top,
-                    entry.outer_rect.right - entry.outer_rect.left,
-                    entry.outer_rect.bottom - entry.outer_rect.top,
-                ) {
-                    errors.push(describe(
-                        entry,
-                        &format!("final fallback move failed: {error}"),
-                    ));
-                    continue;
-                }
-                if let Err(error) = align_normal_rect(entry, entry.placement.rcNormalPosition) {
-                    errors.push(error);
-                    continue;
-                }
-                if !wait_for_monitor(entry, target_rect) {
-                    errors.push(describe(
-                        entry,
-                        "final fallback move missed the target monitor",
-                    ));
-                    continue;
-                }
-                if let Err(error) = unsafe { SetWindowPlacement(entry.hwnd, &entry.placement) } {
-                    errors.push(describe(
-                        entry,
-                        &format!("final fallback placement failed: {error}"),
-                    ));
-                    continue;
-                }
-                unsafe {
-                    let _ = ShowWindowAsync(
-                        entry.hwnd,
-                        SHOW_WINDOW_CMD(entry.placement.showCmd as i32),
-                    );
-                }
-                let state_restored =
-                    wait_for_window_state(entry, false) && wait_for_zoomed_state(entry, false);
-                if !state_restored
-                    || !wait_for_normal_rect(entry, entry.placement.rcNormalPosition)
-                    || !wait_for_monitor(entry, target_rect)
-                {
-                    errors.push(describe(entry, "final window placement was not restored"));
-                    continue;
-                }
-            }
-            entry.moved = false;
         }
 
         for entry in entries.iter() {
@@ -1093,124 +954,42 @@ fn move_entry(
         return Ok(());
     }
     entry.moved = true;
-    if entry.maximized {
-        unsafe {
-            let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
-        }
-        if !wait_for_zoomed_state(entry, false) {
-            return Err(describe(
-                entry,
-                "window did not leave its maximized state for migration",
-            ));
-        }
-        // A maximized window may keep its restore rectangle on another
-        // monitor. SW_RESTORE legitimately moves it there; only the final
-        // migrated monitor must match the destination.
-        let current = current_rect(entry)?;
-        let mut virtual_placement = window_placement(entry)?;
-        virtual_placement.rcNormalPosition = translated_rect(
-            entry,
-            virtual_placement.rcNormalPosition,
-            target_rect,
-            source_rect,
-        )?;
-        virtual_placement.showCmd = SW_RESTORE.0 as u32;
-        unsafe { SetWindowPlacement(entry.hwnd, &virtual_placement) }
-            .map_err(|error| describe(entry, &format!("restored window move failed: {error}")))?;
-        unsafe {
-            let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
-        }
-        if !wait_for_monitor(entry, source_rect) {
-            // Chromium windows can report success from SetWindowPlacement while
-            // leaving both their outer and normal rectangles unchanged. Force the
-            // restored window across with the same SetWindowPos/alignment sequence
-            // used by the return path before treating the migration as failed.
-            let moved_outer = translated_rect(entry, current, target_rect, source_rect)?;
-            set_window_rect(
-                entry,
-                moved_outer.left,
-                moved_outer.top,
-                moved_outer.right - moved_outer.left,
-                moved_outer.bottom - moved_outer.top,
-            )
-            .map_err(|error| {
-                describe(
-                    entry,
-                    &format!("restored window fallback move failed: {error}"),
-                )
-            })?;
-            align_normal_rect(entry, virtual_placement.rcNormalPosition)?;
-            if !wait_for_monitor(entry, source_rect) {
-                let actual = current_rect(entry).unwrap_or_default();
-                let normal = window_placement(entry)
-                    .map(|placement| placement.rcNormalPosition)
-                    .unwrap_or_default();
-                return Err(describe(
-                    entry,
-                    &format!(
-                        "restored window did not move to the virtual display \
-                         (outer={},{},{},{}, normal={},{},{},{})",
-                        actual.left,
-                        actual.top,
-                        actual.right,
-                        actual.bottom,
-                        normal.left,
-                        normal.top,
-                        normal.right,
-                        normal.bottom,
-                    ),
-                ));
-            }
-        }
-        virtual_placement.flags = entry.placement.flags;
-        virtual_placement.showCmd = entry.placement.showCmd;
-        unsafe { SetWindowPlacement(entry.hwnd, &virtual_placement) }
-            .map_err(|error| describe(entry, &format!("window state move failed: {error}")))?;
-        unsafe {
-            let _ = ShowWindowAsync(entry.hwnd, SHOW_WINDOW_CMD(entry.placement.showCmd as i32));
-        }
-        let state_restored = wait_for_zoomed_state(entry, true);
-        if !state_restored || !wait_for_monitor(entry, source_rect) {
-            return Err(describe(
-                entry,
-                "window did not restore its state on the virtual display",
-            ));
-        }
+    let Some(current) = ensure_normal(entry)? else {
         return Ok(());
+    };
+    let outer = if entry.maximized {
+        current.outer
+    } else {
+        entry.outer_rect
+    };
+    let requested = translated_rect(entry, outer, target_rect, source_rect)?;
+    let Some(accepted) = move_normal(entry, requested, source_rect)? else {
+        return Ok(());
+    };
+    if entry.maximized {
+        // Preserve the size accepted at the destination DPI, including the
+        // application's minimum size. Only Stop restores the saved geometry.
+        let mut placement = accepted.placement;
+        placement.flags = entry.placement.flags;
+        placement.showCmd = entry.placement.showCmd;
+        let goal = WindowGoal::on_monitor(entry, source_rect, WindowState::Maximized)?;
+        apply_placement(entry, &placement, goal, "maximize after migration")?;
     }
+    Ok(())
+}
 
-    let width = entry.outer_rect.right - entry.outer_rect.left;
-    let height = entry.outer_rect.bottom - entry.outer_rect.top;
-    let moved_width = width.min(source_rect.right - source_rect.left).max(1);
-    let moved_height = height.min(source_rect.bottom - source_rect.top).max(1);
-    let destination = translated_position(
+#[cfg(test)]
+fn move_restored_to_monitor(
+    entry: &WindowSnapshot,
+    current: RECT,
+    target_rect: RECT,
+    source_rect: RECT,
+) -> Result<(), String> {
+    move_normal(
         entry,
-        entry.outer_rect.left,
-        entry.outer_rect.top,
-        moved_width,
-        moved_height,
-        target_rect,
+        translated_rect(entry, current, target_rect, source_rect)?,
         source_rect,
     )?;
-    unsafe {
-        SetWindowPos(
-            entry.hwnd,
-            None,
-            destination.x,
-            destination.y,
-            moved_width,
-            moved_height,
-            SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
-        )
-    }
-    .map_err(|error| describe(entry, &format!("window move failed: {error}")))?;
-
-    if !wait_for_monitor(entry, source_rect) {
-        return Err(describe(
-            entry,
-            "window did not move to the virtual display",
-        ));
-    }
     Ok(())
 }
 
@@ -1274,32 +1053,38 @@ fn translated_rect(
     })
 }
 
-fn restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), String> {
-    // The preliminary restore may already have succeeded and survived the
-    // topology change. Do not unmaximize and move an already restored window.
-    let target_monitor = monitor_for_rect(target_rect, "restore target")?;
-    if window_placement(entry).is_ok_and(|placement| {
-        maximized_state_matches(
-            unsafe { IsZoomed(entry.hwnd) }.as_bool(),
-            unsafe { IsIconic(entry.hwnd) }.as_bool(),
-            unsafe { MonitorFromWindow(entry.hwnd, MONITOR_DEFAULTTONULL) } == target_monitor,
-            placement.rcNormalPosition,
-            entry.placement.rcNormalPosition,
-        )
-    }) {
-        log_window_state("restore-already-matched", entry, Some(target_rect));
+fn restore_entry(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), String> {
+    if entry.maximized {
+        return restore_maximized(entry, target_rect);
+    }
+    let mut goal = WindowGoal::on_monitor(entry, target_rect, WindowState::Normal)?;
+    goal.outer = Some(entry.outer_rect);
+    goal.normal = Some(entry.placement.rcNormalPosition);
+    if observation_matches(entry, &goal)? {
+        wait_for_goal(entry, goal, "verify restored window")?;
         return Ok(());
     }
-    log_window_state("restore-move-required", entry, Some(target_rect));
-    unsafe {
-        let _ = ShowWindowAsync(entry.hwnd, SW_RESTORE);
+    if ensure_normal(entry)?.is_none() {
+        return Ok(());
     }
-    if !wait_for_zoomed_state(entry, false) {
-        return Err(describe_restore_state(
-            entry,
-            "maximized window could not be restored for migration",
-            target_rect,
-        ));
+    if move_normal(entry, entry.outer_rect, target_rect)?.is_none() {
+        return Ok(());
+    }
+    // First let the destination DPI settle. Then restore placement metadata
+    // and commit the saved physical rectangle once, at that settled DPI.
+    let mut placement = entry.placement;
+    placement.flags.0 &= !windows::Win32::UI::WindowsAndMessaging::WPF_RESTORETOMAXIMIZED.0;
+    placement.showCmd = SW_SHOWNOACTIVATE.0 as u32;
+    let placement_goal = WindowGoal::on_monitor(entry, target_rect, WindowState::Normal)?;
+    if apply_placement(
+        entry,
+        &placement,
+        placement_goal,
+        "restore ordinary placement",
+    )?
+    .is_none()
+    {
+        return Ok(());
     }
     set_window_rect(
         entry,
@@ -1308,76 +1093,47 @@ fn restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), St
         entry.outer_rect.right - entry.outer_rect.left,
         entry.outer_rect.bottom - entry.outer_rect.top,
     )
-    .map_err(|error| {
-        describe_restore_state(
-            entry,
-            &format!("maximized window return move failed: {error}"),
-            target_rect,
-        )
-    })?;
-    if !wait_for_monitor(entry, target_rect) {
-        return Err(describe_restore_state(
-            entry,
-            "maximized window did not return to its original monitor",
-            target_rect,
-        ));
-    } // Maximize on the original monitor before restoring rcNormalPosition:
-    // the saved normal rectangle is allowed to belong to a different monitor.
-    unsafe {
-        let _ = ShowWindowAsync(entry.hwnd, SHOW_WINDOW_CMD(entry.placement.showCmd as i32));
-    }
-    if !wait_for_zoomed_state(entry, true) {
-        return Err(describe_restore_state(
-            entry,
-            "window did not maximize after its return move",
-            target_rect,
-        ));
-    }
-    if !wait_for_monitor(entry, target_rect) {
-        return Err(describe_restore_state(
-            entry,
-            "maximized window left its original monitor",
-            target_rect,
-        ));
-    }
-    unsafe { SetWindowPlacement(entry.hwnd, &entry.placement) }.map_err(|error| {
-        describe(
-            entry,
-            &format!("maximized placement restore failed: {error}"),
-        )
-    })?;
-    if !wait_for_zoomed_state(entry, true) {
-        return Err(describe_restore_state(
-            entry,
-            "saved placement did not preserve maximization",
-            target_rect,
-        ));
-    }
-    if !wait_for_normal_rect(entry, entry.placement.rcNormalPosition) {
-        return Err(describe_restore_state(
-            entry,
-            "saved normal rectangle was not restored",
-            target_rect,
-        ));
-    }
-    if !wait_for_monitor(entry, target_rect) {
-        return Err(describe_restore_state(
-            entry,
-            "saved placement moved the maximized window off its original monitor",
-            target_rect,
-        ));
-    }
+    .map_err(|error| describe(entry, &format!("restore exact rectangle: {error}")))?;
+    wait_for_goal(entry, goal, "verify restored window")?;
     Ok(())
 }
 
-fn maximized_state_matches(
-    zoomed: bool,
-    iconic: bool,
-    on_target: bool,
-    actual_normal: RECT,
-    saved_normal: RECT,
-) -> bool {
-    zoomed && !iconic && on_target && actual_normal == saved_normal
+fn restore_maximized(entry: &WindowSnapshot, target_rect: RECT) -> Result<(), String> {
+    let mut final_goal = WindowGoal::on_monitor(entry, target_rect, WindowState::Maximized)?;
+    final_goal.normal = Some(entry.placement.rcNormalPosition);
+    if observation_matches(entry, &final_goal)? {
+        wait_for_goal(entry, final_goal, "verify restored maximized window")?;
+        return Ok(());
+    }
+    if ensure_normal(entry)?.is_none() {
+        return Ok(());
+    }
+    let Some(accepted) = move_normal(entry, entry.outer_rect, target_rect)? else {
+        return Ok(());
+    };
+    // Maximize on the original monitor before restoring rcNormalPosition:
+    // the saved normal rectangle may belong to a different monitor.
+    let mut placement = accepted.placement;
+    placement.flags = entry.placement.flags;
+    placement.showCmd = entry.placement.showCmd;
+    let maximize_goal = WindowGoal::on_monitor(entry, target_rect, WindowState::Maximized)?;
+    if apply_placement(
+        entry,
+        &placement,
+        maximize_goal,
+        "maximize on original monitor",
+    )?
+    .is_none()
+    {
+        return Ok(());
+    }
+    apply_placement(
+        entry,
+        &entry.placement,
+        final_goal,
+        "restore maximized placement",
+    )?;
+    Ok(())
 }
 
 fn log_window_state(stage: &str, entry: &WindowSnapshot, target_rect: Option<RECT>) {
@@ -1407,6 +1163,7 @@ fn log_window_state(stage: &str, entry: &WindowSnapshot, target_rect: Option<REC
     );
 }
 
+#[cfg(test)]
 fn describe_restore_state(entry: &WindowSnapshot, message: &str, target_rect: RECT) -> String {
     describe(
         entry,
@@ -1420,26 +1177,272 @@ fn describe_restore_state(entry: &WindowSnapshot, message: &str, target_rect: RE
     )
 }
 
-fn wait_for_normal_rect(entry: &WindowSnapshot, expected: RECT) -> bool {
-    let deadline = Instant::now() + MOVE_TIMEOUT;
-    loop {
-        if !same_window(entry) {
-            return true;
-        }
-        let mut placement = WINDOWPLACEMENT {
-            length: size_of::<WINDOWPLACEMENT>() as u32,
-            ..Default::default()
+#[derive(Clone, Copy, Debug)]
+struct WindowObservation {
+    outer: RECT,
+    placement: WINDOWPLACEMENT,
+    monitor: HMONITOR,
+    dpi: u32,
+    iconic: bool,
+    zoomed: bool,
+}
+
+impl WindowObservation {
+    fn geometry_matches(&self, other: &Self) -> bool {
+        self.outer == other.outer
+            && self.placement.rcNormalPosition == other.placement.rcNormalPosition
+            && self.placement.showCmd == other.placement.showCmd
+            && self.placement.flags == other.placement.flags
+            && self.monitor == other.monitor
+            && self.dpi == other.dpi
+            && self.iconic == other.iconic
+            && self.zoomed == other.zoomed
+    }
+
+    fn valid_outer(&self) -> bool {
+        self.outer.right > self.outer.left
+            && self.outer.bottom > self.outer.top
+            && !self.monitor.0.is_null()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum WindowState {
+    #[default]
+    Any,
+    Normal,
+    Maximized,
+    #[cfg(test)]
+    Minimized,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WindowGoal {
+    state: WindowState,
+    monitor: Option<RECT>,
+    dpi: Option<u32>,
+    outer: Option<RECT>,
+    normal: Option<RECT>,
+}
+
+impl WindowGoal {
+    fn on_monitor(entry: &WindowSnapshot, rect: RECT, state: WindowState) -> Result<Self, String> {
+        Ok(Self {
+            state,
+            monitor: Some(rect),
+            dpi: Some(destination_dpi(entry, rect)?),
+            ..Self::default()
+        })
+    }
+
+    fn matches(&self, actual: &WindowObservation, target: Option<HMONITOR>) -> bool {
+        let state_matches = match self.state {
+            WindowState::Any => true,
+            WindowState::Normal => !actual.iconic && !actual.zoomed && actual.valid_outer(),
+            WindowState::Maximized => !actual.iconic && actual.zoomed && actual.valid_outer(),
+            #[cfg(test)]
+            WindowState::Minimized => actual.iconic,
         };
-        if unsafe { GetWindowPlacement(entry.hwnd, &mut placement) }.is_ok()
-            && placement.rcNormalPosition == expected
+        state_matches
+            && target.is_none_or(|monitor| !monitor.0.is_null() && actual.monitor == monitor)
+            && self.dpi.is_none_or(|dpi| actual.dpi == dpi)
+            && self.outer.is_none_or(|rect| actual.outer == rect)
+            && self
+                .normal
+                .is_none_or(|rect| actual.placement.rcNormalPosition == rect)
+    }
+
+    fn current_monitor(&self) -> Option<HMONITOR> {
+        self.monitor
+            .map(|rect| unsafe { MonitorFromRect(&rect, MONITOR_DEFAULTTONULL) })
+    }
+}
+
+fn observe_window(entry: &WindowSnapshot) -> Result<Option<WindowObservation>, String> {
+    if !same_window(entry) {
+        return Ok(None);
+    }
+    let observation = (|| {
+        Ok(WindowObservation {
+            outer: current_rect(entry)?,
+            placement: window_placement(entry)?,
+            monitor: unsafe { MonitorFromWindow(entry.hwnd, MONITOR_DEFAULTTONULL) },
+            dpi: unsafe { GetDpiForWindow(entry.hwnd) },
+            iconic: unsafe { IsIconic(entry.hwnd) }.as_bool(),
+            zoomed: unsafe { IsZoomed(entry.hwnd) }.as_bool(),
+        })
+    })();
+    // Closing a window during an operation is not a migration failure, and a
+    // recycled HWND must never receive the next step in the operation.
+    if !same_window(entry) {
+        return Ok(None);
+    }
+    observation.map(Some)
+}
+
+fn observation_matches(entry: &WindowSnapshot, goal: &WindowGoal) -> Result<bool, String> {
+    Ok(observe_window(entry)?.is_none_or(|actual| goal.matches(&actual, goal.current_monitor())))
+}
+
+#[derive(Default)]
+struct WindowSettling {
+    previous: Option<WindowObservation>,
+    since: Option<Instant>,
+}
+
+impl WindowSettling {
+    fn observe(&mut self, actual: WindowObservation, matches: bool, now: Instant) -> bool {
+        if !matches {
+            self.since = None;
+        } else if self
+            .previous
+            .is_none_or(|old| !actual.geometry_matches(&old))
+            || self.since.is_none()
         {
-            return true;
+            self.since = Some(now);
         }
-        if Instant::now() >= deadline {
-            return false;
+        self.previous = Some(actual);
+        matches
+            && self
+                .since
+                .is_some_and(|since| now.duration_since(since) >= SETTLE_INTERVAL)
+    }
+}
+
+fn wait_for_goal(
+    entry: &WindowSnapshot,
+    goal: WindowGoal,
+    stage: &str,
+) -> Result<Option<WindowObservation>, String> {
+    let deadline = Instant::now() + MOVE_TIMEOUT;
+    let mut settling = WindowSettling::default();
+    loop {
+        let Some(actual) = observe_window(entry)? else {
+            return Ok(None);
+        };
+        let now = Instant::now();
+        if settling.observe(actual, goal.matches(&actual, goal.current_monitor()), now) {
+            return Ok(Some(actual));
+        }
+        if now >= deadline {
+            return Err(describe(
+                entry,
+                &format!("{stage} did not settle; expected={goal:?}; actual={actual:?}"),
+            ));
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn destination_dpi(entry: &WindowSnapshot, target: RECT) -> Result<u32, String> {
+    let awareness =
+        unsafe { GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(entry.hwnd)) };
+    if awareness != DPI_AWARENESS_PER_MONITOR_AWARE {
+        // System-aware and unaware windows retain their own DPI across monitors.
+        return Ok(unsafe { GetDpiForWindow(entry.hwnd) });
+    }
+    // GetDpiForMonitor is not supported on a per-monitor-aware calling thread.
+    // A never-shown PMv2 window gives the destination's actual effective DPI
+    // through GetDpiForWindow without relying on registry scale factors.
+    let previous =
+        unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let probe = unsafe {
+        CreateWindowExW(
+            WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+            w!("STATIC"),
+            w!(""),
+            WS_POPUP,
+            target.left + (target.right - target.left) / 2,
+            target.top + (target.bottom - target.top) / 2,
+            1,
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+    };
+    unsafe {
+        SetThreadDpiAwarenessContext(previous);
+    }
+    let probe =
+        probe.map_err(|error| describe(entry, &format!("query destination DPI: {error}")))?;
+    let dpi = unsafe { GetDpiForWindow(probe) };
+    unsafe { DestroyWindow(probe) }
+        .map_err(|error| describe(entry, &format!("release DPI probe: {error}")))?;
+    if dpi == 0 {
+        return Err(describe(entry, "destination DPI is unavailable"));
+    }
+    Ok(dpi)
+}
+
+fn ensure_normal(entry: &WindowSnapshot) -> Result<Option<WindowObservation>, String> {
+    let Some(current) = observe_window(entry)? else {
+        return Ok(None);
+    };
+    let goal = WindowGoal {
+        state: WindowState::Normal,
+        ..WindowGoal::default()
+    };
+    let restored = if !goal.matches(&current, None) {
+        let mut placement = current.placement;
+        placement.flags.0 &= !windows::Win32::UI::WindowsAndMessaging::WPF_RESTORETOMAXIMIZED.0;
+        placement.showCmd = SW_SHOWNOACTIVATE.0 as u32;
+        apply_placement(entry, &placement, goal, "restore movable window state")?
+    } else {
+        wait_for_goal(entry, goal, "verify movable window state")?
+    };
+    let Some(restored) = restored else {
+        return Ok(None);
+    };
+    // Restoring a maximized window may itself cross to the normal rectangle's
+    // monitor. Its geometry must be at that monitor's DPI before translating it.
+    let mut monitor = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    unsafe { GetMonitorInfoW(restored.monitor, &mut monitor) }
+        .ok()
+        .map_err(|error| describe(entry, &format!("query restored monitor: {error}")))?;
+    let restored_goal = WindowGoal::on_monitor(entry, monitor.rcMonitor, WindowState::Normal)?;
+    if restored_goal.matches(&restored, Some(restored.monitor)) {
+        return Ok(Some(restored));
+    }
+    wait_for_goal(entry, restored_goal, "settle restored window DPI")
+}
+
+fn move_normal(
+    entry: &WindowSnapshot,
+    requested: RECT,
+    target: RECT,
+) -> Result<Option<WindowObservation>, String> {
+    if !same_window(entry) {
+        return Ok(None);
+    }
+    let goal = WindowGoal::on_monitor(entry, target, WindowState::Normal)?;
+    set_window_rect(
+        entry,
+        requested.left,
+        requested.top,
+        requested.right - requested.left,
+        requested.bottom - requested.top,
+    )
+    .map_err(|error| describe(entry, &format!("move normal window: {error}")))?;
+    wait_for_goal(entry, goal, "move normal window")
+}
+
+fn apply_placement(
+    entry: &WindowSnapshot,
+    placement: &WINDOWPLACEMENT,
+    goal: WindowGoal,
+    stage: &str,
+) -> Result<Option<WindowObservation>, String> {
+    if !same_window(entry) {
+        return Ok(None);
+    }
+    unsafe { SetWindowPlacement(entry.hwnd, placement) }
+        .map_err(|error| describe(entry, &format!("{stage}: {error}")))?;
+    wait_for_goal(entry, goal, stage)
 }
 
 fn window_placement(entry: &WindowSnapshot) -> Result<WINDOWPLACEMENT, String> {
@@ -1452,103 +1455,74 @@ fn window_placement(entry: &WindowSnapshot) -> Result<WINDOWPLACEMENT, String> {
     Ok(placement)
 }
 
-fn align_normal_rect(entry: &WindowSnapshot, expected: RECT) -> Result<(), String> {
-    for _ in 0..3 {
-        let placement = window_placement(entry)?;
-        if placement.rcNormalPosition == expected {
-            return Ok(());
-        }
-        let outer = current_rect(entry)?;
-        let current = placement.rcNormalPosition;
-        set_window_rect(
-            entry,
-            outer.left + expected.left - current.left,
-            outer.top + expected.top - current.top,
-            outer.right - outer.left + (expected.right - expected.left)
-                - (current.right - current.left),
-            outer.bottom - outer.top + (expected.bottom - expected.top)
-                - (current.bottom - current.top),
-        )
-        .map_err(|error| {
-            describe(
-                entry,
-                &format!("normal rectangle alignment failed: {error}"),
-            )
-        })?;
-        if wait_for_normal_rect(entry, expected) {
-            return Ok(());
-        }
-    }
-    Err(describe(entry, "normal rectangle alignment did not settle"))
+#[cfg(test)]
+fn wait_for_normal_rect(entry: &WindowSnapshot, expected: RECT) -> bool {
+    wait_for_goal(
+        entry,
+        WindowGoal {
+            normal: Some(expected),
+            ..WindowGoal::default()
+        },
+        "test normal rectangle",
+    )
+    .is_ok()
 }
 
+#[cfg(test)]
 fn wait_for_outer_rect(entry: &WindowSnapshot, expected: RECT) -> bool {
-    let deadline = Instant::now() + MOVE_TIMEOUT;
-    loop {
-        if !same_window(entry) {
-            return true;
-        }
-        if current_rect(entry).is_ok_and(|rect| rect == expected) {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    wait_for_goal(
+        entry,
+        WindowGoal {
+            outer: Some(expected),
+            ..WindowGoal::default()
+        },
+        "test outer rectangle",
+    )
+    .is_ok()
 }
 
+#[cfg(test)]
 fn wait_for_window_state(entry: &WindowSnapshot, minimized: bool) -> bool {
-    let deadline = Instant::now() + MOVE_TIMEOUT;
-    loop {
-        if !same_window(entry) {
-            return true;
-        }
-        if unsafe { IsIconic(entry.hwnd) }.as_bool() == minimized {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    let state = if minimized {
+        WindowState::Minimized
+    } else {
+        WindowState::Normal
+    };
+    wait_for_goal(
+        entry,
+        WindowGoal {
+            state,
+            ..WindowGoal::default()
+        },
+        "test window state",
+    )
+    .is_ok()
 }
 
+#[cfg(test)]
 fn wait_for_zoomed_state(entry: &WindowSnapshot, maximized: bool) -> bool {
-    let deadline = Instant::now() + MOVE_TIMEOUT;
-    loop {
-        if !same_window(entry) {
-            return true;
-        }
-        if unsafe { IsZoomed(entry.hwnd) }.as_bool() == maximized {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    let state = if maximized {
+        WindowState::Maximized
+    } else {
+        WindowState::Normal
+    };
+    wait_for_goal(
+        entry,
+        WindowGoal {
+            state,
+            ..WindowGoal::default()
+        },
+        "test maximized state",
+    )
+    .is_ok()
 }
 
-fn wait_for_monitor(entry: &WindowSnapshot, expected_rect: RECT) -> bool {
-    let deadline = Instant::now() + MOVE_TIMEOUT;
-    loop {
-        if !same_window(entry) {
-            return true;
-        }
-        // Display changes can invalidate HMONITOR values. Resolve the current
-        // handle from the session's current geometry on every observation.
-        let expected = unsafe { MonitorFromRect(&expected_rect, MONITOR_DEFAULTTONULL) };
-        if !expected.0.is_null()
-            && unsafe { MonitorFromWindow(entry.hwnd, MONITOR_DEFAULTTONULL) } == expected
-        {
-            return true;
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+#[cfg(test)]
+fn wait_for_monitor(entry: &WindowSnapshot, expected: RECT) -> bool {
+    let Ok(goal) = WindowGoal::on_monitor(entry, expected, WindowState::Any) else {
+        return false;
+    };
+    wait_for_goal(entry, goal, "test monitor").is_ok()
 }
 
 fn same_window(entry: &WindowSnapshot) -> bool {
@@ -1615,6 +1589,10 @@ fn describe(entry: &WindowSnapshot, message: &str) -> String {
         entry.pid, entry.class_name, entry.maximized
     )
 }
+
+#[cfg(test)]
+#[path = "window_migration/operation_tests.rs"]
+mod operation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1899,36 +1877,6 @@ mod tests {
     }
 
     #[test]
-    fn maximized_restore_only_skips_a_complete_state_match() {
-        let saved = RECT {
-            left: -1920,
-            top: 100,
-            right: -1280,
-            bottom: 580,
-        };
-        // The saved restore position may legitimately be on another screen.
-        assert!(super::maximized_state_matches(
-            true, false, true, saved, saved
-        ));
-        assert!(!super::maximized_state_matches(
-            false, false, true, saved, saved
-        ));
-        assert!(!super::maximized_state_matches(
-            true, true, true, saved, saved
-        ));
-        assert!(!super::maximized_state_matches(
-            true, false, false, saved, saved
-        ));
-        let changed = RECT {
-            left: saved.left + 1,
-            ..saved
-        };
-        assert!(!super::maximized_state_matches(
-            true, false, true, changed, saved
-        ));
-    }
-
-    #[test]
     fn intermediate_restore_preserves_scanner_errors_for_final_reconcile() {
         let mut migration = super::WindowMigration {
             migration_id: super::next_migration_id(),
@@ -1953,15 +1901,52 @@ mod tests {
 #[cfg(test)]
 mod native_tests {
     use super::*;
-    use windows::Win32::Foundation::WPARAM;
+    use windows::Win32::Foundation::{LRESULT, WPARAM};
     use windows::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DispatchMessageW, GetForegroundWindow, GetMessageW, MSG, PostMessageW,
-        SW_MAXIMIZE, SW_SHOWNOACTIVATE, ShowWindow, WM_CLOSE, WS_OVERLAPPEDWINDOW,
+        CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_WNDPROC, GetForegroundWindow,
+        GetMessageW, MSG, PostMessageW, SW_MAXIMIZE, SWP_NOMOVE, SWP_NOSIZE, SetWindowLongPtrW,
+        ShowWindow, WINDOWPOS, WM_CLOSE, WM_WINDOWPOSCHANGING, WS_OVERLAPPEDWINDOW,
     };
     use windows::core::w;
+
+    thread_local! {
+        static MINIMUM_SIZE_REGION: std::cell::Cell<Option<RECT>> = const { std::cell::Cell::new(None) };
+    }
+
+    unsafe extern "system" fn constrained_window_proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WM_WINDOWPOSCHANGING {
+            MINIMUM_SIZE_REGION.with(|region| {
+                if let Some(region) = region.get() {
+                    let position = unsafe { &mut *(lparam.0 as *mut WINDOWPOS) };
+                    let mut current = RECT::default();
+                    let _ = unsafe { GetWindowRect(hwnd, &mut current) };
+                    let (x, y) = if position.flags.contains(SWP_NOMOVE) {
+                        (current.left, current.top)
+                    } else {
+                        (position.x, position.y)
+                    };
+                    if !position.flags.contains(SWP_NOSIZE)
+                        && x >= region.left
+                        && x < region.right
+                        && y >= region.top
+                        && y < region.bottom
+                    {
+                        // Model the application's 600-DIP minimum at 200% DPI.
+                        position.cy = position.cy.max(1200);
+                    }
+                }
+            });
+        }
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
 
     struct TestWindow {
         hwnd: HWND,
@@ -1969,6 +1954,10 @@ mod native_tests {
     }
     impl TestWindow {
         fn new(target: RECT) -> Self {
+            Self::with_minimum_region(target, None)
+        }
+
+        fn with_minimum_region(target: RECT, minimum_region: Option<RECT>) -> Self {
             let (sender, receiver) = std::sync::mpsc::channel();
             let ui_thread = thread::spawn(move || {
                 unsafe {
@@ -1982,8 +1971,8 @@ mod native_tests {
                         WS_OVERLAPPEDWINDOW,
                         target.left + 100,
                         target.top + 100,
-                        480,
-                        320,
+                        if minimum_region.is_some() { 1600 } else { 480 },
+                        if minimum_region.is_some() { 1025 } else { 320 },
                         None,
                         None,
                         None,
@@ -1991,6 +1980,16 @@ mod native_tests {
                     )
                 }
                 .unwrap();
+                if minimum_region.is_some() {
+                    MINIMUM_SIZE_REGION.with(|region| region.set(minimum_region));
+                    unsafe {
+                        SetWindowLongPtrW(
+                            hwnd,
+                            GWLP_WNDPROC,
+                            constrained_window_proc as *const () as isize,
+                        );
+                    }
+                }
                 unsafe {
                     let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                     let _ = ShowWindow(hwnd, SW_MAXIMIZE);
@@ -2019,6 +2018,168 @@ mod native_tests {
                 let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
             self.ui_thread.take().unwrap().join().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "creates a non-activating test window on an existing physical display"]
+    fn native_restore_ordinary_window_after_user_minimizes() {
+        let previous_dpi =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        let target = crate::display::active_displays()
+            .unwrap()
+            .into_iter()
+            .find(|display| !display.virtual_display)
+            .expect("physical display required");
+        for minimized_from_maximized in [false, true] {
+            let window = TestWindow::new(target.rect);
+            assert_ne!(
+                unsafe { GetForegroundWindow() },
+                window.hwnd,
+                "fixture creation must not activate"
+            );
+            let monitor = monitor_for_rect(target.rect, "test target").unwrap();
+            let maximized = snapshot_window(window.hwnd, monitor, 0).unwrap().unwrap();
+            unsafe {
+                let _ = ShowWindowAsync(window.hwnd, SW_SHOWNOACTIVATE);
+            }
+            assert!(wait_for_zoomed_state(&maximized, false));
+            assert_ne!(
+                unsafe { GetForegroundWindow() },
+                window.hwnd,
+                "fixture ordinary setup must not activate"
+            );
+            let mut original = snapshot_window(window.hwnd, monitor, 0).unwrap().unwrap();
+            let expected_outer = original.outer_rect;
+            let expected_normal = original.placement.rcNormalPosition;
+            assert!(!original.maximized);
+            if minimized_from_maximized {
+                let mut placement = window_placement(&original).unwrap();
+                placement.showCmd = SW_MAXIMIZE.0 as u32;
+                unsafe {
+                    SetWindowPlacement(window.hwnd, &placement).unwrap();
+                }
+                assert!(wait_for_zoomed_state(&original, true));
+                assert_ne!(
+                    unsafe { GetForegroundWindow() },
+                    window.hwnd,
+                    "fixture maximize setup must not activate"
+                );
+            }
+            unsafe {
+                let _ = ShowWindowAsync(
+                    window.hwnd,
+                    windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE,
+                );
+            }
+            assert!(wait_for_window_state(&original, true));
+            assert_ne!(
+                unsafe { GetForegroundWindow() },
+                window.hwnd,
+                "fixture setup must not activate"
+            );
+            original.moved = true;
+            let mut migration = WindowMigration {
+                migration_id: next_migration_id(),
+                entries: Arc::new(Mutex::new(vec![original])),
+                stop_scanner: Arc::new(AtomicBool::new(true)),
+                scanner: None,
+                scanner_errors: Vec::new(),
+                restore_on_drop: true,
+                target_rect: target.rect,
+            };
+            migration.restore().unwrap();
+            let entries = migration.entries.lock().unwrap();
+            let restored = &entries[0];
+            assert!(!restored.moved);
+            assert!(wait_for_window_state(restored, false));
+            assert!(wait_for_zoomed_state(restored, false));
+            assert!(wait_for_outer_rect(restored, expected_outer));
+            assert!(wait_for_normal_rect(restored, expected_normal));
+            // Windows can activate an iconic window on restore even with
+            // SW_SHOWNOACTIVATE. Placement/state, not focus, is this contract.
+            println!(
+                "PASS ordinary state restored after minimize; from-maximized={minimized_from_maximized}"
+            );
+            drop(entries);
+            drop(migration);
+            drop(window);
+        }
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(previous_dpi);
+        }
+    }
+
+    #[test]
+    #[ignore = "creates a non-activating constrained test window on two existing physical displays"]
+    fn native_maximized_migration_accepts_destination_minimum_size() {
+        let previous_dpi =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        let displays: Vec<_> = crate::display::active_displays()
+            .unwrap()
+            .into_iter()
+            .filter(|display| !display.virtual_display)
+            .filter(|display| {
+                display.rect.right - display.rect.left >= 1800
+                    && display.rect.bottom - display.rect.top >= 1300
+            })
+            .collect();
+        assert!(
+            displays.len() >= 2,
+            "two existing physical displays of at least 1800x1300 required"
+        );
+        let (target, source) = (&displays[0], &displays[1]);
+        let window = TestWindow::with_minimum_region(target.rect, Some(source.rect));
+        let target_monitor = monitor_for_rect(target.rect, "test target").unwrap();
+        let original = snapshot_window(window.hwnd, target_monitor, 0)
+            .unwrap()
+            .unwrap();
+        assert!(original.maximized);
+        unsafe {
+            let _ = ShowWindowAsync(window.hwnd, SW_RESTORE);
+        }
+        assert!(wait_for_zoomed_state(&original, false));
+        let current = current_rect(&original).unwrap();
+        assert_eq!(current.bottom - current.top, 1025);
+
+        // Exercise the exact fallback used when SetWindowPlacement did not
+        // move a Chromium window. The application's minimum rejects 1025px.
+        move_restored_to_monitor(&original, current, target.rect, source.rect).unwrap();
+        let deadline = Instant::now() + MOVE_TIMEOUT;
+        loop {
+            let actual = current_rect(&original).unwrap();
+            if actual.bottom - actual.top == 1200 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "minimum size did not apply: {actual:?}"
+            );
+            thread::sleep(POLL_INTERVAL);
+        }
+        let mut accepted = window_placement(&original).unwrap();
+        assert_eq!(
+            accepted.rcNormalPosition.bottom - accepted.rcNormalPosition.top,
+            1200
+        );
+        accepted.flags = original.placement.flags;
+        accepted.showCmd = original.placement.showCmd;
+        unsafe {
+            SetWindowPlacement(window.hwnd, &accepted).unwrap();
+        }
+        assert!(wait_for_zoomed_state(&original, true));
+        assert!(wait_for_monitor(&original, source.rect));
+        restore_maximized(&original, target.rect).unwrap();
+        assert!(wait_for_normal_rect(
+            &original,
+            original.placement.rcNormalPosition
+        ));
+        assert!(wait_for_monitor(&original, target.rect));
+        assert_ne!(unsafe { GetForegroundWindow() }, window.hwnd);
+        println!("PASS requested=1025 accepted=1200 maximized=true original-restored=true");
+        drop(window);
+        unsafe {
+            let _ = SetThreadDpiAwarenessContext(previous_dpi);
         }
     }
 
@@ -2304,3 +2465,7 @@ mod external_uwp_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "window_migration/firefox_tests.rs"]
+mod firefox_tests;
