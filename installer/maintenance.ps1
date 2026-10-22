@@ -25,6 +25,7 @@ $configRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) '
 $backupRetention = 5
 $backupOwnershipMarker = '.sbms-upgrade-snapshot-v1'
 $backupOwnershipContent = 'SBMS upgrade snapshot v1'
+$script:restartRequired = $false
 
 function Get-Sha256Hex {
     param([Parameter(Mandatory)][string]$LiteralPath)
@@ -427,6 +428,8 @@ namespace SBMS {
 }
 
 function Install-SbmsTask {
+    param([switch]$DeferStart)
+
     $interactive = Assert-InstallIdentity
     if (Get-OwnedTask) {
         throw "Owned scheduled task already exists at $taskPath$taskName."
@@ -435,6 +438,10 @@ function Install-SbmsTask {
         -Argument '--background' `
         -WorkingDirectory $InstallRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $interactive.Sid
+    if ($DeferStart) {
+        # Only future logons may start the new host while its driver awaits reboot.
+        $trigger.StartBoundary = [DateTime]::Now.ToString('yyyy-MM-ddTHH:mm:ss')
+    }
     $principal = New-ScheduledTaskPrincipal `
         -UserId $interactive.Sid `
         -LogonType Interactive `
@@ -461,6 +468,9 @@ function Install-SbmsTask {
             -Settings $settings `
             -Description 'Starts the SBMS tray with the privileges required by its protected session gate.' |
             Out-Null
+        if ($DeferStart) {
+            return
+        }
         Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         while ([DateTime]::UtcNow -lt $deadline) {
@@ -523,7 +533,8 @@ function Install-SbmsDriver {
         throw "Driver package is missing: $driverInf"
     }
     . (Join-Path $PSScriptRoot 'driver-trust.ps1')
-    Invoke-SbmsDriverInstall -DriverInf $driverInf -TrustCertificate:$TrustCertificate
+    Invoke-SbmsDriverInstall -DriverInf $driverInf -TrustCertificate:$TrustCertificate `
+        -RestartRequired ([ref]$script:restartRequired)
 }
 
 function Remove-DriverPackages {
@@ -568,7 +579,7 @@ function Install-Sbms {
     )
     try {
         Install-SbmsDriver
-        Install-SbmsTask
+        Install-SbmsTask -DeferStart:$script:restartRequired
     }
     catch {
         $failure = $_
@@ -594,6 +605,10 @@ function Install-Sbms {
         throw $failure
     }
 
+    # Keep the old package while Windows still needs a reboot to finish updating it.
+    if ($script:restartRequired) {
+        return
+    }
     # The new package and startup task are working. Old SBMS packages are no
     # longer useful for rollback and otherwise accumulate in DriverStore.
     Remove-DriverPackages -Packages @(Find-ObsoleteSbmsDriverPackages)
@@ -652,6 +667,9 @@ switch ($Action) {
     }
     'Install' {
         Invoke-MaintenanceAction { Install-Sbms }
+        if ($script:restartRequired) {
+            exit 3010
+        }
     }
     'Uninstall' {
         Invoke-MaintenanceAction { Uninstall-Sbms }

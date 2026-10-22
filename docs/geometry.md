@@ -68,7 +68,7 @@ to 1000 Hz.
 SizingRequest::calculate
   -> SizingResult.virtual_mode
   -> VirtualMode
-  -> protected v7 session gate
+  -> protected v8 session gate
   -> IDD monitor and target mode
   -> Windows display source
   -> GPU renderer

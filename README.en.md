@@ -51,7 +51,7 @@ SBMS gives Windows a virtual monitor, places application windows on it, then sca
 
 ### Input, windows, and layout restoration
 
-You keep viewing and interacting with windows on the physical screen; SBMS translates mouse positions to the corresponding positions on the virtual screen. Starting a mapping moves ordinary windows from the target monitor; stopping restores the windows and the original display layout.<sup><a id="principle-ref-2" href="#principle-note-2">2</a></sup>
+You keep viewing and interacting with windows on the physical screen; SBMS translates mouse positions to the corresponding positions on the virtual screen. Starting a mapping moves windows on the target screen to the virtual monitor. Normal stopping returns only windows still on that virtual monitor to its physical target, including newly opened and minimized windows. Windows moved to the primary or another physical screen are left alone, and the original display layout is restored. Valid positions and sizes scale proportionally between the source and destination monitor bounds, subject to application size constraints. Minimized and maximized states, including restoration from minimized to maximized, are preserved. Only invalid or out-of-bounds layouts use the default size, three quarters of the work area's width and height, with multiple windows offset to avoid complete overlap. Windows already minimized before startup are excluded from the startup migration.<sup><a id="principle-ref-2" href="#principle-note-2">2</a></sup>
 
 ### Sampling and filtering
 
@@ -86,7 +86,7 @@ Each Stream only output has its own Sunshine instance and connection port. Local
 
 <p><sub><sup><a id="principle-note-1"></a>1. a C++ UMDF indirect display driver exposes the virtual monitor through WDF/IddCx. Local mapping captures the virtual output with Desktop Duplication, then scales and presents it through a D3D11 pixel shader in a full-screen window on the target monitor. "Virtual desktop" here means the extended desktop area on a virtual monitor, not the multiple-desktop feature in Windows Task View. <a href="#principle-ref-1" title="Back to text">↩</a></sup></sub></p>
 
-<p><sub><sup><a id="principle-note-2"></a>2. the local input path transforms mouse coordinates from the target display region into the virtual source region and controls the real Windows pointer. Window migration also handles eligible windows created during a mapping session. The session lifecycle records and restores the relevant window and display-topology state. <a href="#principle-ref-2" title="Back to text">↩</a></sup></sub></p>
+<p><sub><sup><a id="principle-note-2"></a>2. the local input path transforms mouse coordinates from the target display region into the virtual source region and controls the real Windows pointer. Window migration also handles eligible windows created during a mapping session. The session selects windows by their current monitor, transfers them before removing the virtual display, then restores the display topology. <a href="#principle-ref-2" title="Back to text">↩</a></sup></sub></p>
 
 <p><sub><sup><a id="principle-note-3"></a>3. Automatic fallback selects the default only when no sampling mode has been set manually. SBMS enumerates DXGI adapters, excludes software adapters, and queries <code>D3D11_FEATURE_DATA_D3D11_OPTIONS2.UnifiedMemoryArchitecture</code>. A discrete GPU is considered present only if at least one hardware adapter explicitly reports non-unified memory (UMA=false); otherwise the legacy high-performance filter is the default. Failed or unknown queries do not establish the presence of a discrete GPU. This is a driver-reported heuristic, not a classification by GPU name or VRAM capacity, and it does not identify the GPU actually used for rendering. The result is cached after the first query in each process and is not refreshed on GPU hot-plug events. Correct matching to the active hardware or its performance is not guaranteed for dual-GPU systems that default to integrated graphics, hybrid routing, external-GPU hot-plugging, or incorrect driver reports. Select the sampling mode manually according to actual performance; restart SBMS after hardware changes to rerun detection. <a href="#principle-ref-3" title="Back to text">↩</a></sup></sub></p>
 
@@ -150,7 +150,7 @@ The current self-signed build requires approval to trust the driver certificate.
 3. Check the screen dimensions and correct them under `Screen size` if necessary. Start with `Physical` under `Sizing`.
 4. Click `Start mapping`, then arrange the displays in Windows display settings to match their physical positions.
 
-Add output groups for additional displays. Click `Stop and restore` to stop mapping and restore windows and the display layout.
+Add output groups for additional displays. Click `Stop and restore` to return windows still on the virtual monitors to their physical targets, preserve valid layouts and window states, and restore the display layout.
 
 ### Streaming displays
 

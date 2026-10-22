@@ -23,9 +23,9 @@ namespace
 constexpr UINT kMaximumDimension = 16384;
 constexpr UINT kMaximumRefreshRate = 1000;
 constexpr UINT kMaximumMonitors = 16;
-constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v7";
-constexpr UINT kGateMagic = 0x53424737;
-constexpr UINT kProtocolVersion = 7;
+constexpr wchar_t kSessionGate[] = L"Global\\SBMSSession-v8";
+constexpr UINT kGateMagic = 0x53424738;
+constexpr UINT kProtocolVersion = 8;
 
 struct GateHeader
 {
@@ -44,15 +44,34 @@ struct GateEntry
     UINT refreshDenominator;
 };
 
+struct GateIdentity
+{
+    volatile LONG sequence;
+    ULONG adapterLow;
+    LONG adapterHigh;
+    UINT targetId;
+};
+
 struct GateConfig
 {
     GateHeader header;
     GateEntry entries[kMaximumMonitors];
+    GateIdentity identities[kMaximumMonitors];
 };
 
 static_assert(sizeof(GateHeader) == 16);
 static_assert(sizeof(GateEntry) == 20);
-static_assert(sizeof(GateConfig) == 336);
+static_assert(sizeof(GateIdentity) == 16);
+static_assert(sizeof(GateConfig) == 592);
+
+ULONG BeginIdentityPublication(GateIdentity& identity)
+{
+    const ULONG previousSequence = static_cast<ULONG>(
+        InterlockedCompareExchange(&identity.sequence, 0, 0));
+    const ULONG writingSequence = (previousSequence | 1u) + 2u;
+    InterlockedExchange(&identity.sequence, static_cast<LONG>(writingSequence));
+    return writingSequence;
+}
 
 struct ModeConfig
 {
@@ -132,27 +151,22 @@ bool ValidateMode(
     return true;
 }
 
-bool ReadSessionConfig(ModeConfig (&modes)[kMaximumMonitors], UINT& count)
+bool ReadSessionConfig(
+    const GateConfig& config,
+    ModeConfig (&modes)[kMaximumMonitors],
+    UINT& count)
 {
-    HANDLE gate = OpenFileMappingW(FILE_MAP_READ, FALSE, kSessionGate);
-    if (gate == nullptr)
-    {
-        return false;
-    }
-    const auto* config = static_cast<const GateConfig*>(
-        MapViewOfFile(gate, FILE_MAP_READ, 0, 0, sizeof(GateConfig)));
     bool valid = false;
-    if (config != nullptr &&
-        config->header.magic == kGateMagic &&
-        config->header.version == kProtocolVersion &&
-        config->header.count > 0 &&
-        config->header.count <= kMaximumMonitors)
+    if (config.header.magic == kGateMagic &&
+        config.header.version == kProtocolVersion &&
+        config.header.count > 0 &&
+        config.header.count <= kMaximumMonitors)
     {
         valid = true;
         UINT connectorMask = 0;
-        for (UINT index = 0; index < config->header.count; ++index)
+        for (UINT index = 0; index < config.header.count; ++index)
         {
-            const GateEntry& entry = config->entries[index];
+            const GateEntry& entry = config.entries[index];
             if (entry.connectorIndex >= kMaximumMonitors)
             {
                 valid = false;
@@ -175,11 +189,9 @@ bool ReadSessionConfig(ModeConfig (&modes)[kMaximumMonitors], UINT& count)
         }
         if (valid)
         {
-            count = config->header.count;
+            count = config.header.count;
         }
     }
-    if (config != nullptr) UnmapViewOfFile(config);
-    CloseHandle(gate);
     return valid;
 }
 
@@ -387,7 +399,7 @@ bool StartDrain(
     return true;
 }
 
-NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode)
+NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode, GateConfig& config)
 {
     WDF_OBJECT_ATTRIBUTES attributes;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorState);
@@ -426,27 +438,59 @@ NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode)
         return arrivalStatus;
     }
 
+    // An odd sequence marks a write; matching nonzero even reads form one
+    // snapshot. Advance past an interrupted write when restarting the driver.
+    GateIdentity& identity = config.identities[mode.connectorIndex];
+    const ULONG writingSequence = BeginIdentityPublication(identity);
+    identity.adapterLow = arrival.OsAdapterLuid.LowPart;
+    identity.adapterHigh = arrival.OsAdapterLuid.HighPart;
+    identity.targetId = arrival.OsTargetId;
+    InterlockedExchange(&identity.sequence, static_cast<LONG>(writingSequence + 1u));
+
     return STATUS_SUCCESS;
 }
 
 NTSTATUS ReportMonitors(DeviceState* state)
 {
-    ModeConfig modes[kMaximumMonitors]{};
-    UINT count = 0;
-    if (!ReadSessionConfig(modes, count))
+    HANDLE gate = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, kSessionGate);
+    if (gate == nullptr)
     {
         return STATUS_INVALID_PARAMETER;
     }
-
-    for (UINT index = 0; index < count; ++index)
+    auto* config = static_cast<GateConfig*>(
+        MapViewOfFile(gate, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(GateConfig)));
+    if (config == nullptr)
     {
-        const NTSTATUS status = ReportMonitor(state, modes[index]);
-        if (!NT_SUCCESS(status))
+        CloseHandle(gate);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    // Keep this exact session mapping alive through all arrivals. Reopening by
+    // name per monitor could publish an older adapter's identities into a new session.
+    ModeConfig modes[kMaximumMonitors]{};
+    UINT count = 0;
+    NTSTATUS result = STATUS_INVALID_PARAMETER;
+    if (ReadSessionConfig(*config, modes, count))
+    {
+        // A restarted adapter may reuse OS target IDs. Invalidate every old
+        // receipt before any new monitor can arrive and be mistaken for it.
+        for (UINT index = 0; index < count; ++index)
         {
-            return status;
+            BeginIdentityPublication(config->identities[modes[index].connectorIndex]);
+        }
+        result = STATUS_SUCCESS;
+        for (UINT index = 0; index < count; ++index)
+        {
+            result = ReportMonitor(state, modes[index], *config);
+            if (!NT_SUCCESS(result))
+            {
+                break;
+            }
         }
     }
-    return STATUS_SUCCESS;
+    UnmapViewOfFile(config);
+    CloseHandle(gate);
+    return result;
 }
 
 void InitAdapter(DeviceState* state)

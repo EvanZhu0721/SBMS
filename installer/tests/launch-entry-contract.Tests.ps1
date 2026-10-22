@@ -76,11 +76,19 @@ Describe 'SBMS launch entry contract' {
         )
     }
 
-    It 'registers an interactive highest-privilege background tray task' {
+    It 'registers the tray task with deferred startup = <DeferStart>' -TestCases @(
+        @{ DeferStart = $false }
+        @{ DeferStart = $true }
+    ) {
+        param($DeferStart)
         $script:mockTaskAction =
             [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction')
         $script:mockTrigger =
             [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskTrigger')
+        $script:mockTrigger.CimInstanceProperties.Add(
+            [Microsoft.Management.Infrastructure.CimProperty]::Create(
+                'StartBoundary', '', [Microsoft.Management.Infrastructure.CimType]::String,
+                [Microsoft.Management.Infrastructure.CimFlags]::None))
         $script:mockPrincipal =
             [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskPrincipal')
         $script:mockSettings =
@@ -117,32 +125,32 @@ Describe 'SBMS launch entry contract' {
             }
         }
 
-        Install-SbmsTask
+        Install-SbmsTask -DeferStart:$DeferStart
 
-        Assert-MockCalled New-ScheduledTaskAction -Times 1 -Exactly `
+        Assert-MockCalled New-ScheduledTaskAction -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $Execute -eq $script:tray -and
                     $Argument -ceq '--background' -and
                     $WorkingDirectory -eq $script:loadRoot
             }
-        Assert-MockCalled New-ScheduledTaskTrigger -Times 1 -Exactly `
+        Assert-MockCalled New-ScheduledTaskTrigger -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $AtLogOn -and $User -eq 'S-1-5-21-test'
             }
-        Assert-MockCalled New-ScheduledTaskPrincipal -Times 1 -Exactly `
+        Assert-MockCalled New-ScheduledTaskPrincipal -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $UserId -eq 'S-1-5-21-test' -and
                     $LogonType -eq 'Interactive' -and
                     $RunLevel -eq 'Highest'
             }
-        Assert-MockCalled New-ScheduledTaskSettingsSet -Times 1 -Exactly `
+        Assert-MockCalled New-ScheduledTaskSettingsSet -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $AllowStartIfOnBatteries -and
                     $DontStopIfGoingOnBatteries -and
                     $ExecutionTimeLimit -eq [TimeSpan]::Zero -and
                     $MultipleInstances.ToString() -eq 'IgnoreNew'
             }
-        Assert-MockCalled Register-ScheduledTask -Times 1 -Exactly `
+        Assert-MockCalled Register-ScheduledTask -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $TaskPath -eq '\SBMS\' -and
                     $TaskName -eq 'Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A' -and
@@ -153,14 +161,22 @@ Describe 'SBMS launch entry contract' {
                     [object]::ReferenceEquals($Principal, $script:mockPrincipal) -and
                     [object]::ReferenceEquals($Settings, $script:mockSettings)
             }
-        Assert-MockCalled Start-ScheduledTask -Times 1 -Exactly `
+        $expectedStarts = if ($DeferStart) { 0 } else { 1 }
+        Assert-MockCalled Start-ScheduledTask -Times $expectedStarts -Exactly -Scope It `
             -ParameterFilter {
                 $TaskPath -eq '\SBMS\' -and
                     $TaskName -eq 'Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A'
             }
-        Assert-MockCalled Start-Sleep -Times 1 -Exactly `
+        Assert-MockCalled Start-Sleep -Times $expectedStarts -Exactly -Scope It `
             -ParameterFilter { $Milliseconds -eq 200 }
-        $script:processScan | Should Be 3
+        if ($DeferStart) {
+            $script:mockTrigger.StartBoundary | Should Not BeNullOrEmpty
+            $script:processScan | Should Be 1
+            Assert-MockCalled Test-SbmsTrayReady -Times 0 -Exactly -Scope It
+        }
+        else {
+            $script:processScan | Should Be 3
+        }
         { [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8') } | Should Throw
     }
 

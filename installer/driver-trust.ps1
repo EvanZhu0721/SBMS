@@ -20,7 +20,8 @@ function Invoke-SbmsCertificateStore {
 function Invoke-SbmsDriverInstall {
     param(
         [Parameter(Mandatory)][string]$DriverInf,
-        [switch]$TrustCertificate
+        [switch]$TrustCertificate,
+        [ref]$RestartRequired
     )
 
     $directory = Split-Path -Parent $DriverInf
@@ -58,10 +59,14 @@ function Invoke-SbmsDriverInstall {
             }
         }
         & pnputil.exe /add-driver $DriverInf /install
-        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3010) {
-            throw "pnputil add-driver failed with exit code $LASTEXITCODE. See Windows\INF\setupapi.dev.log."
+        $driverExitCode = $LASTEXITCODE
+        if ($driverExitCode -ne 0 -and $driverExitCode -ne 3010) {
+            throw "pnputil add-driver failed with exit code $driverExitCode. See Windows\INF\setupapi.dev.log."
         }
-        if ($LASTEXITCODE -eq 3010) {
+        if ($null -ne $RestartRequired) {
+            $RestartRequired.Value = $driverExitCode -eq 3010
+        }
+        if ($driverExitCode -eq 3010) {
             Write-Output 'Windows requested a restart to finish driver installation.'
         }
     }

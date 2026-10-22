@@ -114,7 +114,10 @@ Describe 'Explicit driver certificate trust' {
 
     It 'accepts restart-required success and retains approved trust' {
         Mock pnputil.exe { $global:LASTEXITCODE = 3010 }
-        Invoke-SbmsDriverInstall -DriverInf $script:driverInf -TrustCertificate | Should Match 'restart'
+        $restartRequired = $false
+        Invoke-SbmsDriverInstall -DriverInf $script:driverInf -TrustCertificate `
+            -RestartRequired ([ref]$restartRequired) | Should Match 'restart'
+        $restartRequired | Should Be $true
         ($script:events -join ',') | Should Be 'Add/Root,Add/TrustedPublisher'
     }
 }

@@ -21,12 +21,11 @@ use crate::display::Display;
 use crate::gpu_renderer::{GpuRendererConfig, GpuRendererError, run_gpu_renderer};
 use crate::input::{InputGuard, flush_movement, handle_message};
 
+mod taskbar_guard;
+
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const START_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
-#[cfg(not(test))]
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
-#[cfg(test)]
-const STOP_TIMEOUT: Duration = Duration::from_millis(20);
 static WINDOW_CLASS_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
@@ -216,11 +215,15 @@ impl Renderer {
     }
 
     pub fn stop(&mut self) -> Result<(), String> {
+        self.stop_with_timeout(STOP_TIMEOUT)
+    }
+
+    fn stop_with_timeout(&mut self, timeout: Duration) -> Result<(), String> {
         if self.thread.is_none() {
             return Ok(());
         }
         self.request_stop();
-        let (result, exceeded_timeout) = match self.done.recv_timeout(STOP_TIMEOUT) {
+        let (result, exceeded_timeout) = match self.done.recv_timeout(timeout) {
             Ok(result) => (result, false),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 // A live renderer owns HWND, input and D3D resources. Keep waiting
@@ -433,6 +436,17 @@ fn run(
             return Err(WorkerRunError::Failed(error));
         }
     };
+    let taskbar_guard = match taskbar_guard::TaskbarGuard::new(window) {
+        Ok(guard) => guard,
+        Err(error) => {
+            drop(input);
+            unsafe {
+                let _ = DestroyWindow(window);
+                let _ = UnregisterClassW(class_name, Some(instance));
+            }
+            return Err(WorkerRunError::Failed(error));
+        }
+    };
     let result = thread::scope(|scope| {
         let (draw_done_tx, draw_done_rx) = mpsc::sync_channel(1);
         let window_value = window.0 as usize;
@@ -481,6 +495,7 @@ fn run(
             .map_err(|_| WorkerRunError::Failed("renderer draw worker panicked".to_string()))?;
         draw_result
     });
+    drop(taskbar_guard);
     drop(input);
     unsafe {
         let _ = DestroyWindow(window);
@@ -717,6 +732,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_dxgi_output_before_first_frame_is_retryable_without_reporting_ready() {
+        let reporter: RendererReporter = Arc::new(|_| panic!("no renderer is active yet"));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let result = finish_gpu_renderer(
+            Err(GpuRendererError::OutputUnavailable(
+                "source not enumerated".into(),
+            )),
+            &reporter,
+            true,
+            &ready_tx,
+        );
+        assert!(matches!(result, Err(WorkerRunError::Retryable(_))));
+        assert_eq!(
+            wait_for_start(&ready_rx, || false, Duration::ZERO),
+            StartWait::Retryable("source not enumerated".into()),
+        );
+    }
+
+    #[test]
     fn failure_before_first_frame_reports_explicit_failed_start() {
         let (event_tx, event_rx) = mpsc::channel();
         let reporter: RendererReporter = Arc::new(move |event| {
@@ -834,7 +868,9 @@ mod tests {
             thread: Some(thread),
         };
 
-        let error = renderer.stop().unwrap_err();
+        let error = renderer
+            .stop_with_timeout(Duration::from_millis(20))
+            .unwrap_err();
         assert!(error.contains("needed more than"));
         assert!(renderer.thread.is_none());
     }

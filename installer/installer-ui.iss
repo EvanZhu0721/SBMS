@@ -384,6 +384,7 @@ end;
 function InstallerUINextButtonClick(PageID: Integer): Boolean;
 begin
   Result := True;
+  if WizardSilent then exit;
   if (PageID = IntroPage.ID) and not IntroFinished then begin
     ShowInstallerThanks;
     Result := False;

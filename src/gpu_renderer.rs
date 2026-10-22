@@ -191,6 +191,8 @@ pub enum GpuRendererError {
     AccessLost(String),
     /// Desktop Duplication output duplication access was denied temporarily (e.g. sleep/wake).
     DuplicateOutputAccessDenied(String),
+    /// CCD may expose a source before DXGI enumerates its output after a topology change.
+    OutputUnavailable(String),
     /// The render adapter reset or was removed.
     DeviceLost,
     Failure(String),
@@ -200,7 +202,7 @@ impl GpuRendererError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::AccessLost(_) | Self::DuplicateOutputAccessDenied(_)
+            Self::AccessLost(_) | Self::DuplicateOutputAccessDenied(_) | Self::OutputUnavailable(_)
         )
     }
 }
@@ -210,6 +212,7 @@ impl fmt::Display for GpuRendererError {
         match self {
             Self::AccessLost(message) => formatter.write_str(message),
             Self::DuplicateOutputAccessDenied(message) => formatter.write_str(message),
+            Self::OutputUnavailable(message) => formatter.write_str(message),
             Self::DeviceLost => formatter.write_str("D3D11 render device was lost"),
             Self::Failure(message) => formatter.write_str(message),
         }
@@ -343,7 +346,7 @@ fn find_source_output(
         }
         adapter_index += 1;
     }
-    Err(GpuRendererError::Failure(format!(
+    Err(GpuRendererError::OutputUnavailable(format!(
         "no DXGI output matches source rectangle ({}, {})-({}, {})",
         source_rect.left, source_rect.top, source_rect.right, source_rect.bottom
     )))
@@ -491,10 +494,14 @@ impl Pipeline {
         let mut cache_valid = false;
         let mut direct_source_active = None;
         let mut last_present: Option<Instant> = None;
+        let mut frame: Option<AcquiredFrame<'_>> = None;
         let refresh_interval =
             Duration::from_secs_f64(1000.0 / f64::from(self.config.target_refresh_millihz.max(1)));
 
         while !stop.load(Ordering::Acquire) {
+            if let Some(previous) = frame.take() {
+                previous.release()?;
+            }
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
             match unsafe {
@@ -533,7 +540,7 @@ impl Pipeline {
             // Keep ownership through sampling and Present. Releasing just
             // before the next Acquire avoids redundant desktop updates to
             // the duplication surface while presentation is waiting.
-            let _frame = AcquiredFrame(&duplication);
+            frame = Some(AcquiredFrame(Some(&duplication)));
             if stop.load(Ordering::Acquire) {
                 break;
             }
@@ -1081,12 +1088,24 @@ impl CopyStats {
     }
 }
 
-struct AcquiredFrame<'a>(&'a IDXGIOutputDuplication);
+struct AcquiredFrame<'a>(Option<&'a IDXGIOutputDuplication>);
+
+impl AcquiredFrame<'_> {
+    fn release(mut self) -> Result<(), GpuRendererError> {
+        // Clear ownership even on failure: a lost duplication must be dropped,
+        // not released twice or used by another AcquireNextFrame call.
+        let duplication = self.0.take().expect("frame is still acquired");
+        unsafe { duplication.ReleaseFrame() }
+            .map_err(|error| classify_windows_error("IDXGIOutputDuplication::ReleaseFrame", error))
+    }
+}
 
 impl Drop for AcquiredFrame<'_> {
     fn drop(&mut self) {
-        unsafe {
-            let _ = self.0.ReleaseFrame();
+        if let Some(duplication) = self.0.take()
+            && let Err(error) = unsafe { duplication.ReleaseFrame() }
+        {
+            let _ = classify_windows_error("IDXGIOutputDuplication::ReleaseFrame", error);
         }
     }
 }
@@ -1325,6 +1344,19 @@ mod tests {
     }
 
     #[test]
+    fn absent_dxgi_output_is_transient() {
+        let error = super::find_source_output(RECT {
+            left: i32::MIN,
+            top: i32::MIN,
+            right: i32::MIN + 1,
+            bottom: i32::MIN + 1,
+        })
+        .unwrap_err();
+        assert!(matches!(error, GpuRendererError::OutputUnavailable(_)));
+        assert!(error.is_retryable());
+    }
+
+    #[test]
     fn dxgi_access_lost_is_a_recoverable_topology_loss() {
         let error = classify_hresult(
             "IDXGIOutputDuplication::AcquireNextFrame",
@@ -1336,6 +1368,22 @@ mod tests {
             error.to_string(),
             "IDXGIOutputDuplication::AcquireNextFrame failed: HRESULT(0x887A0026)"
         );
+    }
+
+    #[test]
+    fn release_access_lost_is_recoverable_but_invalid_call_is_not() {
+        let lost = classify_hresult(
+            "IDXGIOutputDuplication::ReleaseFrame",
+            DXGI_ERROR_ACCESS_LOST,
+        );
+        assert!(matches!(lost, GpuRendererError::AccessLost(_)));
+        assert!(lost.is_retryable());
+        let invalid = classify_hresult(
+            "IDXGIOutputDuplication::AcquireNextFrame",
+            windows::Win32::Graphics::Dxgi::DXGI_ERROR_INVALID_CALL,
+        );
+        assert!(matches!(invalid, GpuRendererError::Failure(_)));
+        assert!(!invalid.is_retryable());
     }
 
     #[test]

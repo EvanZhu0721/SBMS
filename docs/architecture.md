@@ -12,11 +12,19 @@ tray / CLI
   -> stream-only groups: virtual desktop stays available to an external capturer
 ```
 
-The v7 gate contains up to sixteen connector-indexed modes. Its ACL permits the
+The v8 gate contains up to sixteen connector-indexed modes. Its ACL permits the
 launching user, SYSTEM, LocalService and Administrators. One IDD adapter
 publishes every requested connector and drains their IddCx swap chains; it does
 not copy frames into shared memory. Connector indexes are stable identities and
-must not be inferred from Windows enumeration order.
+must not be inferred from Windows enumeration order. After each successful
+`IddCxMonitorArrival`, the driver publishes its `OsAdapterLuid` and `OsTargetId`
+into that connector's response slot, using a sequence counter to prevent partial
+reads during initial publication or driver restart.
+Rust matches these identities directly against CCD targets; identifying a virtual
+connector does not require a PnP monitor path or Container ID lookup. The driver
+holds the original session mapping through publication, and startup waits for
+unpublished responses within its existing deadline. The matching v8 driver and
+application must be deployed together.
 
 Pixels remain on the GPU in the Rust renderer. Quality sampling first applies
 selective subpixel colour-fringe suppression. A reduction on either axis uses
@@ -33,11 +41,53 @@ copying, or keep presenting static content at the target refresh rate. See
 [configuration.md](configuration.md#rendering-options) for the settings and
 automatic-selection limits.
 
-The whole plan starts and stops as one transaction. Startup creates and
-confirms every virtual source before any mirror renderer starts. Shutdown
-releases all input capture and rendering, restores migrated windows, closes the
-single software-device handle, waits for every planned connector to disappear,
-and restores the saved physical topology once.
+The whole mapping starts and stops as one transaction. `WindowMigration` captures
+an independent original layout before device creation and binds a stable virtual
+source ID for each group. Startup creates the renderer before beginning window
+migration. The scanner subsequently handles eligible windows found on the
+physical target. Windows already minimized are excluded from startup migration.
+
+Valid window layouts map proportionally between stable monitor bounds, preserving
+arrangement and minimized/maximized state, including restore-to-maximized flags.
+Taskbar work-area changes do not change this proportional mapping. Only invalid
+or out-of-bounds layouts use a default cascade within the work area, at three
+quarters of its width and height, subject to application size constraints.
+Internal layout coordinates are screen coordinates; `WINDOWPLACEMENT` work-area
+coordinates are converted at the API boundary.
+
+Shutdown transfers tracking into a single-use `WindowRestorePlan`:
+
+1. Freeze the scene: join scanners, release runtime claims, and capture windows
+   currently on each virtual source, including new and minimized windows.
+   Separately capture physical-screen windows with their exact geometry and state.
+2. Stop rendering, then transfer the selected windows to their physical targets
+   while the virtual sources still exist. Record the actual result of each
+   successful transfer; failed entries are not added to later repair.
+3. Remove the virtual device and restore the saved physical topology. Consume the
+   plan to repair only physical windows, including successful transfers, that
+   Windows changed during topology restoration. Unchanged windows receive no
+   positioning calls. Mapping owns the device lifecycle; the plan owns selection,
+   window transfer, preservation, and accumulated errors.
+
+`RestoreMode::StartupRollback` uses the independently saved startup layout,
+including captured windows not yet actively moved. Windows currently on another
+physical screen are not reclaimed. A missing source retains only historical
+windows with no current monitor. Source and target matching use stable display
+IDs, never reused desktop coordinates.
+
+Source migration and physical preservation share one execution path. Necessary
+monitor/DPI preparation precedes final geometry submission, with bounded
+observation of the requested position and state. External window mutations are
+asynchronous; an already unresponsive window is rejected before submission.
+Application size constraints remain respected. Physical preservation additionally
+retains exact geometry and the normal restore rectangle's separate monitor anchor.
+
+There is no blanket temporary minimization, staging/final replay, or batch retry
+after work-area changes. Failures remain errors, and one failed window does not
+prevent remaining windows or device cleanup from being processed. An asynchronous
+request already posted to an application cannot be cancelled if that application
+subsequently hangs. Dropping runtime tracking only joins its scanner and releases
+claims; it never performs an implicit second window restoration.
 
 User configuration is stored as at most three named profiles in
 `%LOCALAPPDATA%\SBMS\config-profiles-v1.json`. The collection, active profile

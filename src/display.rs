@@ -8,8 +8,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DICS_FLAG_GLOBAL, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, DIREG_DEV, HDEVINFO,
     SP_DEVICE_INTERFACE_DATA, SP_DEVICE_INTERFACE_DETAIL_DATA_W, SP_DEVINFO_DATA,
     SetupDiDestroyDeviceInfoList, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
-    SetupDiGetDeviceInterfaceDetailW, SetupDiGetDevicePropertyW, SetupDiOpenDevRegKey,
-    SetupDiOpenDeviceInterfaceW,
+    SetupDiGetDeviceInterfaceDetailW, SetupDiOpenDevRegKey, SetupDiOpenDeviceInterfaceW,
 };
 use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
@@ -21,9 +20,6 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GUID_DEVINTERFACE_MONITOR,
     GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig, SDC_APPLY,
     SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SetDisplayConfig,
-};
-use windows::Win32::Devices::Properties::{
-    DEVPKEY_Device_ContainerId, DEVPROP_TYPE_GUID, DEVPROPTYPE,
 };
 use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
 use windows::Win32::Graphics::Gdi::{
@@ -40,12 +36,11 @@ use windows::Win32::Security::Cryptography::{
 use windows::Win32::System::Registry::{
     HKEY, KEY_READ, REG_BINARY, REG_VALUE_TYPE, RegCloseKey, RegQueryValueExW,
 };
-use windows::core::{GUID, PCWSTR, w};
+use windows::core::{PCWSTR, w};
 
 use crate::diagnostics::{self, Level};
 use crate::geometry::Rotation;
-use crate::limits::MAX_OUTPUTS;
-use crate::session_gate::VirtualMode;
+use crate::session_gate::{ConnectorIdentity, VirtualMode, published_connector_identities};
 
 #[derive(Clone, Debug)]
 pub struct Display {
@@ -68,11 +63,26 @@ pub struct Display {
 }
 
 #[derive(Debug)]
-pub struct DisplayError(String);
+pub enum DisplayError {
+    Failure(String),
+    IdentityPending(String),
+}
+
+impl DisplayError {
+    pub(crate) fn identity_pending(message: impl Into<String>) -> Self {
+        Self::IdentityPending(message.into())
+    }
+
+    pub(crate) fn is_identity_pending(&self) -> bool {
+        matches!(self, Self::IdentityPending(_))
+    }
+}
 
 impl FmtDisplay for DisplayError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        match self {
+            Self::Failure(message) | Self::IdentityPending(message) => formatter.write_str(message),
+        }
     }
 }
 
@@ -93,18 +103,18 @@ pub fn unique_physical_display(
     let display = match matches.as_slice() {
         [display] => (*display).clone(),
         [] => {
-            return Err(DisplayError(format!(
+            return Err(DisplayError::Failure(format!(
                 "active display id not found: {display_id}"
             )));
         }
         _ => {
-            return Err(DisplayError(format!(
+            return Err(DisplayError::Failure(format!(
                 "display id is ambiguous: {display_id}"
             )));
         }
     };
     if display.virtual_display {
-        return Err(DisplayError(
+        return Err(DisplayError::Failure(
             "the physical output cannot be the SBMS virtual display".into(),
         ));
     }
@@ -118,7 +128,7 @@ pub fn unique_physical_display(
         .count()
         != 1
     {
-        return Err(DisplayError(
+        return Err(DisplayError::Failure(
             "cloned outputs sharing one GDI display name are not supported".into(),
         ));
     }
@@ -134,6 +144,7 @@ fn active_displays_with_identity(include_identity: bool) -> Result<Vec<Display>,
     for _ in 0..5 {
         match read_active_displays(include_identity) {
             Ok(displays) => return Ok(displays),
+            Err(error) if error.is_identity_pending() => return Err(error),
             Err(error) => last_error = Some(error),
         }
         thread::sleep(Duration::from_millis(20));
@@ -146,7 +157,7 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
         .checked_add(u64::from(requested.refresh_denominator) / 2)
         .and_then(|value| value.checked_div(u64::from(requested.refresh_denominator)))
         .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| DisplayError("requested refresh rate is invalid".into()))?;
+        .ok_or_else(|| DisplayError::Failure("requested refresh rate is invalid".into()))?;
     let device_name = wide(&display.device_name);
     let mut mode = find_display_mode(
         PCWSTR(device_name.as_ptr()),
@@ -156,7 +167,7 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
         Rotation::Deg0,
     )
     .ok_or_else(|| {
-        DisplayError(format!(
+        DisplayError::Failure(format!(
             "{} does not expose requested mode {}x{}@{}",
             display.device_name, requested.width, requested.height, requested_hz
         ))
@@ -176,7 +187,7 @@ pub fn apply_display_mode(display: &Display, requested: VirtualMode) -> Result<(
         )
     };
     if result != DISP_CHANGE_SUCCESSFUL {
-        return Err(DisplayError(format!(
+        return Err(DisplayError::Failure(format!(
             "ChangeDisplaySettingsExW({}) rejected native mode {}x{}@{} with status {}",
             display.device_name, requested.width, requested.height, requested_hz, result.0
         )));
@@ -298,14 +309,14 @@ fn restore_display_topology_inner(
         }
 
         let width = u32::try_from(display.rect.right - display.rect.left)
-            .map_err(|_| DisplayError("saved display width is invalid".into()))?;
+            .map_err(|_| DisplayError::Failure("saved display width is invalid".into()))?;
         let height = u32::try_from(display.rect.bottom - display.rect.top)
-            .map_err(|_| DisplayError("saved display height is invalid".into()))?;
+            .map_err(|_| DisplayError::Failure("saved display height is invalid".into()))?;
         let refresh_hz = u64::from(display.refresh_numerator)
             .checked_add(u64::from(display.refresh_denominator) / 2)
             .and_then(|value| value.checked_div(u64::from(display.refresh_denominator)))
             .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| DisplayError("saved display refresh rate is invalid".into()))?;
+            .ok_or_else(|| DisplayError::Failure("saved display refresh rate is invalid".into()))?;
         let device_name = wide(&actual.device_name);
         let mut mode = if same_mode {
             // A position-only restore must not request a new panel timing.
@@ -325,7 +336,7 @@ fn restore_display_topology_inner(
                 display.rotation,
             )
             .ok_or_else(|| {
-                DisplayError(format!(
+                DisplayError::Failure(format!(
                     "{} no longer exposes saved mode {}x{}@{}",
                     actual.device_name, width, height, refresh_hz
                 ))
@@ -363,7 +374,7 @@ fn restore_display_topology_inner(
             actual.device_name, flags.0, result.0
         ));
         if result != DISP_CHANGE_SUCCESSFUL {
-            return Err(DisplayError(format!(
+            return Err(DisplayError::Failure(format!(
                 "could not stage saved topology for {}: status {}; saved={:?} {:?} @{}/{} primary={}; current={:?} {:?} @{}/{} primary={}; submitted={}x{}@{} bpp={} fields={:#x} position_only={}",
                 actual.device_name,
                 result.0,
@@ -396,7 +407,7 @@ fn restore_display_topology_inner(
             result.0
         ));
         if result != DISP_CHANGE_SUCCESSFUL {
-            return Err(DisplayError(format!(
+            return Err(DisplayError::Failure(format!(
                 "could not apply saved physical topology: status {}",
                 result.0
             )));
@@ -455,7 +466,7 @@ fn restore_desktop_positions(expected: &[Display]) -> Result<(), DisplayError> {
             .get_mut(index)
             .filter(|mode| mode.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE)
             .ok_or_else(|| {
-                DisplayError(format!(
+                DisplayError::Failure(format!(
                     "missing source mode while restoring {}",
                     saved.device_name
                 ))
@@ -485,7 +496,7 @@ fn restore_desktop_positions(expected: &[Display]) -> Result<(), DisplayError> {
         modes.len()
     ));
     if status != 0 {
-        return Err(DisplayError(format!(
+        return Err(DisplayError::Failure(format!(
             "could not restore complete desktop positions: status {}; requested={:?}",
             status,
             expected
@@ -502,7 +513,7 @@ fn restore_desktop_positions(expected: &[Display]) -> Result<(), DisplayError> {
                 || current.primary != saved.primary
                 || !same_desktop_mode(current, saved))
         {
-            return Err(DisplayError(format!(
+            return Err(DisplayError::Failure(format!(
                 "desktop restore verification failed for {}: saved={:?} primary={} @{}/{}; actual={:?} primary={} @{}/{}",
                 current.device_name,
                 saved.rect,
@@ -525,6 +536,15 @@ fn topology_restore_flags(saved: &Display, actual: &Display) -> CDS_TYPE {
         flags |= CDS_SET_PRIMARY;
     }
     flags
+}
+
+pub(crate) fn same_physical_display(left: &Display, right: &Display) -> bool {
+    !left.virtual_display
+        && !right.virtual_display
+        && left.id.eq_ignore_ascii_case(&right.id)
+        && left.rect == right.rect
+        && left.primary == right.primary
+        && same_desktop_mode(left, right)
 }
 
 fn same_desktop_mode(left: &Display, right: &Display) -> bool {
@@ -625,7 +645,7 @@ fn current_desktop_mode(device_name: &str) -> Result<DEVMODEW, DisplayError> {
     }
     .as_bool()
     {
-        return Err(DisplayError(format!(
+        return Err(DisplayError::Failure(format!(
             "could not read current desktop mode for {device_name}"
         )));
     }
@@ -716,35 +736,38 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
             let id = wide_string(&target.monitorDevicePath);
             let virtual_display = is_sbms_adapter(&adapter);
             let connector_index = if virtual_display {
-                monitor_container_id(&id)
-                    .and_then(sbms_connector_index)
-                    .ok_or_else(|| {
-                        DisplayError(format!(
-                            "SBMS monitor has no valid connector identity: {id}"
-                        ))
-                    })?
+                let identities = published_connector_identities()
+                    .map_err(|error| DisplayError::Failure(error.to_string()))?;
+                connector_for_target(&identities, path.targetInfo.adapterId, path.targetInfo.id)?
             } else {
                 target.connectorInstance
             };
-            let (physical_size, preferred_refresh_millihz, sunshine_id) = if include_identity {
-                let monitor_identity = monitor_identity(&id);
-                (
-                    monitor_identity
-                        .as_ref()
-                        .and_then(|identity| edid_dimensions_mm(&identity.edid)),
-                    monitor_identity
-                        .as_ref()
-                        .and_then(|identity| edid_preferred_refresh_millihz(&identity.edid)),
-                    sunshine_display_id(&sunshine_device_id_payload(
-                        &id,
-                        monitor_identity.as_ref(),
-                    )),
-                )
-            } else {
-                (None, None, None)
-            };
+            let (physical_size, preferred_refresh_millihz, sunshine_id) =
+                if include_identity && !id.is_empty() {
+                    let monitor_identity = monitor_identity(&id);
+                    (
+                        monitor_identity
+                            .as_ref()
+                            .and_then(|identity| edid_dimensions_mm(&identity.edid)),
+                        monitor_identity
+                            .as_ref()
+                            .and_then(|identity| edid_preferred_refresh_millihz(&identity.edid)),
+                        sunshine_display_id(&sunshine_device_id_payload(
+                            &id,
+                            monitor_identity.as_ref(),
+                        )),
+                    )
+                } else {
+                    (None, None, None)
+                };
             displays.push(Display {
-                id,
+                // Windows can publish a target before its PnP path. The driver's
+                // stable slot is the virtual source identity throughout its lifetime.
+                id: if virtual_display {
+                    format!("sbms:connector:{connector_index}")
+                } else {
+                    id
+                },
                 connector_index,
                 sunshine_id,
                 name: display_name(&name, physical_size, &source),
@@ -765,7 +788,7 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
         return Ok(displays);
     }
 
-    Err(DisplayError(
+    Err(DisplayError::Failure(
         "display topology kept changing while it was read".into(),
     ))
 }
@@ -835,39 +858,21 @@ fn monitor_identity(monitor_device_path: &str) -> Option<MonitorIdentity> {
     Some(MonitorIdentity { instance_id, edid })
 }
 
-fn monitor_container_id(monitor_device_path: &str) -> Option<GUID> {
-    let (device_info_set, device_info) = open_monitor_device(monitor_device_path)?;
-    let mut property_type = DEVPROPTYPE::default();
-    let mut bytes = [0u8; size_of::<GUID>()];
-    let mut size = 0;
-    unsafe {
-        SetupDiGetDevicePropertyW(
-            device_info_set.0,
-            &device_info,
-            &DEVPKEY_Device_ContainerId,
-            &mut property_type,
-            Some(&mut bytes),
-            Some(&mut size),
-            0,
-        )
-    }
-    .ok()?;
-    if property_type != DEVPROP_TYPE_GUID || size as usize != bytes.len() {
-        return None;
-    }
-    Some(unsafe { bytes.as_ptr().cast::<GUID>().read_unaligned() })
-}
-
-fn sbms_connector_index(container_id: GUID) -> Option<u32> {
-    // Must match MonitorContainerId in driver/Driver.cpp. Windows' connectorInstance
-    // is not the driver's stable ConnectorIndex when only a later slot is active.
-    const BASE: GUID = GUID::from_u128(0x67453031_7ba9_4d45_8f0b_721db4616242);
-    let index = container_id.data1 ^ BASE.data1;
-    (container_id.data2 == BASE.data2
-        && container_id.data3 == BASE.data3
-        && container_id.data4 == BASE.data4
-        && index < MAX_OUTPUTS as u32)
-        .then_some(index)
+fn connector_for_target(
+    identities: &[ConnectorIdentity],
+    adapter_id: windows::Win32::Foundation::LUID,
+    target_id: u32,
+) -> Result<u32, DisplayError> {
+    identities.iter().find(|identity| {
+        identity.adapter_low == adapter_id.LowPart
+            && identity.adapter_high == adapter_id.HighPart
+            && identity.target_id == target_id
+    }).map(|identity| identity.connector_index).ok_or_else(|| {
+        DisplayError::identity_pending(format!(
+            "driver has not published the Windows target identity: adapter={:08x}:{:08x} target={target_id}",
+            adapter_id.HighPart as u32, adapter_id.LowPart,
+        ))
+    })
 }
 
 fn open_monitor_device(monitor_device_path: &str) -> Option<(DeviceInfoSet, SP_DEVINFO_DATA)> {
@@ -1248,7 +1253,7 @@ fn wide_string(value: &[u16]) -> String {
 }
 
 fn win32_error(operation: &str, code: u32) -> DisplayError {
-    DisplayError(format!("{operation} failed with Win32 error {code}"))
+    DisplayError::Failure(format!("{operation} failed with Win32 error {code}"))
 }
 
 #[cfg(test)]
@@ -1269,24 +1274,52 @@ mod tests {
     }
 
     #[test]
-    fn sbms_container_identity_preserves_sparse_connector_slots() {
-        for index in [0, 1, 5, 15] {
-            let mut container =
-                windows::core::GUID::from_u128(0x67453031_7ba9_4d45_8f0b_721db4616242);
-            container.data1 ^= index;
-            assert_eq!(super::sbms_connector_index(container), Some(index));
-        }
-    }
-
-    #[test]
-    fn sbms_container_identity_rejects_unrelated_and_out_of_range_guids() {
-        let base = windows::core::GUID::from_u128(0x67453031_7ba9_4d45_8f0b_721db4616242);
-        let mut unrelated = base;
-        unrelated.data4[7] ^= 1;
-        assert_eq!(super::sbms_connector_index(unrelated), None);
-        let mut out_of_range = base;
-        out_of_range.data1 ^= crate::limits::MAX_OUTPUTS as u32;
-        assert_eq!(super::sbms_connector_index(out_of_range), None);
+    fn driver_target_identity_preserves_sparse_slots_and_matches_the_whole_luid() {
+        use crate::session_gate::ConnectorIdentity;
+        use windows::Win32::Foundation::LUID;
+        let adapter = LUID {
+            LowPart: 12,
+            HighPart: -3,
+        };
+        let identities = [
+            ConnectorIdentity {
+                connector_index: 5,
+                adapter_low: 12,
+                adapter_high: -3,
+                target_id: 256,
+            },
+            ConnectorIdentity {
+                connector_index: 1,
+                adapter_low: 12,
+                adapter_high: -3,
+                target_id: 17,
+            },
+        ];
+        assert_eq!(
+            super::connector_for_target(&identities, adapter, 256).unwrap(),
+            5
+        );
+        assert_eq!(
+            super::connector_for_target(&identities, adapter, 17).unwrap(),
+            1
+        );
+        assert!(
+            super::connector_for_target(
+                &identities,
+                LUID {
+                    LowPart: 12,
+                    HighPart: 4
+                },
+                256
+            )
+            .unwrap_err()
+            .is_identity_pending()
+        );
+        assert!(
+            super::connector_for_target(&identities, adapter, 5)
+                .unwrap_err()
+                .is_identity_pending()
+        );
     }
 
     fn display(id: &str, device_name: &str, virtual_display: bool) -> Display {

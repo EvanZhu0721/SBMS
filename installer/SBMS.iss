@@ -57,7 +57,8 @@ Source: "..\NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}\licenses"; DestName: "GPL-3.0.txt"; Flags: ignoreversion
 Source: "..\LICENSES\MS-PL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSES\Apache-2.0.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
-Source: "..\LICENSES\LGPL-2.1.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
+; Run maintenance after the final installed file, before Inno evaluates NeedRestart.
+Source: "..\LICENSES\LGPL-2.1.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion; AfterInstall: InstallSbms
 Source: "maintenance.ps1"; DestName: "sbms-maintenance.ps1"; Flags: dontcopy
 
 [InstallDelete]
@@ -97,6 +98,8 @@ Name: "{group}\Uninstall SBMS"; Filename: "{uninstallexe}"
 var
   MaintenanceLogPath: String;
   TrustCertificate: Boolean;
+  DriverRestartRequired: Boolean;
+  MaintenanceFailed: Boolean;
 
 #include "installer-ui.iss"
 
@@ -242,17 +245,29 @@ begin
   end;
 end;
 
-procedure CurStepChanged(CurStep: TSetupStep);
+procedure InstallSbms();
 var
   ResultCode: Integer;
 begin
-  if CurStep = ssPostInstall then
-  begin
-    if not RunMaintenance('Install', ExpandConstant('{app}'), ResultCode) then
-      RaiseException(MaintenanceFailure('Could not start SBMS installation maintenance.'))
-    else if ResultCode <> 0 then
-      RaiseException(MaintenanceFailure(Format('SBMS driver or startup registration failed (exit code %d).', [ResultCode])));
-  end;
+  MaintenanceFailed := True;
+  if not RunMaintenance('Install', ExpandConstant('{app}'), ResultCode) then
+    RaiseException(MaintenanceFailure('Could not start SBMS installation maintenance.'))
+  else if ResultCode = 3010 then
+    DriverRestartRequired := True
+  else if ResultCode <> 0 then
+    RaiseException(MaintenanceFailure(Format('SBMS driver or startup registration failed (exit code %d).', [ResultCode])));
+  MaintenanceFailed := False;
+end;
+
+function NeedRestart(): Boolean;
+begin
+  Result := DriverRestartRequired;
+end;
+
+function GetCustomSetupExitCode(): Integer;
+begin
+  Result := 0;
+  if MaintenanceFailed then Result := 1;
 end;
 
 function InitializeUninstall(): Boolean;
