@@ -58,6 +58,22 @@ Describe 'SBMS launch entry contract' {
             -InstallRoot $script:loadRoot
     }
 
+    It 'resolves the interactive account from the process owner SID' {
+        $script:currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        Mock Get-Process { [pscustomobject]@{ Id = 123; SessionId = 1 } }
+        Mock Get-CimInstance { [Microsoft.Management.Infrastructure.CimInstance]::new('Win32_Process') }
+        Mock Invoke-CimMethod {
+            [pscustomobject]@{ ReturnValue = 0; Sid = $script:currentIdentity.User.Value }
+        }
+
+        $identity = Get-InteractiveIdentity
+
+        $identity.Sid | Should Be $script:currentIdentity.User.Value
+        $identity.Name | Should Be $script:currentIdentity.Name
+        Assert-MockCalled Invoke-CimMethod -Times 1 -Exactly -Scope It `
+            -ParameterFilter { $MethodName -eq 'GetOwnerSid' }
+    }
+
     It 'marks the Start menu launch as an explicit open request' {
         $icons = Get-InnoSection `
             -Source $script:installerSource `
@@ -76,11 +92,15 @@ Describe 'SBMS launch entry contract' {
         )
     }
 
-    It 'registers the tray task with deferred startup = <DeferStart>' -TestCases @(
-        @{ DeferStart = $false }
-        @{ DeferStart = $true }
+    It 'registers the tray with deferred startup = <DeferStart>, broken diagnostics = <BrokenDetails>' -TestCases @(
+        @{ DeferStart = $false; BrokenDetails = $false }
+        @{ DeferStart = $true; BrokenDetails = $false }
+        @{ DeferStart = $false; BrokenDetails = $true }
     ) {
-        param($DeferStart)
+        param($DeferStart, $BrokenDetails)
+        if ($BrokenDetails) {
+            Mock ConvertTo-Json { throw 'Task diagnostics unavailable' }
+        }
         $script:mockTaskAction =
             [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskAction')
         $script:mockTrigger =
@@ -97,7 +117,7 @@ Describe 'SBMS launch entry contract' {
         $script:processScan = 0
         $script:taskRegistered = $false
         Mock Assert-InstallIdentity {
-            [pscustomobject]@{ Sid = 'S-1-5-21-test' }
+            [pscustomobject]@{ Sid = 'S-1-5-21-test'; Name = 'TEST-PC\test-user' }
         }
         Mock Get-ScheduledTask { $null }
         Mock New-ScheduledTaskAction { $script:mockTaskAction }
@@ -110,6 +130,7 @@ Describe 'SBMS launch entry contract' {
             $script:taskRegistered = $true
         }
         Mock Start-ScheduledTask {}
+        Mock Export-ScheduledTask { throw 'Optional task export unavailable' }
         $script:readyChecks = 0
         Mock Test-SbmsTrayReady {
             $marker = [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8')
@@ -127,6 +148,7 @@ Describe 'SBMS launch entry contract' {
 
         Install-SbmsTask -DeferStart:$DeferStart
 
+        Assert-MockCalled Export-ScheduledTask -Times 0 -Exactly -Scope It
         Assert-MockCalled New-ScheduledTaskAction -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $Execute -eq $script:tray -and
@@ -135,11 +157,11 @@ Describe 'SBMS launch entry contract' {
             }
         Assert-MockCalled New-ScheduledTaskTrigger -Times 1 -Exactly -Scope It `
             -ParameterFilter {
-                $AtLogOn -and $User -eq 'S-1-5-21-test'
+                $AtLogOn -and $User -eq 'TEST-PC\test-user'
             }
         Assert-MockCalled New-ScheduledTaskPrincipal -Times 1 -Exactly -Scope It `
             -ParameterFilter {
-                $UserId -eq 'S-1-5-21-test' -and
+                $UserId -eq 'TEST-PC\test-user' -and
                     $LogonType -eq 'Interactive' -and
                     $RunLevel -eq 'Highest'
             }

@@ -144,6 +144,13 @@ begin
   Result := ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe');
 end;
 
+function InitializeMaintenanceLog(Path, Header: String): Boolean;
+begin
+  if FileExists(Path) and not FileCopy(Path, Path + '.previous', False) then
+    Log('Could not preserve previous maintenance log: ' + Path);
+  Result := SaveStringToFile(Path, UTF8Encode(Header), False);
+end;
+
 function RunMaintenanceScript(
   ScriptPath: String;
   Action: String;
@@ -151,15 +158,14 @@ function RunMaintenanceScript(
   var ResultCode: Integer): Boolean;
 var
   Parameters: String;
+  DetailLogPath, Header: String;
 begin
   MaintenanceLogPath :=
     ExpandConstant('{commonappdata}\SBMS\logs\setup-') + Action + '.log';
+  Header := GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') +
+    ' ' + Action + #13#10;
   if not ForceDirectories(ExtractFileDir(MaintenanceLogPath)) or
-    not SaveStringToFile(
-      MaintenanceLogPath,
-      UTF8Encode(GetDateTimeString('yyyy-mm-dd hh:nn:ss', '-', ':') +
-      ' ' + Action + #13#10),
-      False) then
+    not InitializeMaintenanceLog(MaintenanceLogPath, Header) then
   begin
     ResultCode := 5;
     Result := False;
@@ -175,6 +181,11 @@ begin
   Parameters :=
     '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ScriptPath +
     '" -Action "' + Action + '" -InstallRoot "' + Root + '"';
+  DetailLogPath := MaintenanceLogPath + '.details.log';
+  if InitializeMaintenanceLog(DetailLogPath, Header) then
+    Parameters := Parameters + ' -DiagnosticLogPath "' + DetailLogPath + '"'
+  else
+    LogMaintenanceOutput('Could not initialize detailed log: ' + DetailLogPath, True, False);
   if (Action = 'Install') and TrustCertificate then
     Parameters := Parameters + ' -TrustCertificate';
   Result := ExecAndLogOutput(

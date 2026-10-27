@@ -7,7 +7,9 @@ param(
     [Parameter(Mandatory)]
     [string]$InstallRoot,
 
-    [switch]$TrustCertificate
+    [switch]$TrustCertificate,
+
+    [string]$DiagnosticLogPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -26,6 +28,54 @@ $backupRetention = 5
 $backupOwnershipMarker = '.sbms-upgrade-snapshot-v1'
 $backupOwnershipContent = 'SBMS upgrade snapshot v1'
 $script:restartRequired = $false
+$script:maintenanceStage = 'Initialize'
+$script:reportedException = $null
+
+function Write-MaintenanceDiagnostic {
+    param([string]$Message)
+
+    $line = '{0:O} [{1}] {2}' -f [DateTimeOffset]::Now, $script:maintenanceStage, $Message
+    # Diagnostics cannot change the maintenance result or interrupt rollback.
+    try { [Console]::Out.WriteLine($line) } catch { }
+    try {
+        if ($DiagnosticLogPath) {
+            [IO.File]::AppendAllText($DiagnosticLogPath, $line + [Environment]::NewLine,
+                [Text.UTF8Encoding]::new($false))
+        }
+    }
+    catch {
+        try { [Console]::Error.WriteLine("Detailed log write failed: $($_.Exception.Message)") } catch { }
+    }
+}
+
+function Write-MaintenanceError {
+    param([Management.Automation.ErrorRecord]$Record)
+
+    # Rethrowing after rollback must not relabel the original failure as rollback.
+    if ([object]::ReferenceEquals($script:reportedException, $Record.Exception)) {
+        return
+    }
+    $script:reportedException = $Record.Exception
+    try {
+        Write-MaintenanceDiagnostic ("ErrorId={0}; Category={1}; Target={2}" -f
+            $Record.FullyQualifiedErrorId, $Record.CategoryInfo, $Record.TargetObject)
+        $exception = $Record.Exception
+        while ($null -ne $exception) {
+            Write-MaintenanceDiagnostic ('Exception={0}; HResult=0x{1:X8}; Message={2}' -f
+                $exception.GetType().FullName, $exception.HResult, $exception.Message)
+            if ($exception -is [Microsoft.Management.Infrastructure.CimException]) {
+                Write-MaintenanceDiagnostic ("CIM NativeErrorCode={0}; ErrorData={1}" -f
+                    $exception.NativeErrorCode, ($exception.ErrorData | Format-List * | Out-String -Width 4096))
+            }
+            $exception = $exception.InnerException
+        }
+        Write-MaintenanceDiagnostic $Record.InvocationInfo.PositionMessage
+        Write-MaintenanceDiagnostic $Record.ScriptStackTrace
+    }
+    catch {
+        Write-MaintenanceDiagnostic "Could not format error details: $($_.Exception.Message)"
+    }
+}
 
 function Get-Sha256Hex {
     param([Parameter(Mandatory)][string]$LiteralPath)
@@ -53,20 +103,19 @@ function Get-InteractiveIdentity {
     }
     $process = Get-CimInstance -ClassName Win32_Process `
         -Filter "ProcessId = $($explorer.Id)"
-    $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner
-    if ($owner.ReturnValue -ne 0 -or -not $owner.User) {
+    $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwnerSid
+    if ($owner.ReturnValue -ne 0 -or -not $owner.Sid) {
         throw 'The interactive user identity could not be resolved.'
     }
-    $name = if ($owner.Domain) {
-        "$($owner.Domain)\$($owner.User)"
+    $sid = [Security.Principal.SecurityIdentifier]::new($owner.Sid)
+    $account = $sid.Translate([Security.Principal.NTAccount])
+    $resolvedSid = $account.Translate([Security.Principal.SecurityIdentifier])
+    if ($resolvedSid.Value -ne $sid.Value) {
+        throw 'The interactive account name does not resolve to its process owner SID.'
     }
-    else {
-        $owner.User
-    }
-    $account = [Security.Principal.NTAccount]::new($name)
-    $sid = $account.Translate([Security.Principal.SecurityIdentifier])
+    Write-MaintenanceDiagnostic "Interactive account=$($account.Value); SID=$($sid.Value); Session=$sessionId; ExplorerPID=$($explorer.Id)"
     [pscustomobject]@{
-        Name = $name
+        Name = $account.Value
         Sid = $sid.Value
     }
 }
@@ -430,20 +479,22 @@ namespace SBMS {
 function Install-SbmsTask {
     param([switch]$DeferStart)
 
+    $script:maintenanceStage = 'Build startup task'
     $interactive = Assert-InstallIdentity
+    Write-MaintenanceDiagnostic "Task=$taskPath$taskName; Account=$($interactive.Name); SID=$($interactive.Sid); DeferStart=$DeferStart"
     if (Get-OwnedTask) {
         throw "Owned scheduled task already exists at $taskPath$taskName."
     }
     $taskAction = New-ScheduledTaskAction -Execute $tray `
         -Argument '--background' `
         -WorkingDirectory $InstallRoot
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $interactive.Sid
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $interactive.Name
     if ($DeferStart) {
         # Only future logons may start the new host while its driver awaits reboot.
         $trigger.StartBoundary = [DateTime]::Now.ToString('yyyy-MM-ddTHH:mm:ss')
     }
     $principal = New-ScheduledTaskPrincipal `
-        -UserId $interactive.Sid `
+        -UserId $interactive.Name `
         -LogonType Interactive `
         -RunLevel Highest
     $settings = New-ScheduledTaskSettingsSet `
@@ -459,6 +510,19 @@ function Install-SbmsTask {
     )
     $brokerMarker = [System.Threading.Mutex]::new($false, 'Local\SBMS-Manual-Launch-Broker-7EB4D7A8')
     try {
+        try {
+            foreach ($part in @($taskAction, $trigger, $principal, $settings)) {
+                $properties = [ordered]@{ Class = $part.CimSystemProperties.ClassName }
+                foreach ($property in $part.CimInstanceProperties) {
+                    $properties[$property.Name] = $property.Value
+                }
+                Write-MaintenanceDiagnostic ($properties | ConvertTo-Json -Depth 4)
+            }
+        }
+        catch {
+            Write-MaintenanceDiagnostic "Could not format task details: $($_.Exception.Message)"
+        }
+        $script:maintenanceStage = 'Register startup task'
         Register-ScheduledTask `
             -TaskPath $taskPath `
             -TaskName $taskName `
@@ -471,6 +535,7 @@ function Install-SbmsTask {
         if ($DeferStart) {
             return
         }
+        $script:maintenanceStage = 'Start startup task'
         Start-ScheduledTask -TaskPath $taskPath -TaskName $taskName
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         while ([DateTime]::UtcNow -lt $deadline) {
@@ -570,6 +635,7 @@ function Test-UninstallPreflight {
 }
 
 function Install-Sbms {
+    $script:maintenanceStage = 'Install preflight'
     Assert-InstallIdentity | Out-Null
     $taskSnapshots = @(Get-OwnedTaskSnapshots)
     Remove-SbmsTask
@@ -578,11 +644,15 @@ function Install-Sbms {
             ForEach-Object { $_.Name }
     )
     try {
+        $script:maintenanceStage = 'Install driver'
         Install-SbmsDriver
+        Write-MaintenanceDiagnostic "Driver installation completed; RestartRequired=$script:restartRequired"
         Install-SbmsTask -DeferStart:$script:restartRequired
     }
     catch {
         $failure = $_
+        Write-MaintenanceError $failure
+        $script:maintenanceStage = 'Rollback installation'
         Remove-SbmsTask
         $added = @(
             @(Find-SbmsDriverPackages) |
@@ -611,6 +681,7 @@ function Install-Sbms {
     }
     # The new package and startup task are working. Old SBMS packages are no
     # longer useful for rollback and otherwise accumulate in DriverStore.
+    $script:maintenanceStage = 'Remove obsolete drivers'
     Remove-DriverPackages -Packages @(Find-ObsoleteSbmsDriverPackages)
 }
 
@@ -644,13 +715,27 @@ function Invoke-MaintenanceAction {
     param([scriptblock]$Operation)
 
     try {
+        # Inno captures UTF-8. Set the console code page before native commands run.
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $OutputEncoding = [Console]::OutputEncoding
+        $current = [Security.Principal.WindowsIdentity]::GetCurrent()
+        Write-MaintenanceDiagnostic ("Action=$Action; Root=$InstallRoot; PID=$PID; PS=$($PSVersionTable.PSVersion); OS=$([Environment]::OSVersion.VersionString); Is64Bit=$([Environment]::Is64BitProcess); Culture=$([Globalization.CultureInfo]::CurrentCulture.Name); OutputCodePage=$([Console]::OutputEncoding.CodePage); Account=$($current.Name); SID=$($current.User.Value)")
+        if (Test-Path -LiteralPath $tray) {
+            try {
+                Write-MaintenanceDiagnostic "TrayVersion=$([Diagnostics.FileVersionInfo]::GetVersionInfo($tray).FileVersion)"
+            }
+            catch {
+                Write-MaintenanceDiagnostic "Could not read tray version: $($_.Exception.Message)"
+            }
+        }
         & $Operation
+        Write-MaintenanceDiagnostic 'Completed'
     }
     catch {
         # Setup captures stdout/stderr even if PowerShell cannot start this script.
         # Keep the original exception and location visible in the persistent log.
         [Console]::Error.WriteLine("SBMS $Action failed: $($_.Exception.Message)")
-        [Console]::Error.WriteLine($_.ScriptStackTrace)
+        Write-MaintenanceError $_
         exit 1
     }
 }

@@ -31,6 +31,7 @@ Describe 'Install and uninstall compensation contracts' {
 
     BeforeEach {
         $script:restartRequired = $false
+        $script:reportedException = $null
         $script:events = New-Object System.Collections.ArrayList
         $script:driverScan = 0
 
@@ -64,6 +65,7 @@ Describe 'Install and uninstall compensation contracts' {
             [void]$script:events.Add('install-driver')
         }
         Mock Install-SbmsTask {
+            $script:maintenanceStage = 'Register startup task'
             [void]$script:events.Add('install-task')
             throw 'startup registration failed'
         }
@@ -79,13 +81,26 @@ Describe 'Install and uninstall compensation contracts' {
         Mock Find-ObsoleteSbmsDriverPackages { @() }
     }
 
-    It 'removes only newly added drivers and restores the previous task after install failure' {
+    It 'preserves the original error and rolls back with a blocked log = <BlockedLog>' -TestCases @(
+        @{ BlockedLog = $false }
+        @{ BlockedLog = $true }
+    ) {
+        param($BlockedLog)
+        $script:DiagnosticLogPath = Join-Path $TestDrive "rollback-$BlockedLog.log"
+        if ($BlockedLog) {
+            # A directory at the file path makes the real AppendAllText fail.
+            New-Item -ItemType Directory -Path $script:DiagnosticLogPath | Out-Null
+        }
         $caught = $null
         try {
             Install-Sbms
         }
         catch {
             $caught = $_
+        }
+        finally {
+            $detail = $script:DiagnosticLogPath
+            $script:DiagnosticLogPath = ''
         }
 
         $caught | Should Not BeNullOrEmpty
@@ -94,8 +109,17 @@ Describe 'Install and uninstall compensation contracts' {
             'remove-task|install-driver|install-task|remove-task|' +
             'remove-driver:oem-new.inf|restore-task'
         )
-        Assert-MockCalled Remove-DriverPackages -Times 1 -Exactly
-        Assert-MockCalled Restore-SbmsTasks -Times 1 -Exactly
+        Assert-MockCalled Remove-DriverPackages -Times 1 -Exactly -Scope It
+        Assert-MockCalled Restore-SbmsTasks -Times 1 -Exactly -Scope It
+        if (-not $BlockedLog) {
+            $script:DiagnosticLogPath = $detail
+            try { Write-MaintenanceError $caught }
+            finally { $script:DiagnosticLogPath = '' }
+            $logged = [IO.File]::ReadAllText($detail, [Text.Encoding]::UTF8)
+            ([regex]::Matches($logged, 'Exception=')).Count | Should Be 1
+            $logged | Should Match '\[Register startup task\] Exception='
+            $logged | Should Not Match '\[Rollback installation\] Exception='
+        }
     }
 
     It 'reports both failures when install task restoration also fails' {
