@@ -1038,9 +1038,16 @@ impl WindowGoal {
             && self
                 .position
                 .is_none_or(|(left, top)| actual.outer.left == left && actual.outer.top == top)
-            && self
-                .normal
-                .is_none_or(|rect| actual.placement.rcNormalPosition == rect)
+            && self.normal.is_none_or(|rect| {
+                let accepted = actual.placement.rcNormalPosition;
+                // Maximized apps may clamp or replace their restore rectangle.
+                // Keep monitor, DPI and visible-state checks independent.
+                if self.state == WindowState::Maximized {
+                    accepted.right > accepted.left && accepted.bottom > accepted.top
+                } else {
+                    accepted == rect
+                }
+            })
             && self.restore_to_maximized.is_none_or(|expected| {
                 (actual.placement.flags.0
                     & windows::Win32::UI::WindowsAndMessaging::WPF_RESTORETOMAXIMIZED.0

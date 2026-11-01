@@ -1305,3 +1305,61 @@ fn native_physical_preservation_restores_os_relocation_and_does_not_write_unchan
     unsafe { SetThreadDpiAwarenessContext(previous) };
     checks.unwrap();
 }
+
+#[test]
+fn maximized_goal_accepts_logged_app_adjustments_but_checks_destination() {
+    // Obsidian's minimum size at 192/120 DPI, then Codex's full-screen
+    // restore rectangle, from the two 2026-11-01 failed mapping sessions.
+    for (dpi, requested, accepted) in [
+        (192, rect(235, 2880, 308, 180), rect(235, 2880, 400, 300)),
+        (
+            120,
+            rect(-2560, -1001, 176, 103),
+            rect(-2560, -1001, 250, 188),
+        ),
+        (
+            192,
+            rect(236, 2881, 2799, 1469),
+            rect(235, 2880, 4480, 2520),
+        ),
+    ] {
+        let mut actual = observation();
+        actual.zoomed = true;
+        actual.dpi = dpi;
+        actual.placement.rcNormalPosition = accepted;
+        let target = Some(actual.monitor);
+        let goal = WindowGoal {
+            state: WindowState::Maximized,
+            normal: Some(requested),
+            dpi: Some(dpi),
+            ..Default::default()
+        };
+        assert!(goal.matches(&actual, target));
+        let mut invalid = actual;
+        invalid.dpi += 1;
+        assert!(!goal.matches(&invalid, target));
+        invalid = actual;
+        invalid.monitor = HMONITOR(2usize as *mut _);
+        assert!(!goal.matches(&invalid, target));
+        invalid = actual;
+        invalid.zoomed = false;
+        assert!(!goal.matches(&invalid, target));
+        invalid = actual;
+        invalid.iconic = true;
+        assert!(!goal.matches(&invalid, target));
+        invalid = actual;
+        invalid.outer.right = invalid.outer.left;
+        assert!(!goal.matches(&invalid, target));
+        invalid = actual;
+        invalid.placement.rcNormalPosition.right = invalid.placement.rcNormalPosition.left;
+        assert!(!goal.matches(&invalid, target));
+        invalid = actual;
+        invalid.iconic = true;
+        invalid.zoomed = false;
+        let minimized = WindowGoal {
+            state: WindowState::Minimized,
+            ..goal
+        };
+        assert!(!minimized.matches(&invalid, target));
+    }
+}
