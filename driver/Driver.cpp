@@ -64,131 +64,6 @@ static_assert(sizeof(GateEntry) == 20);
 static_assert(sizeof(GateIdentity) == 16);
 static_assert(sizeof(GateConfig) == 592);
 
-// Optional, bounded lifecycle evidence. The existing v8 gate ABI is unchanged.
-constexpr wchar_t kDriverDiagnostics[] = L"Global\\SBMSDriverDiagnostics-v1";
-constexpr UINT kDiagnosticMagic = 0x53424431;
-constexpr UINT kDiagnosticCapacity = 64;
-
-enum class DiagnosticStage : UINT
-{
-    MonitorReady = 1, Assign, Unassign, CreateFactory, EnumAdapter,
-    CreateDevice, QueryDevice, SetDevice, AllocateDrain, CreateStop,
-    CreateWorker, DrainStarted, FirstFrame, DrainExit, StopWait, DeviceRemovedReason,
-    SignalStop
-};
-
-struct DiagnosticRecord
-{
-    volatile LONG publication;
-    ULONG sequence;
-    ULONG tickLow;
-    ULONG tickHigh;
-    ULONG driverPid;
-    UINT connectorIndex;
-    ULONG assignment;
-    UINT stage;
-    ULONG adapterLow;
-    LONG adapterHigh;
-    HRESULT result;
-    UINT detail;
-};
-
-struct DiagnosticBuffer
-{
-    UINT magic;
-    UINT version;
-    UINT capacity;
-    ULONG ownerPid;
-    ULONG sessionTickLow;
-    ULONG sessionTickHigh;
-    volatile LONG writerLock;
-    volatile LONG nextSequence;
-    volatile LONG dropped;
-    DiagnosticRecord records[kDiagnosticCapacity];
-};
-
-static_assert(sizeof(DiagnosticRecord) == 48);
-static_assert(sizeof(DiagnosticBuffer) == 3108);
-
-struct DriverDiagnostics
-{
-    HANDLE mapping{};
-    DiagnosticBuffer* buffer{};
-    volatile LONG references{1};
-};
-
-void RetainDiagnostics(DriverDiagnostics* diagnostics)
-{
-    if (diagnostics != nullptr) InterlockedIncrement(&diagnostics->references);
-}
-
-void ReleaseDiagnostics(DriverDiagnostics* diagnostics)
-{
-    if (diagnostics != nullptr && InterlockedDecrement(&diagnostics->references) == 0)
-    {
-        UnmapViewOfFile(diagnostics->buffer);
-        CloseHandle(diagnostics->mapping);
-        delete diagnostics;
-    }
-}
-
-DriverDiagnostics* OpenDriverDiagnostics()
-{
-    HANDLE mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, kDriverDiagnostics);
-    if (mapping == nullptr) return nullptr;
-    auto* buffer = static_cast<DiagnosticBuffer*>(
-        MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(DiagnosticBuffer)));
-    if (buffer == nullptr || buffer->magic != kDiagnosticMagic ||
-        buffer->version != 1 || buffer->capacity != kDiagnosticCapacity)
-    {
-        if (buffer != nullptr) UnmapViewOfFile(buffer);
-        CloseHandle(mapping);
-        return nullptr;
-    }
-    auto* diagnostics = new (std::nothrow) DriverDiagnostics{};
-    if (diagnostics == nullptr)
-    {
-        UnmapViewOfFile(buffer);
-        CloseHandle(mapping);
-        return nullptr;
-    }
-    diagnostics->mapping = mapping;
-    diagnostics->buffer = buffer;
-    return diagnostics;
-}
-
-void RecordDiagnostic(
-    DriverDiagnostics* diagnostics, UINT connector, ULONG assignment,
-    DiagnosticStage stage, LUID adapter, HRESULT result = S_OK, UINT detail = 0)
-{
-    if (diagnostics == nullptr) return;
-    DiagnosticBuffer* buffer = diagnostics->buffer;
-    // Never wait on diagnostics in an IddCx callback or frame worker. Report
-    // contention explicitly; the host also reports overwritten ring records.
-    if (InterlockedCompareExchange(&buffer->writerLock, 1, 0) != 0)
-    {
-        InterlockedIncrement(&buffer->dropped);
-        return;
-    }
-    const ULONG sequence = static_cast<ULONG>(InterlockedIncrement(&buffer->nextSequence));
-    DiagnosticRecord& record = buffer->records[(sequence - 1u) % kDiagnosticCapacity];
-    InterlockedExchange(&record.publication, static_cast<LONG>(sequence * 2u - 1u));
-    const ULONGLONG tick = GetTickCount64();
-    record.sequence = sequence;
-    record.tickLow = static_cast<ULONG>(tick);
-    record.tickHigh = static_cast<ULONG>(tick >> 32);
-    record.driverPid = GetCurrentProcessId();
-    record.connectorIndex = connector;
-    record.assignment = assignment;
-    record.stage = static_cast<UINT>(stage);
-    record.adapterLow = adapter.LowPart;
-    record.adapterHigh = adapter.HighPart;
-    record.result = result;
-    record.detail = detail;
-    InterlockedExchange(&record.publication, static_cast<LONG>(sequence * 2u));
-    InterlockedExchange(&buffer->writerLock, 0);
-}
-
 ULONG BeginIdentityPublication(GateIdentity& identity)
 {
     const ULONG previousSequence = static_cast<ULONG>(
@@ -227,10 +102,6 @@ struct Drain
     HANDLE stop{};
     HANDLE thread{};
     volatile LONG ownership{};
-    DriverDiagnostics* diagnostics{};
-    UINT connectorIndex{};
-    ULONG assignment{};
-    LUID renderAdapter{};
 };
 
 struct DeviceState
@@ -243,9 +114,6 @@ struct MonitorState
 {
     Drain* drain{};
     ModeConfig mode{};
-    DriverDiagnostics* diagnostics{};
-    ULONG assignment{};
-    LUID renderAdapter{};
 };
 
 WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(DeviceState, GetDeviceState);
@@ -374,18 +242,12 @@ void DestroyDrain(Drain* drain)
     if (drain->thread != nullptr) CloseHandle(drain->thread);
     if (drain->stop != nullptr) CloseHandle(drain->stop);
     if (drain->d3dDevice != nullptr) drain->d3dDevice->Release();
-    ReleaseDiagnostics(drain->diagnostics);
     delete drain;
 }
 
 DWORD WINAPI DrainFrames(void* argument)
 {
     auto* drain = static_cast<Drain*>(argument);
-    RecordDiagnostic(drain->diagnostics, drain->connectorIndex, drain->assignment,
-        DiagnosticStage::DrainStarted, drain->renderAdapter);
-    bool firstFrame = true;
-    HRESULT exitResult = S_OK;
-    UINT exitReason = 1; // Explicit stop before acquisition.
 
     for (;;)
     {
@@ -406,15 +268,11 @@ DWORD WINAPI DrainFrames(void* argument)
             {
                 continue;
             }
-            exitReason = wait == WAIT_OBJECT_0 + 1 ? 2 : 3;
-            exitResult = wait == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : S_OK;
             break;
         }
 
         if (FAILED(result))
         {
-            exitResult = result;
-            exitReason = 4; // ReleaseAndAcquireBuffer.
             break;
         }
 
@@ -423,29 +281,12 @@ DWORD WINAPI DrainFrames(void* argument)
             buffer.MetaData.pSurface->Release();
         }
 
-        const HRESULT finished = IddCxSwapChainFinishedProcessingFrame(drain->swapChain);
-        if (FAILED(finished))
+        if (FAILED(IddCxSwapChainFinishedProcessingFrame(drain->swapChain)))
         {
-            exitResult = finished;
-            exitReason = 5; // FinishedProcessingFrame.
             break;
-        }
-        if (firstFrame)
-        {
-            firstFrame = false;
-            RecordDiagnostic(drain->diagnostics, drain->connectorIndex, drain->assignment,
-                DiagnosticStage::FirstFrame, drain->renderAdapter);
         }
     }
 
-    RecordDiagnostic(drain->diagnostics, drain->connectorIndex, drain->assignment,
-        DiagnosticStage::DrainExit, drain->renderAdapter, exitResult, exitReason);
-    if (FAILED(exitResult))
-    {
-        RecordDiagnostic(drain->diagnostics, drain->connectorIndex, drain->assignment,
-            DiagnosticStage::DeviceRemovedReason, drain->renderAdapter,
-            drain->d3dDevice->GetDeviceRemovedReason());
-    }
     WdfObjectDelete(drain->swapChain);
     drain->swapChain = nullptr;
     if (InterlockedCompareExchange(&drain->ownership, 2, 0) == 1)
@@ -464,20 +305,11 @@ void StopDrain(MonitorState* monitor)
 
     Drain* drain = monitor->drain;
     monitor->drain = nullptr;
-    if (!SetEvent(drain->stop))
-    {
-        const HRESULT result = HRESULT_FROM_WIN32(GetLastError());
-        RecordDiagnostic(drain->diagnostics, drain->connectorIndex, drain->assignment,
-            DiagnosticStage::SignalStop, drain->renderAdapter, result);
-    }
+    SetEvent(drain->stop);
     if (drain->thread != nullptr)
     {
-        const DWORD wait = WaitForSingleObject(drain->thread, 5000);
-        if (wait != WAIT_OBJECT_0)
+        if (WaitForSingleObject(drain->thread, 5000) != WAIT_OBJECT_0)
         {
-            const HRESULT result = wait == WAIT_FAILED ? HRESULT_FROM_WIN32(GetLastError()) : S_OK;
-            RecordDiagnostic(drain->diagnostics, drain->connectorIndex, drain->assignment,
-                DiagnosticStage::StopWait, drain->renderAdapter, result, wait);
             // Either the worker observes state 1 and destroys itself, or it
             // already published state 2 and cleanup remains here.
             if (InterlockedCompareExchange(&drain->ownership, 1, 0) != 2)
@@ -500,16 +332,13 @@ bool StartDrain(
     IDXGIDevice* dxgiDevice = nullptr;
     ID3D11Device* d3dDevice = nullptr;
 
-    DiagnosticStage stage = DiagnosticStage::CreateFactory;
     HRESULT result = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
     if (SUCCEEDED(result))
     {
-        stage = DiagnosticStage::EnumAdapter;
         result = factory->EnumAdapterByLuid(renderAdapter, IID_PPV_ARGS(&adapter));
     }
     if (SUCCEEDED(result))
     {
-        stage = DiagnosticStage::CreateDevice;
         result = D3D11CreateDevice(
             adapter,
             D3D_DRIVER_TYPE_UNKNOWN,
@@ -524,12 +353,10 @@ bool StartDrain(
     }
     if (SUCCEEDED(result))
     {
-        stage = DiagnosticStage::QueryDevice;
         result = d3dDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
     }
     if (SUCCEEDED(result))
     {
-        stage = DiagnosticStage::SetDevice;
         IDARG_IN_SWAPCHAINSETDEVICE setDevice{};
         setDevice.pDevice = dxgiDevice;
         result = IddCxSwapChainSetDevice(swapChain, &setDevice);
@@ -541,13 +368,6 @@ bool StartDrain(
 
     if (FAILED(result))
     {
-        RecordDiagnostic(monitor->diagnostics, monitor->mode.connectorIndex, monitor->assignment,
-            stage, renderAdapter, result);
-        if (d3dDevice != nullptr)
-        {
-            RecordDiagnostic(monitor->diagnostics, monitor->mode.connectorIndex, monitor->assignment,
-                DiagnosticStage::DeviceRemovedReason, renderAdapter, d3dDevice->GetDeviceRemovedReason());
-        }
         if (d3dDevice != nullptr) d3dDevice->Release();
         return false;
     }
@@ -555,8 +375,6 @@ bool StartDrain(
     auto* drain = new (std::nothrow) Drain{};
     if (drain == nullptr)
     {
-        RecordDiagnostic(monitor->diagnostics, monitor->mode.connectorIndex, monitor->assignment,
-            DiagnosticStage::AllocateDrain, renderAdapter, E_OUTOFMEMORY);
         d3dDevice->Release();
         return false;
     }
@@ -564,11 +382,6 @@ bool StartDrain(
     drain->swapChain = swapChain;
     drain->d3dDevice = d3dDevice;
     drain->frameAvailable = frameAvailable;
-    drain->diagnostics = monitor->diagnostics;
-    RetainDiagnostics(drain->diagnostics);
-    drain->connectorIndex = monitor->mode.connectorIndex;
-    drain->assignment = monitor->assignment;
-    drain->renderAdapter = renderAdapter;
     drain->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (drain->stop != nullptr)
     {
@@ -576,11 +389,9 @@ bool StartDrain(
     }
     if (drain->thread == nullptr)
     {
-        const HRESULT error = HRESULT_FROM_WIN32(GetLastError());
-        RecordDiagnostic(monitor->diagnostics, monitor->mode.connectorIndex, monitor->assignment,
-            drain->stop == nullptr ? DiagnosticStage::CreateStop : DiagnosticStage::CreateWorker,
-            renderAdapter, error);
-        DestroyDrain(drain);
+        if (drain->stop != nullptr) CloseHandle(drain->stop);
+        d3dDevice->Release();
+        delete drain;
         return false;
     }
 
@@ -588,8 +399,7 @@ bool StartDrain(
     return true;
 }
 
-NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode, GateConfig& config,
-    DriverDiagnostics* diagnostics)
+NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode, GateConfig& config)
 {
     WDF_OBJECT_ATTRIBUTES attributes;
     WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&attributes, MonitorState);
@@ -618,8 +428,6 @@ NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode, GateConfig& c
 
     MonitorState* monitorState = GetMonitorState(output.MonitorObject);
     monitorState->mode = mode;
-    monitorState->diagnostics = diagnostics;
-    RetainDiagnostics(diagnostics);
 
     IDARG_OUT_MONITORARRIVAL arrival{};
     const NTSTATUS arrivalStatus =
@@ -638,8 +446,6 @@ NTSTATUS ReportMonitor(DeviceState* state, const ModeConfig& mode, GateConfig& c
     identity.adapterHigh = arrival.OsAdapterLuid.HighPart;
     identity.targetId = arrival.OsTargetId;
     InterlockedExchange(&identity.sequence, static_cast<LONG>(writingSequence + 1u));
-    RecordDiagnostic(diagnostics, mode.connectorIndex, 0, DiagnosticStage::MonitorReady,
-        arrival.OsAdapterLuid, S_OK, arrival.OsTargetId);
 
     return STATUS_SUCCESS;
 }
@@ -662,7 +468,6 @@ NTSTATUS ReportMonitors(DeviceState* state)
     // Keep this exact session mapping alive through all arrivals. Reopening by
     // name per monitor could publish an older adapter's identities into a new session.
     ModeConfig modes[kMaximumMonitors]{};
-    DriverDiagnostics* diagnostics = OpenDriverDiagnostics();
     UINT count = 0;
     NTSTATUS result = STATUS_INVALID_PARAMETER;
     if (ReadSessionConfig(*config, modes, count))
@@ -676,14 +481,13 @@ NTSTATUS ReportMonitors(DeviceState* state)
         result = STATUS_SUCCESS;
         for (UINT index = 0; index < count; ++index)
         {
-            result = ReportMonitor(state, modes[index], *config, diagnostics);
+            result = ReportMonitor(state, modes[index], *config);
             if (!NT_SUCCESS(result))
             {
                 break;
             }
         }
     }
-    ReleaseDiagnostics(diagnostics);
     UnmapViewOfFile(config);
     CloseHandle(gate);
     return result;
@@ -799,10 +603,7 @@ NTSTATUS DeviceD0Entry(WDFDEVICE device, WDF_POWER_DEVICE_STATE previousState)
 
 void MonitorCleanup(WDFOBJECT object)
 {
-    MonitorState* monitor = GetMonitorState(object);
-    StopDrain(monitor);
-    ReleaseDiagnostics(monitor->diagnostics);
-    monitor->diagnostics = nullptr;
+    StopDrain(GetMonitorState(object));
 }
 
 NTSTATUS AdapterInitFinished(
@@ -876,10 +677,6 @@ NTSTATUS AssignSwapChain(
 {
     MonitorState* state = GetMonitorState(monitor);
     StopDrain(state);
-    ++state->assignment;
-    state->renderAdapter = input->RenderAdapterLuid;
-    RecordDiagnostic(state->diagnostics, state->mode.connectorIndex, state->assignment,
-        DiagnosticStage::Assign, input->RenderAdapterLuid);
     if (!StartDrain(
             state,
             input->hSwapChain,
@@ -893,9 +690,6 @@ NTSTATUS AssignSwapChain(
 
 NTSTATUS UnassignSwapChain(IDDCX_MONITOR monitor)
 {
-    MonitorState* state = GetMonitorState(monitor);
-    RecordDiagnostic(state->diagnostics, state->mode.connectorIndex, state->assignment,
-        DiagnosticStage::Unassign, state->renderAdapter);
-    StopDrain(state);
+    StopDrain(GetMonitorState(monitor));
     return STATUS_SUCCESS;
 }

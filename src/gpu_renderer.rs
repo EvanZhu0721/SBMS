@@ -47,11 +47,10 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MWA_NO_ALT_ENTER, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_MOVE_RECT, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIDevice,
-    IDXGIFactory1, IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIFactory1,
+    IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
     IDXGISwapChain1,
 };
-use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::core::{Error as WindowsError, Interface, PCSTR};
 
@@ -188,16 +187,6 @@ pub struct GpuRendererConfig {
     pub target_refresh_millihz: u32,
 }
 
-/// Display identity is diagnostic context, not an adapter-selection override.
-pub struct GpuRendererIdentity {
-    pub source_device_name: String,
-    pub source_id: String,
-    pub source_connector_index: u32,
-    pub target_device_name: String,
-    pub target_id: String,
-    pub target_rect: RECT,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GpuRendererError {
     /// Desktop Duplication must be rebuilt after a topology or mode change.
@@ -240,39 +229,29 @@ impl std::error::Error for GpuRendererError {}
 /// telemetry can sample idle windows without exposing D3D objects.
 pub fn run_gpu_renderer(
     config: GpuRendererConfig,
-    identity: &GpuRendererIdentity,
     stop: &AtomicBool,
     mut on_event: impl FnMut(GpuRendererEvent) -> Result<(), String>,
 ) -> Result<(), GpuRendererError> {
     let mut trace = FirstFrameTrace::new(config.target_window);
     trace.log(format_args!(
-        "debug=issue-50-beta source_device={} source_id={} connector={} source_rect={:?} target_device={} target_id={} target_rect={:?} target={}x{} refresh_millihz={} rendering={:?}",
-        identity.source_device_name,
-        identity.source_id,
-        identity.source_connector_index,
+        "debug=first-frame-detailed-v1 source={:?} target={}x{} refresh_millihz={} rendering={:?}",
         config.source_rect,
-        identity.target_device_name,
-        identity.target_id,
-        identity.target_rect,
         config.target_width,
         config.target_height,
         config.target_refresh_millihz,
         config.rendering
     ));
-    crate::session_gate::log_driver_diagnostics("gpu-start");
-    let mut diagnostic_device = None;
     let result = (|| {
         validate_config(config)?;
         let copy_mode = CopyMode::from_options(config.rendering);
         let copy_stats_enabled = CopyMode::diagnostics_requested();
-        trace.enter("resolve-source");
         let (adapter, output) =
-            find_source_output(config.source_rect, &identity.source_device_name, &trace)?;
+            trace.call("resolve-source", || find_source_output(config.source_rect))?;
         if let Ok(description) =
             trace.call("IDXGIAdapter1::GetDesc1", || unsafe { adapter.GetDesc1() })
         {
             trace.log(format_args!(
-                "selected_adapter={} luid={:?}",
+                "adapter={} luid={:?}",
                 String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
                 description.AdapterLuid
             ));
@@ -280,7 +259,7 @@ pub fn run_gpu_renderer(
         if let Ok(description) = trace.call("IDXGIOutput::GetDesc", || unsafe { output.GetDesc() })
         {
             trace.log(format_args!(
-                "selected_output={} rect={:?} attached={} rotation={:?} monitor={:?}",
+                "output={} rect={:?} attached={} rotation={:?} monitor={:?}",
                 String::from_utf16_lossy(&description.DeviceName).trim_end_matches('\0'),
                 description.DesktopCoordinates,
                 description.AttachedToDesktop.as_bool(),
@@ -289,27 +268,11 @@ pub fn run_gpu_renderer(
             ));
         }
         let (device, context) = trace.call("D3D11CreateDevice", || create_device(&adapter))?;
-        diagnostic_device = Some(device.clone());
-        let actual_adapter = (|| {
-            let dxgi_device: IDXGIDevice = device.cast()?;
-            let actual = unsafe { dxgi_device.GetAdapter()? };
-            unsafe { actual.GetDesc() }
-        })();
-        match actual_adapter {
-            Ok(description) => trace.log(format_args!(
-                "actual_device_adapter={} luid={:?}",
-                String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
-                description.AdapterLuid
-            )),
-            Err(error) => trace.log(format_args!("actual_device_adapter unavailable={error:?}")),
-        }
         let duplication = trace
             .call("IDXGIOutput1::DuplicateOutput", || unsafe {
                 output.DuplicateOutput(&device)
             })
             .map_err(|error| classify_windows_error("IDXGIOutput1::DuplicateOutput", error))?;
-        trace.log("DuplicateOutput result=S_OK");
-        crate::session_gate::log_driver_diagnostics("duplicate-output-ready");
         let description = trace.call("IDXGIOutputDuplication::GetDesc", || unsafe {
             duplication.GetDesc()
         });
@@ -324,13 +287,7 @@ pub fn run_gpu_renderer(
             &mut trace,
         )
     })();
-    if result.is_err()
-        && let Some(device) = diagnostic_device.as_ref()
-    {
-        trace.device_reason(device, "renderer-error");
-    }
-    crate::session_gate::log_driver_diagnostics("gpu-exit");
-    trace.lifecycle(format_args!(
+    trace.log(format_args!(
         "exit stop_requested={} result={result:?}",
         stop.load(Ordering::Acquire)
     ));
@@ -349,7 +306,6 @@ struct FirstFrameTrace {
     phase: &'static str,
     wait_timeouts: u64,
     calls: u64,
-    acquire_attempts: u64,
     next_wait_report: Instant,
     presented: bool,
 }
@@ -363,7 +319,6 @@ impl FirstFrameTrace {
             phase: "validate",
             wait_timeouts: 0,
             calls: 0,
-            acquire_attempts: 0,
             next_wait_report: started + FIRST_FRAME_LOG_INTERVAL,
             presented: false,
         }
@@ -371,38 +326,23 @@ impl FirstFrameTrace {
 
     fn log(&self, detail: impl fmt::Display) {
         if !self.presented {
-            self.lifecycle(detail);
+            diagnostics::log(
+                Level::Info,
+                "renderer",
+                "first-frame",
+                None,
+                format!(
+                    "pid={} tid={} window={:?} call={} phase={} elapsed_ms={} acquire_timeouts={} {detail}",
+                    std::process::id(),
+                    unsafe { GetCurrentThreadId() },
+                    self.window,
+                    self.calls,
+                    self.phase,
+                    self.started.elapsed().as_millis(),
+                    self.wait_timeouts,
+                ),
+            );
         }
-    }
-
-    fn lifecycle(&self, detail: impl fmt::Display) {
-        diagnostics::log(
-            Level::Info,
-            "renderer",
-            "first-frame",
-            None,
-            format!(
-                "pid={} tid={} tick_ms={} window={:?} call={} phase={} elapsed_ms={} acquire_attempts={} acquire_timeouts={} {detail}",
-                std::process::id(),
-                unsafe { GetCurrentThreadId() },
-                unsafe { GetTickCount64() },
-                self.window,
-                self.calls,
-                self.phase,
-                self.started.elapsed().as_millis(),
-                self.acquire_attempts,
-                self.wait_timeouts,
-            ),
-        );
-    }
-
-    fn device_reason(&self, device: &ID3D11Device, context: &str) {
-        let reason = unsafe { device.GetDeviceRemovedReason() };
-        let code = reason.err().map_or(0, |error| error.code().0 as u32);
-        self.lifecycle(format_args!(
-            "context={context} GetDeviceRemovedReason=0x{code:08X} device_removed={}",
-            code != 0
-        ));
     }
 
     fn enter(&mut self, phase: &'static str) {
@@ -441,12 +381,8 @@ impl FirstFrameTrace {
     }
 
     fn presented(&mut self) {
-        if self.presented {
-            return;
-        }
         self.enter("presented");
         self.presented = true;
-        crate::session_gate::log_driver_diagnostics("first-present");
     }
 }
 
@@ -510,24 +446,14 @@ fn validate_config(config: GpuRendererConfig) -> Result<(), GpuRendererError> {
 
 fn find_source_output(
     source_rect: RECT,
-    source_device_name: &str,
-    trace: &FirstFrameTrace,
 ) -> Result<(IDXGIAdapter1, IDXGIOutput1), GpuRendererError> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
         .map_err(|error| classify_windows_error("CreateDXGIFactory1", error))?;
     let mut adapter_index = 0;
-    let mut selected = None;
-    let mut matches = 0;
     loop {
         let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
             Ok(adapter) => adapter,
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(error) if selected.is_some() => {
-                trace.log(format_args!(
-                    "candidate_enumeration incomplete api=EnumAdapters1 index={adapter_index} error={error:?}"
-                ));
-                break;
-            }
             Err(error) => {
                 return Err(classify_windows_error(
                     "IDXGIFactory1::EnumAdapters1",
@@ -540,73 +466,28 @@ fn find_source_output(
             let output = match unsafe { adapter.EnumOutputs(output_index) } {
                 Ok(output) => output,
                 Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-                Err(error) if selected.is_some() => {
-                    trace.log(format_args!(
-                        "candidate_enumeration incomplete api=EnumOutputs adapter_index={adapter_index} index={output_index} error={error:?}"
-                    ));
-                    break;
-                }
                 Err(error) => {
                     return Err(classify_windows_error("IDXGIAdapter::EnumOutputs", error));
                 }
             };
-            let description = match unsafe { output.GetDesc() } {
-                Ok(description) => description,
-                Err(error) if selected.is_some() => {
-                    trace.log(format_args!(
-                        "candidate_enumeration incomplete api=GetDesc adapter_index={adapter_index} output_index={output_index} error={error:?}"
-                    ));
-                    output_index += 1;
-                    continue;
-                }
-                Err(error) => return Err(classify_windows_error("IDXGIOutput::GetDesc", error)),
-            };
-            let rect_match = same_rect(description.DesktopCoordinates, source_rect);
-            let device_name = String::from_utf16_lossy(&description.DeviceName);
-            let device_name = device_name.trim_end_matches('\0');
-            let identity_match = device_name.eq_ignore_ascii_case(source_device_name);
-            if rect_match || identity_match {
-                let adapter_description = match unsafe { adapter.GetDesc1() } {
-                    Ok(description) => format!(
-                        "{} luid={:08X}:{:08X}",
-                        String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
-                        description.AdapterLuid.HighPart as u32,
-                        description.AdapterLuid.LowPart
-                    ),
-                    Err(error) => format!("unavailable={error:?}"),
-                };
-                trace.log(format_args!(
-                    "source_candidate adapter_index={adapter_index} output_index={output_index} device={device_name} attached={} rect={:?} monitor={:?} rect_match={rect_match} identity_match={identity_match} selected={} adapter={adapter_description}",
-                    description.AttachedToDesktop.as_bool(),
-                    description.DesktopCoordinates,
-                    description.Monitor,
-                    rect_match && selected.is_none(),
-                ));
-            }
-            if rect_match {
-                matches += 1;
-                // Preserve the existing first-RECT-match policy for this beta.
-                // Later outputs are observed only to expose ambiguous identities.
-                if selected.is_none() {
-                    let output = output.cast::<IDXGIOutput1>().map_err(|error| {
+            let description = unsafe { output.GetDesc() }
+                .map_err(|error| classify_windows_error("IDXGIOutput::GetDesc", error))?;
+            if same_rect(description.DesktopCoordinates, source_rect) {
+                return output
+                    .cast::<IDXGIOutput1>()
+                    .map(|output| (adapter, output))
+                    .map_err(|error| {
                         classify_windows_error("IDXGIOutput::QueryInterface(IDXGIOutput1)", error)
-                    })?;
-                    selected = Some((adapter.clone(), output));
-                }
+                    });
             }
             output_index += 1;
         }
         adapter_index += 1;
     }
-    trace.log(format_args!(
-        "source_candidates rect_matches={matches} policy=first-rect-match expected_device={source_device_name}"
-    ));
-    selected.ok_or_else(|| {
-        GpuRendererError::OutputUnavailable(format!(
-            "no DXGI output matches source rectangle ({}, {})-({}, {})",
-            source_rect.left, source_rect.top, source_rect.right, source_rect.bottom
-        ))
-    })
+    Err(GpuRendererError::OutputUnavailable(format!(
+        "no DXGI output matches source rectangle ({}, {})-({}, {})",
+        source_rect.left, source_rect.top, source_rect.right, source_rect.bottom
+    )))
 }
 
 fn same_rect(left: RECT, right: RECT) -> bool {
@@ -790,29 +671,30 @@ impl Pipeline {
                 refresh_interval,
                 self.config.rendering.static_refresh,
             );
-            if !trace.presented {
-                trace.acquire_attempts += 1;
-            }
-            let acquisition = if trace.acquire_attempts == 1 && !trace.presented {
-                trace.log(format_args!(
-                    "first_acquire_request timeout_ms={timeout} stop_requested={}",
-                    stop.load(Ordering::Acquire)
-                ));
-                let result = trace.call("IDXGIOutputDuplication::AcquireNextFrame", || unsafe {
-                    duplication.AcquireNextFrame(timeout, &mut frame_info, &mut desktop_resource)
-                });
-                trace.log(format_args!("first_acquire_result={result:?}"));
-                result
-            } else {
-                unsafe {
-                    duplication.AcquireNextFrame(timeout, &mut frame_info, &mut desktop_resource)
-                }
-            };
+            trace.log(format_args!(
+                "acquire_request timeout_ms={timeout} stop_requested={}",
+                stop.load(Ordering::Acquire)
+            ));
+            let acquisition = trace.call("IDXGIOutputDuplication::AcquireNextFrame", || unsafe {
+                duplication.AcquireNextFrame(timeout, &mut frame_info, &mut desktop_resource)
+            });
+            trace.log(format_args!(
+                "acquire_result={acquisition:?} stop_requested={}",
+                stop.load(Ordering::Acquire)
+            ));
             match acquisition {
                 Ok(()) => {}
                 Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
                     if trace.record_wait_timeout(Instant::now()) {
-                        trace.device_reason(&self.device, "first-frame-wait");
+                        let reason = trace
+                            .call("ID3D11Device::GetDeviceRemovedReason", || unsafe {
+                                self.device.GetDeviceRemovedReason()
+                            });
+                        trace.log(format_args!(
+                            "last_hresult={:?} device_removed_reason={:?}",
+                            error.code(),
+                            reason
+                        ));
                     }
                     if !stop.load(Ordering::Acquire)
                         && self.config.rendering.static_refresh
@@ -1687,16 +1569,12 @@ mod tests {
 
     #[test]
     fn absent_dxgi_output_is_transient() {
-        let error = super::find_source_output(
-            RECT {
-                left: i32::MIN,
-                top: i32::MIN,
-                right: i32::MIN + 1,
-                bottom: i32::MIN + 1,
-            },
-            "missing-source",
-            &super::FirstFrameTrace::new(Default::default()),
-        )
+        let error = super::find_source_output(RECT {
+            left: i32::MIN,
+            top: i32::MIN,
+            right: i32::MIN + 1,
+            bottom: i32::MIN + 1,
+        })
         .unwrap_err();
         assert!(matches!(error, GpuRendererError::OutputUnavailable(_)));
         assert!(error.is_retryable());

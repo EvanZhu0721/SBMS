@@ -19,7 +19,7 @@ use windows::core::{PCWSTR, w};
 use crate::config::RenderingOptions;
 use crate::display::Display;
 use crate::gpu_renderer::{
-    GpuRendererConfig, GpuRendererError, GpuRendererEvent, GpuRendererIdentity, run_gpu_renderer,
+    GpuRendererConfig, GpuRendererError, GpuRendererEvent, run_gpu_renderer,
 };
 use crate::input::{InputGuard, flush_movement, handle_message};
 
@@ -441,14 +441,6 @@ fn run(
     ready: &mpsc::Sender<Result<(), RendererStartError>>,
     reporter: &RendererReporter,
 ) -> Result<(), WorkerRunError> {
-    let identity = GpuRendererIdentity {
-        source_device_name: source.device_name.clone(),
-        source_id: source.id.clone(),
-        source_connector_index: source.connector_index,
-        target_device_name: target.device_name.clone(),
-        target_id: target.id.clone(),
-        target_rect: target.rect,
-    };
     let target_refresh_millihz = if target.refresh_numerator == 0 || target.refresh_denominator == 0
     {
         60_000
@@ -557,7 +549,6 @@ fn run(
                     rendering,
                     target_refresh_millihz,
                 },
-                &identity,
                 stop,
                 ready,
                 reporter,
@@ -685,14 +676,13 @@ fn signal_event(wake_event: &OwnedHandle) {
 
 fn draw_frames(
     config: GpuRendererConfig,
-    identity: &GpuRendererIdentity,
     stop: &AtomicBool,
     ready: &mpsc::Sender<Result<(), RendererStartError>>,
     reporter: &RendererReporter,
 ) -> Result<(), WorkerRunError> {
     let mut first_frame = true;
     let mut fps = FpsSampler::default();
-    let result = run_gpu_renderer(config, identity, stop, |event| {
+    let result = run_gpu_renderer(config, stop, |event| {
         match event {
             GpuRendererEvent::Presented => {
                 fps.record_present(Instant::now());

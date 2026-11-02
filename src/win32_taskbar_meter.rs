@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::mem::size_of;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -20,9 +20,14 @@ use windows::core::{Error, PCWSTR, Result, w};
 use super::{TrayMonitor, WM_METER_MENU, WM_METER_TOGGLE};
 
 const CLASS: PCWSTR = w!("SbmsTaskbarMeter");
+const CONTROL_CLASS: PCWSTR = w!("SbmsTaskbarMeterControl");
+const WM_UPDATE: u32 = WM_APP + 1;
+const WM_LAYOUT: u32 = WM_APP + 2;
+const WM_STOP: u32 = WM_APP + 3;
+const LAYOUT_TIMER: usize = 1;
 // Nonzero alpha gives the entire rectangle native hit testing, including digit gaps.
 const BACKGROUND_PIXEL: u32 = 0x01000000;
-static CURRENT_METER: AtomicIsize = AtomicIsize::new(0);
+static CURRENT_METER: Mutex<Weak<Shared>> = Mutex::new(Weak::new());
 
 struct DpiContext(DPI_AWARENESS_CONTEXT);
 impl DpiContext {
@@ -36,34 +41,206 @@ impl Drop for DpiContext {
     }
 }
 
-struct State {
-    host: HWND,
+struct Snapshot {
+    host: isize,
+    control: isize,
+    stopped: bool,
+    monitor: TrayMonitor,
+    rect: Option<RECT>,
+    #[cfg(test)]
+    layout: Option<tests::TestLayout>,
+    #[cfg(test)]
+    observed: tests::Observed,
 }
 
+struct Shared {
+    snapshot: Mutex<Snapshot>,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Snapshot> {
+        self.snapshot.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+// Only plain data crosses this boundary. All meter HWND/GDI operations stay on Worker.
 pub(super) struct TaskbarMeter {
+    shared: Arc<Shared>,
+}
+
+impl TaskbarMeter {
+    pub(super) fn new(host: HWND) -> Self {
+        Self::start(
+            host,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn start(host: HWND, #[cfg(test)] layout: Option<tests::TestLayout>) -> Self {
+        let shared = Arc::new(Shared {
+            snapshot: Mutex::new(Snapshot {
+                host: host.0 as isize,
+                control: 0,
+                stopped: false,
+                monitor: TrayMonitor::default(),
+                rect: None,
+                #[cfg(test)]
+                layout,
+                #[cfg(test)]
+                observed: tests::Observed::default(),
+            }),
+        });
+        *CURRENT_METER.lock().unwrap_or_else(|p| p.into_inner()) = Arc::downgrade(&shared);
+        let worker_shared = Arc::clone(&shared);
+        if let Err(error) = std::thread::Builder::new()
+            .name("sbms-taskbar-meter".into())
+            .spawn(move || Worker::run(worker_shared))
+        {
+            shared.lock().stopped = true;
+            super::diagnostics::log(
+                super::Level::Error,
+                "tray",
+                "taskbar-meter-thread-start-failed",
+                None,
+                error.to_string(),
+            );
+        }
+        Self { shared }
+    }
+
+    pub(super) fn set_monitor(&self, monitor: TrayMonitor) {
+        let mut state = self.shared.lock();
+        if state.monitor != monitor {
+            state.monitor = monitor;
+            post_control(&state, WM_UPDATE);
+        }
+    }
+
+    pub(super) fn refresh_layout(&self) {
+        post_control(&self.shared.lock(), WM_LAYOUT);
+    }
+
+    pub(super) fn stop(&self) {
+        let mut state = self.shared.lock();
+        state.host = 0;
+        state.rect = None;
+        state.stopped = true;
+        post_control(&state, WM_STOP);
+    }
+}
+
+impl Drop for TaskbarMeter {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+// Holding the short data lock across PostMessage serializes it with endpoint invalidation.
+// No synchronous Win32 call or Explorer operation runs while this lock is held.
+fn post_control(state: &Snapshot, message: u32) {
+    if state.control != 0 {
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(state.control as *mut _)),
+                message,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        };
+    }
+}
+
+struct Worker {
+    shared: Arc<Shared>,
+    control: Cell<HWND>,
     hwnd: Cell<HWND>,
-    state: Box<State>,
-    monitor: Cell<TrayMonitor>,
     light: Cell<bool>,
     placed: Cell<Option<RECT>>,
     rendered: Cell<Option<Frame>>,
 }
 
-impl TaskbarMeter {
-    pub(super) fn new(host: HWND) -> Self {
-        Self {
+impl Worker {
+    fn run(shared: Arc<Shared>) {
+        let worker = Box::new(Self {
+            shared,
+            control: Cell::new(HWND::default()),
             hwnd: Cell::new(HWND::default()),
-            state: Box::new(State { host }),
-            monitor: Cell::new(TrayMonitor::default()),
             light: Cell::new(false),
             placed: Cell::new(None),
             rendered: Cell::new(None),
+        });
+        let result = worker.message_loop();
+        if let Err(error) = result {
+            log_failure("taskbar-meter-thread-failed", &error);
         }
     }
 
-    pub(super) fn set_monitor(&self, monitor: TrayMonitor) {
-        self.monitor.set(monitor);
-        self.redraw();
+    fn message_loop(&self) -> Result<()> {
+        if self.shared.lock().stopped {
+            return Ok(());
+        }
+        let instance = unsafe { GetModuleHandleW(None) }?;
+        let classes: [(PCWSTR, WNDPROC); 2] = [
+            (CONTROL_CLASS, Some(control_proc)),
+            (CLASS, Some(window_proc)),
+        ];
+        for (name, procedure) in classes {
+            let class = WNDCLASSW {
+                lpfnWndProc: procedure,
+                hInstance: instance.into(),
+                lpszClassName: name,
+                ..Default::default()
+            };
+            unsafe { RegisterClassW(&class) };
+        }
+        // A message-only window has no ownership or parent relationship with the UI host.
+        let control = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                CONTROL_CLASS,
+                PCWSTR::null(),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                Some(HWND_MESSAGE),
+                None,
+                Some(instance.into()),
+                None,
+            )
+        }?;
+        self.control.set(control);
+        unsafe { SetWindowLongPtrW(control, GWLP_USERDATA, self as *const Self as isize) };
+        if unsafe { SetTimer(Some(control), LAYOUT_TIMER, 500, None) } == 0 {
+            return Err(Error::from_thread());
+        }
+        {
+            let mut state = self.shared.lock();
+            if state.stopped {
+                return Ok(());
+            }
+            state.control = control.0 as isize;
+        }
+        self.refresh_layout();
+        let mut message = MSG::default();
+        loop {
+            if self.shared.lock().stopped {
+                return Ok(());
+            }
+            let result = unsafe { GetMessageW(&mut message, None, 0, 0) }.0;
+            if result == -1 {
+                return Err(Error::from_thread());
+            }
+            if result == 0 {
+                return Ok(());
+            }
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
     }
 
     fn redraw(&self) {
@@ -77,42 +254,56 @@ impl TaskbarMeter {
         }
     }
 
-    pub(super) fn refresh_layout(&self) {
+    fn refresh_layout(&self) {
+        if self.shared.lock().stopped {
+            return;
+        }
+        if self.update_layout().is_none() {
+            self.shared.lock().rect = None;
+        }
+    }
+
+    fn update_layout(&self) -> Option<()> {
+        #[cfg(test)]
+        let test_layout = self.shared.lock().layout;
+        #[cfg(test)]
+        if let Some(layout) = test_layout {
+            self.light.set(layout.light);
+            let result = if unsafe { IsWindow(Some(HWND(layout.parent as *mut _))) }.as_bool() {
+                self.apply_layout(HWND(layout.parent as *mut _), layout.rect)
+                    .map_err(|error| log_failure("taskbar-meter-layout", &error))
+                    .ok()
+            } else {
+                None
+            };
+            self.shared.lock().observed.layouts += 1;
+            return result;
+        }
         let light = light_taskbar();
         if self.light.replace(light) != light {
             self.redraw();
         }
-        let Ok(taskbar) = (unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }) else {
-            return;
-        };
-        // Match Explorer while creating and positioning the child, then restore Slint's context.
+        let taskbar = unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) }.ok()?;
+        // Match Explorer while creating and positioning the child on this worker.
         let _dpi = DpiContext::for_window(taskbar);
         let mut parent_rect = RECT::default();
-        if unsafe { GetClientRect(taskbar, &mut parent_rect) }.is_err() {
-            return;
-        }
-        let Ok(notify) =
-            (unsafe { FindWindowExW(Some(taskbar), None, w!("TrayNotifyWnd"), PCWSTR::null()) })
-        else {
-            return;
-        };
+        unsafe { GetClientRect(taskbar, &mut parent_rect) }.ok()?;
+        let notify =
+            unsafe { FindWindowExW(Some(taskbar), None, w!("TrayNotifyWnd"), PCWSTR::null()) }
+                .ok()?;
         let mut notify_rect = RECT::default();
-        if unsafe { GetWindowRect(notify, &mut notify_rect) }.is_err() {
-            return;
-        }
+        unsafe { GetWindowRect(notify, &mut notify_rect) }.ok()?;
         let mut point = POINT {
             x: notify_rect.left,
             y: notify_rect.top,
         };
         if !unsafe { ScreenToClient(taskbar, &mut point) }.as_bool() {
-            return;
+            return None;
         }
-        let Some(rect) = layout(parent_rect, point.x, unsafe { GetDpiForWindow(taskbar) }) else {
-            return;
-        };
-        if let Err(error) = self.apply_layout(taskbar, rect) {
-            log_failure("taskbar-meter-layout", &error);
-        }
+        let rect = layout(parent_rect, point.x, unsafe { GetDpiForWindow(taskbar) })?;
+        self.apply_layout(taskbar, rect)
+            .map_err(|error| log_failure("taskbar-meter-layout", &error))
+            .ok()
     }
 
     fn apply_layout(&self, taskbar: HWND, rect: RECT) -> Result<()> {
@@ -126,15 +317,8 @@ impl TaskbarMeter {
             self.hwnd.set(HWND::default());
             self.placed.set(None);
             self.rendered.set(None);
-            CURRENT_METER.store(0, Ordering::Release);
+            self.shared.lock().rect = None;
             let instance = unsafe { GetModuleHandleW(None) }?;
-            let class = WNDCLASSW {
-                lpfnWndProc: Some(window_proc),
-                hInstance: instance.into(),
-                lpszClassName: CLASS,
-                ..Default::default()
-            };
-            unsafe { RegisterClassW(&class) };
             // Creating directly as a child avoids temporarily reparenting a top-level Slint window.
             hwnd = unsafe {
                 CreateWindowExW(
@@ -154,9 +338,12 @@ impl TaskbarMeter {
             }?;
             self.hwnd.set(hwnd);
             unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*self.state as *const State as isize);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, self as *const Self as isize);
             }
-            CURRENT_METER.store(hwnd.0 as isize, Ordering::Release);
+            #[cfg(test)]
+            {
+                self.shared.lock().observed.hwnd = hwnd.0 as isize;
+            }
         }
         // Submit before showing a new child. ULW owns its size; SetWindowPos uses parent coordinates.
         self.render(rect)?;
@@ -174,11 +361,23 @@ impl TaskbarMeter {
             }
             self.placed.set(Some(rect));
         }
+        let mut screen = RECT::default();
+        let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+        let screen = if visible && unsafe { GetWindowRect(hwnd, &mut screen) }.is_ok() {
+            Some(screen)
+        } else {
+            None
+        };
+        let mut state = self.shared.lock();
+        if !state.stopped {
+            state.rect = screen;
+        }
         Ok(())
     }
 
     fn render(&self, rect: RECT) -> Result<bool> {
-        let frame = Frame::new(rect, self.monitor.get(), self.light.get());
+        let monitor = self.shared.lock().monitor;
+        let frame = Frame::new(rect, monitor, self.light.get());
         if self.rendered.get() == Some(frame) {
             return Ok(false);
         }
@@ -207,6 +406,12 @@ impl TaskbarMeter {
             )?;
         }
         self.rendered.set(Some(frame));
+        #[cfg(test)]
+        {
+            let mut state = self.shared.lock();
+            state.observed.frame = Some(frame);
+            state.observed.renders += 1;
+        }
         Ok(true)
     }
 }
@@ -342,25 +547,84 @@ fn paint_pixels(pixels: &mut [u32], frame: Frame) {
     }
 }
 
-impl Drop for TaskbarMeter {
+impl Drop for Worker {
     fn drop(&mut self) {
-        let hwnd = self.hwnd.get();
-        CURRENT_METER.store(0, Ordering::Release);
-        if unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            let _ = unsafe { DestroyWindow(hwnd) };
+        // Clear endpoints before destroying HWNDs, so no sender can post to a recycled handle.
+        {
+            let mut state = self.shared.lock();
+            state.control = 0;
+            state.rect = None;
+            state.host = 0;
+            state.stopped = true;
+        }
+        unsafe {
+            for hwnd in [self.control.get(), self.hwnd.get()] {
+                if !hwnd.is_invalid() {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+            }
+            if !self.control.get().is_invalid() {
+                let _ = KillTimer(Some(self.control.get()), LAYOUT_TIMER);
+                let _ = DestroyWindow(self.control.get());
+            }
+            if !self.hwnd.get().is_invalid() {
+                let _ = DestroyWindow(self.hwnd.get());
+            }
+        }
+        #[cfg(test)]
+        {
+            let mut state = self.shared.lock();
+            state.observed.hwnd = 0;
+            state.observed.ended = true;
         }
     }
 }
 
 pub(super) fn meter_rect() -> Option<RECT> {
-    let hwnd = HWND(CURRENT_METER.load(Ordering::Acquire) as *mut _);
-    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
-        return None;
+    let shared = CURRENT_METER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .upgrade()?;
+    shared.lock().rect
+}
+
+unsafe extern "system" fn control_proc(
+    hwnd: HWND,
+    message: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+) -> LRESULT {
+    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Worker;
+    if let Some(worker) = unsafe { pointer.as_ref() } {
+        match message {
+            WM_UPDATE => {
+                worker.redraw();
+                return LRESULT(0);
+            }
+            WM_LAYOUT => {
+                worker.refresh_layout();
+                return LRESULT(0);
+            }
+            WM_TIMER if wp.0 == LAYOUT_TIMER => {
+                worker.refresh_layout();
+                return LRESULT(0);
+            }
+            WM_STOP => {
+                unsafe { PostQuitMessage(0) };
+                return LRESULT(0);
+            }
+            WM_NCDESTROY => {
+                worker.shared.lock().control = 0;
+                worker.control.set(HWND::default());
+                unsafe {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    PostQuitMessage(0);
+                }
+            }
+            _ => {}
+        }
     }
-    let _dpi = DpiContext::for_window(hwnd);
-    let mut rect = RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut rect) }.ok()?;
-    Some(rect)
+    unsafe { DefWindowProcW(hwnd, message, wp, lp) }
 }
 
 fn layout(parent: RECT, notify_left: i32, dpi: u32) -> Option<RECT> {
@@ -398,7 +662,7 @@ fn light_taskbar() -> bool {
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const State;
+    let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Worker;
     let state = unsafe { pointer.as_ref() };
     match message {
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
@@ -410,16 +674,41 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
                 } else {
                     WM_METER_MENU
                 };
-                if let Err(error) =
-                    unsafe { PostMessageW(Some(state.host), message, WPARAM(0), LPARAM(0)) }
-                {
+                let result = {
+                    let shared = state.shared.lock();
+                    (shared.host != 0).then(|| unsafe {
+                        PostMessageW(
+                            Some(HWND(shared.host as *mut _)),
+                            message,
+                            WPARAM(0),
+                            LPARAM(0),
+                        )
+                    })
+                };
+                if let Some(Err(error)) = result {
                     log_failure("taskbar-meter-post", &error);
                 }
             }
             return LRESULT(0);
         }
         WM_NCDESTROY => {
+            if let Some(state) = state {
+                state.hwnd.set(HWND::default());
+                state.placed.set(None);
+                state.rendered.set(None);
+                state.shared.lock().rect = None;
+                #[cfg(test)]
+                {
+                    state.shared.lock().observed.hwnd = 0;
+                }
+            }
             unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0) };
+        }
+        #[cfg(test)]
+        WM_WINDOWPOSCHANGING => {
+            if let Some(state) = state {
+                state.shared.lock().observed.positions += 1;
+            }
         }
         _ => {}
     }
@@ -429,13 +718,46 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::{Duration, Instant};
     use windows::Win32::Graphics::Gdi::{
         BITMAP, GdiFlush, GetCurrentObject, GetObjectType, GetObjectW, OBJ_BITMAP,
     };
+    use windows::Win32::System::Threading::GetCurrentThreadId;
 
     static ACTIONS: AtomicU32 = AtomicU32::new(0);
-    static POSITIONS: AtomicU32 = AtomicU32::new(0);
+
+    #[derive(Clone, Copy)]
+    pub(super) struct TestLayout {
+        pub parent: isize,
+        pub rect: RECT,
+        pub light: bool,
+    }
+
+    #[derive(Clone, Copy, Default)]
+    pub(super) struct Observed {
+        pub hwnd: isize,
+        pub frame: Option<Frame>,
+        pub positions: u32,
+        pub renders: u32,
+        pub layouts: u32,
+        pub ended: bool,
+    }
+
+    fn pump_until(mut ready: impl FnMut() -> bool) {
+        let started = Instant::now();
+        while !ready() {
+            let mut message = MSG::default();
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                unsafe { DispatchMessageW(&message) };
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "worker response timeout"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     unsafe extern "system" fn host_proc(
         hwnd: HWND,
@@ -451,18 +773,6 @@ mod tests {
             return LRESULT(0);
         }
         unsafe { DefWindowProcW(hwnd, message, wp, lp) }
-    }
-
-    unsafe extern "system" fn observed_meter_proc(
-        hwnd: HWND,
-        message: u32,
-        wp: WPARAM,
-        lp: LPARAM,
-    ) -> LRESULT {
-        if message == WM_WINDOWPOSCHANGING {
-            POSITIONS.fetch_add(1, Ordering::Relaxed);
-        }
-        unsafe { window_proc(hwnd, message, wp, lp) }
     }
 
     struct HiddenHost(HWND);
@@ -596,19 +906,6 @@ mod tests {
         ACTIONS.store(0, Ordering::Relaxed);
         let host = HiddenHost::new();
         let parent = HiddenHost::new();
-        let meter = TaskbarMeter::new(host.0);
-        let sample = TrayMonitor {
-            fps: 111,
-            running: true,
-            valid: true,
-            ..Default::default()
-        };
-        meter.set_monitor(sample);
-        assert_eq!(
-            meter.monitor.get(),
-            sample,
-            "accept data before a taskbar exists"
-        );
         let rect = layout(
             RECT {
                 right: 1200,
@@ -619,42 +916,74 @@ mod tests {
             96,
         )
         .unwrap();
-        meter.apply_layout(parent.0, rect).unwrap();
-        let hwnd = meter.hwnd.get();
+        let meter = TaskbarMeter::start(
+            host.0,
+            Some(TestLayout {
+                parent: parent.0.0 as isize,
+                rect,
+                light: false,
+            }),
+        );
+        let sample = TrayMonitor {
+            fps: 111,
+            running: true,
+            valid: true,
+            ..Default::default()
+        };
+        meter.set_monitor(sample);
+        pump_until(|| {
+            let observed = meter.shared.lock().observed;
+            observed.layouts > 0
+                && observed
+                    .frame
+                    .is_some_and(|frame| frame.glyphs == sample.glyphs())
+        });
+        let observed = meter.shared.lock().observed;
+        let hwnd = HWND(observed.hwnd as *mut _);
         assert_eq!(unsafe { GetParent(hwnd) }.unwrap(), parent.0);
         assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool());
+        assert_eq!(meter_rect(), None, "hidden parent has no click rectangle");
+        let control = HWND(meter.shared.lock().control as *mut _);
+        let worker_thread = unsafe { GetWindowThreadProcessId(hwnd, None) };
+        assert_ne!(
+            worker_thread,
+            unsafe { GetCurrentThreadId() },
+            "meter has its own message thread"
+        );
+        assert_eq!(worker_thread, unsafe {
+            GetWindowThreadProcessId(control, None)
+        });
+        assert_ne!(
+            unsafe { GetParent(control) }.ok(),
+            Some(host.0),
+            "controller is independent of UI host"
+        );
         assert_eq!(unsafe { GetDpiForWindow(hwnd) }, unsafe {
             GetDpiForWindow(parent.0)
         });
-        assert_eq!(meter.rendered.get().unwrap().glyphs, sample.glyphs());
         assert!(
             unsafe { GetLayeredWindowAttributes(hwnd, None, None, None) }.is_err(),
             "no color-key/global-alpha path"
         );
-        unsafe {
-            SetWindowLongPtrW(
-                hwnd,
-                GWLP_WNDPROC,
-                observed_meter_proc as *const () as isize,
-            )
-        };
-        POSITIONS.store(0, Ordering::Relaxed);
-        meter.apply_layout(parent.0, rect).unwrap();
+
+        let before = meter.shared.lock().observed;
         meter.set_monitor(sample);
-        assert!(
-            !meter.render(rect).unwrap(),
+        meter.refresh_layout();
+        pump_until(|| meter.shared.lock().observed.layouts > before.layouts);
+        let after = meter.shared.lock().observed;
+        assert_eq!(
+            after.renders, before.renders,
             "unchanged content is not resubmitted"
         );
         assert_eq!(
-            POSITIONS.load(Ordering::Relaxed),
-            0,
+            after.positions, before.positions,
             "unchanged layout is not repositioned"
         );
         meter.set_monitor(TrayMonitor { fps: 222, ..sample });
-        assert_eq!(meter.rendered.get().unwrap().glyphs, [0x5b; 3]);
-        meter.light.set(true);
-        assert!(meter.render(rect).unwrap(), "theme change resubmits pixels");
-        assert_eq!(meter.rendered.get().unwrap().color, 0xff343236);
+        pump_until(|| meter.shared.lock().observed.frame.unwrap().glyphs == [0x5b; 3]);
+        meter.shared.lock().layout.as_mut().unwrap().light = true;
+        meter.refresh_layout();
+        pump_until(|| meter.shared.lock().observed.frame.unwrap().color == 0xff343236);
         let larger = layout(
             RECT {
                 right: 1600,
@@ -665,34 +994,63 @@ mod tests {
             192,
         )
         .unwrap();
-        meter.apply_layout(parent.0, larger).unwrap();
+        meter.shared.lock().layout.as_mut().unwrap().rect = larger;
+        meter.refresh_layout();
+        pump_until(|| {
+            let observed = meter.shared.lock().observed;
+            observed.frame.unwrap().width == 116 && observed.positions > before.positions
+        });
         let mut actual = RECT::default();
         unsafe { GetClientRect(hwnd, &mut actual) }.unwrap();
         assert_eq!((actual.right, actual.bottom), (116, 96));
-        assert!(POSITIONS.load(Ordering::Relaxed) > 0);
+        assert!(meter.shared.lock().observed.positions > before.positions);
         unsafe {
-            SendMessageW(hwnd, WM_LBUTTONUP, None, None);
-            SendMessageW(hwnd, WM_RBUTTONUP, None, None);
+            PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), LPARAM(0)).unwrap();
+            PostMessageW(Some(hwnd), WM_RBUTTONUP, WPARAM(0), LPARAM(0)).unwrap();
         }
-        let mut message = MSG::default();
-        while unsafe { PeekMessageW(&mut message, Some(host.0), 0, 0, PM_REMOVE) }.as_bool() {
-            unsafe { DispatchMessageW(&message) };
-        }
-        assert_eq!(
-            ACTIONS.load(Ordering::Relaxed),
-            17,
-            "one left and one right host action"
-        );
+        pump_until(|| ACTIONS.load(Ordering::Relaxed) == 17);
+
         drop(parent);
+        pump_until(|| meter.shared.lock().observed.hwnd == 0);
         assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
+        assert_eq!(meter_rect(), None);
         meter.set_monitor(sample);
         let replacement = HiddenHost::new();
-        meter.apply_layout(replacement.0, rect).unwrap();
-        let recreated = meter.hwnd.get();
+        *meter.shared.lock().layout.as_mut().unwrap() = TestLayout {
+            parent: replacement.0.0 as isize,
+            rect,
+            light: false,
+        };
+        // The worker's own 500 ms timer must recreate the child without a UI layout call.
+        pump_until(|| meter.shared.lock().observed.hwnd != 0);
+        let recreated = HWND(meter.shared.lock().observed.hwnd as *mut _);
         assert_eq!(unsafe { GetParent(recreated) }.unwrap(), replacement.0);
-        assert_eq!(meter.rendered.get().unwrap().glyphs, sample.glyphs());
+        pump_until(|| meter.shared.lock().observed.frame.unwrap().glyphs == sample.glyphs());
+        let shared = Arc::clone(&meter.shared);
         drop(meter);
+        assert_eq!(
+            shared.lock().host,
+            0,
+            "drop invalidates click destination immediately"
+        );
+        assert_eq!(meter_rect(), None);
+        pump_until(|| shared.lock().observed.ended);
         assert!(!unsafe { IsWindow(Some(recreated)) }.as_bool());
+        assert!(!unsafe { IsWindow(Some(control)) }.as_bool());
+
+        let startup = TaskbarMeter::start(
+            host.0,
+            Some(TestLayout {
+                parent: replacement.0.0 as isize,
+                rect,
+                light: false,
+            }),
+        );
+        let startup_shared = Arc::clone(&startup.shared);
+        drop(startup);
+        pump_until(|| startup_shared.lock().observed.ended);
+        assert_eq!(startup_shared.lock().control, 0);
+        assert_eq!(startup_shared.lock().observed.hwnd, 0);
         let samples = [
             sample,
             TrayMonitor::default(),
@@ -717,7 +1075,7 @@ mod tests {
             &samples,
         );
         println!(
-            "Hidden layered child: first frame, data, theme, resize, parent recreation, dedup, routes, GDI/window cleanup passed; BMP rows=96/144/192 DPI, columns=111/---/Err/nAn"
+            "Threaded hidden layered child: distinct UI/worker threads, first frame, data, theme, resize, timer parent recreation, dedup, async routes, startup-drop and GDI/window cleanup passed; BMP rows=96/144/192 DPI, columns=111/---/Err/nAn"
         );
     }
 }

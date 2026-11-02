@@ -138,26 +138,24 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     })?;
     let flyout = QuickAccess::new()?;
     let outside_click_flyout = flyout.as_weak();
-    let _outside_click_observer = win32_flyout::OutsideClickObserver::new(move |point| {
-        if let Some(flyout) = outside_click_flyout.upgrade()
-            && flyout.window().is_visible()
-            && win32_flyout::should_dismiss_on_press(flyout.window(), point)
-        {
-            // Return from the native hook before touching the Slint window.
-            let flyout = flyout.as_weak();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(flyout) = flyout.upgrade() {
-                    diagnostics::log(
-                        Level::Debug,
-                        "ui",
-                        "flyout-dismiss",
-                        None,
-                        "mouse pressed on desktop, taskbar, or fullscreen window",
-                    );
-                    let _ = flyout.hide();
-                }
-            });
-        }
+    let outside_click_observer = win32_flyout::OutsideClickObserver::new(move |point| {
+        // Leave the native hook before querying either Slint or the Shell.
+        let flyout = outside_click_flyout.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(flyout) = flyout.upgrade()
+                && flyout.window().is_visible()
+                && win32_flyout::should_dismiss_on_press(flyout.window(), point)
+            {
+                diagnostics::log(
+                    Level::Debug,
+                    "ui",
+                    "flyout-dismiss",
+                    None,
+                    "mouse pressed on desktop, taskbar, or fullscreen window",
+                );
+                let _ = flyout.hide();
+            }
+        });
     })?;
     let auto_map_on_login = ConfigProfileStore::default_store()
         .and_then(|store| store.list())
@@ -459,7 +457,10 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     );
     // The tray host is a native Win32 window, so Slint cannot count it when deciding
     // whether the app is still alive. Only the explicit tray Exit action should quit.
-    slint::run_event_loop_until_quit()?;
+    let event_loop_result = slint::run_event_loop_until_quit();
+    // Release native resources before logging or waiting for mapping cleanup.
+    drop(outside_click_observer);
+    drop(tray);
     diagnostics::log(
         Level::Info,
         "tray",
@@ -467,7 +468,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         None,
         "Slint event loop stopped",
     );
-    {
+    if event_loop_result.is_ok() {
         let displays = displays.lock().expect("display metadata poisoned");
         let mut groups = groups.lock().expect("group drafts poisoned");
         let active = *active_group.lock().expect("active group poisoned");
@@ -475,6 +476,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         persist_groups(&flyout, &groups, active, &profile_revision);
     }
     controller.shutdown();
+    event_loop_result?;
     Ok(())
 }
 

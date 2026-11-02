@@ -38,7 +38,6 @@ pub fn meter_rect() -> Option<RECT> {
 
 const WM_METER_TOGGLE: u32 = WM_APP + 3;
 const WM_METER_MENU: u32 = WM_APP + 4;
-const METER_TIMER_ID: usize = 2;
 
 const CLASS_NAME: PCWSTR = w!("SbmsTrayHostWindow");
 const TRAY_ICON_ID: u32 = 1;
@@ -272,7 +271,6 @@ impl NativeTray {
         CURRENT_HWND.store(hwnd.0 as isize, Ordering::Release);
         inner.begin_registration("startup");
         inner.meter.refresh_layout();
-        unsafe { SetTimer(Some(hwnd), METER_TIMER_ID, 500, None) };
 
         Ok(Self { inner })
     }
@@ -284,18 +282,16 @@ impl NativeTray {
 
 impl Drop for NativeTray {
     fn drop(&mut self) {
-        let mut state = lock_state(&self.inner.state);
-        state.hwnd = 0;
+        self.inner.meter.stop();
+        lock_state(&self.inner.state).hwnd = 0;
         unsafe {
             let _ = KillTimer(Some(self.inner.hwnd), MAINTENANCE_TIMER_ID);
-            let _ = KillTimer(Some(self.inner.hwnd), METER_TIMER_ID);
             let _ = Shell_NotifyIconW(NIM_DELETE, &identity_data(self.inner.hwnd));
             SetWindowLongPtrW(self.inner.hwnd, GWLP_USERDATA, 0);
             let _ = DestroyMenu(self.inner.hmenu);
             let _ = DestroyWindow(self.inner.hwnd);
             let _ = DestroyIcon(self.inner.hicon);
         }
-        drop(state);
         let _ = CURRENT_HWND.compare_exchange(
             self.inner.hwnd.0 as isize,
             0,
@@ -523,12 +519,6 @@ unsafe extern "system" fn wnd_proc(
                     },
                 );
             }
-        }
-        return LRESULT(0);
-    }
-    if message == WM_TIMER && wparam.0 == METER_TIMER_ID {
-        if let Some(inner) = unsafe { inner(hwnd) } {
-            inner.meter.refresh_layout();
         }
         return LRESULT(0);
     }

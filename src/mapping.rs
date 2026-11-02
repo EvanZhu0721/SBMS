@@ -743,15 +743,13 @@ impl ActiveGroup {
     ) -> Result<(), MappingError> {
         let group_id = self.info.id;
         let reporter = Arc::clone(&self.renderer_event_gate.reporter);
-        let started = Instant::now();
-        let mut attempt = 0;
         let mut last_retryable = None;
         loop {
             check_start_cancelled(cancel)?;
             if Instant::now() >= deadline {
                 return Err(startup_deadline_error(group_id, last_retryable.as_deref()));
             }
-            if attempt > 0 {
+            if last_retryable.is_some() {
                 let displays = wait_for_recovery_topology(
                     &self.info,
                     &target.id,
@@ -781,28 +779,12 @@ impl ActiveGroup {
                     return Err(startup_deadline_error(group_id, last_retryable.as_deref()));
                 }
             }
-            attempt += 1;
             let event_gate = RendererEventGate::new(group_id, Arc::clone(&reporter));
             self.renderer_event_gate.discard();
             self.renderer_event_gate = Arc::clone(&event_gate);
             let reporter_gate = Arc::clone(&event_gate);
             let renderer_reporter: RendererReporter =
                 Arc::new(move |event| reporter_gate.report(event));
-            crate::diagnostics::log(
-                crate::diagnostics::Level::Info,
-                "mapping",
-                "startup-renderer",
-                None,
-                format!(
-                    "group={group_id} renderer_id={} attempt={attempt} remaining_ms={} source={} target={} virtual_device=retained",
-                    event_gate.renderer_id,
-                    deadline
-                        .saturating_duration_since(Instant::now())
-                        .as_millis(),
-                    source.device_name,
-                    target.device_name,
-                ),
-            );
             match start(target.clone(), source.clone(), renderer_reporter, deadline) {
                 Ok(renderer) => {
                     self.renderer = Some(renderer);
@@ -817,7 +799,6 @@ impl ActiveGroup {
                         migration.bind_source_id(source.id.clone());
                     }
                     event_gate.activate();
-                    diagnostics_recovery(group_id, "startup-first-frame-ready", started);
                     return Ok(());
                 }
                 Err(error) => {
@@ -827,22 +808,6 @@ impl ActiveGroup {
                     match error {
                         RendererStartError::Retryable(error) => {
                             check_start_cancelled(cancel)?;
-                            #[cfg(not(test))]
-                            crate::session_gate::log_driver_diagnostics("startup-retry");
-                            crate::diagnostics::log(
-                                crate::diagnostics::Level::Warn,
-                                "mapping",
-                                "startup-renderer",
-                                None,
-                                format!(
-                                    "group={group_id} renderer_id={} attempt={attempt} stopped; rebuild pending elapsed_ms={} remaining_ms={} cause={error}",
-                                    event_gate.renderer_id,
-                                    started.elapsed().as_millis(),
-                                    deadline
-                                        .saturating_duration_since(Instant::now())
-                                        .as_millis(),
-                                ),
-                            );
                             last_retryable = Some(error);
                         }
                         RendererStartError::Cancelled { cleanup_error } => {
@@ -1063,8 +1028,6 @@ impl Drop for MappingSession {
 }
 
 fn rollback_start(mut session: MappingSession, mut cause: MappingError) -> MappingError {
-    #[cfg(not(test))]
-    crate::session_gate::log_driver_diagnostics("rollback-start");
     if let Err(error) = session.stop_with_window_plan(RestoreMode::StartupRollback) {
         cause.record_cleanup_failure(error);
     }
