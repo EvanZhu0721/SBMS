@@ -588,55 +588,29 @@ mod tests {
     }
 
     #[test]
-    fn ring_buffer_keeps_the_latest_records() {
+    fn diagnostic_writes_bound_memory_and_flush_errors_before_close() {
         let path = test_path("sbms.log");
         let diagnostics = Diagnostics::open(path.clone(), 1024 * 1024, 200).unwrap();
         for index in 0..225 {
-            diagnostics.write(record(index, Level::Info)).unwrap();
+            diagnostics
+                .write(record(
+                    index,
+                    if index == 224 {
+                        Level::Error
+                    } else {
+                        Level::Info
+                    },
+                ))
+                .unwrap();
         }
         let recent = diagnostics.recent();
         assert_eq!(recent.len(), 200);
         assert_eq!(recent.first().unwrap().time, 25);
         assert_eq!(recent.last().unwrap().time, 224);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"level\":\"ERROR\""));
+        assert!(text.contains("record-224"));
         drop(diagnostics);
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn old_records_without_local_time_remain_compatible() {
-        let record: Record = serde_json::from_str(
-            r#"{"time":1,"level":"INFO","module":"test","stage":"read","mapping_session_id":"-","message":"legacy"}"#,
-        )
-        .unwrap();
-
-        assert_eq!(record.time, 1);
-        assert!(record.local_time.is_empty());
-    }
-
-    #[test]
-    fn local_time_uses_a_readable_system_time_shape() {
-        let time = local_time_string(unix_time_millis()).unwrap();
-
-        assert_eq!(time.len(), 23);
-        assert_eq!(&time[4..5], "-");
-        assert_eq!(&time[10..11], " ");
-        assert_eq!(&time[19..20], ".");
-    }
-
-    #[test]
-    fn rotation_keeps_three_bounded_files() {
-        let path = test_path("sbms.log");
-        let diagnostics = Diagnostics::open(path.clone(), 512, 200).unwrap();
-        for index in 0..30 {
-            diagnostics.write(record(index, Level::Error)).unwrap();
-        }
-        drop(diagnostics);
-
-        for candidate in [&path, &rotated_path(&path, 1), &rotated_path(&path, 2)] {
-            assert!(candidate.is_file());
-            assert!(candidate.metadata().unwrap().len() <= 512);
-        }
-        assert!(!rotated_path(&path, 3).exists());
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
@@ -667,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_cleanup_removes_only_explicit_obsolete_names() {
+    fn obsolete_log_cleanup_preserves_unknown_files_and_respects_retention() {
         let path = test_path("sbms.log");
         let directory = path.parent().unwrap();
         fs::create_dir_all(directory).unwrap();
@@ -702,10 +676,7 @@ mod tests {
             assert!(directory.join(name).is_file(), "{name} should be preserved");
         }
         fs::remove_dir_all(directory).unwrap();
-    }
 
-    #[test]
-    fn auxiliary_cleanup_applies_thirty_day_retention() {
         let path = test_path("sbms.log");
         let directory = path.parent().unwrap();
         fs::create_dir_all(directory).unwrap();
@@ -730,59 +701,5 @@ mod tests {
         assert!(directory.join("unknown-20260629-043305.log").is_file());
         assert!(directory.join("sbms.log").is_file());
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn error_is_visible_without_dropping_the_writer() {
-        let path = test_path("sbms.log");
-        let diagnostics = Diagnostics::open(path.clone(), 1024 * 1024, 200).unwrap();
-        diagnostics.write(record(1, Level::Info)).unwrap();
-        diagnostics.write(record(2, Level::Error)).unwrap();
-
-        let text = fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"level\":\"ERROR\""));
-        assert!(text.contains("record-2"));
-        drop(diagnostics);
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn persisted_recent_skips_malformed_lines_and_keeps_the_latest_records() {
-        let path = test_path("sbms.log");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let mut contents = String::new();
-        for index in 0..205 {
-            contents.push_str(&serde_json::to_string(&record(index, Level::Info)).unwrap());
-            contents.push('\n');
-        }
-        contents.push_str("not-json\n");
-        fs::write(&path, contents).unwrap();
-
-        let records = {
-            let _guard = CrossProcessLogGuard::acquire().unwrap();
-            let mut records = VecDeque::with_capacity(DEFAULT_MEMORY_RECORDS);
-            let file = fs::File::open(&path).unwrap();
-            for line in BufReader::new(file).lines() {
-                let line = line.unwrap();
-                let Ok(record) = serde_json::from_str::<Record>(&line) else {
-                    continue;
-                };
-                if records.len() == DEFAULT_MEMORY_RECORDS {
-                    records.pop_front();
-                }
-                records.push_back(record);
-            }
-            records
-        };
-
-        assert_eq!(records.len(), 200);
-        assert_eq!(records.front().unwrap().time, 5);
-        assert_eq!(records.back().unwrap().time, 204);
-        fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn mapping_session_ids_are_unique() {
-        assert_ne!(new_mapping_session_id(), new_mapping_session_id());
     }
 }

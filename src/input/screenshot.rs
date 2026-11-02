@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn return_fence_rejects_delayed_motion_but_never_waits_for_a_quiet_mouse() {
+    fn return_fence_handles_delayed_motion_zero_and_clock_wrap() {
         let encoded_tick = 1_001;
         for time in [950, 999, 1_000] {
             assert!(stale_return_motion(time, encoded_tick, 1_010));
@@ -437,10 +437,7 @@ mod tests {
         assert!(!stale_return_motion(1_010, encoded_tick, 1_011));
         assert!(!stale_return_motion(999, 0, 1_010));
         assert!(!stale_return_motion(999, encoded_tick, 2_001));
-    }
 
-    #[test]
-    fn return_fence_handles_zero_and_32_bit_message_clock_wrap() {
         assert!(stale_return_motion(0, 1, 0));
         assert!(!stale_return_motion(1, 1, 1));
         let tick = u32::MAX as u64 + 2;
@@ -451,7 +448,7 @@ mod tests {
     }
 
     #[test]
-    fn a_long_selection_has_no_forced_completion() {
+    fn overlay_session_finishes_only_after_confirmed_absence() {
         let now = Instant::now();
         let mut session = Session::new(now);
         assert_eq!(session.poll(now, Some(true)), Progress::Waiting);
@@ -459,10 +456,7 @@ mod tests {
             session.poll(now + Duration::from_secs(600), Some(true)),
             Progress::Waiting
         );
-    }
 
-    #[test]
-    fn completion_or_cancel_waits_for_all_overlays_to_stay_absent() {
         let now = Instant::now();
         let mut session = Session::new(now);
         session.poll(now, Some(true));
@@ -482,10 +476,7 @@ mod tests {
             session.poll(now + Duration::from_millis(200), Some(false)),
             Progress::Finished
         );
-    }
 
-    #[test]
-    fn a_short_hide_or_failed_query_restarts_the_absence_interval() {
         for interruption in [Some(true), None] {
             let now = Instant::now();
             let mut session = Session::new(now);
@@ -504,10 +495,7 @@ mod tests {
                 Progress::Finished
             );
         }
-    }
 
-    #[test]
-    fn startup_timeout_is_distinct_from_observed_completion() {
         let now = Instant::now();
         let mut session = Session::new(now);
         assert_eq!(
@@ -534,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn selector_rejects_editors_and_unrelated_core_windows() {
+    fn overlay_identity_and_cloaking_distinguish_capture_from_editors() {
         assert_eq!(
             overlay_kind(
                 "Windows.UI.Core.CoreWindow",
@@ -559,10 +547,7 @@ mod tests {
         ] {
             assert_eq!(overlay_kind(class, image), None);
         }
-    }
 
-    #[test]
-    fn modern_overlay_root_can_be_visible_and_cloaked() {
         assert_eq!(
             OverlayKind::SnippingToolRoot.visibility(true, Some(1)),
             Some(true)
@@ -579,119 +564,54 @@ mod tests {
     }
 
     #[test]
-    fn cache_hit_skips_the_full_enumeration() {
-        let mut cache = OverlayCache::new();
-        assert_eq!(
-            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
-            Some(true)
-        );
-        let searched = Cell::new(false);
-        assert_eq!(
-            cache.visibility(
-                |handle| {
-                    assert_eq!(handle, 7);
-                    Some(true)
-                },
-                || {
-                    searched.set(true);
-                    (Some(false), None)
-                }
-            ),
-            Some(true)
-        );
-        assert!(
-            !searched.get(),
-            "a confirmed cache hit must not scan the desktop"
-        );
+    fn overlay_cache_revalidates_identity_before_reusing_or_replacing_a_handle() {
+        for (probe, search, expected, next_handle) in [
+            (Some(true), (Some(false), None), Some(true), Some(7)),
+            (Some(false), (Some(true), Some(9)), Some(true), Some(9)),
+            (Some(false), (Some(false), None), Some(false), None),
+            (None, (Some(false), None), None, Some(7)),
+        ] {
+            let mut cache = OverlayCache::new();
+            assert_eq!(
+                cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
+                Some(true)
+            );
+            let searched = Cell::new(false);
+            assert_eq!(
+                cache.visibility(
+                    |handle| {
+                        assert_eq!(handle, 7);
+                        probe
+                    },
+                    || {
+                        searched.set(true);
+                        search
+                    }
+                ),
+                expected
+            );
+            assert_eq!(searched.get(), probe == Some(false));
+            assert_eq!(
+                cache.visibility(
+                    |handle| {
+                        assert_eq!(Some(handle), next_handle);
+                        Some(true)
+                    },
+                    || {
+                        assert!(
+                            next_handle.is_none(),
+                            "retained candidate must be revalidated"
+                        );
+                        (Some(true), Some(8))
+                    }
+                ),
+                Some(true)
+            );
+        }
     }
 
     #[test]
-    fn rejected_cache_falls_back_to_search_and_replaces_the_candidate() {
-        let mut cache = OverlayCache::new();
-        assert_eq!(
-            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
-            Some(true)
-        );
-        // Window 7 closed mid-poll: the re-validation rejects it and the full
-        // search runs again, caching the overlay it actually found.
-        assert_eq!(
-            cache.visibility(|_| Some(false), || (Some(true), Some(9))),
-            Some(true)
-        );
-        let searched = Cell::new(false);
-        assert_eq!(
-            cache.visibility(
-                |handle| {
-                    assert_eq!(handle, 9, "the replacement candidate must be re-validated");
-                    Some(true)
-                },
-                || {
-                    searched.set(true);
-                    (Some(false), None)
-                }
-            ),
-            Some(true)
-        );
-        assert!(!searched.get());
-    }
-
-    #[test]
-    fn reused_handle_is_not_mistaken_for_the_overlay() {
-        let mut cache = OverlayCache::new();
-        assert_eq!(
-            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
-            Some(true)
-        );
-        // Handle 7 was destroyed and reused by a foreign window: the full
-        // class/process/visibility re-validation rejects it, so the outcome is
-        // the search's own answer, never a false "overlay visible".
-        assert_eq!(
-            cache.visibility(|_| Some(false), || (Some(false), None)),
-            Some(false)
-        );
-        // The cache is empty again: the next poll searches without a probe.
-        assert_eq!(
-            cache.visibility(|_| unreachable!(), || (Some(true), Some(8))),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn failed_revalidation_keeps_the_candidate_and_never_confirms_closure() {
-        let mut cache = OverlayCache::new();
-        assert_eq!(
-            cache.visibility(|_| unreachable!(), || (Some(true), Some(7))),
-            Some(true)
-        );
-        let searched = Cell::new(false);
-        // A failed identity query is uncertainty: it must not become a
-        // confirmed close, and no search may overrule it behind the candidate.
-        assert_eq!(
-            cache.visibility(
-                |_| None,
-                || {
-                    searched.set(true);
-                    (Some(false), None)
-                }
-            ),
-            None
-        );
-        assert!(!searched.get());
-        // The candidate stays cached: the next poll re-validates the same handle.
-        assert_eq!(
-            cache.visibility(
-                |handle| {
-                    assert_eq!(handle, 7);
-                    Some(true)
-                },
-                || unreachable!()
-            ),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn search_stops_at_the_first_confirmed_overlay() {
+    fn overlay_scan_distinguishes_found_absent_and_uncertain() {
         let mut scan = OverlayScan::default();
         assert!(scan.observe(1, Some(false)));
         // An uncertain classification keeps scanning; it must not stop the
@@ -702,10 +622,7 @@ mod tests {
         assert_eq!(scan.found, Some(3));
         // Windows after the stop are never classified: the find already won.
         assert_eq!(scan.outcome(false), Some(true));
-    }
 
-    #[test]
-    fn uncertain_results_are_never_confirmed_closed() {
         // A failed window query keeps the scan uncertain even if the rest is clean.
         let mut scan = OverlayScan::default();
         assert!(scan.observe(1, Some(false)));
@@ -719,10 +636,7 @@ mod tests {
         let mut scan = OverlayScan::default();
         assert!(scan.observe(1, Some(false)));
         assert_eq!(scan.outcome(false), Some(false));
-    }
 
-    #[test]
-    fn an_early_stop_find_is_not_an_enumeration_failure() {
         // EnumWindows reports FALSE when the callback stops it after a find;
         // the recorded find must win over that error return.
         let mut scan = OverlayScan::default();

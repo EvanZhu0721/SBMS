@@ -3,6 +3,7 @@ use std::rc::Rc;
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::controller::DisplayOption;
+use crate::win32_tray::{TrayHandle, TrayMonitor};
 
 use super::state::{GroupDraft, SunshineState, set_shared_reference};
 use super::{
@@ -36,15 +37,28 @@ pub(super) fn update_tab_projection(ui: &QuickAccess, groups: &[GroupDraft], act
     ui.set_group_count(groups.len() as i32);
 }
 
-pub(super) fn project_group_telemetry(ui: &QuickAccess, groups: &[GroupDraft], active: usize) {
+pub(super) fn project_group_telemetry(
+    ui: &QuickAccess,
+    tray: &TrayHandle,
+    groups: &[GroupDraft],
+    active: usize,
+) {
     let Some(group) = groups.get(active) else {
         return;
     };
     let telemetry = &group.telemetry;
-    ui.set_mapping_fps(telemetry.fps.unwrap_or_default() as i32);
-    ui.set_mapping_fps_valid(telemetry.fps.is_some());
-    ui.set_mapping_fps_error(telemetry.error);
-    ui.set_mapping_fps_nan(ui.get_stream_only() && !telemetry.error);
+    let monitor = TrayMonitor {
+        fps: telemetry.fps.unwrap_or_default().min(999) as i32,
+        valid: telemetry.fps.is_some(),
+        running: ui.get_running(),
+        error: telemetry.error,
+        not_a_number: ui.get_stream_only() && !telemetry.error,
+    };
+    ui.set_mapping_fps(monitor.fps);
+    ui.set_mapping_fps_valid(monitor.valid);
+    ui.set_mapping_fps_error(monitor.error);
+    ui.set_mapping_fps_nan(monitor.not_a_number);
+    tray.set_monitor(monitor);
     ui.set_sunshine_state(telemetry.sunshine_state.as_i32());
     ui.set_sunshine_port(telemetry.sunshine_port.unwrap_or_default().into());
     ui.set_sunshine_panel_enabled(
@@ -137,6 +151,7 @@ pub(super) fn set_target_options(
 
 pub(super) fn hydrate_group(
     ui: &QuickAccess,
+    tray: &TrayHandle,
     displays: &[DisplayOption],
     groups: &[GroupDraft],
     active: usize,
@@ -185,7 +200,7 @@ pub(super) fn hydrate_group(
         validate_stream_fields(ui, displays);
     }
     update_tab_projection(ui, groups, active);
-    project_group_telemetry(ui, groups, active);
+    project_group_telemetry(ui, tray, groups, active);
 }
 
 pub(super) fn snapshot_group(

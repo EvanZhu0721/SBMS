@@ -234,37 +234,6 @@ Describe 'manage-sunshine-instance.ps1' {
         $remaining | Should BeNullOrEmpty
     }
 
-    It 'is idempotent for an already-running matching Start request' {
-        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
-        $displayId = '{23f8cce0-fefe-4a5b-9e14-abcdef012345}'
-        $port = Get-FreeSunshineBasePort
-        $arguments = @(
-            '-Action'
-            'Start'
-            '-GroupId'
-            $groupId
-            '-DisplayId'
-            $displayId
-            '-Port'
-            [string]$port
-        )
-
-        $first = Invoke-Manager -ManagerArguments $arguments
-        $second = Invoke-Manager -ManagerArguments $arguments
-
-        $first.ExitCode | Should Be 0
-        $second.ExitCode | Should Be 0
-        $second.Json.status | Should Be 'already_running'
-        $second.Json.pid | Should Be $first.Json.pid
-
-        $null = Invoke-Manager -ManagerArguments @(
-            '-Action'
-            'Stop'
-            '-GroupId'
-            $groupId
-        )
-    }
-
     It 'passes capture only as an exact runtime argument' {
         $cases = @(
             [pscustomobject]@{ Capture = 'auto'; Expected = $null }

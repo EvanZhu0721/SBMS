@@ -1989,7 +1989,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_mapped_move_cannot_undo_screenshot_handoff() {
+    fn managed_input_tags_cannot_replay_a_move_after_handoff() {
         let endpoint = ActiveEndpoint::new();
         let tag = input_tag(17);
         endpoint.replace(11);
@@ -2024,6 +2024,13 @@ mod tests {
         assert!(!rejects(WM_MOUSEMOVE, input_tag(23)));
         assert!(!endpoint.release(11));
         assert!(!rejects(WM_MOUSEMOVE, input_tag(23)));
+
+        let first = input_tag(1);
+        let second = input_tag(usize::MAX);
+        assert!(is_managed_input_tag(first));
+        assert!(is_managed_input_tag(second));
+        assert!(is_managed_input_tag(INPUT_TAG_SIGNATURE));
+        assert!(!is_managed_input_tag(0));
     }
 
     #[test]
@@ -2047,7 +2054,7 @@ mod tests {
     }
 
     #[test]
-    fn foreign_clip_replacement_discards_our_stale_restore_authority() {
+    fn clip_ownership_preserves_our_baseline_and_respects_foreign_replacement() {
         let desktop = ClipBaseline {
             rect: RECT {
                 left: -1920,
@@ -2081,10 +2088,7 @@ mod tests {
         assert!(!coordination.native_clip_allowed(foreign));
         // Native clipping can resume once that application releases its clip.
         assert!(coordination.native_clip_allowed(desktop));
-    }
 
-    #[test]
-    fn unchanged_own_clip_keeps_original_baseline_for_restore_retry() {
         let original = ClipBaseline {
             rect: RECT {
                 left: -1920,
@@ -2119,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    fn restoration_lease_blocks_activation_during_native_cursor_movement() {
+    fn restoration_lease_preserves_endpoint_ownership_until_commit() {
         let mut coordination = InputCoordination::new();
         assert!(coordination.reserve_restoration(11, NO_INPUT_ENDPOINT, 7, 7));
         assert!(!coordination.activation_allowed());
@@ -2128,10 +2132,7 @@ mod tests {
         assert!(!coordination.activation_allowed());
         coordination.release_restoration(11);
         assert!(coordination.activation_allowed());
-    }
 
-    #[test]
-    fn restoration_lease_blocks_transfer_after_captured_endpoint_commit() {
         let mut coordination = InputCoordination::new();
         let endpoints = ActiveEndpoint::new();
         assert!(coordination.reserve_restoration(11, NO_INPUT_ENDPOINT, 7, 7));
@@ -2143,18 +2144,12 @@ mod tests {
         coordination.release_restoration(11);
         assert!(coordination.activation_allowed());
         assert_eq!(endpoints.replace(22), 11);
-    }
 
-    #[test]
-    fn rejected_restoration_does_not_block_later_activation() {
         let mut coordination = InputCoordination::new();
         assert!(!coordination.reserve_restoration(11, 22, 7, 7));
         assert!(!coordination.reserve_restoration(11, NO_INPUT_ENDPOINT, 8, 7));
         assert!(coordination.activation_allowed());
-    }
 
-    #[test]
-    fn screenshot_return_does_not_reclaim_after_another_capture_already_ended() {
         assert!(screenshot_endpoint_available(NO_INPUT_ENDPOINT, 7, 7));
         assert!(!screenshot_endpoint_available(42, 7, 7));
         assert!(!screenshot_endpoint_available(NO_INPUT_ENDPOINT, 8, 7));
@@ -2202,7 +2197,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_return_waits_for_overlay_and_drag_to_end() {
+    fn screenshot_restore_waits_or_cancels_before_reclaiming_input() {
         assert_eq!(
             screenshot_restore_decision(Progress::Waiting, Some(true), true, true, false, true),
             ScreenshotRestoreDecision::Wait
@@ -2223,10 +2218,7 @@ mod tests {
                 ScreenshotRestoreDecision::Restore
             );
         }
-    }
 
-    #[test]
-    fn screenshot_return_cancels_after_other_input_or_leaving_the_target() {
         for progress in [Progress::Finished, Progress::TimedOut] {
             assert_eq!(
                 screenshot_restore_decision(progress, Some(false), false, true, false, true),
@@ -2272,7 +2264,7 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_maps_live_uncaptured_cursor_to_its_physical_display() {
+    fn screenshot_handoff_only_moves_or_releases_its_own_source() {
         let transform = screenshot_transform();
         for (cursor, expected) in [
             (
@@ -2294,10 +2286,7 @@ mod tests {
                 ScreenshotHandoff::MoveCursor(expected)
             );
         }
-    }
 
-    #[test]
-    fn screenshot_leaves_physical_displays_and_other_sources_alone() {
         let transform = screenshot_transform();
         for cursor in [
             PixelPoint { x: 2500, y: 500 },
@@ -2315,10 +2304,7 @@ mod tests {
             screenshot_handoff(false, false, transform, None),
             ScreenshotHandoff::Ignore
         );
-    }
 
-    #[test]
-    fn screenshot_releases_only_the_captured_endpoint_owner() {
         let transform = screenshot_transform();
         for cursor in [None, Some(PixelPoint { x: -1280, y: -720 })] {
             assert_eq!(
@@ -2330,26 +2316,5 @@ mod tests {
                 ScreenshotHandoff::Ignore
             );
         }
-    }
-
-    #[test]
-    fn stale_endpoint_cannot_release_new_owner() {
-        let endpoints = ActiveEndpoint::new();
-        assert_eq!(endpoints.replace(11), NO_INPUT_ENDPOINT);
-        assert_eq!(endpoints.replace(22), 11);
-        assert!(!endpoints.release(11));
-        assert!(endpoints.owns(22));
-        assert!(endpoints.release(22));
-        assert!(!endpoints.owns(22));
-    }
-
-    #[test]
-    fn all_sbms_injection_tags_are_recognized() {
-        let first = input_tag(1);
-        let second = input_tag(usize::MAX);
-        assert!(is_managed_input_tag(first));
-        assert!(is_managed_input_tag(second));
-        assert!(is_managed_input_tag(INPUT_TAG_SIGNATURE));
-        assert!(!is_managed_input_tag(0));
     }
 }

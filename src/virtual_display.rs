@@ -177,40 +177,35 @@ fn wide_multi_string(values: &[&str]) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{CreationState, CreationWait, wait_for_creation};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
     #[test]
-    fn creation_wait_prefers_a_completed_callback_over_cancellation() {
-        let state = CreationState::new();
-        *state.result.lock().unwrap() = Some(Ok("device".into()));
-        let cancel = AtomicBool::new(true);
-        assert!(matches!(
-            wait_for_creation(&state, &cancel, Duration::from_secs(1)),
-            CreationWait::Completed(Ok(id)) if id == "device"
-        ));
-    }
-
-    #[test]
-    fn creation_wait_observes_cancellation_without_waiting_for_timeout() {
-        let state = CreationState::new();
-        let cancel = AtomicBool::new(true);
-        let started = Instant::now();
-        assert!(matches!(
-            wait_for_creation(&state, &cancel, Duration::from_secs(1)),
-            CreationWait::Cancelled
-        ));
-        assert!(started.elapsed() < Duration::from_millis(100));
-        cancel.store(false, Ordering::Release);
-    }
-
-    #[test]
-    fn creation_wait_reports_timeout() {
-        let state = CreationState::new();
-        let cancel = AtomicBool::new(false);
-        assert!(matches!(
-            wait_for_creation(&state, &cancel, Duration::from_millis(1)),
-            CreationWait::TimedOut
-        ));
+    fn creation_wait_prioritizes_completion_then_cancellation_then_timeout() {
+        for (completed, cancelled) in [(true, true), (false, true), (false, false)] {
+            let state = CreationState::new();
+            if completed {
+                *state.result.lock().unwrap() = Some(Ok("device".into()));
+            }
+            let cancel = AtomicBool::new(cancelled);
+            let timeout = if cancelled {
+                Duration::from_secs(1)
+            } else {
+                Duration::from_millis(1)
+            };
+            let started = Instant::now();
+            match wait_for_creation(&state, &cancel, timeout) {
+                CreationWait::Completed(Ok(id)) => {
+                    assert!(completed);
+                    assert_eq!(id, "device");
+                }
+                CreationWait::Cancelled => {
+                    assert!(!completed && cancelled);
+                    assert!(started.elapsed() < Duration::from_millis(100));
+                }
+                CreationWait::TimedOut => assert!(!completed && !cancelled),
+                _ => panic!("unexpected creation failure"),
+            }
+        }
     }
 }

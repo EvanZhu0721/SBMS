@@ -32,7 +32,7 @@ Describe 'Inno Setup user-state lifecycle contract' {
         )
     }
 
-    It 'does not delete LocalAppData SBMS state during install or upgrade' {
+    It 'deletes LocalAppData SBMS state only on deliberate uninstall' {
         $installDelete = Get-InnoSection `
             -Source $script:source `
             -Name 'InstallDelete'
@@ -42,19 +42,12 @@ Describe 'Inno Setup user-state lifecycle contract' {
         ) -join "`n"
 
         $activeEntries | Should Not Match '(?i)\{localappdata\}\\SBMS'
-    }
 
-    It 'deletes the complete LocalAppData SBMS state on deliberate uninstall' {
-        $uninstallDelete = Get-InnoSection `
-            -Source $script:source `
-            -Name 'UninstallDelete'
-        $stateDeletes = @(
-            [regex]::Matches(
-                $uninstallDelete,
-                '(?im)^\s*Type:\s*filesandordirs;\s*Name:\s*"\{localappdata\}\\SBMS"\s*$'
-            )
-        )
-
+        $uninstallDelete = Get-InnoSection -Source $script:source -Name 'UninstallDelete'
+        $stateDeletes = @([regex]::Matches(
+            $uninstallDelete,
+            '(?im)^\s*Type:\s*filesandordirs;\s*Name:\s*"\{localappdata\}\\SBMS"\s*$'
+        ))
         $stateDeletes.Count | Should Be 1
     }
 

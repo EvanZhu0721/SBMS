@@ -51,7 +51,7 @@ pub enum ControllerEvent {
     GroupReady(MappingGroupInfo),
     Fps {
         id: u32,
-        fps: u32,
+        fps: Option<u32>,
     },
     Sunshine {
         id: u32,
@@ -770,10 +770,17 @@ impl Controller {
                                     event: RendererEvent::Fps(fps),
                                     ..
                                 } => {
-                                    emit(ControllerEvent::Fps {
-                                        id,
-                                        fps: fps.min(999),
-                                    });
+                                    if !active
+                                        .as_ref()
+                                        .expect("guard checked active run")
+                                        .recovery
+                                        .contains_key(&id)
+                                    {
+                                        emit(ControllerEvent::Fps {
+                                            id,
+                                            fps: Some(fps.min(999)),
+                                        });
+                                    }
                                 }
                                 MappingEvent::Renderer {
                                     id,
@@ -786,7 +793,7 @@ impl Controller {
                                         continue;
                                     }
                                     let (available, _) = desktop_snapshot(desktop.as_deref());
-                                    queue_renderer_recovery(active_run, id, available);
+                                    queue_renderer_recovery(active_run, id, available, &emit);
                                     emit_recovery_state(active_run, available, &emit);
                                 }
                                 MappingEvent::Renderer {
@@ -859,7 +866,7 @@ impl Controller {
                                     .map(|group| group.id)
                                     .collect();
                                 for id in ids {
-                                    queue_renderer_recovery(active, id, false);
+                                    queue_renderer_recovery(active, id, false, &emit);
                                 }
                                 for pending in active.recovery.values_mut() {
                                     pending.failed(Instant::now(), error.clone(), false);
@@ -976,7 +983,7 @@ fn synchronize_desktop(
         .map(|group| group.id)
         .collect();
     for id in ids {
-        queue_renderer_recovery(active, id, snapshot.0);
+        queue_renderer_recovery(active, id, snapshot.0, emit);
         active
             .recovery
             .get_mut(&id)
@@ -1013,11 +1020,16 @@ fn next_recovery_delay(active: &ActiveRun) -> Option<Duration> {
         .map(|next| next.saturating_duration_since(Instant::now()))
 }
 
-fn queue_renderer_recovery(active: &mut ActiveRun, id: u32, available: bool) {
-    active
-        .recovery
-        .entry(id)
-        .or_insert_with(|| PendingRecovery::new(Instant::now(), available));
+fn queue_renderer_recovery(
+    active: &mut ActiveRun,
+    id: u32,
+    available: bool,
+    emit: &impl Fn(ControllerEvent),
+) {
+    active.recovery.entry(id).or_insert_with(|| {
+        emit(ControllerEvent::Fps { id, fps: None });
+        PendingRecovery::new(Instant::now(), available)
+    });
     active.recovery.get_mut(&id).expect("queued recovery").pause = active.session.has_renderer(id);
     if let Some(cancel) = active.recovery_jobs.get(&id) {
         cancel.store(true, Ordering::Release);
@@ -1125,11 +1137,10 @@ fn recover_due_renderer(
     );
     thread::spawn(move || {
         let (topology, result) = if !pause_only {
-            group.recover(reporter, || {
+            group.recover(reporter, deadline, || {
                 run_cancel.load(Ordering::Acquire)
                     || job_cancel.load(Ordering::Acquire)
                     || desktop_snapshot(desktop.as_deref()) != before
-                    || Instant::now() >= deadline
             })
         } else {
             (None, group.pause_renderer())
@@ -1231,7 +1242,7 @@ fn complete_recovery(
                 .get_mut(&completed.id)
                 .expect("completed recovery");
             let message = if error.is_clean_cancellation() {
-                "desktop recovery exceeded its existing 30-second budget".to_string()
+                "display topology did not become ready within the recovery budget".to_string()
             } else {
                 error.to_string()
             };
@@ -1535,183 +1546,103 @@ mod tests {
     }
 
     #[test]
-    fn mirror_only_plan_does_not_reserve_sunshine_ports() {
-        let plan = plan(vec![
-            MappingRoute::Mirror {
-                target: "display-a".into(),
-            },
-            MappingRoute::Mirror {
-                target: "display-b".into(),
-            },
-        ]);
-
-        assert!(sunshine_ports_for_plan(&plan).unwrap().is_empty());
-        assert_eq!(projected_desktop_duplication_processes(&plan), 1);
-        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Auto);
+    fn routing_preserves_stream_slots_and_counts_one_shared_mirror_renderer() {
+        for (routes, slots, processes) in [
+            (
+                vec![
+                    MappingRoute::Mirror { target: "a".into() },
+                    MappingRoute::Mirror { target: "b".into() },
+                ],
+                vec![],
+                1,
+            ),
+            (
+                vec![
+                    MappingRoute::Mirror { target: "a".into() },
+                    MappingRoute::StreamOnly,
+                    MappingRoute::Mirror { target: "b".into() },
+                    MappingRoute::StreamOnly,
+                ],
+                vec![1, 3],
+                3,
+            ),
+            (
+                vec![MappingRoute::StreamOnly, MappingRoute::StreamOnly],
+                vec![0, 1],
+                2,
+            ),
+        ] {
+            let plan = plan(routes);
+            let expected: HashMap<u32, u16> = slots
+                .into_iter()
+                .map(|id| (id, sunshine::default_port_for_slot(id as usize).unwrap()))
+                .collect();
+            assert_eq!(sunshine_ports_for_plan(&plan).unwrap(), expected);
+            assert_eq!(projected_desktop_duplication_processes(&plan), processes);
+        }
     }
 
     #[test]
-    fn mixed_plan_reserves_only_streaming_ports_and_preserves_output_slots() {
-        let plan = plan(vec![
-            MappingRoute::Mirror {
-                target: "display-a".into(),
-            },
-            MappingRoute::StreamOnly,
-            MappingRoute::Mirror {
-                target: "display-b".into(),
-            },
-            MappingRoute::StreamOnly,
-        ]);
-
-        assert_eq!(
-            sunshine_ports_for_plan(&plan).unwrap(),
-            HashMap::from([
-                (1, sunshine::default_port_for_slot(1).unwrap()),
-                (3, sunshine::default_port_for_slot(3).unwrap()),
-            ])
-        );
-        assert_eq!(projected_desktop_duplication_processes(&plan), 3);
+    fn capture_backend_switches_only_above_the_process_limit() {
+        for mirror in [false, true] {
+            for processes in [4, 5] {
+                let mut routes = vec![MappingRoute::StreamOnly; processes - usize::from(mirror)];
+                if mirror {
+                    routes.push(MappingRoute::Mirror {
+                        target: "physical".into(),
+                    });
+                }
+                let expected = if processes == 4 {
+                    CaptureBackend::Auto
+                } else {
+                    CaptureBackend::Wgc
+                };
+                assert_eq!(
+                    capture_backend_for_plan(&plan(routes)),
+                    expected,
+                    "mirror={mirror}, processes={processes}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn stream_only_plan_preserves_all_streaming_ports() {
-        let plan = plan(vec![MappingRoute::StreamOnly, MappingRoute::StreamOnly]);
-
-        assert_eq!(
-            sunshine_ports_for_plan(&plan).unwrap(),
-            HashMap::from([
-                (0, sunshine::default_port_for_slot(0).unwrap()),
-                (1, sunshine::default_port_for_slot(1).unwrap()),
-            ])
-        );
-        assert_eq!(projected_desktop_duplication_processes(&plan), 2);
+    fn start_and_restart_cancellation_tracks_stop_and_shutdown() {
+        for restart in [false, true] {
+            let (tx, rx) = mpsc::channel();
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let sender = ControllerSender::new(tx, Arc::clone(&shutdown));
+            if restart {
+                sender.restart_mapping();
+            } else {
+                sender.start(plan(vec![MappingRoute::StreamOnly]));
+            }
+            let cancel = match rx.recv().unwrap() {
+                Message::Command(
+                    Command::Start { cancel, .. } | Command::RestartMapping { cancel },
+                ) => cancel,
+                _ => panic!("expected start or restart"),
+            };
+            assert!(!cancel.load(Ordering::Acquire));
+            sender.stop();
+            assert!(cancel.load(Ordering::Acquire));
+            assert!(matches!(
+                rx.recv().unwrap(),
+                Message::Command(Command::Stop)
+            ));
+            for shutting_down in [false, true] {
+                shutdown.store(shutting_down, Ordering::Release);
+                sender.start(plan(vec![MappingRoute::StreamOnly]));
+                let Message::Command(Command::Start { cancel, .. }) = rx.recv().unwrap() else {
+                    panic!("expected start")
+                };
+                assert_eq!(cancel.load(Ordering::Acquire), shutting_down);
+            }
+        }
     }
 
     #[test]
-    fn stays_on_auto_at_the_desktop_duplication_limit() {
-        let plan = plan(vec![
-            MappingRoute::Mirror {
-                target: "display-a".into(),
-            },
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-        ]);
-
-        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Auto);
-    }
-
-    #[test]
-    fn uses_wgc_when_a_mirror_renderer_pushes_four_sunshine_instances_over_the_limit() {
-        let plan = plan(vec![
-            MappingRoute::Mirror {
-                target: "display-a".into(),
-            },
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-        ]);
-
-        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Wgc);
-    }
-
-    #[test]
-    fn uses_wgc_for_five_stream_only_instances() {
-        let plan = plan(vec![
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-        ]);
-
-        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Wgc);
-    }
-
-    #[test]
-    fn keeps_four_stream_only_instances_on_auto() {
-        let plan = plan(vec![
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-            MappingRoute::StreamOnly,
-        ]);
-
-        assert_eq!(capture_backend_for_plan(&plan), CaptureBackend::Auto);
-    }
-
-    #[test]
-    fn stop_cancels_a_queued_start_before_the_worker_receives_stop() {
-        let (tx, rx) = mpsc::channel();
-        let sender = ControllerSender::new(tx, Arc::new(AtomicBool::new(false)));
-        sender.start(plan(vec![MappingRoute::StreamOnly]));
-        let Message::Command(Command::Start { cancel, .. }) = rx.recv().unwrap() else {
-            panic!("expected start command");
-        };
-
-        assert!(!cancel.load(Ordering::Acquire));
-        sender.stop();
-        assert!(cancel.load(Ordering::Acquire));
-        assert!(matches!(
-            rx.recv().unwrap(),
-            Message::Command(Command::Stop)
-        ));
-    }
-
-    #[test]
-    fn a_start_sent_after_stop_gets_a_fresh_cancellation_token() {
-        let (tx, rx) = mpsc::channel();
-        let sender = ControllerSender::new(tx, Arc::new(AtomicBool::new(false)));
-        sender.stop();
-        sender.start(plan(vec![MappingRoute::StreamOnly]));
-        assert!(matches!(
-            rx.recv().unwrap(),
-            Message::Command(Command::Stop)
-        ));
-        let Message::Command(Command::Start { cancel, .. }) = rx.recv().unwrap() else {
-            panic!("expected start command");
-        };
-
-        assert!(!cancel.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn a_start_created_after_shutdown_is_already_cancelled() {
-        let (tx, rx) = mpsc::channel();
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let sender = ControllerSender::new(tx, Arc::clone(&shutdown));
-        shutdown.store(true, Ordering::Release);
-        sender.start(plan(vec![MappingRoute::StreamOnly]));
-        let Message::Command(Command::Start { cancel, .. }) = rx.recv().unwrap() else {
-            panic!("expected start command");
-        };
-
-        assert!(cancel.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn reconnect_retries_at_most_twice() {
-        assert_eq!(next_reconnect_attempt(1), Some(2));
-        assert_eq!(next_reconnect_attempt(2), None);
-    }
-
-    #[test]
-    fn stop_cancels_a_queued_manual_restart() {
-        let (tx, rx) = mpsc::channel();
-        let sender = ControllerSender::new(tx, Arc::new(AtomicBool::new(false)));
-        sender.restart_mapping();
-        let Message::Command(Command::RestartMapping { cancel }) = rx.recv().unwrap() else {
-            panic!("expected restart command");
-        };
-
-        assert!(!cancel.load(Ordering::Acquire));
-        sender.stop();
-        assert!(cancel.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn cancelled_reconnect_is_not_queued() {
+    fn reconnect_obeys_cancellation_and_attempt_limit() {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(true));
         let retry_plan = plan(vec![MappingRoute::StreamOnly]);
@@ -1726,10 +1657,13 @@ mod tests {
             &cancel,
         ));
         assert!(rx.try_recv().is_err());
+
+        assert_eq!(next_reconnect_attempt(1), Some(2));
+        assert_eq!(next_reconnect_attempt(2), None);
     }
 
     #[test]
-    fn locked_time_does_not_consume_recovery_budget() {
+    fn desktop_transitions_reset_awake_budget_but_never_retry_permanent_failures() {
         let now = Instant::now();
         let mut pending = PendingRecovery::new(now, false);
         assert!(pending.next.is_none());
@@ -1741,10 +1675,29 @@ mod tests {
             pending.begin_attempt(unlocked),
             unlocked + RENDERER_RECOVERY_WINDOW
         );
+
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        pending.begin_attempt(now);
+        pending.failed(now, "access lost".into(), true);
+        pending.desktop_changed(now + Duration::from_secs(1), false);
+        assert!(pending.next.is_none());
+        assert!(pending.deadline.is_none());
+        assert_eq!(pending.attempts, 0);
+        assert!(!pending.exhausted());
+
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        pending.begin_attempt(now);
+        pending.failed(now, "device removed".into(), false);
+        pending.desktop_changed(now, false);
+        pending.desktop_changed(now + Duration::from_secs(1), true);
+        assert!(pending.exhausted());
+        assert_eq!(pending.error.as_deref(), Some("device removed"));
     }
 
     #[test]
-    fn transient_recovery_is_bounded_and_next_desktop_transition_rearms_it() {
+    fn transient_recovery_keeps_attempt_and_deadline_bounds_until_a_desktop_change() {
         let now = Instant::now();
         let mut pending = PendingRecovery::new(now, true);
         for attempt in 0..RENDERER_RECOVERY_ATTEMPTS {
@@ -1758,10 +1711,7 @@ mod tests {
         assert_eq!(pending.attempts, 0);
         assert!(pending.error.is_none());
         assert!(pending.next.is_some());
-    }
 
-    #[test]
-    fn repeated_retry_does_not_extend_first_attempt_deadline() {
         let now = Instant::now();
         let mut pending = PendingRecovery::new(now, true);
         let deadline = pending.begin_attempt(now);
@@ -1774,30 +1724,6 @@ mod tests {
         assert!(pending.exhausted());
     }
 
-    #[test]
-    fn relocking_resets_the_awake_budget_without_scheduling_gpu_work() {
-        let now = Instant::now();
-        let mut pending = PendingRecovery::new(now, true);
-        pending.begin_attempt(now);
-        pending.failed(now, "access lost".into(), true);
-        pending.desktop_changed(now + Duration::from_secs(1), false);
-        assert!(pending.next.is_none());
-        assert!(pending.deadline.is_none());
-        assert_eq!(pending.attempts, 0);
-        assert!(!pending.exhausted());
-    }
-
-    #[test]
-    fn genuine_failure_is_not_retried_after_unlock() {
-        let now = Instant::now();
-        let mut pending = PendingRecovery::new(now, true);
-        pending.begin_attempt(now);
-        pending.failed(now, "device removed".into(), false);
-        pending.desktop_changed(now, false);
-        pending.desktop_changed(now + Duration::from_secs(1), true);
-        assert!(pending.exhausted());
-        assert_eq!(pending.error.as_deref(), Some("device removed"));
-    }
     fn recovery_run() -> ActiveRun {
         let reporter: MappingReporter = Arc::new(|_| {});
         ActiveRun {
@@ -1869,7 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_failure_and_cleanup_failure_both_survive_stop() {
+    fn stop_and_cancel_preserve_original_and_cleanup_failures() {
         let result = stop_result(
             Some(MappingError::renderer_failed(
                 0,
@@ -1887,10 +1813,7 @@ mod tests {
         assert_eq!(state, "Stopped");
         assert!(error.contains("original renderer failure"));
         assert!(error.contains("cleanup failure"));
-    }
 
-    #[test]
-    fn canceled_recovery_does_not_replace_original_renderer_failure() {
         let mut run = recovery_run();
         run.interrupted_failure = Some(MappingError::renderer_failed(0, "original failure"));
         run.cancel.store(true, Ordering::Release);
@@ -1922,47 +1845,19 @@ mod tests {
     }
 
     #[test]
-    fn inflight_recovery_does_not_busy_poll_after_desktop_change() {
+    fn stale_success_is_cleaned_in_background_before_returning_resources() {
+        verify_stale_success(true, (true, 0));
+        // A real desktop revision change must reject a late first frame even
+        // before its cancellation flag has been observed by the worker.
+        verify_stale_success(false, (true, 1));
+    }
+
+    fn verify_stale_success(cancelled: bool, desktop: (bool, u64)) {
         let mut run = recovery_run();
         run.recovery
             .insert(0, PendingRecovery::new(Instant::now(), true));
         run.recovery_jobs
-            .insert(0, Arc::new(AtomicBool::new(false)));
-        assert!(next_recovery_delay(&run).is_none());
-        run.recovery_jobs.clear();
-        assert!(next_recovery_delay(&run).is_some());
-    }
-
-    #[test]
-    fn stop_is_accepted_before_recovery_resources_return() {
-        let mut run = recovery_run();
-        let cancel = Arc::new(AtomicBool::new(false));
-        run.recovery_jobs.insert(0, Arc::clone(&cancel));
-        let active = Some(run);
-        let (events, rx) = mpsc::channel();
-        request_stop(&active, &|event| {
-            events.send(event).unwrap();
-        });
-        assert!(cancel.load(Ordering::Acquire));
-        assert!(active.as_ref().unwrap().cancel.load(Ordering::Acquire));
-        assert!(!active.as_ref().unwrap().recovery_jobs.is_empty());
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            ControllerEvent::State {
-                state: "Stopping",
-                ..
-            }
-        ));
-        // The session and its display remain owned until completion returns them.
-        assert!(active.is_some());
-    }
-
-    #[test]
-    fn stale_success_is_cleaned_in_background_before_returning_resources() {
-        let mut run = recovery_run();
-        run.recovery
-            .insert(0, PendingRecovery::new(Instant::now(), true));
-        run.recovery_jobs.insert(0, Arc::new(AtomicBool::new(true)));
+            .insert(0, Arc::new(AtomicBool::new(cancelled)));
         let group = run.session.take_recovery_group(0);
         let mut active = Some(run);
         let (tx, rx) = mpsc::channel();
@@ -1971,7 +1866,7 @@ mod tests {
             RecoveryCompletion {
                 generation: 1,
                 id: 0,
-                desktop: (true, 0),
+                desktop,
                 group,
                 topology: None,
                 result: Ok(()),
@@ -1994,23 +1889,70 @@ mod tests {
         assert!(run.recovery_jobs.is_empty());
         assert!(run.recovery.contains_key(&0));
     }
+
+    #[test]
+    fn healthy_capture_can_present_after_the_topology_budget() {
+        let mut run = recovery_run();
+        let mut pending = PendingRecovery::new(Instant::now(), true);
+        pending.begin_attempt(Instant::now() - RENDERER_RECOVERY_WINDOW - Duration::from_secs(1));
+        run.recovery.insert(0, pending);
+        run.recovery_jobs
+            .insert(0, Arc::new(AtomicBool::new(false)));
+        let group = run.session.take_recovery_group(0);
+        let mut active = Some(run);
+        let (tx, _) = mpsc::channel();
+        let (events, rx) = mpsc::channel();
+        complete_recovery(
+            &mut active,
+            RecoveryCompletion {
+                generation: 1,
+                id: 0,
+                desktop: (true, 0),
+                group,
+                topology: None,
+                result: Ok(()),
+                cleaned: false,
+                paused: false,
+            },
+            None,
+            &tx,
+            &|event| {
+                events.send(event).unwrap();
+            },
+        );
+        let run = active.as_ref().unwrap();
+        assert!(run.recovery.is_empty());
+        assert!(run.recovery_jobs.is_empty());
+        assert!(rx.try_iter().any(|event| matches!(event,
+            ControllerEvent::State { state: "Running", error, .. } if error.is_empty()
+        )));
+    }
     #[test]
     fn scheduled_recovery_leaves_refresh_and_stop_handlers_available() {
         let mut run = recovery_run();
-        run.recovery
-            .insert(0, PendingRecovery::new(Instant::now(), true));
         let (tx, rx) = mpsc::channel();
         let (events, event_rx) = mpsc::channel();
         let emit = |event| {
             events.send(event).unwrap();
         };
+        queue_renderer_recovery(&mut run, 0, true, &emit);
+        queue_renderer_recovery(&mut run, 0, true, &emit);
+        assert!(matches!(
+            event_rx.try_recv(),
+            Ok(ControllerEvent::Fps { id: 0, fps: None })
+        ));
+        assert!(event_rx.try_recv().is_err());
         // The fixture target cannot exist. The production worker may wait for
         // topology, but scheduling it must return so handlers can run now.
         recover_due_renderer(&mut run, None, (true, 0), &tx, &emit);
         assert!(run.recovery_jobs.contains_key(&0));
+        assert!(next_recovery_delay(&run).is_none());
         refresh(&emit, true);
         let mut active = Some(run);
         request_stop(&active, &emit);
+        let run = active.as_ref().unwrap();
+        assert!(run.cancel.load(Ordering::Acquire));
+        assert!(run.recovery_jobs[&0].load(Ordering::Acquire));
         assert!(event_rx.try_iter().any(|event| matches!(
             event,
             ControllerEvent::State {

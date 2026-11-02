@@ -216,54 +216,35 @@ mod tests {
     }
 
     #[test]
-    fn prefers_a_physical_gateway_over_virtual_or_gatewayless_interfaces() {
-        let candidates = [
-            candidate(
-                [100, 109, 89, 106],
-                IF_TYPE_PROP_VIRTUAL,
-                true,
-                true,
-                true,
-                1,
-            ),
-            candidate([192, 168, 50, 9], ETHERNET, false, true, true, 5),
-            candidate([192, 168, 5, 71], ETHERNET, true, true, true, 25),
-        ];
+    fn lan_selection_rejects_special_ranges_and_ranks_usable_adapters() {
+        for candidates in [
+            vec![
+                candidate(
+                    [100, 109, 89, 106],
+                    IF_TYPE_PROP_VIRTUAL,
+                    true,
+                    true,
+                    true,
+                    1,
+                ),
+                candidate([192, 168, 50, 9], ETHERNET, false, true, true, 5),
+                candidate([192, 168, 5, 71], ETHERNET, true, true, true, 25),
+            ],
+            vec![
+                candidate([192, 168, 1, 20], ETHERNET, true, true, true, 35),
+                candidate([192, 168, 5, 71], IF_TYPE_IEEE80211, true, true, true, 10),
+            ],
+            vec![
+                candidate([192, 168, 5, 60], ETHERNET, true, true, false, 5),
+                candidate([192, 168, 5, 71], ETHERNET, true, true, true, 25),
+            ],
+        ] {
+            assert_eq!(
+                select_lan_ipv4(&candidates),
+                Some(Ipv4Addr::new(192, 168, 5, 71))
+            );
+        }
 
-        assert_eq!(
-            select_lan_ipv4(&candidates),
-            Some(Ipv4Addr::new(192, 168, 5, 71))
-        );
-    }
-
-    #[test]
-    fn metric_breaks_ties_between_physical_gateway_interfaces() {
-        let candidates = [
-            candidate([192, 168, 1, 20], ETHERNET, true, true, true, 35),
-            candidate([192, 168, 5, 71], IF_TYPE_IEEE80211, true, true, true, 10),
-        ];
-
-        assert_eq!(
-            select_lan_ipv4(&candidates),
-            Some(Ipv4Addr::new(192, 168, 5, 71))
-        );
-    }
-
-    #[test]
-    fn preferred_address_wins_over_deprecated_address_on_the_same_adapter() {
-        let candidates = [
-            candidate([192, 168, 5, 60], ETHERNET, true, true, false, 5),
-            candidate([192, 168, 5, 71], ETHERNET, true, true, true, 25),
-        ];
-
-        assert_eq!(
-            select_lan_ipv4(&candidates),
-            Some(Ipv4Addr::new(192, 168, 5, 71))
-        );
-    }
-
-    #[test]
-    fn rejects_non_lan_ipv4_special_ranges() {
         for address in [
             Ipv4Addr::UNSPECIFIED,
             Ipv4Addr::LOCALHOST,
@@ -274,13 +255,5 @@ mod tests {
             assert!(!usable_lan_ipv4(address), "{address}");
         }
         assert!(usable_lan_ipv4(Ipv4Addr::new(192, 168, 5, 71)));
-    }
-
-    #[test]
-    fn live_scan_never_returns_a_filtered_address() {
-        if let Some(address) = preferred_lan_ipv4().expect("Windows adapter scan should succeed") {
-            println!("preferred LAN IPv4: {address}");
-            assert!(usable_lan_ipv4(address));
-        }
     }
 }

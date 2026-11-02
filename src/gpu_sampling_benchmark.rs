@@ -459,7 +459,10 @@ fn native_static_refresh_keeps_target_cadence() {
             },
             target_refresh_millihz: 120_000,
         };
-        let pipeline = Pipeline::new(config, &adapter, device, context)?;
+        let mut trace = FirstFrameTrace::new(hwnd);
+        // Keep diagnostic I/O outside the cadence measurement.
+        trace.presented();
+        let pipeline = Pipeline::new(config, &adapter, device, context, &mut trace)?;
         unsafe {
             pipeline.context.ClearRenderTargetView(
                 &pipeline.cached_frame.as_ref().unwrap().target,
@@ -475,7 +478,7 @@ fn native_static_refresh_keeps_target_cadence() {
                 let wait = frame_wait_timeout(Some(last), interval, true);
                 std::thread::sleep(Duration::from_millis(wait.into()));
                 if last.elapsed() >= interval {
-                    pipeline.present_cached(0)?;
+                    pipeline.present_cached(0, &mut trace)?;
                     last = advance_refresh_deadline(last, interval);
                     count += 1;
                 }

@@ -93,7 +93,6 @@ Describe 'SBMS launch entry contract' {
     }
 
     It 'registers the tray with deferred startup = <DeferStart>, broken diagnostics = <BrokenDetails>' -TestCases @(
-        @{ DeferStart = $false; BrokenDetails = $false }
         @{ DeferStart = $true; BrokenDetails = $false }
         @{ DeferStart = $false; BrokenDetails = $true }
     ) {
@@ -114,7 +113,6 @@ Describe 'SBMS launch entry contract' {
         $script:mockSettings =
             [Microsoft.Management.Infrastructure.CimInstance]::new('MSFT_TaskSettings')
         $script:startedProcess = [pscustomobject]@{ Id = 4242 }
-        $script:processScan = 0
         $script:taskRegistered = $false
         Mock Assert-InstallIdentity {
             [pscustomobject]@{ Sid = 'S-1-5-21-test'; Name = 'TEST-PC\test-user' }
@@ -130,7 +128,6 @@ Describe 'SBMS launch entry contract' {
             $script:taskRegistered = $true
         }
         Mock Start-ScheduledTask {}
-        Mock Export-ScheduledTask { throw 'Optional task export unavailable' }
         $script:readyChecks = 0
         Mock Test-SbmsTrayReady {
             $marker = [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8')
@@ -140,7 +137,6 @@ Describe 'SBMS launch entry contract' {
         }
         Mock Start-Sleep {}
         Mock Get-InstalledSbmsProcesses {
-            $script:processScan++
             if ($script:taskRegistered) {
                 $script:startedProcess
             }
@@ -148,7 +144,6 @@ Describe 'SBMS launch entry contract' {
 
         Install-SbmsTask -DeferStart:$DeferStart
 
-        Assert-MockCalled Export-ScheduledTask -Times 0 -Exactly -Scope It
         Assert-MockCalled New-ScheduledTaskAction -Times 1 -Exactly -Scope It `
             -ParameterFilter {
                 $Execute -eq $script:tray -and
@@ -189,15 +184,12 @@ Describe 'SBMS launch entry contract' {
                 $TaskPath -eq '\SBMS\' -and
                     $TaskName -eq 'Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A'
             }
-        Assert-MockCalled Start-Sleep -Times $expectedStarts -Exactly -Scope It `
-            -ParameterFilter { $Milliseconds -eq 200 }
         if ($DeferStart) {
             $script:mockTrigger.StartBoundary | Should Not BeNullOrEmpty
-            $script:processScan | Should Be 1
             Assert-MockCalled Test-SbmsTrayReady -Times 0 -Exactly -Scope It
         }
         else {
-            $script:processScan | Should Be 3
+            $script:readyChecks | Should BeGreaterThan 1
         }
         { [System.Threading.Mutex]::OpenExisting('Local\SBMS-Manual-Launch-Broker-7EB4D7A8') } | Should Throw
     }

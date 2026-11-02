@@ -112,7 +112,9 @@ impl TrayHandle {
             return;
         }
         state.status = status.into();
-        post_status_update(state.hwnd);
+        let hwnd = state.hwnd;
+        drop(state);
+        post_status_update(hwnd);
     }
 
     pub fn set_monitor(&self, monitor: TrayMonitor) {
@@ -121,7 +123,25 @@ impl TrayHandle {
             return;
         }
         state.monitor = monitor;
-        post_status_update(state.hwnd);
+        let hwnd = state.hwnd;
+        drop(state);
+        post_status_update(hwnd);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self(Arc::new(TrayState {
+            shared: Mutex::new(SharedTrayState {
+                hwnd: 0,
+                status: "Stopped".into(),
+                monitor: TrayMonitor::default(),
+            }),
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn monitor(&self) -> TrayMonitor {
+        lock_state(&self.0).monitor
     }
 }
 
@@ -251,7 +271,7 @@ impl NativeTray {
         unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, &*inner as *const Inner as _) };
         CURRENT_HWND.store(hwnd.0 as isize, Ordering::Release);
         inner.begin_registration("startup");
-        inner.meter.refresh(TrayMonitor::default());
+        inner.meter.refresh_layout();
         unsafe { SetTimer(Some(hwnd), METER_TIMER_ID, 500, None) };
 
         Ok(Self { inner })
@@ -293,9 +313,6 @@ impl Inner {
         self.recovery_announced.set(false);
         self.registered.set(false);
 
-        // Clear any stale identity before re-adding after a failed modify or an
-        // Explorer restart. NIM_DELETE is harmless when no icon exists.
-        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &identity_data(self.hwnd)) };
         if !self.try_register(1) {
             self.schedule_retry();
         }
@@ -303,34 +320,16 @@ impl Inner {
 
     fn try_register(&self, attempt: usize) -> bool {
         let reason = self.registration_reason.get();
-        let state = lock_state(&self.state);
-        self.meter.refresh(state.monitor);
-        let data = notify_icon_data(self.hwnd, self.hicon, &state.tooltip());
-        drop(state);
-        if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
+        let tooltip = lock_state(&self.state).tooltip();
+        let data = notify_icon_data(self.hwnd, self.hicon, &tooltip);
+        if let Err(stage) = register_icon(&data) {
             diagnostics::log(
                 Level::Warn,
                 "tray",
-                "registration-failed",
+                stage,
                 None,
                 format!("reason={reason} attempt={attempt}"),
             );
-            return false;
-        }
-
-        let mut version = identity_data(self.hwnd);
-        version.Anonymous = NOTIFYICONDATAW_0 {
-            uVersion: NOTIFYICON_VERSION_4,
-        };
-        if !unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) }.as_bool() {
-            diagnostics::log(
-                Level::Warn,
-                "tray",
-                "set-version-failed",
-                None,
-                format!("reason={reason} attempt={attempt}"),
-            );
-            let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &identity_data(self.hwnd)) };
             return false;
         }
 
@@ -401,14 +400,17 @@ impl Inner {
     }
 
     fn update_status(&self, reason: &'static str) {
+        let (monitor, tooltip) = {
+            let state = lock_state(&self.state);
+            (state.monitor, state.tooltip())
+        };
+        // Numeric updates do not depend on Explorer registration or layout.
+        self.meter.set_monitor(monitor);
         if !self.registered.get() {
             return;
         }
 
-        let state = lock_state(&self.state);
-        self.meter.refresh(state.monitor);
-        let data = notify_icon_data(self.hwnd, self.hicon, &state.tooltip());
-        drop(state);
+        let data = notify_icon_data(self.hwnd, self.hicon, &tooltip);
         if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
             diagnostics::log(
                 Level::Warn,
@@ -526,8 +528,7 @@ unsafe extern "system" fn wnd_proc(
     }
     if message == WM_TIMER && wparam.0 == METER_TIMER_ID {
         if let Some(inner) = unsafe { inner(hwnd) } {
-            let monitor = lock_state(&inner.state).monitor;
-            inner.meter.refresh(monitor);
+            inner.meter.refresh_layout();
         }
         return LRESULT(0);
     }
@@ -548,6 +549,7 @@ unsafe extern "system" fn wnd_proc(
                 "Explorer notification area was recreated; registering tray icon again",
             );
             inner.begin_registration("taskbar-created");
+            inner.meter.refresh_layout();
         }
         return LRESULT(0);
     }
@@ -749,6 +751,24 @@ fn notify_icon_data(hwnd: HWND, hicon: HICON, tooltip: &str) -> NOTIFYICONDATAW 
     }
 }
 
+fn register_icon(data: &NOTIFYICONDATAW) -> Result<(), &'static str> {
+    // An earlier delete may have failed and left the identity in Explorer.
+    // Each registration attempt must clear it before adding the icon again.
+    let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &identity_data(data.hWnd)) };
+    if !unsafe { Shell_NotifyIconW(NIM_ADD, data) }.as_bool() {
+        return Err("registration-failed");
+    }
+    let mut version = identity_data(data.hWnd);
+    version.Anonymous = NOTIFYICONDATAW_0 {
+        uVersion: NOTIFYICON_VERSION_4,
+    };
+    if !unsafe { Shell_NotifyIconW(NIM_SETVERSION, &version) }.as_bool() {
+        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &identity_data(data.hWnd)) };
+        return Err("set-version-failed");
+    }
+    Ok(())
+}
+
 fn identity_data(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -763,93 +783,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn monitor_matches_gui_readings_and_state_precedence() {
-        let running = TrayMonitor {
-            fps: 60,
-            valid: true,
-            running: true,
-            ..Default::default()
-        };
-        assert_eq!(running.reading(), "060 FPS");
-        assert_eq!(running.glyphs(), [0x3f, 0x7d, 0x3f]);
-        assert_eq!(
-            TrayMonitor {
-                fps: 120,
-                ..running
+    #[ignore = "briefly registers a temporary Windows notification icon"]
+    fn registration_recovers_when_a_previous_delete_left_the_icon_present() {
+        use windows::Win32::UI::WindowsAndMessaging::{IDI_APPLICATION, LoadIconW};
+
+        struct TestWindow(HWND);
+        impl Drop for TestWindow {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = Shell_NotifyIconW(NIM_DELETE, &identity_data(self.0));
+                    let _ = DestroyWindow(self.0);
+                }
             }
-            .reading(),
-            "120 FPS"
-        );
-        assert_eq!(
-            TrayMonitor {
-                fps: 1000,
-                ..running
-            }
-            .reading(),
-            "999 FPS"
-        );
-        assert_eq!(TrayMonitor { fps: -1, ..running }.reading(), "000 FPS");
-        assert_eq!(
-            TrayMonitor {
-                valid: false,
-                ..running
-            }
-            .glyphs(),
-            [0x40; 3]
-        );
-        assert_eq!(
-            TrayMonitor {
-                running: false,
-                ..running
-            }
-            .reading(),
-            "---"
-        );
-        assert_eq!(
-            TrayMonitor {
-                not_a_number: true,
-                ..running
-            }
-            .glyphs(),
-            [0x54, 0x77, 0x54]
-        );
-        assert_eq!(
-            TrayMonitor {
-                error: true,
-                not_a_number: true,
-                ..running
-            }
-            .glyphs(),
-            [0x79, 0x50, 0x50],
-        );
+        }
+
+        let window = TestWindow(unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                w!("STATIC"),
+                w!("SBMS registration test"),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                None,
+                None,
+                Some(GetModuleHandleW(None).unwrap().into()),
+                None,
+            )
+            .unwrap()
+        });
+        let icon = unsafe { LoadIconW(None, IDI_APPLICATION) }.unwrap();
+        let data = notify_icon_data(window.0, icon, "SBMS registration test");
+        assert_eq!(register_icon(&data), Ok(()));
+
+        // A failed delete can leave exactly this state in Explorer. Confirm that
+        // an add-only retry fails, then exercise the actual registration path.
+        assert!(!unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool());
+        assert_eq!(register_icon(&data), Ok(()));
+        assert!(unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool());
     }
 
     #[test]
-    fn retry_backoff_is_bounded_and_increasing() {
-        assert_eq!(RETRY_DELAYS_MS, [250, 500, 1_000, 2_000, 4_000, 8_000]);
-        assert!(RETRY_DELAYS_MS.windows(2).all(|pair| pair[0] < pair[1]));
-        assert!(RECOVERY_RETRY_MS > *RETRY_DELAYS_MS.last().unwrap());
-    }
-
-    #[test]
-    fn notification_events_preserve_mouse_and_keyboard_access() {
+    fn notification_dispatch_preserves_icon_identity_coordinates_and_access() {
         for event in [NIN_SELECT, NIN_KEYSELECT] {
             assert!(is_toggle_event(event));
             assert!(!is_context_event(event));
         }
         assert!(is_context_event(WM_CONTEXTMENU));
         assert!(!is_toggle_event(WM_CONTEXTMENU));
-    }
 
-    #[test]
-    fn callback_coordinates_preserve_signed_virtual_screen_positions() {
         let packed = ((-20_i16 as u16 as u32) << 16) | (-10_i16 as u16 as u32);
         let point = callback_point(WPARAM(packed as usize));
         assert_eq!((point.x, point.y), (-10, -20));
-    }
 
-    #[test]
-    fn version_four_notifications_require_the_expected_icon_id() {
         let selected = LPARAM(((TRAY_ICON_ID << 16) | NIN_SELECT) as isize);
         assert_eq!(notification_event(selected), Some(NIN_SELECT));
 

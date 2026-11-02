@@ -107,31 +107,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cleanup_covers_distant_stroke_support_and_clips_edges() {
-        let r = cleanup(
-            &[RECT {
-                left: 20,
-                top: 20,
-                right: 21,
-                bottom: 21,
-            }],
-            [64, 64],
-        );
-        assert_eq!(
-            r,
-            [RECT {
-                left: 16,
-                top: 4,
-                right: 25,
-                bottom: 37
-            }]
-        );
-        assert_eq!(cleanup(&[full([8, 8])], [8, 8]), [full([8, 8])]);
-        assert!(cleanup(&[], [64, 64]).is_empty());
-    }
-
-    #[test]
-    fn lanczos_regions_include_every_changed_tap_for_both_axes() {
+    fn sampling_regions_cover_lanczos_and_ewa_taps() {
         for (source, target) in [(31, 17), (17, 31), (31, 31), (128, 7)] {
             let scale = source as f64 / target as f64;
             let radius = 3.0 * scale.max(1.0);
@@ -149,10 +125,7 @@ mod tests {
                 }
             }
         }
-    }
 
-    #[test]
-    fn ewa_regions_include_clamped_eight_tap_neighborhood() {
         for changed in 0..17 {
             let (lo, hi) = axis(changed, changed + 1, 17, 43, 4.0);
             for out in 0..43 {

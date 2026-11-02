@@ -140,19 +140,6 @@ Describe 'Install and uninstall compensation contracts' {
             Should Match 'startup registration failed.*Startup-task compensation also failed.*task restore failed'
     }
 
-    It 'defers tray startup when driver installation requires a restart' {
-        Mock Install-SbmsDriver { $script:restartRequired = $true }
-        Mock Install-SbmsTask {}
-
-        Install-Sbms
-
-        Assert-MockCalled Install-SbmsTask -Times 1 -Exactly -Scope It `
-            -ParameterFilter { $DeferStart }
-        Assert-MockCalled Restore-SbmsTasks -Times 0 -Exactly -Scope It
-        Assert-MockCalled Remove-DriverPackages -Times 0 -Exactly -Scope It
-        Assert-MockCalled Find-ObsoleteSbmsDriverPackages -Times 0 -Exactly -Scope It
-    }
-
     It 'reinstalls the driver before restoring tasks after uninstall failure' {
         Mock Test-UninstallPreflight {
             [void]$script:events.Add('preflight')

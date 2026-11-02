@@ -2,8 +2,10 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use windows::Win32::Foundation::{LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC, GetMessageW, MSG, PostMessageW,
-    SetWindowLongPtrW, ShowWindow, WM_APP, WM_CLOSE, WM_WINDOWPOSCHANGING, WS_OVERLAPPEDWINDOW,
+    DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GWLP_WNDPROC, GetMessageW, MSG, PM_REMOVE,
+    PeekMessageW, PostMessageW, SMTO_ABORTIFHUNG, SendMessageTimeoutW, SetWindowLongPtrW,
+    ShowWindow, WINDOWPOS, WM_APP, WM_CLOSE, WM_DPICHANGED, WM_NULL, WM_WINDOWPOSCHANGING,
+    WS_OVERLAPPEDWINDOW,
 };
 
 #[derive(Default)]
@@ -12,12 +14,28 @@ struct ProbeState {
     entered: AtomicBool,
     drained: AtomicBool,
     position_requests: AtomicUsize,
+    resize_first_position: AtomicBool,
+    controlled_dpi: AtomicBool,
+    dpi_notifications: AtomicUsize,
+    response_checks: AtomicUsize,
+    callback_window: AtomicUsize,
+    callback_completed: AtomicBool,
 }
 
 unsafe extern "system" fn probe_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const ProbeState;
     if !pointer.is_null() {
         let state = unsafe { &*pointer };
+        if message == WM_NULL {
+            state.response_checks.fetch_add(1, Ordering::SeqCst);
+        }
+        if message == WM_DPICHANGED && state.controlled_dpi.load(Ordering::SeqCst) {
+            state.dpi_notifications.fetch_add(1, Ordering::SeqCst);
+            // This fixture deliberately keeps the geometry submitted by the
+            // caller. Do not let STATIC's default handling apply the suggested
+            // DPI rectangle and turn one request into extra position events.
+            return LRESULT(0);
+        }
         if message == WM_APP {
             state.entered.store(true, Ordering::SeqCst);
             while state.block.load(Ordering::SeqCst) {
@@ -29,11 +47,155 @@ unsafe extern "system" fn probe_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPA
             state.drained.store(true, Ordering::SeqCst);
             return LRESULT(0);
         }
+        if message == WM_APP + 2 {
+            return LRESULT(1);
+        }
         if message == WM_WINDOWPOSCHANGING {
             state.position_requests.fetch_add(1, Ordering::SeqCst);
+            if state.resize_first_position.swap(false, Ordering::SeqCst) {
+                unsafe { (*(l.0 as *mut WINDOWPOS)).cx += 7 };
+            }
+            let callback = state.callback_window.load(Ordering::SeqCst);
+            if callback != 0 {
+                let mut result = 0;
+                // Bounded even with the old sleep-only executor: teardown must
+                // never leave the fixture owner waiting on the test thread.
+                let sent = unsafe {
+                    SendMessageTimeoutW(
+                        HWND(callback as *mut _),
+                        WM_APP + 2,
+                        WPARAM(0),
+                        LPARAM(0),
+                        SMTO_ABORTIFHUNG,
+                        3000,
+                        Some(&mut result),
+                    )
+                };
+                state
+                    .callback_completed
+                    .store(sent.0 != 0 && result == 1, Ordering::SeqCst);
+            }
         }
     }
     unsafe { DefWindowProcW(hwnd, message, w, l) }
+}
+
+#[test]
+#[ignore = "moves owned native windows between physical monitors with different DPI"]
+fn native_completed_dpi_transition_is_not_submitted_again() {
+    for resize_first in [false, true] {
+        let fixture = Fixture::create();
+        let initial = observe_window(&fixture.entry).unwrap().unwrap();
+        let target = crate::display::active_displays()
+            .unwrap()
+            .into_iter()
+            .find(|display| {
+                !display.virtual_display
+                    && destination_dpi(&fixture.entry, display.rect).unwrap() != initial.dpi
+            })
+            .expect("native test requires physical monitors with different DPI");
+        let monitor = default_monitor(target.rect).unwrap();
+        let requested = RECT {
+            left: monitor.rcWork.left + 60,
+            top: monitor.rcWork.top + 60,
+            right: monitor.rcWork.left + 700,
+            bottom: monitor.rcWork.top + 540,
+        };
+        let goal = WindowGoal {
+            outer: Some(requested),
+            ..WindowGoal::on_monitor(&fixture.entry, target.rect, WindowState::Normal).unwrap()
+        };
+        fixture.state.controlled_dpi.store(true, Ordering::SeqCst);
+        fixture.state.response_checks.store(0, Ordering::SeqCst);
+        fixture
+            .state
+            .resize_first_position
+            .store(resize_first, Ordering::SeqCst);
+        let actual = execute_layout(&fixture.entry, requested, &monitor, goal)
+            .unwrap()
+            .unwrap();
+        assert!(goal.matches(&actual, goal.current_monitor()));
+        assert!(
+            fixture.state.dpi_notifications.load(Ordering::SeqCst) > 0,
+            "fixture must exercise a real DPI transition"
+        );
+        // WINDOWPOS notifications are not API-submission receipts: Windows
+        // can issue additional ones during a DPI transition. Instead verify
+        // the exact final rectangle and the executor's independent preflight
+        // boundary. The complete first move must skip its second WM_NULL;
+        // the deliberately resized first move must still reach that boundary
+        // and submit final geometry to remove the seven-pixel discrepancy.
+        assert_eq!(
+            fixture.state.response_checks.load(Ordering::SeqCst),
+            if resize_first { 2 } else { 1 },
+            "only an incomplete DPI transition needs the final placement preflight"
+        );
+        assert!(!fixture.state.resize_first_position.load(Ordering::SeqCst));
+    }
+}
+
+#[test]
+#[ignore = "moves one owned native window whose positioning synchronously calls the executor thread"]
+fn native_position_callback_is_dispatched_without_consuming_posted_messages() {
+    struct Helper(HWND);
+    impl Drop for Helper {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DestroyWindow(self.0);
+            }
+        }
+    }
+    let fixture = Fixture::create();
+    let helper = Helper(unsafe {
+        CreateWindowExW(
+            WS_EX_NOACTIVATE,
+            w!("STATIC"),
+            w!("SBMS sent-message test helper"),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    });
+    unsafe {
+        SetWindowLongPtrW(
+            helper.0,
+            GWLP_USERDATA,
+            Arc::as_ptr(&fixture.state) as isize,
+        );
+        SetWindowLongPtrW(helper.0, GWLP_WNDPROC, probe_proc as *const () as isize);
+        PostMessageW(None, WM_APP + 3, WPARAM(17), LPARAM(0)).unwrap();
+    }
+    fixture
+        .state
+        .callback_window
+        .store(helper.0.0 as usize, Ordering::SeqCst);
+    let result = restore_layout_batch(&[&fixture.entry], fixture.monitor.rcMonitor);
+    let mut posted = MSG::default();
+    let retained = unsafe {
+        PeekMessageW(
+            &mut posted,
+            Some(HWND(-1isize as *mut _)),
+            WM_APP + 3,
+            WM_APP + 3,
+            PM_REMOVE,
+        )
+    }
+    .as_bool();
+    assert!(
+        retained,
+        "goal observation must not consume posted thread messages"
+    );
+    assert_eq!(posted.wParam.0, 17);
+    result.unwrap();
+    assert!(fixture.state.callback_completed.load(Ordering::SeqCst));
+    assert_eq!(fixture.state.position_requests.load(Ordering::SeqCst), 1);
 }
 
 struct Fixture {
@@ -149,7 +311,11 @@ fn native_hung_batch_rejects_before_enqueue_and_has_no_late_move() {
     fixture.state.block.store(false, Ordering::SeqCst);
     unsafe { PostMessageW(Some(fixture.entry.hwnd), WM_APP + 1, WPARAM(0), LPARAM(0)) }.unwrap();
     wait_flag(&fixture.state.drained);
-    assert!(result.unwrap_err().contains("no placement submitted"));
+    assert!(
+        result
+            .unwrap_err()
+            .contains("responsiveness check failed before the next placement")
+    );
     assert!(
         elapsed < Duration::from_secs(2),
         "bounded preflight took {elapsed:?}"

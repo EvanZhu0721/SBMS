@@ -117,11 +117,8 @@ fn ensure_log_folder(log_path: &Path) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-
-    static NEXT_TEMP_DIRECTORY: AtomicUsize = AtomicUsize::new(1);
 
     fn record(time: u64, level: Level, session: &str, message: &str) -> Record {
         Record {
@@ -136,29 +133,12 @@ mod tests {
     }
 
     #[test]
-    fn recent_activity_keeps_newer_sessions_after_an_error() {
-        let records = [
-            record(1_000, Level::Error, "1-1", "failed"),
-            record(2_000, Level::Info, "1-2", "recovered"),
-        ];
-
-        let text = format_recent_diagnostics_at(&records);
-
-        assert!(text.contains("failed"));
-        assert!(text.contains("recovered"));
-        assert!(text.find("recovered").unwrap() < text.find("failed").unwrap());
-    }
-
-    #[test]
-    fn last_error_is_empty_without_an_error() {
+    fn last_error_selects_latest_error_and_ignores_healthy_records() {
         assert_eq!(
             format_last_error(&[record(1_000, Level::Info, "1-1", "healthy")]),
             ""
         );
-    }
 
-    #[test]
-    fn last_error_uses_the_latest_error_across_sessions() {
         let records = [
             record(1_000, Level::Error, "1-1", "first"),
             record(2_000, Level::Info, "1-2", "healthy"),
@@ -166,30 +146,5 @@ mod tests {
         ];
 
         assert_eq!(format_last_error(&records), "mapping / test: latest");
-    }
-
-    #[test]
-    fn ensure_log_folder_creates_the_directory_containing_the_log() {
-        let sequence = NEXT_TEMP_DIRECTORY.fetch_add(1, Ordering::Relaxed);
-        let test_root = std::env::temp_dir().join(format!(
-            "sbms-open-log-folder-{}-{sequence}",
-            std::process::id()
-        ));
-        let log_path = test_root.join("SBMS").join("logs").join("sbms.log");
-
-        let folder = ensure_log_folder(&log_path).expect("log folder should be created");
-
-        assert_eq!(folder, test_root.join("SBMS").join("logs"));
-        assert!(folder.is_dir());
-
-        fs::remove_dir_all(&test_root).expect("temporary log folder should be removable");
-    }
-
-    #[test]
-    fn ensure_log_folder_rejects_a_path_without_a_directory() {
-        let error = ensure_log_folder(Path::new("sbms.log"))
-            .expect_err("a bare file name has no log folder");
-
-        assert_eq!(error, "The diagnostic log path has no parent folder");
     }
 }

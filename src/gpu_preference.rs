@@ -153,20 +153,4 @@ mod tests {
             adapter(false, Some(false)),
         ]));
     }
-
-    #[test]
-    #[ignore = "queries installed graphics adapters; run explicitly on a hardware validation host"]
-    fn report_installed_adapter_sampling_default() {
-        let adapters = probe().expect("DXGI adapter enumeration");
-        for adapter in &adapters {
-            println!(
-                "{}: software={}, unified={:?}",
-                adapter.name, adapter.software, adapter.unified
-            );
-        }
-        println!(
-            "automatic high-performance sampling={}",
-            default_for_adapters(&adapters)
-        );
-    }
 }

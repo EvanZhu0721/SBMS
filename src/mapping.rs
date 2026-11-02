@@ -16,7 +16,9 @@ use crate::display::{
 };
 use crate::geometry::Rotation;
 use crate::limits::MAX_OUTPUTS;
-use crate::renderer::{Renderer, RendererEvent, RendererReporter, RendererStartError};
+use crate::renderer::{
+    Renderer, RendererEvent, RendererReporter, RendererStartError, START_TIMEOUT,
+};
 use crate::session_gate::{SessionGate, VirtualDisplayConfig, VirtualMode};
 use crate::virtual_display::VirtualDisplay;
 use crate::window_migration::{RestoreMode, WindowMigration, WindowRestorePlan};
@@ -412,7 +414,7 @@ impl MappingSession {
             return Err(rollback_start(session, error));
         }
         let ReadyTopology {
-            sources,
+            mut sources,
             displays: stable_displays,
         } = match wait_for_sources(&plan, &reporter, cancel) {
             Ok(topology) => topology,
@@ -427,6 +429,7 @@ impl MappingSession {
             }
         }
 
+        let mut presentation_targets = vec![None; plan.groups.len()];
         for (index, request) in plan.groups.iter().enumerate() {
             if let Err(error) = check_start_cancelled(cancel) {
                 return Err(rollback_start(session, error));
@@ -434,43 +437,35 @@ impl MappingSession {
             let MappingRoute::Mirror { target } = &request.route else {
                 continue;
             };
-            let physical = match mapping_target(&stable_displays, target) {
+            let mut physical = match mapping_target(&stable_displays, target) {
                 Ok(target) => target,
                 Err(error) => {
                     return Err(rollback_start(session, error.with_group(request.id)));
                 }
             };
-            let event_gate = Arc::clone(&session.groups[index].renderer_event_gate);
-            let renderer_reporter: RendererReporter = Arc::new(move |event| {
-                event_gate.report(event);
-            });
-            let renderer = match Renderer::start_with_options_interruptible(
-                physical,
-                sources[index].clone(),
-                renderer_reporter,
-                request.rendering,
-                || cancel.load(Ordering::Acquire),
+            // Each group's existing ten-second budget covers all of its
+            // attempts, including old-worker cleanup and topology refresh.
+            let deadline = Instant::now() + START_TIMEOUT;
+            if let Err(error) = session.groups[index].start_renderer(
+                &mut physical,
+                &mut sources[index],
+                deadline,
+                cancel,
+                active_displays,
+                |target, source, reporter, deadline| {
+                    Renderer::start_with_options_until_interruptible(
+                        target,
+                        source,
+                        reporter,
+                        request.rendering,
+                        deadline,
+                        || cancel.load(Ordering::Acquire),
+                    )
+                },
             ) {
-                Ok(renderer) => renderer,
-                Err(RendererStartError::Cancelled { cleanup_error }) => {
-                    let mut cause = start_cancelled();
-                    if let Some(error) = cleanup_error {
-                        cause.record_cleanup_failure(format!("renderer startup cleanup: {error}"));
-                    }
-                    return Err(rollback_start(session, cause));
-                }
-                Err(RendererStartError::Failed(error) | RendererStartError::Retryable(error)) => {
-                    return Err(rollback_start(
-                        session,
-                        group_stage(request.id, "first-frame", error),
-                    ));
-                }
-            };
-            session.groups[index].renderer = Some(renderer);
-            session.groups[index].renderer_event_gate.activate();
-            if let Err(error) = check_start_cancelled(cancel) {
                 return Err(rollback_start(session, error));
             }
+            presentation_targets[index] = Some(physical);
         }
 
         // Establish the renderer's work area before moving any window. Each
@@ -479,20 +474,15 @@ impl MappingSession {
             if let Err(error) = check_start_cancelled(cancel) {
                 return Err(rollback_start(session, error));
             }
-            let MappingRoute::Mirror { target } = &request.route else {
+            let MappingRoute::Mirror { .. } = &request.route else {
                 continue;
             };
-            let physical = match mapping_target(&stable_displays, target) {
-                Ok(target) => target,
-                Err(error) => {
-                    return Err(rollback_start(session, error.with_group(request.id)));
-                }
-            };
+            let physical = presentation_targets[index].as_ref().expect("mirror target");
             match session.groups[index]
                 .migration
                 .as_mut()
                 .expect("mirror snapshot")
-                .begin(&physical, &sources[index])
+                .begin(physical, &sources[index])
             {
                 Ok(()) => (),
                 Err(_) if cancel.load(Ordering::Acquire) => {
@@ -737,6 +727,142 @@ impl MappingSession {
 unsafe impl Send for MappingSession {}
 
 impl ActiveGroup {
+    fn start_renderer(
+        &mut self,
+        target: &mut Display,
+        source: &mut Display,
+        deadline: Instant,
+        cancel: &AtomicBool,
+        mut read: impl FnMut() -> Result<Vec<Display>, DisplayError>,
+        mut start: impl FnMut(
+            Display,
+            Display,
+            RendererReporter,
+            Instant,
+        ) -> Result<Renderer, RendererStartError>,
+    ) -> Result<(), MappingError> {
+        let group_id = self.info.id;
+        let reporter = Arc::clone(&self.renderer_event_gate.reporter);
+        let started = Instant::now();
+        let mut attempt = 0;
+        let mut last_retryable = None;
+        loop {
+            check_start_cancelled(cancel)?;
+            if Instant::now() >= deadline {
+                return Err(startup_deadline_error(group_id, last_retryable.as_deref()));
+            }
+            if attempt > 0 {
+                let displays = wait_for_recovery_topology(
+                    &self.info,
+                    &target.id,
+                    &|| cancel.load(Ordering::Acquire) || Instant::now() >= deadline,
+                    &mut read,
+                    || {
+                        thread::sleep(
+                            POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())),
+                        )
+                    },
+                )
+                .map_err(|error| {
+                    if error.is_clean_cancellation() && !cancel.load(Ordering::Acquire) {
+                        startup_deadline_error(group_id, last_retryable.as_deref())
+                    } else {
+                        error
+                    }
+                })?;
+                *target = mapping_target(&displays, &target.id)
+                    .map_err(|error| error.with_group(group_id))?;
+                *source = displays
+                    .into_iter()
+                    .find(|display| display.virtual_display && display.connector_index == group_id)
+                    .expect("ready source checked");
+                check_start_cancelled(cancel)?;
+                if Instant::now() >= deadline {
+                    return Err(startup_deadline_error(group_id, last_retryable.as_deref()));
+                }
+            }
+            attempt += 1;
+            let event_gate = RendererEventGate::new(group_id, Arc::clone(&reporter));
+            self.renderer_event_gate.discard();
+            self.renderer_event_gate = Arc::clone(&event_gate);
+            let reporter_gate = Arc::clone(&event_gate);
+            let renderer_reporter: RendererReporter =
+                Arc::new(move |event| reporter_gate.report(event));
+            crate::diagnostics::log(
+                crate::diagnostics::Level::Info,
+                "mapping",
+                "startup-renderer",
+                None,
+                format!(
+                    "group={group_id} renderer_id={} attempt={attempt} remaining_ms={} source={} target={} virtual_device=retained",
+                    event_gate.renderer_id,
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis(),
+                    source.device_name,
+                    target.device_name,
+                ),
+            );
+            match start(target.clone(), source.clone(), renderer_reporter, deadline) {
+                Ok(renderer) => {
+                    self.renderer = Some(renderer);
+                    check_start_cancelled(cancel)?;
+                    if Instant::now() >= deadline {
+                        return Err(startup_deadline_error(group_id, last_retryable.as_deref()));
+                    }
+                    self.info.source_id = source.id.clone();
+                    self.info.source_device_name = source.device_name.clone();
+                    self.info.sunshine_id = source.sunshine_id.clone();
+                    if let Some(migration) = self.migration.as_mut() {
+                        migration.bind_source_id(source.id.clone());
+                    }
+                    event_gate.activate();
+                    diagnostics_recovery(group_id, "startup-first-frame-ready", started);
+                    return Ok(());
+                }
+                Err(error) => {
+                    // start returns only after the owner/draw workers and HWND
+                    // have finished. Never activate a failed candidate's events.
+                    event_gate.discard();
+                    match error {
+                        RendererStartError::Retryable(error) => {
+                            check_start_cancelled(cancel)?;
+                            #[cfg(not(test))]
+                            crate::session_gate::log_driver_diagnostics("startup-retry");
+                            crate::diagnostics::log(
+                                crate::diagnostics::Level::Warn,
+                                "mapping",
+                                "startup-renderer",
+                                None,
+                                format!(
+                                    "group={group_id} renderer_id={} attempt={attempt} stopped; rebuild pending elapsed_ms={} remaining_ms={} cause={error}",
+                                    event_gate.renderer_id,
+                                    started.elapsed().as_millis(),
+                                    deadline
+                                        .saturating_duration_since(Instant::now())
+                                        .as_millis(),
+                                ),
+                            );
+                            last_retryable = Some(error);
+                        }
+                        RendererStartError::Cancelled { cleanup_error } => {
+                            let mut cause = start_cancelled();
+                            if let Some(error) = cleanup_error {
+                                cause.record_cleanup_failure(format!(
+                                    "renderer startup cleanup: {error}"
+                                ));
+                            }
+                            return Err(cause);
+                        }
+                        RendererStartError::Failed(error) => {
+                            return Err(group_stage(group_id, "first-frame", error));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn pause_renderer(&mut self) -> Result<(), MappingError> {
         self.renderer_event_gate.discard();
         if let Some(mut renderer) = self.renderer.take() {
@@ -750,6 +876,7 @@ impl ActiveGroup {
     pub(crate) fn recover(
         &mut self,
         reporter: MappingReporter,
+        topology_deadline: Instant,
         interrupted: impl Fn() -> bool,
     ) -> (Option<Vec<Display>>, Result<(), MappingError>) {
         let mut topology = None;
@@ -760,7 +887,9 @@ impl ActiveGroup {
                 group_stage(group_id, "recovery", "stream-only group has no renderer")
             })?;
             let started = Instant::now();
-            let displays = wait_for_ready_recovery_topology(&self.info, target_id, &interrupted)?;
+            let displays = wait_for_ready_recovery_topology(&self.info, target_id, &|| {
+                interrupted() || Instant::now() >= topology_deadline
+            })?;
             diagnostics_recovery(group_id, "topology-ready", started);
             let target =
                 mapping_target(&displays, target_id).map_err(|error| error.with_group(group_id))?;
@@ -787,7 +916,7 @@ impl ActiveGroup {
             let reporter_gate = Arc::clone(&event_gate);
             let renderer_reporter: RendererReporter =
                 Arc::new(move |event| reporter_gate.report(event));
-            let renderer = Renderer::start_with_options_interruptible(
+            let renderer = Renderer::recover_with_options_interruptible(
                 target.clone(),
                 source.clone(),
                 renderer_reporter,
@@ -848,6 +977,18 @@ impl ActiveGroup {
         })();
         (topology, result)
     }
+}
+
+fn startup_deadline_error(group_id: u32, last_retryable: Option<&str>) -> MappingError {
+    group_stage(
+        group_id,
+        "first-frame",
+        format!(
+            "renderer startup exhausted its {} second total budget; last recoverable error: {}",
+            START_TIMEOUT.as_secs(),
+            last_retryable.unwrap_or("none"),
+        ),
+    )
 }
 
 fn validate_recovered_topology(
@@ -922,6 +1063,8 @@ impl Drop for MappingSession {
 }
 
 fn rollback_start(mut session: MappingSession, mut cause: MappingError) -> MappingError {
+    #[cfg(not(test))]
+    crate::session_gate::log_driver_diagnostics("rollback-start");
     if let Err(error) = session.stop_with_window_plan(RestoreMode::StartupRollback) {
         cause.record_cleanup_failure(error);
     }
@@ -962,12 +1105,15 @@ fn wait_for_recovery_topology(
         }
         match result {
             Ok(displays) => {
-                if unique_physical_display(&displays, target_id).is_ok()
-                    && displays.iter().any(|display| {
-                        display.virtual_display
-                            && display.connector_index == group.id
-                            && source_matches_mode(display, group.mode, group.rotation)
+                let sources: Vec<_> = displays
+                    .iter()
+                    .filter(|display| {
+                        display.virtual_display && display.connector_index == group.id
                     })
+                    .collect();
+                if unique_physical_display(&displays, target_id).is_ok()
+                    && sources.len() == 1
+                    && source_matches_mode(sources[0], group.mode, group.rotation)
                 {
                     return Ok(displays);
                 }
@@ -1443,81 +1589,82 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     #[test]
-    fn removal_waits_for_physical_stability_and_resets_after_pending_identity() {
+    fn topology_wait_requires_stability_and_never_retries_real_errors() {
         let (_, initial) = recovery_fixture();
         let physical = initial[0].clone();
+        let expected = vec![physical.clone()];
         let mut shifted = physical.clone();
         shifted.rect.left += 8;
         shifted.rect.right += 8;
-        let mut samples = vec![
-            Ok(initial),
-            Ok(vec![physical]),
-            Ok(vec![shifted.clone()]),
-            Err(DisplayError::identity_pending("receipt pending")),
-            Ok(vec![shifted.clone()]),
-            Ok(vec![shifted.clone()]),
-        ]
-        .into_iter();
-        let mut waits = 0;
-        let actual = wait_for_stable_topology(
-            &[5],
-            None,
-            || samples.next().expect("unexpected extra topology read"),
-            || waits += 1,
-        )
-        .unwrap();
-        assert_eq!(waits, 5);
-        assert!(same_physical_display(&actual[0], &shifted));
-    }
-
-    #[test]
-    fn restored_topology_must_match_again_after_a_late_layout_change() {
-        let (_, initial) = recovery_fixture();
-        let expected = vec![initial[0].clone()];
-        let mut shifted = expected.clone();
-        shifted[0].rect.top += 8;
-        shifted[0].rect.bottom += 8;
-        let mut samples = vec![
-            expected.clone(),
-            shifted,
-            expected.clone(),
-            expected.clone(),
-        ]
-        .into_iter();
-        let mut waits = 0;
-        wait_for_stable_topology(
-            &[5],
-            Some(&expected),
-            || Ok(samples.next().expect("unexpected extra topology read")),
-            || waits += 1,
-        )
-        .unwrap();
-        assert_eq!(waits, 3);
-    }
-
-    #[test]
-    fn settled_topology_ignores_enumeration_order_and_equivalent_identity_and_rate() {
-        let (_, initial) = recovery_fixture();
-        let mut other = initial[0].clone();
+        let mut other = physical.clone();
         other.id = "second".into();
-        let expected = vec![initial[0].clone(), other];
-        let mut reordered = expected.clone();
+        let ordered = vec![physical.clone(), other];
+        let mut reordered = ordered.clone();
         reordered.reverse();
         reordered[1].id = "PHYSICAL".into();
         reordered[1].device_name = "renumbered".into();
         reordered[1].refresh_numerator *= 1000;
         reordered[1].refresh_denominator *= 1000;
-        let mut samples = vec![expected.clone(), reordered].into_iter();
-        let mut waits = 0;
-        let settled = wait_for_stable_topology(
-            &[],
+        for (name, samples, saved) in [
+            (
+                "removal and pending reset",
+                vec![
+                    Ok(initial),
+                    Ok(expected.clone()),
+                    Ok(vec![shifted.clone()]),
+                    Err(DisplayError::identity_pending("receipt pending")),
+                    Ok(vec![shifted.clone()]),
+                    Ok(vec![shifted.clone()]),
+                ],
+                None,
+            ),
+            (
+                "late layout change",
+                vec![
+                    Ok(expected.clone()),
+                    Ok(vec![shifted]),
+                    Ok(expected.clone()),
+                    Ok(expected.clone()),
+                ],
+                Some(expected.clone()),
+            ),
+            (
+                "equivalent enumeration",
+                vec![Ok(ordered), Ok(reordered)],
+                None,
+            ),
+            ("headless", vec![Ok(Vec::new()), Ok(Vec::new())], None),
+            (
+                "one empty snapshot",
+                vec![Ok(Vec::new()), Ok(expected.clone()), Ok(expected)],
+                None,
+            ),
+        ] {
+            let last = samples.last().unwrap().as_ref().unwrap().clone();
+            let expected_waits = samples.len() - 1;
+            let mut samples = samples.into_iter();
+            let mut waits = 0;
+            let settled = wait_for_stable_topology(
+                &[5],
+                saved.as_deref(),
+                || samples.next().expect("unexpected extra read"),
+                || waits += 1,
+            )
+            .unwrap();
+            assert_eq!(waits, expected_waits, "{name}");
+            assert_eq!(settled.len(), last.len(), "{name}");
+            assert!(physical_topology_restored(&last, &settled), "{name}");
+        }
+
+        let error = wait_for_stable_topology(
+            &[5],
             None,
-            || Ok(samples.next().expect("already stable topology must return")),
-            || waits += 1,
+            || Err(DisplayError::Failure("invalid connector receipt".into())),
+            || panic!("real failure must not be retried"),
         )
-        .unwrap();
-        assert_eq!(waits, 1);
-        assert!(physical_topology_restored(&expected, &settled));
+        .unwrap_err();
+        assert_eq!(error.stage(), "remove");
+        assert_eq!(error.message(), "invalid connector receipt");
     }
 
     #[test]
@@ -1546,44 +1693,6 @@ mod tests {
     }
 
     #[test]
-    fn topology_wait_propagates_real_errors_instead_of_retrying_them() {
-        let error = wait_for_stable_topology(
-            &[5],
-            None,
-            || Err(DisplayError::Failure("invalid connector receipt".into())),
-            || panic!("real failure must not be retried"),
-        )
-        .unwrap_err();
-        assert_eq!(error.stage(), "remove");
-        assert_eq!(error.message(), "invalid connector receipt");
-    }
-
-    #[test]
-    fn headless_removal_can_settle_but_one_empty_snapshot_is_not_enough() {
-        let (_, initial) = recovery_fixture();
-        for samples in [
-            vec![Vec::new(), Vec::new()],
-            vec![
-                Vec::new(),
-                vec![initial[0].clone()],
-                vec![initial[0].clone()],
-            ],
-        ] {
-            let expected = samples.last().unwrap().clone();
-            let mut samples = samples.into_iter();
-            let actual = wait_for_stable_topology(
-                &[5],
-                None,
-                || Ok(samples.next().expect("unexpected extra read")),
-                || {},
-            )
-            .unwrap();
-            assert_eq!(actual.len(), expected.len());
-            assert!(samples.next().is_none());
-        }
-    }
-
-    #[test]
     fn recovery_does_not_replace_pre_session_physical_layout() {
         let mut session = MappingSession::recovery_test_session(Arc::new(|_| {}));
         let mut original = virtual_source(0);
@@ -1604,122 +1713,58 @@ mod tests {
     }
 
     #[test]
-    fn topology_identity_wait_accepts_published_receipt_after_pending() {
-        let mut reads = 0;
-        let pending_reports = Cell::new(0);
-        let (displays, was_pending) = read_ready_topology(
-            || {
-                reads += 1;
-                if reads == 1 {
-                    Err(DisplayError::identity_pending("receipt not published"))
-                } else {
-                    Ok(vec![virtual_source(5)])
+    fn topology_identity_wait_distinguishes_ready_pending_failure_deadline_and_cancel() {
+        for case in ["ready", "invalid", "deadline", "cancel"] {
+            let mut reads = 0;
+            let pending_reports = Cell::new(0);
+            let result = read_ready_topology(
+                || {
+                    reads += 1;
+                    match (case, reads) {
+                        ("ready", 2) => Ok(vec![virtual_source(5)]),
+                        ("invalid", _) => {
+                            Err(DisplayError::Failure("invalid connector identity".into()))
+                        }
+                        _ => Err(DisplayError::identity_pending(
+                            "connector 5 receipt pending",
+                        )),
+                    }
+                },
+                Instant::now()
+                    + if case == "deadline" {
+                        Duration::ZERO
+                    } else {
+                        Duration::from_secs(1)
+                    },
+                Duration::ZERO,
+                &|| case == "cancel" && pending_reports.get() > 0,
+                &mut |_| pending_reports.set(pending_reports.get() + 1),
+                "topology",
+            );
+            match case {
+                "ready" => {
+                    let (displays, pending) = result.unwrap();
+                    assert!(pending);
+                    assert_eq!(displays[0].connector_index, 5);
+                    assert_eq!(reads, 2);
+                    assert_eq!(pending_reports.get(), 1);
                 }
-            },
-            Instant::now() + Duration::from_secs(1),
-            Duration::ZERO,
-            &|| false,
-            &mut |_| pending_reports.set(pending_reports.get() + 1),
-            "topology",
-        )
-        .unwrap();
-
-        assert!(was_pending);
-        assert_eq!(displays[0].connector_index, 5);
-        assert_eq!(reads, 2);
-        assert_eq!(pending_reports.get(), 1);
-    }
-
-    #[test]
-    fn topology_identity_wait_does_not_retry_invalid_identity() {
-        let mut reads = 0;
-        let error = read_ready_topology(
-            || {
-                reads += 1;
-                Err(DisplayError::Failure("invalid connector identity".into()))
-            },
-            Instant::now() + Duration::from_secs(1),
-            Duration::ZERO,
-            &|| false,
-            &mut |_| panic!("invalid identity must not be reported as pending"),
-            "topology",
-        )
-        .unwrap_err();
-
-        assert_eq!(reads, 1);
-        assert_eq!(error.message, "invalid connector identity");
-    }
-
-    #[test]
-    fn topology_identity_wait_keeps_callers_deadline_and_pending_reason() {
-        let mut reads = 0;
-        let error = read_ready_topology(
-            || {
-                reads += 1;
-                Err(DisplayError::identity_pending(
-                    "connector 5 receipt pending",
-                ))
-            },
-            Instant::now(),
-            Duration::from_secs(1),
-            &|| false,
-            &mut |_| {},
-            "remove",
-        )
-        .unwrap_err();
-
-        assert_eq!(reads, 1);
-        assert_eq!(error.stage, "remove");
-        assert!(error.message.contains("timeout"));
-        assert!(error.message.contains("connector 5 receipt pending"));
-    }
-
-    #[test]
-    fn topology_identity_wait_honors_cancel_before_another_read() {
-        let cancelled = Cell::new(false);
-        let mut reads = 0;
-        let error = read_ready_topology(
-            || {
-                reads += 1;
-                Err(DisplayError::identity_pending("receipt pending"))
-            },
-            Instant::now() + Duration::from_secs(1),
-            Duration::ZERO,
-            &|| cancelled.get(),
-            &mut |_| cancelled.set(true),
-            "topology",
-        )
-        .unwrap_err();
-
-        assert_eq!(reads, 1);
-        assert!(error.is_clean_cancellation());
-    }
-
-    #[test]
-    fn cleanup_failure_prevents_retrying_a_transient_error() {
-        let mut error =
-            group_stage(0, "first-frame", "DuplicateOutput: E_ACCESSDENIED").retryable();
-        assert!(error.is_retryable());
-        error.record_cleanup_failure("renderer thread failed to stop");
-        assert!(!error.is_retryable());
-        assert!(!error.is_clean_cancellation());
-    }
-
-    #[test]
-    fn interrupted_recovery_does_not_query_display_topology() {
-        let group = MappingGroupInfo {
-            id: 0,
-            mode: VirtualMode::default(),
-            rotation: Rotation::default(),
-            route: MappingRoute::Mirror {
-                target: "unused".into(),
-            },
-            source_id: String::new(),
-            source_device_name: String::new(),
-            sunshine_id: None,
-        };
-        let error = wait_for_ready_recovery_topology(&group, "unused", &|| true).unwrap_err();
-        assert!(error.is_clean_cancellation());
+                "invalid" => {
+                    assert_eq!(result.unwrap_err().message, "invalid connector identity");
+                    assert_eq!(pending_reports.get(), 0);
+                }
+                "deadline" => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.stage, "topology");
+                    assert!(error.message.contains("timeout"));
+                    assert!(error.message.contains("connector 5 receipt pending"));
+                }
+                _ => assert!(result.unwrap_err().is_clean_cancellation()),
+            }
+            if case != "ready" {
+                assert_eq!(reads, 1, "{case}");
+            }
+        }
     }
 
     fn recovery_fixture() -> (MappingGroupInfo, Vec<Display>) {
@@ -1742,7 +1787,7 @@ mod tests {
     }
 
     #[test]
-    fn first_frame_validation_rejects_moved_source_and_preserves_real_errors() {
+    fn recovery_retries_only_transient_topology_failures_with_complete_cleanup() {
         let (group, displays) = recovery_fixture();
         let mut moved = displays.clone();
         moved[1].rect.left += 100;
@@ -1766,81 +1811,130 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.is_retryable());
-    }
 
-    #[test]
-    fn recovery_ready_snapshot_has_no_artificial_wait() {
-        let (group, displays) = recovery_fixture();
-        let recovered = wait_for_recovery_topology(
-            &group,
-            "physical",
-            &|| false,
-            || Ok(displays.clone()),
-            || panic!("ready topology must not sleep"),
-        )
-        .unwrap();
-        assert_eq!(recovered[1].connector_index, group.id);
-    }
-
-    #[test]
-    fn recovery_identity_pending_recovers_on_first_usable_snapshot() {
-        let (group, displays) = recovery_fixture();
-        let mut reads = 0;
-        let waits = Cell::new(0);
-        wait_for_recovery_topology(
-            &group,
-            "physical",
-            &|| false,
-            || {
-                reads += 1;
-                if reads == 1 {
-                    Err(DisplayError::identity_pending("receipt pending"))
-                } else {
-                    Ok(displays.clone())
-                }
-            },
-            || waits.set(waits.get() + 1),
-        )
-        .unwrap();
-        assert_eq!(reads, 2);
-        assert_eq!(waits.get(), 1);
-    }
-
-    #[test]
-    fn recovery_identity_pending_ends_only_when_caller_interrupts() {
-        let (group, _) = recovery_fixture();
-        let waits = Cell::new(0);
-        let mut reads = 0;
-        let error = wait_for_recovery_topology(
-            &group,
-            "physical",
-            &|| waits.get() == 20,
-            || {
-                reads += 1;
-                Err(DisplayError::identity_pending("receipt pending"))
-            },
-            || waits.set(waits.get() + 1),
-        )
-        .unwrap_err();
-        assert_eq!(reads, 20);
-        assert!(error.is_clean_cancellation());
-    }
-
-    #[test]
-    fn recovery_does_not_treat_real_read_failure_as_pending() {
-        let (group, _) = recovery_fixture();
-        let error = wait_for_recovery_topology(
-            &group,
-            "physical",
-            &|| false,
-            || Err(DisplayError::Failure("invalid connector identity".into())),
-            || panic!("a genuine read failure must not wait"),
-        )
-        .unwrap_err();
-        assert_eq!(error.group_id, Some(group.id));
-        assert_eq!(error.message, "invalid connector identity");
-        assert!(!error.is_clean_cancellation());
+        let mut error =
+            group_stage(0, "first-frame", "DuplicateOutput: E_ACCESSDENIED").retryable();
+        assert!(error.is_retryable());
+        error.record_cleanup_failure("renderer thread failed to stop");
         assert!(!error.is_retryable());
+        assert!(!error.is_clean_cancellation());
+
+        // The initial-start owner has the same terminal boundaries. A retry
+        // never grants another budget or runs after a cancellation/real error.
+        for case in [
+            "cancel",
+            "permanent",
+            "deadline",
+            "topology-error",
+            "expired",
+        ] {
+            let (info, displays) = recovery_fixture();
+            let mut session = MappingSession::recovery_test_session(Arc::new(|_| {}));
+            let group = &mut session.groups[0];
+            group.info = info;
+            let mut target = displays[0].clone();
+            let mut source = displays[1].clone();
+            let cancel = AtomicBool::new(false);
+            let deadline = Instant::now()
+                + if case == "expired" {
+                    Duration::ZERO
+                } else {
+                    Duration::from_secs(1)
+                };
+            let attempts = Cell::new(0);
+            let reads = Cell::new(0);
+            let result = group.start_renderer(
+                &mut target,
+                &mut source,
+                deadline,
+                &cancel,
+                || {
+                    reads.set(reads.get() + 1);
+                    Err(DisplayError::Failure("invalid connector identity".into()))
+                },
+                |_, _, _, attempt_deadline| {
+                    attempts.set(attempts.get() + 1);
+                    assert_eq!(attempt_deadline, deadline);
+                    match case {
+                        "cancel" => cancel.store(true, Ordering::Release),
+                        "permanent" => {
+                            return Err(RendererStartError::Failed(
+                                "texture allocation failed".into(),
+                            ));
+                        }
+                        "deadline" => {
+                            thread::sleep(deadline.saturating_duration_since(Instant::now()))
+                        }
+                        _ => {}
+                    }
+                    Err(RendererStartError::Retryable(
+                        "AcquireNextFrame ACCESS_LOST".into(),
+                    ))
+                },
+            );
+            let error = result.unwrap_err();
+            assert_eq!(attempts.get(), usize::from(case != "expired"), "{case}");
+            assert_eq!(reads.get(), usize::from(case == "topology-error"), "{case}");
+            assert_eq!(error.is_clean_cancellation(), case == "cancel", "{case}");
+            assert!(!error.is_retryable(), "{case}");
+            assert!(group.renderer.is_none(), "{case}");
+            if case == "deadline" {
+                assert!(error.message.contains("total budget"));
+                assert!(error.message.contains("ACCESS_LOST"));
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_waits_only_for_pending_identity_and_honors_cancellation() {
+        let (group, displays) = recovery_fixture();
+        for case in ["ready", "pending", "cancel", "invalid"] {
+            let mut reads = 0;
+            let waits = Cell::new(0);
+            let result = wait_for_recovery_topology(
+                &group,
+                "physical",
+                &|| case == "cancel" && waits.get() == 20,
+                || {
+                    reads += 1;
+                    match case {
+                        "ready" => Ok(displays.clone()),
+                        "pending" if reads > 1 => Ok(displays.clone()),
+                        "invalid" => {
+                            Err(DisplayError::Failure("invalid connector identity".into()))
+                        }
+                        _ => Err(DisplayError::identity_pending("receipt pending")),
+                    }
+                },
+                || {
+                    assert!(
+                        case == "pending" || case == "cancel",
+                        "{case} must not wait"
+                    );
+                    waits.set(waits.get() + 1);
+                },
+            );
+            match case {
+                "ready" | "pending" => {
+                    assert_eq!(result.unwrap()[1].connector_index, group.id);
+                    assert_eq!(reads, if case == "ready" { 1 } else { 2 });
+                    assert_eq!(waits.get(), reads - 1);
+                }
+                "cancel" => {
+                    assert_eq!(reads, 20);
+                    assert!(result.unwrap_err().is_clean_cancellation());
+                }
+                _ => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.group_id, Some(group.id));
+                    assert_eq!(error.message, "invalid connector identity");
+                    assert!(!error.is_clean_cancellation());
+                    assert!(!error.is_retryable());
+                }
+            }
+        }
+        let error = wait_for_ready_recovery_topology(&group, "unused", &|| true).unwrap_err();
+        assert!(error.is_clean_cancellation());
     }
 
     fn group(id: u32, route: MappingRoute) -> MappingGroupRequest {
@@ -1880,43 +1974,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_readiness_requires_capture_identity_but_mirroring_does_not() {
-        let mut source = virtual_source(5);
-        source.sunshine_id = None;
-        let stream = MappingPlan::new(vec![group(5, MappingRoute::StreamOnly)]).unwrap();
-        let mirror = MappingPlan::new(vec![group(
-            5,
-            MappingRoute::Mirror {
-                target: "physical".into(),
-            },
-        )])
-        .unwrap();
-
-        assert!(ordered_ready_sources(&stream, std::slice::from_ref(&source)).is_none());
-        assert!(ordered_ready_sources(&mirror, std::slice::from_ref(&source)).is_some());
-        source.sunshine_id = Some("capture-id".into());
-        assert!(ordered_ready_sources(&stream, &[source]).is_some());
-    }
-
-    #[test]
-    fn mixed_plan_preserves_stable_connector_ids() {
-        let plan = MappingPlan::new(vec![
-            group(
-                3,
-                MappingRoute::Mirror {
-                    target: "physical-a".into(),
-                },
-            ),
-            group(1, MappingRoute::StreamOnly),
-        ])
-        .unwrap();
-
-        assert_eq!(plan.groups[0].id, 3);
-        assert_eq!(plan.groups[1].id, 1);
-    }
-
-    #[test]
-    fn invalid_plans_fail_before_starting_hardware() {
+    fn plan_validation_and_cancellation_stop_before_hardware() {
         assert!(MappingPlan::new(Vec::new()).is_err());
         assert!(
             MappingPlan::new(vec![
@@ -1945,10 +2003,7 @@ mod tests {
         assert!(
             MappingPlan::new(vec![group(MAX_OUTPUTS as u32, MappingRoute::StreamOnly,)]).is_err()
         );
-    }
 
-    #[test]
-    fn cancelled_start_stops_before_hardware_and_invalid_plan_still_wins() {
         let cancel = AtomicBool::new(true);
         let valid = MappingPlan {
             groups: vec![group(0, MappingRoute::StreamOnly)],
@@ -1983,45 +2038,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_json_is_an_explicit_core_interface() {
-        let json = r#"{
-            "groups": [
-                {
-                    "id": 0,
-                    "mode": {
-                        "width": 3840,
-                        "height": 2160,
-                        "refresh_numerator": 240,
-                        "refresh_denominator": 1
-                    },
-                    "route": { "kind": "stream_only" }
-                }
-            ]
-        }"#;
-
-        let plan: MappingPlan = serde_json::from_str(json).unwrap();
-        plan.validate().unwrap();
-        assert_eq!(plan.groups[0].route, MappingRoute::StreamOnly);
-        assert_eq!(plan.groups[0].rotation, Rotation::Deg0);
-    }
-
-    #[test]
-    fn native_modes_keep_final_dimensions_and_rebase_orientation() {
-        let native = VirtualMode {
-            width: 1800,
-            height: 2880,
-            refresh_numerator: 120,
-            refresh_denominator: 1,
-        };
-        assert_eq!(native.width, 1800);
-        assert_eq!(native.height, 2880);
-        assert_eq!(native_topology_rotation(Rotation::Deg0), Rotation::Deg0);
-        assert_eq!(native_topology_rotation(Rotation::Deg90), Rotation::Deg0);
-        assert_eq!(native_topology_rotation(Rotation::Deg180), Rotation::Deg0);
-        assert_eq!(native_topology_rotation(Rotation::Deg270), Rotation::Deg0);
-    }
-
-    #[test]
     fn native_portrait_source_satisfies_a_270_degree_request() {
         let requested = VirtualMode {
             width: 1800,
@@ -2053,112 +2069,155 @@ mod tests {
             virtual_display: true,
         };
 
-        assert!(source_matches_mode(&source, requested, Rotation::Deg270));
+        for rotation in [
+            Rotation::Deg0,
+            Rotation::Deg90,
+            Rotation::Deg180,
+            Rotation::Deg270,
+        ] {
+            assert!(source_matches_mode(&source, requested, rotation));
+        }
     }
 
     #[test]
-    fn topology_timeout_scales_only_above_the_previous_eight_group_limit() {
-        assert_eq!(topology_timeout(1), Duration::from_secs(15));
-        assert_eq!(topology_timeout(8), Duration::from_secs(15));
-        assert_eq!(topology_timeout(9), Duration::from_secs(17));
-        assert_eq!(topology_timeout(16), Duration::from_secs(31));
-    }
-
-    #[test]
-    fn topology_snapshot_explains_an_absent_connector() {
-        let plan = MappingPlan::new(vec![group(1, MappingRoute::StreamOnly)]).unwrap();
-
-        assert_eq!(
-            format_topology_snapshot(&plan, &[]),
-            "group 1 absent requested=3840x2160@240/1 orientation=0 topology_rotation=0"
-        );
-    }
-
-    #[test]
-    fn hydrated_sources_follow_plan_order() {
-        let plan = MappingPlan::new(vec![
+    fn hydrated_sources_preserve_plan_order_and_require_route_specific_capture_identity() {
+        let mut plan = MappingPlan::new(vec![
             group(3, MappingRoute::StreamOnly),
             group(1, MappingRoute::StreamOnly),
         ])
         .unwrap();
-        let displays = vec![virtual_source(1), virtual_source(3)];
-
+        let mut displays = vec![virtual_source(1), virtual_source(3)];
         let ordered = ordered_ready_sources(&plan, &displays).unwrap();
-
         assert_eq!(
             ordered
                 .iter()
-                .map(|display| display.connector_index)
+                .map(|d| d.connector_index)
                 .collect::<Vec<_>>(),
             vec![3, 1]
         );
         assert_eq!(ordered[0].sunshine_id.as_deref(), Some("sunshine-3"));
-    }
-
-    #[test]
-    fn hydrated_sources_reject_changed_or_cloned_topology() {
-        let plan = MappingPlan::new(vec![
-            group(0, MappingRoute::StreamOnly),
-            group(1, MappingRoute::StreamOnly),
-        ])
-        .unwrap();
-        let first = virtual_source(0);
-        let mut second = virtual_source(1);
-        second.device_name = first.device_name.clone();
-        assert!(ordered_ready_sources(&plan, &[first.clone(), second]).is_none());
-
-        let mut wrong_mode = virtual_source(1);
-        wrong_mode.rect.right = 1920;
-        assert!(ordered_ready_sources(&plan, &[first, wrong_mode]).is_none());
-    }
-
-    #[test]
-    fn renderer_events_are_buffered_until_the_candidate_is_installed() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reporter: MappingReporter = Arc::new(move |event| tx.send(event).unwrap());
-        let gate = RendererEventGate::new(3, reporter);
-
-        gate.report(RendererEvent::TopologyLost);
-        assert!(rx.try_recv().is_err());
-        gate.activate();
-        assert!(matches!(
-            rx.recv().unwrap(),
-            MappingEvent::Renderer {
-                id: 3,
-                event: RendererEvent::TopologyLost,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn renderer_events_from_discarded_candidates_stay_suppressed() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reporter: MappingReporter = Arc::new(move |event| tx.send(event).unwrap());
-        let gate = RendererEventGate::new(4, reporter);
-
-        gate.report(RendererEvent::TopologyLost);
-        gate.discard();
-        gate.report(RendererEvent::Failed("stale".into()));
-
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn already_queued_events_are_rejected_after_renderer_replacement() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let reporter: MappingReporter = Arc::new(move |event| tx.send(event).unwrap());
-        let old = RendererEventGate::new(0, Arc::clone(&reporter));
-        old.activate();
-        old.report(RendererEvent::TopologyLost);
-        old.discard();
-        let current = RendererEventGate::new(0, reporter);
-        current.activate();
-        let MappingEvent::Renderer { renderer_id, .. } = rx.recv().unwrap() else {
-            panic!("renderer event expected")
+        displays[1].sunshine_id = None;
+        assert!(ordered_ready_sources(&plan, &displays).is_none());
+        plan.groups[0].route = MappingRoute::Mirror {
+            target: "physical".into(),
         };
+        assert!(ordered_ready_sources(&plan, &displays).is_some());
+        for cloned in [true, false] {
+            let mut invalid = displays.clone();
+            if cloned {
+                invalid[1].device_name = invalid[0].device_name.clone();
+            } else {
+                invalid[1].rect.right = 1920;
+            }
+            assert!(ordered_ready_sources(&plan, &invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn renderer_events_are_buffered_until_activation_and_rejected_after_discard_or_replacement() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reporter: MappingReporter = Arc::new(move |event| tx.send(event).unwrap());
+        let discarded = RendererEventGate::new(3, Arc::clone(&reporter));
+        discarded.report(RendererEvent::TopologyLost);
+        discarded.discard();
+        discarded.report(RendererEvent::Failed("stale".into()));
+        assert!(rx.try_recv().is_err());
+        let old = RendererEventGate::new(3, Arc::clone(&reporter));
+        old.report(RendererEvent::TopologyLost);
+        assert!(rx.try_recv().is_err());
+        old.activate();
+        let MappingEvent::Renderer {
+            id,
+            renderer_id,
+            event: RendererEvent::TopologyLost,
+        } = rx.recv().unwrap()
+        else {
+            panic!("expected buffered topology event")
+        };
+        assert_eq!(id, 3);
+        assert!(old.accepts(renderer_id));
+        old.discard();
+        let current = RendererEventGate::new(3, reporter);
+        current.activate();
         assert!(!old.accepts(renderer_id));
         assert!(!current.accepts(renderer_id));
         assert!(current.accepts(current.renderer_id));
+
+        // Exercise the actual initial-start loop: only the failed group's
+        // renderer is replaced, with a fresh source binding and event gate.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reporter: MappingReporter = Arc::new(move |event| tx.send(event).unwrap());
+        let (info, displays) = recovery_fixture();
+        let mut session = MappingSession::recovery_test_session(Arc::clone(&reporter));
+        session.groups[0].info = info;
+        let mut other = MappingSession::recovery_test_session(Arc::clone(&reporter));
+        let mut ready_group = other.groups.pop().unwrap();
+        ready_group.info.id = 7;
+        ready_group.renderer = Some(Renderer::startup_test_ready());
+        ready_group.renderer_event_gate.activate();
+        let ready_gate = Arc::clone(&ready_group.renderer_event_gate);
+        // These fake renderers own no display. Keep them outside MappingSession
+        // so its production stop path never reads or changes desktop topology.
+        let mut groups = std::mem::take(&mut session.groups);
+        groups.push(ready_group);
+        let group = &mut groups[0];
+        let mut target = displays[0].clone();
+        let mut source = displays[1].clone();
+        let mut refreshed = displays.clone();
+        refreshed[1].device_name = r"\\.\DISPLAY99".into();
+        refreshed[1].rect.left += 100;
+        refreshed[1].rect.right += 100;
+        let deadline = Instant::now() + START_TIMEOUT;
+        let cancel = AtomicBool::new(false);
+        let mut attempts = 0;
+        let mut reads = 0;
+        let mut stale_reporter: Option<RendererReporter> = None;
+        group
+            .start_renderer(
+                &mut target,
+                &mut source,
+                deadline,
+                &cancel,
+                || {
+                    reads += 1;
+                    Ok(refreshed.clone())
+                },
+                |_, source, reporter, attempt_deadline| {
+                    attempts += 1;
+                    assert_eq!(attempt_deadline, deadline, "budget must not reset");
+                    if attempts == 1 {
+                        reporter(RendererEvent::TopologyLost);
+                        stale_reporter = Some(reporter);
+                        Err(RendererStartError::Retryable(
+                            "AcquireNextFrame ACCESS_LOST".into(),
+                        ))
+                    } else {
+                        assert_eq!(source.device_name, refreshed[1].device_name);
+                        assert_eq!(source.rect, refreshed[1].rect);
+                        stale_reporter.as_ref().unwrap()(RendererEvent::Failed(
+                            "stale owner".into(),
+                        ));
+                        reporter(RendererEvent::Fps(59));
+                        Ok(Renderer::startup_test_ready())
+                    }
+                },
+            )
+            .unwrap();
+        assert_eq!((attempts, reads), (2, 1));
+        assert_eq!(group.info.source_device_name, refreshed[1].device_name);
+        assert!(group.renderer.is_some());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(MappingEvent::Renderer {
+                event: RendererEvent::Fps(59),
+                ..
+            })
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "failed candidate events must be discarded"
+        );
+        assert!(groups[1].renderer.is_some());
+        assert!(Arc::ptr_eq(&groups[1].renderer_event_gate, &ready_gate));
     }
 }

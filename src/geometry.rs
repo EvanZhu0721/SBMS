@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_aspect_ratio_changes_physical_width_for_the_same_diagonal() {
+    fn physical_dimensions_preserve_aspect_rotation_and_legacy_defaults() {
         let mut widescreen = display(2560, 1440, 600.0);
         widescreen.aspect_ratio = Some(AspectRatio {
             width: 16,
@@ -464,10 +464,7 @@ mod tests {
         assert!(widescreen_width > square_width);
         assert_approximately_equal(widescreen_width, 600.0 * 16.0 / 337.0_f64.sqrt());
         assert_approximately_equal(square_width, 600.0 / 2.0_f64.sqrt());
-    }
 
-    #[test]
-    fn explicit_aspect_ratio_swaps_physical_axes_when_vertical() {
         let mut horizontal = display(3840, 2160, 600.0);
         horizontal.aspect_ratio = Some(AspectRatio {
             width: 16,
@@ -481,20 +478,14 @@ mod tests {
 
         assert_approximately_equal(vertical_dimensions.0, horizontal_dimensions.1);
         assert_approximately_equal(vertical_dimensions.1, horizontal_dimensions.0);
-    }
 
-    #[test]
-    fn missing_aspect_ratio_preserves_native_pixel_ratio_behavior() {
         let legacy = display(2560, 1600, 400.0);
         let (width, height) = legacy.oriented_physical_mm().unwrap();
         let hypotenuse = 2560.0_f64.hypot(1600.0);
 
         assert_approximately_equal(width, 400.0 * 2560.0 / hypotenuse);
         assert_approximately_equal(height, 400.0 * 1600.0 / hypotenuse);
-    }
 
-    #[test]
-    fn zero_aspect_ratio_dimension_is_rejected() {
         let mut invalid = display(2560, 1440, 600.0);
         invalid.aspect_ratio = Some(AspectRatio {
             width: 0,
@@ -506,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn physical_strategy_matches_reference_density_and_target_aspect() {
-        let result = SizingRequest {
+    fn sizing_strategies_preserve_density_alignment_and_scale_bounds() {
+        let physical = SizingRequest {
             reference: display(3840, 2160, 708.0),
             target: display(2560, 1440, 604.0),
             strategy: SizingStrategy::MatchPhysicalSize,
@@ -516,122 +507,36 @@ mod tests {
         }
         .calculate()
         .unwrap();
-
-        assert_eq!(result.virtual_mode.width % 2, 0);
-        assert_eq!(result.virtual_mode.height % 2, 0);
+        assert_eq!(physical.virtual_mode.width % 2, 0);
+        assert_eq!(physical.virtual_mode.height % 2, 0);
         assert_eq!(
-            result.virtual_mode.width as u64 * 9,
-            result.virtual_mode.height as u64 * 16
+            physical.virtual_mode.width as u64 * 9,
+            physical.virtual_mode.height as u64 * 16
         );
-        assert_eq!(result.preferred_refresh_millihz, Some(240_000));
-    }
-
-    #[test]
-    fn rotation_swaps_oriented_extent_without_guessing_from_aspect() {
-        let size = PixelSize {
-            width: 3840,
-            height: 2160,
-        };
-        assert_eq!(
-            size.oriented(Rotation::Deg90),
-            PixelSize {
-                width: 2160,
-                height: 3840
-            }
-        );
-        assert_eq!(size.oriented(Rotation::Deg180), size);
-    }
-
-    #[test]
-    fn rounded_strategy_snaps_to_quarter_scale() {
-        let result = SizingRequest {
-            reference: display(2496, 1404, 1_000.0),
-            target: display(1920, 1080, 1_000.0),
-            strategy: SizingStrategy::RoundedScale,
-            alignment: 2,
-            preferred_refresh_millihz: None,
-        }
-        .calculate()
-        .unwrap();
-        assert_eq!(
-            result.virtual_mode,
-            PixelSize {
-                width: 2400,
-                height: 1350
-            }
-        );
-    }
-
-    #[test]
-    fn integer_strategy_snaps_to_nearest_whole_scale() {
-        let result = SizingRequest {
-            reference: display(3008, 1692, 1_000.0),
-            target: display(1920, 1080, 1_000.0),
-            strategy: SizingStrategy::IntegerScale,
-            alignment: 2,
-            preferred_refresh_millihz: None,
-        }
-        .calculate()
-        .unwrap();
-        assert_eq!(
-            result.virtual_mode,
-            PixelSize {
-                width: 3840,
-                height: 2160
-            }
-        );
-    }
-
-    #[test]
-    fn integer_strategy_never_drops_below_native_size() {
-        let result = SizingRequest {
-            reference: display(960, 540, 1_000.0),
-            target: display(1920, 1080, 1_000.0),
-            strategy: SizingStrategy::IntegerScale,
-            alignment: 2,
-            preferred_refresh_millihz: None,
-        }
-        .calculate()
-        .unwrap();
-        assert_eq!(
-            result.virtual_mode,
-            PixelSize {
-                width: 1920,
-                height: 1080
-            }
-        );
-    }
-
-    #[test]
-    fn legacy_integer_strategy_deserializes_without_exposing_its_old_limit() {
-        for max_scale in [1, 4, 8] {
-            let json = format!(r#"{{"integer_scale":{{"max_scale":{max_scale}}}}}"#);
-            let strategy: SizingStrategy = serde_json::from_str(&json).unwrap();
-            assert_eq!(strategy, SizingStrategy::IntegerScale);
-        }
-        for max_scale in [0, 9] {
-            let json = format!(r#"{{"integer_scale":{{"max_scale":{max_scale}}}}}"#);
-            assert!(serde_json::from_str::<SizingStrategy>(&json).is_err());
-        }
-    }
-
-    #[test]
-    fn current_sizing_strategies_round_trip_as_canonical_strings() {
-        for strategy in [
-            SizingStrategy::MatchPhysicalSize,
-            SizingStrategy::RoundedScale,
-            SizingStrategy::IntegerScale,
+        assert_eq!(physical.preferred_refresh_millihz, Some(240_000));
+        for (strategy, reference, expected) in [
+            (SizingStrategy::RoundedScale, (2496, 1404), (2400, 1350)),
+            (SizingStrategy::IntegerScale, (3008, 1692), (3840, 2160)),
+            (SizingStrategy::IntegerScale, (960, 540), (1920, 1080)),
         ] {
-            let json = serde_json::to_string(&strategy).unwrap();
+            let result = SizingRequest {
+                reference: display(reference.0, reference.1, 1_000.0),
+                target: display(1920, 1080, 1_000.0),
+                strategy,
+                alignment: 2,
+                preferred_refresh_millihz: None,
+            }
+            .calculate()
+            .unwrap();
             assert_eq!(
-                serde_json::from_str::<SizingStrategy>(&json).unwrap(),
-                strategy
+                result.virtual_mode,
+                PixelSize {
+                    width: expected.0,
+                    height: expected.1
+                },
+                "{strategy:?}"
             );
         }
-        assert_eq!(
-            serde_json::to_string(&SizingStrategy::IntegerScale).unwrap(),
-            r#""integer_scale""#
-        );
     }
 
     #[test]

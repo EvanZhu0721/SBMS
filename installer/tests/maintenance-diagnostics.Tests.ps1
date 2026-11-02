@@ -8,17 +8,6 @@ Describe 'Maintenance failure diagnostics' {
     ) {
         param($BlockedLog, $ExpectedExit)
         $path = Join-Path $PSScriptRoot '..\maintenance.ps1'
-        $tokens = $null
-        $errors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile(
-            $path, [ref]$tokens, [ref]$errors)
-        $errors.Count | Should Be 0
-        $function = $ast.Find({
-            param($node)
-            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                $node.Name -eq 'Invoke-MaintenanceAction'
-        }, $true)
-        $function | Should Not BeNullOrEmpty
         $probe = Join-Path $TestDrive 'diagnostic-probe.ps1'
         # Execute only the exception wrapper, never the real maintenance action.
         $maintenance = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)

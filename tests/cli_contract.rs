@@ -71,7 +71,7 @@ fn usage() -> &'static str {
 }
 
 #[test]
-fn version_is_machine_readable() {
+fn cli_version_and_usage_have_stable_output_and_exit_codes() {
     let root = TestRoot::new("version");
     let output = run(&root, &["--version"]);
 
@@ -81,10 +81,7 @@ fn version_is_machine_readable() {
         format!("sbms {}\n", env!("CARGO_PKG_VERSION"))
     );
     assert_eq!(text(&output.stderr), "");
-}
 
-#[test]
-fn invalid_invocations_keep_the_usage_contract() {
     for arguments in [&[][..], &["unknown"], &["--version", "extra"]] {
         let root = TestRoot::new("usage");
         let output = run(&root, arguments);
@@ -118,7 +115,7 @@ fn config_path_and_missing_config_show_initializes_default_profile() {
 }
 
 #[test]
-fn clear_target_only_changes_output_one() {
+fn clear_target_changes_only_the_first_output_and_preserves_invalid_input() {
     let root = TestRoot::new("clear-target");
     let config_path = root.config_path();
     fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -167,10 +164,7 @@ fn clear_target_only_changes_output_one() {
     assert_eq!(saved["groups"][1], original["groups"][1]);
     assert_eq!(saved["groups"][2], original["groups"][2]);
     assert_eq!(saved["selected_group_id"], 3);
-}
 
-#[test]
-fn clear_target_preserves_malformed_config_bytes() {
     let root = TestRoot::new("bad-config");
     let config_path = root.config_path();
     fs::create_dir_all(config_path.parent().unwrap()).unwrap();

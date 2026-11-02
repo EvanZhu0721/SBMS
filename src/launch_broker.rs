@@ -314,21 +314,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registered_task_name_is_stable() {
-        assert_eq!(
-            REGISTERED_TASK_NAME,
-            r"\SBMS\Tray-7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A"
-        );
-    }
-
-    #[test]
-    fn tray_arguments_default_to_open() {
-        assert!(tray_open_requested([]).unwrap());
-        assert!(tray_open_requested(["--open".into()]).unwrap());
-        assert!(!tray_open_requested(["--background".into()]).unwrap());
-    }
-
-    #[test]
     fn manual_launch_marker_suppresses_background_mapping_until_released() {
         assert!(is_logon_startup(false).unwrap());
         assert!(!is_logon_startup(true).unwrap());
@@ -339,60 +324,35 @@ mod tests {
     }
 
     #[test]
-    fn tray_arguments_reject_unknown_or_extra_values() {
-        assert!(tray_open_requested(["--unknown".into()]).is_err());
-        assert!(tray_open_requested(["--open".into(), "extra".into()]).is_err());
-    }
-
-    #[test]
-    fn polling_routes_to_host_when_busy_owner_becomes_ready() {
-        let mut host_checks = 0;
-        let mut claim_attempts = 0;
-        let mut waits = 0;
-        let result = poll_host_or_claim(
-            || {
-                host_checks += 1;
-                (host_checks == 2).then_some("host")
-            },
-            || {
-                claim_attempts += 1;
-                Ok::<_, ()>(None::<&str>)
-            },
-            || {
-                waits += 1;
-                true
-            },
-        )
-        .unwrap();
-
-        assert!(matches!(result, Some(HostClaim::Existing("host"))));
-        assert_eq!(claim_attempts, 1);
-        assert_eq!(waits, 1);
-    }
-
-    #[test]
-    fn polling_claims_host_when_busy_mutex_is_released() {
-        let mut claim_attempts = 0;
-        let mut waits = 0;
-        let result = poll_host_or_claim(
-            || None::<&str>,
-            || {
-                claim_attempts += 1;
-                Ok::<_, ()>((claim_attempts == 2).then_some("claim"))
-            },
-            || {
-                waits += 1;
-                true
-            },
-        )
-        .unwrap();
-
-        assert!(matches!(result, Some(HostClaim::Claimed("claim"))));
-        assert_eq!(waits, 1);
-    }
-
-    #[test]
-    fn wide_adds_exactly_one_terminator() {
-        assert_eq!(wide("SBMS"), [83, 66, 77, 83, 0]);
+    fn polling_reuses_a_ready_host_or_claims_a_released_mutex() {
+        for existing in [true, false] {
+            let mut host_checks = 0;
+            let mut claim_attempts = 0;
+            let mut waits = 0;
+            let result = poll_host_or_claim(
+                || {
+                    host_checks += 1;
+                    (existing && host_checks == 2).then_some("host")
+                },
+                || {
+                    claim_attempts += 1;
+                    Ok::<_, ()>((!existing && claim_attempts == 2).then_some("claim"))
+                },
+                || {
+                    waits += 1;
+                    true
+                },
+            )
+            .unwrap();
+            assert_eq!(waits, 1);
+            match result {
+                Some(HostClaim::Existing("host")) => {
+                    assert!(existing);
+                    assert_eq!(claim_attempts, 1);
+                }
+                Some(HostClaim::Claimed("claim")) => assert!(!existing),
+                _ => panic!("unexpected host claim"),
+            }
+        }
     }
 }

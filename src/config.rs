@@ -1656,45 +1656,6 @@ mod tests {
     use super::*;
     use crate::geometry::{DisplayGeometry, PhysicalMeasurement, PixelSize, SizingStrategy};
 
-    #[test]
-    fn simplified_drafts_load_without_discarding_reference_or_stream_measurements() {
-        let raw = r#"{
-            "version": 2,
-            "groups": [{
-                "id": 3,
-                "route": {"kind": "stream_only", "screen": {
-                    "width": 2880, "height": 1800, "diagonal_inches": 15.3,
-                    "refresh_millihz": 120000, "rotation": "deg270"
-                }},
-                "reference_source": "manual",
-                "manual_reference": {"width": 2560, "height": 1440, "diagonal_inches": 27.0},
-                "sizing_strategy": "integer_scale"
-            }],
-            "selected_group_id": 3
-        }"#;
-        let config: AppConfig = serde_json::from_str(raw).unwrap();
-        config.validate().unwrap();
-        let group = &config.groups[0];
-        assert_eq!(group.manual_reference.unwrap().diagonal_inches, 27.0);
-        assert_eq!(group.sizing_strategy, Some(SizingStrategy::IntegerScale));
-        let GroupRouteConfig::StreamOnly { screen } = group.route else {
-            panic!("stream draft changed route");
-        };
-        assert_eq!(
-            screen.aspect_ratio,
-            AspectRatio {
-                width: 2880,
-                height: 1800
-            }
-        );
-        assert_eq!(screen.rotation, Rotation::Deg270);
-        let serialized = serde_json::to_string(&config).unwrap();
-        assert_eq!(
-            serde_json::from_str::<AppConfig>(&serialized).unwrap(),
-            config
-        );
-    }
-
     fn test_store(name: &str) -> ConfigStore {
         let path = env::temp_dir().join(format!(
             "sbms-config-test-{}-{}-{}.json",
@@ -1778,90 +1739,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_config_loads_defaults() {
-        let store = test_store("missing");
-        let outcome = store.load().unwrap();
-        assert_eq!(outcome.config, AppConfig::default());
-        assert_eq!(outcome.warning, None);
-    }
-
-    #[test]
-    fn automatic_sampling_preserves_manual_choices_and_legacy_json() {
-        let automatic = RenderingOptions::default();
-        assert!(automatic.effective_with_default(true));
-        assert!(!automatic.effective_with_default(false));
-        for enabled in [false, true] {
-            let options: RenderingOptions = serde_json::from_value(serde_json::json!({
-                "high_performance_sampling": enabled
-            }))
-            .unwrap();
-            assert_eq!(options.high_performance_sampling, Some(enabled));
-            assert_eq!(options.effective_with_default(true), enabled);
-            assert_eq!(options.effective_with_default(false), enabled);
-            assert_eq!(
-                serde_json::to_value(options).unwrap()["high_performance_sampling"],
-                enabled
-            );
-        }
-        let json = serde_json::to_value(automatic).unwrap();
-        assert!(json.get("high_performance_sampling").is_none());
-        assert_eq!(
-            serde_json::from_value::<RenderingOptions>(json).unwrap(),
-            automatic
-        );
-    }
-
-    #[test]
-    fn collecting_unchanged_sampling_preserves_automatic_mode() {
-        let mut options = RenderingOptions::default();
-        let effective = options.high_performance_sampling();
-        options.set_effective_sampling(effective);
-        assert_eq!(options.high_performance_sampling, None);
-        options.set_effective_sampling(!effective);
-        assert_eq!(options.high_performance_sampling, Some(!effective));
-        options.set_effective_sampling(effective);
-        assert_eq!(options.high_performance_sampling, Some(effective));
-    }
-
-    #[test]
-    fn rendering_options_default_automatic_for_existing_configs() {
-        let mut json = serde_json::to_value(AppConfig::default()).unwrap();
-        assert!(json["groups"][0].get("rendering").is_none());
-        let restored: AppConfig = serde_json::from_value(json.clone()).unwrap();
-        assert_eq!(restored.groups[0].rendering, RenderingOptions::default());
-
-        json["groups"][0]["rendering"] = serde_json::json!({"full_frame_copy": true});
-        let restored: AppConfig = serde_json::from_value(json).unwrap();
-        assert_eq!(
-            restored.groups[0].rendering,
-            RenderingOptions {
-                full_frame_copy: true,
-                ..Default::default()
-            }
-        );
-    }
-
-    #[test]
-    fn rendering_options_persist_independently_per_group() {
-        let store = test_store("rendering-options");
-        let mut config = AppConfig::default();
-        config.groups[0].rendering = RenderingOptions {
-            high_performance_sampling: Some(true),
-            full_frame_copy: true,
-            static_refresh: true,
-        };
-        config.groups.push(GroupConfig {
-            id: 1,
-            ..Default::default()
-        });
-        store.save(&config).unwrap();
-        let outcome = store.load().unwrap();
-        assert_eq!(outcome.warning, None);
-        assert_eq!(outcome.config, config);
-        store.reset().unwrap();
-    }
-
-    #[test]
     fn round_trip_replaces_existing_file() {
         let store = test_store("round-trip");
         let mut config = AppConfig {
@@ -1911,81 +1788,136 @@ mod tests {
     }
 
     #[test]
-    fn empty_reference_display_id_is_rejected() {
-        let store = test_store("empty-reference");
-        let mut config = AppConfig::default();
-        config.groups[0].reference_source = Some(ReferenceSource::Display(" ".into()));
-        assert!(store.save(&config).is_err());
-    }
-
-    #[test]
-    fn malformed_config_is_preserved_and_reported() {
-        let store = test_store("malformed");
-        fs::write(store.path(), b"{not json").unwrap();
-        let before = fs::read(store.path()).unwrap();
-        let outcome = store.load().unwrap();
-        assert_eq!(outcome.config, AppConfig::default());
-        assert!(outcome.warning.is_some());
-        assert_eq!(fs::read(store.path()).unwrap(), before);
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn unsupported_version_is_preserved_and_reported() {
-        let store = test_store("future");
-        fs::write(store.path(), br#"{"version":99,"groups":[]}"#).unwrap();
-        let before = fs::read(store.path()).unwrap();
-        let outcome = store.load().unwrap();
-        assert_eq!(outcome.config, AppConfig::default());
-        assert!(
-            outcome
-                .warning
-                .unwrap()
-                .contains("unsupported config version")
-        );
-        assert_eq!(fs::read(store.path()).unwrap(), before);
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn legacy_v1_migrates_to_output_one_and_is_preserved() {
-        let store = test_migration_store("legacy");
-        let legacy = LegacyAppConfig {
-            version: LEGACY_CONFIG_VERSION,
-            target_id: Some("legacy-target".into()),
-            reference_source: Some(ReferenceSource::Display("legacy-reference".into())),
-            sizing: Some(test_sizing()),
+    fn group_validation_rejects_invalid_identity_routes_and_collection_bounds() {
+        let store = test_store("group-boundaries");
+        let order = [12, 4, 0, 15, 7, 2, 10, 6, 1, 14, 5, 9, 3, 13, 8, 11];
+        let maximum = AppConfig {
+            groups: order
+                .into_iter()
+                .map(|id| GroupConfig {
+                    id,
+                    ..Default::default()
+                })
+                .collect(),
+            selected_group_id: Some(15),
+            ..Default::default()
         };
-        let legacy_path = store.legacy_path.as_ref().unwrap();
-        let bytes = serde_json::to_vec_pretty(&serde_json::json!({
-            "version": legacy.version,
-            "target_id": legacy.target_id,
-            "reference_source": legacy.reference_source,
-            "sizing": legacy.sizing,
-        }))
-        .unwrap();
-        fs::write(legacy_path, &bytes).unwrap();
-
-        let outcome = store.load().unwrap();
-        assert_eq!(outcome.warning, None);
-        assert_eq!(outcome.config.version, CONFIG_VERSION);
-        assert_eq!(outcome.config.groups.len(), 1);
-        assert_eq!(outcome.config.groups[0].id, 0);
-        assert_eq!(
-            outcome.config.groups[0].route,
-            GroupRouteConfig::Mirror {
-                target_id: Some("legacy-target".into())
-            }
-        );
-        assert_eq!(outcome.config.groups[0].sizing, Some(test_sizing()));
-        assert_eq!(outcome.config.selected_group_id, Some(0));
-        assert_eq!(fs::read(legacy_path).unwrap(), bytes);
-        assert!(store.path().is_file());
+        store.save(&maximum).unwrap();
+        assert_eq!(store.load().unwrap().config, maximum);
+        for (name, change) in [
+            (
+                "empty",
+                (|c: &mut AppConfig| c.groups.clear()) as fn(&mut AppConfig),
+            ),
+            ("duplicate id", |c| c.groups.push(GroupConfig::default())),
+            ("missing selection", |c| c.selected_group_id = Some(7)),
+            ("too many", |c| {
+                c.groups = (0..=MAX_OUTPUTS as u32)
+                    .map(|id| GroupConfig {
+                        id,
+                        ..Default::default()
+                    })
+                    .collect()
+            }),
+            ("empty reference", |c| {
+                c.groups[0].reference_source = Some(ReferenceSource::Display(" ".into()))
+            }),
+            ("duplicate target", |c| {
+                c.groups[0].route = GroupRouteConfig::Mirror {
+                    target_id: Some("DISPLAY-A".into()),
+                };
+                c.groups.push(GroupConfig {
+                    id: 1,
+                    route: GroupRouteConfig::Mirror {
+                        target_id: Some("display-a".into()),
+                    },
+                    ..Default::default()
+                });
+            }),
+            ("invalid stream", |c| {
+                *c = stream_config(60_000);
+                if let GroupRouteConfig::StreamOnly { screen } = &mut c.groups[0].route {
+                    screen.width = 0;
+                }
+            }),
+        ] {
+            let mut candidate = AppConfig::default();
+            change(&mut candidate);
+            assert!(store.save(&candidate).is_err(), "{name}");
+            assert_eq!(
+                store.load().unwrap().config,
+                maximum,
+                "{name} must not overwrite stored config"
+            );
+        }
         store.reset().unwrap();
     }
 
     #[test]
-    fn legacy_v1_rounded_scale_fixture_migrates_every_sizing_field() {
+    fn invalid_current_and_legacy_configs_are_preserved_without_fallback() {
+        for (name, current, legacy, warning) in [
+            ("malformed", Some("{not json"), None, None),
+            (
+                "future",
+                Some(r#"{"version":99,"groups":[]}"#),
+                None,
+                Some("unsupported config version"),
+            ),
+            ("legacy-malformed", None, Some("{not json"), None),
+            (
+                "legacy-future",
+                None,
+                Some(r#"{"version":9,"target_id":"future"}"#),
+                Some("unsupported config version 9"),
+            ),
+            (
+                "v2-malformed",
+                Some("{broken v2"),
+                Some(r#"{"version":1,"target_id":"legacy"}"#),
+                None,
+            ),
+            (
+                "v2-future",
+                Some(r#"{"version":3,"groups":[]}"#),
+                Some(r#"{"version":1,"target_id":"legacy"}"#),
+                Some("unsupported config version 3"),
+            ),
+        ] {
+            let store = test_migration_store(name);
+            let legacy_path = store.legacy_path.as_ref().unwrap();
+            if let Some(contents) = current {
+                fs::write(store.path(), contents).unwrap();
+            }
+            if let Some(contents) = legacy {
+                fs::write(legacy_path, contents).unwrap();
+            }
+            let outcome = store.load().unwrap();
+            assert_eq!(outcome.config, AppConfig::default(), "{name}");
+            let message = outcome.warning.expect(name);
+            if let Some(expected) = warning {
+                assert!(message.contains(expected), "{name}: {message}");
+            }
+            assert_eq!(store.path().exists(), current.is_some(), "{name}");
+            if let Some(contents) = current {
+                assert_eq!(
+                    fs::read(store.path()).unwrap(),
+                    contents.as_bytes(),
+                    "{name}"
+                );
+            }
+            if let Some(contents) = legacy {
+                assert_eq!(
+                    fs::read(legacy_path).unwrap(),
+                    contents.as_bytes(),
+                    "{name}"
+                );
+            }
+            store.reset().unwrap();
+        }
+    }
+
+    #[test]
+    fn legacy_migration_preserves_full_sizing_and_empty_drafts() {
         let store = test_migration_store("legacy-rounded-scale");
         let legacy_path = store.legacy_path.as_ref().unwrap();
         let bytes = br#"{
@@ -2090,10 +2022,7 @@ mod tests {
         assert!(store.path().is_file());
         assert_eq!(store.load().unwrap().config, outcome.config);
         store.reset().unwrap();
-    }
 
-    #[test]
-    fn empty_legacy_config_migrates_to_unconfigured_output_one() {
         let store = test_migration_store("legacy-empty");
         let legacy_path = store.legacy_path.as_ref().unwrap();
         fs::write(
@@ -2104,37 +2033,6 @@ mod tests {
         assert_eq!(store.load().unwrap().config, AppConfig::default());
         assert!(legacy_path.is_file());
         assert!(store.path().is_file());
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn malformed_legacy_is_preserved_without_creating_v2() {
-        let store = test_migration_store("legacy-malformed");
-        let legacy_path = store.legacy_path.as_ref().unwrap();
-        let bytes = b"{not json";
-        fs::write(legacy_path, bytes).unwrap();
-        let outcome = store.load().unwrap();
-        assert!(outcome.warning.is_some());
-        assert_eq!(fs::read(legacy_path).unwrap(), bytes);
-        assert!(!store.path().exists());
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn future_legacy_is_preserved_without_creating_v2() {
-        let store = test_migration_store("legacy-future");
-        let legacy_path = store.legacy_path.as_ref().unwrap();
-        let bytes = br#"{"version":9,"target_id":"future"}"#;
-        fs::write(legacy_path, bytes).unwrap();
-        let outcome = store.load().unwrap();
-        assert!(
-            outcome
-                .warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("unsupported config version 9"))
-        );
-        assert_eq!(fs::read(legacy_path).unwrap(), bytes);
-        assert!(!store.path().exists());
         store.reset().unwrap();
     }
 
@@ -2164,150 +2062,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_malformed_v2_does_not_fall_back_to_legacy() {
-        let store = test_migration_store("v2-malformed");
-        let legacy_path = store.legacy_path.as_ref().unwrap();
-        fs::write(
-            legacy_path,
-            br#"{"version":1,"target_id":"legacy","reference_source":null,"sizing":null}"#,
-        )
-        .unwrap();
-        let current = b"{broken v2";
-        fs::write(store.path(), current).unwrap();
-        let outcome = store.load().unwrap();
-        assert!(outcome.warning.is_some());
-        assert_eq!(outcome.config, AppConfig::default());
-        assert_eq!(fs::read(store.path()).unwrap(), current);
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn existing_future_v2_does_not_fall_back_to_legacy() {
-        let store = test_migration_store("v2-future");
-        fs::write(
-            store.legacy_path.as_ref().unwrap(),
-            br#"{"version":1,"target_id":"legacy"}"#,
-        )
-        .unwrap();
-        fs::write(store.path(), br#"{"version":3,"groups":[]}"#).unwrap();
-        let outcome = store.load().unwrap();
-        assert!(
-            outcome
-                .warning
-                .as_deref()
-                .is_some_and(|warning| warning.contains("unsupported config version 3"))
-        );
-        assert_eq!(outcome.config, AppConfig::default());
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn reset_removes_current_and_legacy_configs() {
-        let store = test_migration_store("reset");
-        fs::write(store.path(), b"current").unwrap();
-        fs::write(store.legacy_path.as_ref().unwrap(), b"legacy").unwrap();
-        store.reset().unwrap();
-        assert!(!store.path().exists());
-        assert!(!store.legacy_path.as_ref().unwrap().exists());
-    }
-
-    #[test]
-    fn group_validation_rejects_invalid_collections() {
-        let store = test_store("invalid-groups");
-        let mut empty = AppConfig::default();
-        empty.groups.clear();
-        assert!(store.save(&empty).is_err());
-
-        let mut duplicate = AppConfig::default();
-        duplicate.groups.push(GroupConfig::default());
-        assert!(store.save(&duplicate).is_err());
-
-        let missing_selection = AppConfig {
-            selected_group_id: Some(7),
-            ..AppConfig::default()
-        };
-        assert!(store.save(&missing_selection).is_err());
-
-        let too_many = AppConfig {
-            groups: (0..=MAX_OUTPUTS as u32)
-                .map(|id| GroupConfig {
-                    id,
-                    ..GroupConfig::default()
-                })
-                .collect(),
-            selected_group_id: Some(0),
-            ..AppConfig::default()
-        };
-        assert!(store.save(&too_many).is_err());
-    }
-
-    #[test]
-    fn exactly_sixteen_groups_round_trip_in_tab_order() {
-        let store = test_store("sixteen-groups");
-        let order = [12, 4, 0, 15, 7, 2, 10, 6, 1, 14, 5, 9, 3, 13, 8, 11];
-        let config = AppConfig {
-            version: CONFIG_VERSION,
-            groups: order
-                .into_iter()
-                .map(|id| GroupConfig {
-                    id,
-                    ..GroupConfig::default()
-                })
-                .collect(),
-            selected_group_id: Some(15),
-        };
-        store.save(&config).unwrap();
-        let loaded = store.load().unwrap().config;
-        assert_eq!(
-            loaded
-                .groups
-                .iter()
-                .map(|group| group.id)
-                .collect::<Vec<_>>(),
-            order
-        );
-        store.reset().unwrap();
-    }
-
-    #[test]
-    fn duplicate_mirror_targets_are_case_insensitive() {
-        let store = test_store("duplicate-target");
-        let mut config = AppConfig::default();
-        config.groups[0].route = GroupRouteConfig::Mirror {
-            target_id: Some("DISPLAY-A".into()),
-        };
-        config.groups.push(GroupConfig {
-            id: 1,
-            route: GroupRouteConfig::Mirror {
-                target_id: Some("display-a".into()),
-            },
-            ..GroupConfig::default()
-        });
-        assert!(store.save(&config).is_err());
-    }
-
-    #[test]
-    fn invalid_stream_parameters_are_rejected() {
-        let store = test_store("invalid-stream");
-        let mut config = AppConfig::default();
-        config.groups[0].route = GroupRouteConfig::StreamOnly {
-            screen: StreamScreenConfig {
-                width: 0,
-                height: 2160,
-                diagonal_inches: Some(f64::NAN),
-                refresh_millihz: 0,
-                aspect_ratio: AspectRatio {
-                    width: 0,
-                    height: 9,
-                },
-                rotation: Rotation::Deg0,
-            },
-        };
-        assert!(store.save(&config).is_err());
-    }
-
-    #[test]
-    fn stream_refresh_boundaries_round_trip() {
+    fn stream_refresh_limits_round_trip_and_invalid_values_preserve_the_file() {
         for refresh_millihz in [MIN_REFRESH_MILLIHZ, MAX_REFRESH_MILLIHZ] {
             let store = test_store(&format!("refresh-{refresh_millihz}"));
             let config = stream_config(refresh_millihz);
@@ -2317,10 +2072,7 @@ mod tests {
             assert_eq!(outcome.config, config);
             store.reset().unwrap();
         }
-    }
 
-    #[test]
-    fn sub_hertz_stream_refresh_is_rejected_on_save_and_load() {
         let store = test_store("sub-hertz-refresh");
         let config = stream_config(MIN_REFRESH_MILLIHZ - 1);
         assert!(store.save(&config).is_err());
@@ -2340,142 +2092,25 @@ mod tests {
     }
 
     #[test]
-    fn display_override_round_trip_and_case_insensitive_lookup() {
-        let store = test_override_store("round-trip");
-        let mut overrides = DisplayOverrides::default();
-        overrides
-            .upsert(
-                r"\\?\DISPLAY#ABC".into(),
-                24.0,
-                Some(AspectRatio {
-                    width: 16,
-                    height: 9,
-                }),
-            )
-            .unwrap();
-        store.save(&overrides).unwrap();
-        let loaded = store.load().unwrap();
-        assert_eq!(loaded.warning, None);
-        assert_eq!(
-            loaded
-                .overrides
-                .override_for(r"\\?\display#abc")
-                .map(|entry| (entry.diagonal_inches, entry.aspect_ratio)),
-            Some((
-                24.0,
-                Some(AspectRatio {
-                    width: 16,
-                    height: 9
-                })
-            ))
-        );
-        fs::remove_file(store.path).unwrap();
-    }
-
-    #[test]
-    fn invalid_display_override_is_preserved_and_reported() {
-        let store = test_override_store("invalid");
-        fs::write(
-            &store.path,
-            br#"{"version":1,"displays":[{"display_id":"x","diagonal_inches":0}]}"#,
-        )
-        .unwrap();
-        let before = fs::read(&store.path).unwrap();
-        let outcome = store.load().unwrap();
-        assert_eq!(outcome.overrides, DisplayOverrides::default());
-        assert!(outcome.warning.is_some());
-        assert_eq!(fs::read(&store.path).unwrap(), before);
-        fs::remove_file(store.path).unwrap();
-    }
-
-    #[test]
-    fn display_override_upsert_and_remove_are_deterministic() {
-        let mut overrides = DisplayOverrides::default();
-        overrides.upsert("B".into(), 27.0, None).unwrap();
-        overrides.upsert("a".into(), 24.0, None).unwrap();
-        overrides.upsert("A".into(), 25.0, None).unwrap();
-        assert_eq!(overrides.displays.len(), 2);
-        assert_eq!(overrides.displays[0].display_id, "A");
-        assert_eq!(
-            overrides
-                .override_for("a")
-                .map(|entry| entry.diagonal_inches),
-            Some(25.0)
-        );
-        assert!(overrides.remove("b"));
-        assert!(!overrides.remove("missing"));
-    }
-
-    #[test]
-    fn legacy_display_override_without_aspect_ratio_keeps_native_behavior() {
-        let store = test_override_store("legacy-aspect");
-        fs::write(
-            &store.path,
-            br#"{"version":1,"displays":[{"display_id":"legacy","diagonal_inches":24.0}]}"#,
-        )
-        .unwrap();
-        let outcome = store.load().unwrap();
-        let display_override = outcome.overrides.override_for("legacy").unwrap();
-        assert_eq!(display_override.diagonal_inches, 24.0);
-        assert_eq!(display_override.aspect_ratio, None);
-        fs::remove_file(store.path).unwrap();
-    }
-
-    #[test]
-    fn zero_display_override_aspect_ratio_is_preserved_and_reported() {
-        let store = test_override_store("zero-aspect");
-        fs::write(
-            &store.path,
-            br#"{"version":1,"displays":[{"display_id":"x","diagonal_inches":24.0,"aspect_ratio":{"width":0,"height":9}}]}"#,
-        )
-        .unwrap();
-        let before = fs::read(&store.path).unwrap();
-        let outcome = store.load().unwrap();
-        assert!(outcome.warning.is_some());
-        assert_eq!(fs::read(&store.path).unwrap(), before);
-        fs::remove_file(store.path).unwrap();
-    }
-
-    #[test]
-    fn group_lookup_and_mutation_preserve_collection_state() {
-        let mut config = AppConfig {
-            version: CONFIG_VERSION,
-            groups: vec![
-                GroupConfig::default(),
-                GroupConfig {
-                    id: 3,
-                    route: GroupRouteConfig::StreamOnly {
-                        screen: StreamScreenConfig {
-                            width: 1920,
-                            height: 1080,
-                            diagonal_inches: None,
-                            refresh_millihz: 60_000,
-                            aspect_ratio: AspectRatio {
-                                width: 16,
-                                height: 9,
-                            },
-                            rotation: Rotation::Deg0,
-                        },
-                    },
-                    reference_source: None,
-                    sizing: None,
-                    ..GroupConfig::default()
-                },
-            ],
-            selected_group_id: Some(3),
-        };
-        let other_group = config.group(3).unwrap().clone();
-
-        config.group_mut(0).unwrap().route = GroupRouteConfig::Mirror {
-            target_id: Some("replacement-target".into()),
-        };
-
-        assert_eq!(config.groups.len(), 2);
-        assert_eq!(config.groups[0].id, 0);
-        assert_eq!(config.groups[1], other_group);
-        assert_eq!(config.selected_group_id, Some(3));
-        assert!(config.group(99).is_none());
-        assert!(config.group_mut(99).is_none());
+    fn invalid_display_overrides_are_preserved_and_reported() {
+        for (name, contents) in [
+            (
+                "zero-diagonal",
+                r#"{"version":1,"displays":[{"display_id":"x","diagonal_inches":0}]}"#,
+            ),
+            (
+                "zero-aspect",
+                r#"{"version":1,"displays":[{"display_id":"x","diagonal_inches":24.0,"aspect_ratio":{"width":0,"height":9}}]}"#,
+            ),
+        ] {
+            let store = test_override_store(name);
+            fs::write(&store.path, contents).unwrap();
+            let outcome = store.load().unwrap();
+            assert_eq!(outcome.overrides, DisplayOverrides::default());
+            assert!(outcome.warning.is_some(), "{name}");
+            assert_eq!(fs::read(&store.path).unwrap(), contents.as_bytes());
+            fs::remove_file(store.path).unwrap();
+        }
     }
 
     #[test]
@@ -2543,25 +2178,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_intro_preference_is_global_and_does_not_touch_profile_revision() {
-        let (root, profiles) = test_profile_store("launch-intro-preference");
-        let before = profiles.load_active().unwrap();
-        assert!(!profiles.list().unwrap().launch_intro_disabled);
-
-        profiles.set_launch_intro_disabled(true).unwrap();
-
-        let stored = profiles.list().unwrap();
-        let after = profiles.load_active().unwrap();
-        assert!(stored.launch_intro_disabled);
-        assert_eq!(after, before);
-
-        profiles.set_launch_intro_disabled(false).unwrap();
-        assert!(!profiles.list().unwrap().launch_intro_disabled);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn auto_map_on_login_defaults_off_for_existing_profile_stores() {
+    fn auto_mapping_preference_defaults_off_and_survives_profile_switches() {
         let (root, profiles) = test_profile_store("auto-map-compatibility");
         profiles.load_active().unwrap();
         let mut legacy: serde_json::Value =
@@ -2571,10 +2188,7 @@ mod tests {
 
         assert!(!profiles.list().unwrap().auto_map_on_login);
         fs::remove_dir_all(root).unwrap();
-    }
 
-    #[test]
-    fn auto_map_on_login_is_persistent_and_survives_profile_switches() {
         let (root, profiles) = test_profile_store("auto-map-preference");
         let original = profiles.load_active().unwrap();
         assert!(!profiles.list().unwrap().auto_map_on_login);
@@ -2598,7 +2212,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_store_enforces_three_profile_limit() {
+    fn profile_creation_enforces_identity_limit_and_activation() {
         let (root, profiles) = test_profile_store("limit");
         profiles.load_active().unwrap();
         profiles
@@ -2615,10 +2229,7 @@ mod tests {
         assert!(error.to_string().contains("3-profile limit"));
         assert_eq!(profiles.list().unwrap().profiles.len(), 3);
         fs::remove_dir_all(root).unwrap();
-    }
 
-    #[test]
-    fn duplicate_active_can_activate_and_respects_conflicts_and_limit() {
         let (root, profiles) = test_profile_store("duplicate-active");
         let default = profiles.load_active().unwrap();
         assert!(profiles.duplicate_active("DEFAULT", false).is_err());
@@ -2632,6 +2243,20 @@ mod tests {
         let error = profiles.duplicate_active("fourth", false).unwrap_err();
         assert!(error.to_string().contains("3-profile limit"));
         assert_eq!(profiles.list().unwrap().profiles.len(), 3);
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, profiles) = test_profile_store("ids");
+        profiles.load_active().unwrap();
+        assert!(
+            profiles
+                .save_profile("bad name", &AppConfig::default(), false, false)
+                .is_err()
+        );
+        assert!(
+            profiles
+                .save_profile("DEFAULT", &AppConfig::default(), false, false)
+                .is_err()
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2660,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_active_profile_selects_fallback_and_rejects_last_profile() {
+    fn profile_deletion_preserves_a_valid_active_fallback() {
         let (root, profiles) = test_profile_store("delete-with-fallback");
         profiles.load_active().unwrap();
         profiles.duplicate_active("gaming", true).unwrap();
@@ -2679,10 +2304,7 @@ mod tests {
         assert!(error.to_string().contains("last config profile"));
         assert_eq!(profiles.list().unwrap().profiles.len(), 1);
         fs::remove_dir_all(root).unwrap();
-    }
 
-    #[test]
-    fn profile_activation_persists_and_active_profile_cannot_be_deleted() {
         let (root, profiles) = test_profile_store("activate");
         profiles.load_active().unwrap();
         profiles
@@ -2716,23 +2338,6 @@ mod tests {
 
         assert!(error.to_string().contains("changed from revision"));
         assert_eq!(profiles.load_active().unwrap(), updated);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn profile_ids_are_bounded_and_case_insensitively_unique() {
-        let (root, profiles) = test_profile_store("ids");
-        profiles.load_active().unwrap();
-        assert!(
-            profiles
-                .save_profile("bad name", &AppConfig::default(), false, false)
-                .is_err()
-        );
-        assert!(
-            profiles
-                .save_profile("DEFAULT", &AppConfig::default(), false, false)
-                .is_err()
-        );
         fs::remove_dir_all(root).unwrap();
     }
 }

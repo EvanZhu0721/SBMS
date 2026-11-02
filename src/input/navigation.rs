@@ -311,13 +311,13 @@ mod tests {
             },
         ]
     }
-    fn nav() -> Navigation {
+    fn fresh_navigation() -> Navigation {
         Navigation::new(screens(), p(200, 300), 0).unwrap()
     }
 
     #[test]
-    fn handoff_and_up_follow_virtual_layout() {
-        let mut nav = nav();
+    fn scaled_handoffs_preserve_position_between_vertical_and_horizontal_neighbors() {
+        let mut nav = fresh_navigation();
         let handoff = nav.handoff(p(200, 300));
         assert!(contains(r(-200, -100, 0, 0), handoff));
         let landed = nav.move_to(p(-100, -100), p(-100, -99));
@@ -327,82 +327,40 @@ mod tests {
         let returned = nav.move_to(p(landed.x, 200), landed);
         assert_eq!(nav.clip(), r(-200, -100, 0, 0));
         assert_eq!(returned.y, -99);
-    }
-    #[test]
-    fn interior_native_motion_is_unchanged() {
-        let mut nav = nav();
-        for (a, b) in [(p(-80, -40), p(-100, -50)), (p(-120, -80), p(-80, -40))] {
-            assert_eq!(nav.move_to(a, b), a);
-        }
-    }
-    #[test]
-    fn wrong_physical_neighbour_is_blocked() {
-        let mut nav = nav();
-        assert_eq!(nav.move_to(p(100, 50), p(-2, -50)), p(-1, -1));
-        assert_eq!(nav.clip(), r(-200, -100, 0, 0));
-    }
-    #[test]
-    fn drag_never_crosses_and_release_allows_navigation() {
-        let mut nav = nav();
-        nav.button(1, true);
-        assert_eq!(nav.move_to(p(-100, -120), p(-100, -99)), p(-100, -100));
-        nav.button(2, true);
-        nav.button(1, false);
-        assert_eq!(nav.move_to(p(-100, -120), p(-100, -100)), p(-100, -100));
-        nav.button(2, false);
-        assert!(contains(
-            r(0, 0, 400, 200),
-            nav.move_to(p(-100, -120), p(-100, -100))
-        ));
-    }
-    #[test]
-    fn non_overlapping_edge_segment_is_a_wall() {
-        let mut nav = Navigation::new(screens(), p(5, 100), 0).unwrap();
-        assert_eq!(nav.move_to(p(5, 220), p(5, 190)), p(5, 199));
-        assert_eq!(nav.clip(), r(0, 0, 400, 200));
-    }
-    #[test]
-    fn fast_diagonal_uses_first_edge_intersection() {
-        let mut nav = Navigation::new(screens(), p(5, 100), 0).unwrap();
-        // The endpoint is over screen 3, but the path hits the unconnected
-        // portion of screen 1's lower edge first. It must not teleport.
-        assert_eq!(nav.move_to(p(200, 4000), p(5, 198)), p(200, 199));
-        assert_eq!(nav.clip(), r(0, 0, 400, 200));
-    }
-    #[test]
-    fn return_uses_current_display_not_starting_display() {
-        let mut nav = nav();
+
+        let mut nav = fresh_navigation();
         assert_eq!(nav.return_point(p(-200, -100)), p(20, 200));
         let landed = nav.move_to(p(-100, -110), p(-100, -90));
         assert_eq!(nav.return_point(landed), landed);
-    }
-    #[test]
-    fn initial_edge_is_inset_and_stationary_point_does_not_teleport() {
-        let mut nav = nav();
+
+        let mut nav = fresh_navigation();
         assert_eq!(nav.handoff(p(20, 200)), p(-199, -99));
         assert_eq!(nav.move_to(p(-100, -100), p(-100, -100)), p(-100, -100));
-    }
-    #[test]
-    fn no_ping_pong_after_transition() {
-        let mut nav = nav();
+
+        let mut nav = fresh_navigation();
         let a = nav.move_to(p(-100, -100), p(-100, -99));
         assert_eq!(nav.move_to(a, a), a);
         assert_eq!(nav.move_to(p(a.x, a.y - 1), a), p(a.x, a.y - 1));
-    }
 
-    #[test]
-    fn repeated_scaled_crossings_do_not_drift_sideways() {
-        let mut nav = nav();
+        let mut nav = fresh_navigation();
         let mut current = p(-100, -99);
         for _ in 0..100 {
             let upper = nav.move_to(p(current.x, -100), current);
             current = nav.move_to(p(upper.x, 199), upper);
             assert_eq!(current.x, -100);
         }
-    }
 
-    #[test]
-    fn left_and_right_transfer_between_two_mapped_outputs() {
+        let mut nav = Navigation::new(screens(), p(200, 100), 0).unwrap();
+        let lower = nav.move_to(p(200, 199), p(200, 195));
+        assert!(contains(r(-200, -100, 0, 0), lower));
+        assert!(contains(r(20, 200, 380, 400), nav.return_point(lower)));
+
+        let mut nav = fresh_navigation();
+        let upper = nav.move_to(p(-100, -110), p(-100, -90));
+        assert!((175..=181).contains(&upper.y));
+        assert!(contains(nav.clip(), upper));
+        assert_eq!(nav.move_to(p(220, 0), p(200, 0)), p(220, 0));
+
         let mut layout = screens();
         layout.push(Screen {
             logical: r(-300, 200, 20, 400),
@@ -417,36 +375,32 @@ mod tests {
         assert_eq!(back.x, -199);
         assert_eq!(back.y, -50);
     }
-
     #[test]
-    fn held_button_at_start_and_missed_release_are_reconciled() {
-        let mut nav = Navigation::new(screens(), p(200, 300), 1).unwrap();
-        assert_eq!(nav.move_to(p(-100, -100), p(-100, -99)), p(-100, -100));
-        nav.sync_buttons(0);
-        let upper = nav.raw_edge_move(p(0, -1), p(-100, -100));
-        assert!(contains(r(0, 0, 400, 200), upper));
-    }
+    fn edge_navigation_respects_real_neighbors_and_corner_direction() {
+        let mut nav = fresh_navigation();
+        assert_eq!(nav.move_to(p(100, 50), p(-2, -50)), p(-1, -1));
+        assert_eq!(nav.clip(), r(-200, -100, 0, 0));
 
-    #[test]
-    fn starting_on_ordinary_screen_can_enter_mapped_output() {
-        let mut nav = Navigation::new(screens(), p(200, 100), 0).unwrap();
-        let lower = nav.move_to(p(200, 199), p(200, 195));
-        assert!(contains(r(-200, -100, 0, 0), lower));
-        assert!(contains(r(20, 200, 380, 400), nav.return_point(lower)));
-    }
+        let mut nav = Navigation::new(screens(), p(5, 100), 0).unwrap();
+        assert_eq!(nav.move_to(p(5, 220), p(5, 190)), p(5, 199));
+        assert_eq!(nav.clip(), r(0, 0, 400, 200));
 
-    #[test]
-    fn fast_crossing_keeps_remainder_inside_adjacent_screen() {
-        let mut nav = nav();
-        let upper = nav.move_to(p(-100, -110), p(-100, -90));
-        assert!((175..=181).contains(&upper.y));
-        assert!(contains(nav.clip(), upper));
-        assert_eq!(nav.move_to(p(220, 0), p(200, 0)), p(220, 0));
-    }
+        let mut nav = Navigation::new(screens(), p(5, 100), 0).unwrap();
+        // The endpoint is over screen 3, but the path hits the unconnected
+        // portion of screen 1's lower edge first. It must not teleport.
+        assert_eq!(nav.move_to(p(200, 4000), p(5, 198)), p(200, 199));
+        assert_eq!(nav.clip(), r(0, 0, 400, 200));
 
-    #[test]
-    fn clipped_corner_can_change_direction_without_guessing() {
-        let mut nav = nav();
+        let mut layout = screens();
+        layout[1].logical = r(400, 200, 600, 300);
+        let mut nav = Navigation::new(layout, p(399, 198), 0).unwrap();
+        assert_eq!(nav.move_to(p(450, 240), p(399, 198)), p(399, 199));
+        let mut layout = screens();
+        layout[1].logical.top = 201;
+        let mut nav = Navigation::new(layout, p(200, 198), 0).unwrap();
+        assert_eq!(nav.move_to(p(200, 205), p(200, 198)), p(200, 199));
+
+        let mut nav = fresh_navigation();
         let corner = nav.move_to(p(-250, -120), p(-190, -90));
         assert_eq!(corner, p(-200, -100));
         assert_eq!(nav.move_to(corner, corner), corner);
@@ -454,18 +408,34 @@ mod tests {
         let upper = nav.raw_edge_move(p(0, -10), corner);
         assert!(contains(r(0, 0, 400, 200), upper));
     }
-
     #[test]
-    fn raw_input_never_adds_movement_inside_a_screen_or_during_drag() {
-        let mut nav = nav();
+    fn drag_and_raw_motion_respect_button_ownership() {
+        let mut nav = fresh_navigation();
+        nav.button(1, true);
+        assert_eq!(nav.move_to(p(-100, -120), p(-100, -99)), p(-100, -100));
+        nav.button(2, true);
+        nav.button(1, false);
+        assert_eq!(nav.move_to(p(-100, -120), p(-100, -100)), p(-100, -100));
+        nav.button(2, false);
+        assert!(contains(
+            r(0, 0, 400, 200),
+            nav.move_to(p(-100, -120), p(-100, -100))
+        ));
+
+        let mut nav = Navigation::new(screens(), p(200, 300), 1).unwrap();
+        assert_eq!(nav.move_to(p(-100, -100), p(-100, -99)), p(-100, -100));
+        nav.sync_buttons(0);
+        let upper = nav.raw_edge_move(p(0, -1), p(-100, -100));
+        assert!(contains(r(0, 0, 400, 200), upper));
+
+        let mut nav = fresh_navigation();
         assert_eq!(nav.raw_edge_move(p(500, -500), p(-100, -50)), p(-100, -50));
         nav.button(1, true);
         assert_eq!(nav.raw_edge_move(p(0, -10), p(-100, -100)), p(-100, -100));
     }
-
     #[test]
     fn queued_motion_cannot_undo_a_warp_and_clock_wrap_is_supported() {
-        let mut nav = nav();
+        let mut nav = fresh_navigation();
         nav.warped_at(100);
         assert!(!nav.accepts_motion(99));
         assert!(!nav.accepts_motion(100));
@@ -475,18 +445,7 @@ mod tests {
         assert!(!nav.accepts_motion(u32::MAX - 1));
     }
     #[test]
-    fn gaps_and_corner_only_contacts_are_not_neighbours() {
-        let mut layout = screens();
-        layout[1].logical = r(400, 200, 600, 300);
-        let mut nav = Navigation::new(layout, p(399, 198), 0).unwrap();
-        assert_eq!(nav.move_to(p(450, 240), p(399, 198)), p(399, 199));
-        let mut layout = screens();
-        layout[1].logical.top = 201;
-        let mut nav = Navigation::new(layout, p(200, 198), 0).unwrap();
-        assert_eq!(nav.move_to(p(200, 205), p(200, 198)), p(200, 199));
-    }
-    #[test]
-    fn invalid_or_overlapping_layouts_are_rejected() {
+    fn layout_validation_rejects_overlap_and_handles_extreme_extents() {
         assert!(Navigation::new(vec![], p(0, 0), 0).is_none());
         let mut layout = screens();
         layout[1].physical = layout[0].physical;
@@ -496,9 +455,7 @@ mod tests {
             physical: r(1, 1, 2, 2),
         }];
         assert!(Navigation::new(layout, p(0, 0), 0).is_none());
-    }
-    #[test]
-    fn tiny_and_extreme_rectangles_do_not_overflow() {
+
         let layout = vec![Screen {
             logical: r(i32::MIN, 0, i32::MAX, 1),
             physical: r(-1, -1, 0, 0),

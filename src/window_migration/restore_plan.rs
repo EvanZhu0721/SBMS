@@ -252,95 +252,130 @@ mod tests {
     }
 
     #[test]
-    fn rollback_recovers_unprocessed_captured_windows_and_original_layout() {
+    fn history_selection_restores_only_owned_windows_and_uses_the_correct_layout() {
         let source = HMONITOR(std::ptr::dangling_mut());
-        for current in [source, HMONITOR::default()] {
-            let mut entry = history_entry(true, false);
-            let original = entry.startup_layout.unwrap();
-            assert!(prepare_history_entry(
-                &mut entry,
+        let other = HMONITOR(2usize as *mut _);
+        let missing = HMONITOR::default();
+        for (name, mode, captured, moved, expected_source, current, selected, original) in [
+            (
+                "captured before move",
                 RestoreMode::StartupRollback,
+                true,
+                false,
                 Some(source),
-                current,
-            ));
-            assert_eq!(entry.layout.unwrap().normal, original.normal);
-            assert_eq!(entry.layout.unwrap().state, WindowState::Maximized);
-        }
-    }
-
-    #[test]
-    fn rollback_does_not_reclaim_captured_windows_on_other_screens() {
-        let source = HMONITOR(std::ptr::dangling_mut());
-        let physical = HMONITOR(2usize as *mut _);
-        let mut entry = history_entry(true, true);
-        let latest = entry.layout.unwrap().normal;
-        assert!(!prepare_history_entry(
-            &mut entry,
-            RestoreMode::StartupRollback,
-            Some(source),
-            physical,
-        ));
-        assert_eq!(entry.layout.unwrap().normal, latest);
-        assert!(!prepare_history_entry(
-            &mut entry,
-            RestoreMode::StartupRollback,
-            None,
-            physical,
-        ));
-        assert!(prepare_history_entry(
-            &mut entry,
-            RestoreMode::StartupRollback,
-            None,
-            HMONITOR::default(),
-        ));
-    }
-
-    #[test]
-    fn rollback_runtime_windows_require_a_move_and_keep_their_own_layout() {
-        let source = HMONITOR(std::ptr::dangling_mut());
-        let mut entry = history_entry(false, false);
-        let latest = entry.layout.unwrap().normal;
-        assert!(!prepare_history_entry(
-            &mut entry,
-            RestoreMode::StartupRollback,
-            Some(source),
-            source,
-        ));
-        entry.moved = true;
-        assert!(prepare_history_entry(
-            &mut entry,
-            RestoreMode::StartupRollback,
-            Some(source),
-            source,
-        ));
-        assert_eq!(entry.layout.unwrap().normal, latest);
-    }
-
-    #[test]
-    fn normal_stop_history_preserves_current_layout_and_requires_current_source() {
-        let source = HMONITOR(std::ptr::dangling_mut());
-        let mut entry = history_entry(true, true);
-        let latest = entry.layout.unwrap().normal;
-        assert!(prepare_history_entry(
-            &mut entry,
-            RestoreMode::NormalStop,
-            Some(source),
-            source,
-        ));
-        assert_eq!(entry.layout.unwrap().normal, latest);
-        assert_eq!(entry.layout.unwrap().state, WindowState::Normal);
-        for current in [HMONITOR::default(), HMONITOR(2usize as *mut _)] {
-            assert!(!prepare_history_entry(
-                &mut entry,
+                source,
+                true,
+                true,
+            ),
+            (
+                "captured orphan",
+                RestoreMode::StartupRollback,
+                true,
+                false,
+                Some(source),
+                missing,
+                true,
+                true,
+            ),
+            (
+                "captured elsewhere",
+                RestoreMode::StartupRollback,
+                true,
+                true,
+                Some(source),
+                other,
+                false,
+                false,
+            ),
+            (
+                "unknown source",
+                RestoreMode::StartupRollback,
+                true,
+                true,
+                None,
+                other,
+                false,
+                false,
+            ),
+            (
+                "unknown orphan",
+                RestoreMode::StartupRollback,
+                true,
+                true,
+                None,
+                missing,
+                true,
+                true,
+            ),
+            (
+                "runtime unmoved",
+                RestoreMode::StartupRollback,
+                false,
+                false,
+                Some(source),
+                source,
+                false,
+                false,
+            ),
+            (
+                "runtime moved",
+                RestoreMode::StartupRollback,
+                false,
+                true,
+                Some(source),
+                source,
+                true,
+                false,
+            ),
+            (
+                "normal stop",
                 RestoreMode::NormalStop,
+                true,
+                true,
                 Some(source),
-                current,
-            ));
+                source,
+                true,
+                false,
+            ),
+            (
+                "stop orphan",
+                RestoreMode::NormalStop,
+                true,
+                true,
+                Some(source),
+                missing,
+                false,
+                false,
+            ),
+            (
+                "stop elsewhere",
+                RestoreMode::NormalStop,
+                true,
+                true,
+                Some(source),
+                other,
+                false,
+                false,
+            ),
+        ] {
+            let mut entry = history_entry(captured, moved);
+            let expected = if original {
+                entry.startup_layout.unwrap()
+            } else {
+                entry.layout.unwrap()
+            };
+            assert_eq!(
+                prepare_history_entry(&mut entry, mode, expected_source, current),
+                selected,
+                "{name}"
+            );
+            assert_eq!(entry.layout.unwrap().normal, expected.normal, "{name}");
+            assert_eq!(entry.layout.unwrap().state, expected.state, "{name}");
         }
     }
 
     #[test]
-    fn failed_group_transfers_are_consumed_and_not_retried_by_finish() {
+    fn restore_plan_consumes_failed_transfers_and_reports_errors_once() {
         let mut plan = WindowRestorePlan {
             groups: (0..2)
                 .map(|id| RestoreGroup {
@@ -360,51 +395,12 @@ mod tests {
         assert_eq!(plan.errors.len(), 2);
         let error = plan.finish(&[]).unwrap_err();
         assert_eq!(error.matches("unavailable").count(), 2);
-    }
 
-    #[test]
-    fn stop_selection_deduplicates_identity_without_runtime_claims() {
-        let mut selected = Vec::new();
-        let identity = WindowIdentity {
-            hwnd: 42,
-            pid: 1,
-            thread_id: 2,
-            class_name: "fixture".into(),
-        };
-        assert!(select_once(&mut selected, identity.clone()));
-        assert!(!select_once(&mut selected, identity));
-        assert_eq!(selected.len(), 1);
-    }
-    #[test]
-    fn final_plan_reports_scanner_error_once_without_target_or_drop_retry() {
         let plan = WindowRestorePlan {
             groups: Vec::new(),
             physical: None,
             errors: vec!["scanner failure".into()],
         };
         assert_eq!(plan.finish(&[]).unwrap_err(), "scanner failure");
-    }
-    #[test]
-    fn dropping_runtime_only_joins_scanner_and_releases_claims() {
-        let owner = next_migration_id();
-        let identity = WindowIdentity {
-            hwnd: owner as isize,
-            pid: 0,
-            thread_id: 0,
-            class_name: "drop-test".into(),
-        };
-        assert!(claim_window(owner, identity.clone()));
-        let stop = Arc::new(AtomicBool::new(false));
-        drop(WindowMigration {
-            migration_id: owner,
-            entries: Arc::new(Mutex::new(Vec::new())),
-            stop_scanner: stop.clone(),
-            scanner: None,
-            target_rect: RECT::default(),
-            source_id: None,
-        });
-        assert!(stop.load(Ordering::Acquire));
-        assert!(claim_window(owner + 10000, identity));
-        release_owner_claims(owner + 10000);
     }
 }

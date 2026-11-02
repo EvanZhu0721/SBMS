@@ -252,7 +252,7 @@ mod tests {
     use windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP;
 
     #[test]
-    fn desktop_and_both_taskbars_dismiss_but_ordinary_windows_do_not() {
+    fn outside_click_classification_preserves_controls_and_distinguishes_desktop_from_windows() {
         for class in [
             "Progman",
             "WorkerW",
@@ -264,10 +264,7 @@ mod tests {
         for class in ["CabinetWClass", "Chrome_WidgetWin_1", "#32770"] {
             assert!(!is_desktop_or_taskbar(class));
         }
-    }
 
-    #[test]
-    fn fullscreen_requires_the_monitor_not_just_the_work_area() {
         let monitor = RECT {
             left: -1920,
             top: 0,
@@ -286,10 +283,7 @@ mod tests {
             ..maximized
         };
         assert!(!covers_monitor(ordinary, monitor));
-    }
 
-    #[test]
-    fn outside_press_excludes_flyout_and_tray_toggle() {
         let window = RECT {
             left: -400,
             top: 100,

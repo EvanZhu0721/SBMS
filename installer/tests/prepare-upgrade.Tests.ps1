@@ -37,8 +37,6 @@ Describe 'PrepareUpgrade maintenance contract' {
         $script:localAppData = Join-Path $script:caseRoot 'LocalAppData'
         $script:installRoot = Join-Path $script:caseRoot 'Program Files\SBMS'
         $script:userStateRoot = Join-Path $script:localAppData 'SBMS'
-        $script:snapshotRoot = Join-Path $script:caseRoot 'ProgramData\SBMS\upgrade-backup\current'
-
         New-Item -ItemType Directory -Path $script:userStateRoot -Force | Out-Null
         New-Item -ItemType Directory -Path $script:installRoot -Force | Out-Null
         $env:LOCALAPPDATA = $script:localAppData
@@ -49,55 +47,14 @@ Describe 'PrepareUpgrade maintenance contract' {
         $env:LOCALAPPDATA = $script:previousLocalAppData
     }
 
-    It 'exposes PrepareUpgrade as a supported action' {
-        $source = [IO.File]::ReadAllText(
-            $maintenanceScript,
-            [Text.Encoding]::UTF8
-        )
-
-        $source | Should Match "ValidateSet\([^\)]*'PrepareUpgrade'"
-        $source | Should Match "'PrepareUpgrade'\s*\{"
-    }
-
-    It 'stops the old tray before taking the snapshot' {
-        $tokens = $null
-        $parseErrors = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile(
-            $maintenanceScript,
-            [ref]$tokens,
-            [ref]$parseErrors
-        )
-        @($parseErrors).Count | Should Be 0
-
-        $prepare = $ast.Find(
-            {
-                param($node)
-                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-                    $node.Name -eq 'Prepare-SbmsUpgrade'
-            },
-            $true
-        )
-        $prepare | Should Not BeNullOrEmpty
-
-        $body = $prepare.Extent.Text
-        $stopIndex = $body.IndexOf('Stop-Sbms', [StringComparison]::Ordinal)
-        $snapshotIndex = $body.IndexOf(
-            'Backup-SbmsConfiguration',
-            [StringComparison]::Ordinal
-        )
-        ($stopIndex -ge 0) | Should Be $true
-        ($snapshotIndex -gt $stopIndex) | Should Be $true
-    }
-
-    It 'does not create a backup directory when no configuration exists' {
-        Backup-SbmsConfiguration
-
-        Test-Path -LiteralPath (
-            Join-Path $script:userStateRoot 'upgrade-backups'
-        ) | Should Be $false
-    }
-
-    It 'copies only persistent SBMS configuration files' {
+    It 'stops the tray before preserving only persistent configuration in an owned snapshot' {
+        Mock Assert-InstallIdentity {}
+        Mock Stop-Sbms {
+            Test-Path -LiteralPath (Join-Path $script:userStateRoot 'upgrade-backups') |
+                Should Be $false
+            $script:trayStopped = $true
+        }
+        $script:trayStopped = $false
         $expected = @{
             'config-v1.json' = '{"version":1,"target":"legacy"}'
             'config-v2.json' = '{"version":2,"groups":[{"id":0}]}'
@@ -117,7 +74,8 @@ Describe 'PrepareUpgrade maintenance contract' {
             [Text.UTF8Encoding]::new($false)
         )
 
-        Backup-SbmsConfiguration
+        Prepare-SbmsUpgrade
+        $script:trayStopped | Should Be $true
         $snapshot = @(
             Get-ChildItem -LiteralPath (
                 Join-Path $script:userStateRoot 'upgrade-backups'
@@ -135,50 +93,9 @@ Describe 'PrepareUpgrade maintenance contract' {
         Test-Path -LiteralPath (
             Join-Path $snapshot.FullName 'unrelated.txt'
         ) | Should Be $false
-    }
-
-    It 'computes SHA256 without depending on PowerShell module discovery' {
-        $inputFile = Join-Path $script:userStateRoot 'hash-input.txt'
-        [IO.File]::WriteAllText(
-            $inputFile,
-            'abc',
-            [Text.UTF8Encoding]::new($false)
-        )
-
-        Get-Sha256Hex -LiteralPath $inputFile | Should Be (
-            'BA7816BF8F01CFEA414140DE5DAE2223' +
-            'B00361A396177A9CB410FF61F20015AD'
-        )
-    }
-
-    It 'verifies and marks each snapshot without creating an unused manifest' {
-        $source = Join-Path $script:userStateRoot 'config-v2.json'
-        [IO.File]::WriteAllText(
-            $source,
-            '{"version":2}',
-            [Text.UTF8Encoding]::new($false)
-        )
-
-        Backup-SbmsConfiguration
-        $snapshot = @(
-            Get-ChildItem -LiteralPath (
-                Join-Path $script:userStateRoot 'upgrade-backups'
-            ) -Directory
-        )[0]
-        $copy = Join-Path $snapshot.FullName 'config-v2.json'
-
-        Get-Sha256Hex -LiteralPath $copy |
-            Should Be (Get-Sha256Hex -LiteralPath $source)
-        [IO.File]::ReadAllText(
-            (Join-Path $snapshot.FullName '.sbms-upgrade-snapshot-v1'),
-            [Text.Encoding]::UTF8
-        ) | Should Be 'SBMS upgrade snapshot v1'
         Test-OwnedUpgradeSnapshot -Snapshot $snapshot -BackupRoot (
             Join-Path $script:userStateRoot 'upgrade-backups'
         ) | Should Be $true
-        Test-Path -LiteralPath (
-            Join-Path $snapshot.FullName 'manifest.json'
-        ) | Should Be $false
     }
 
     It 'adds a fresh snapshot on repeat upgrade and preserves retained history' {

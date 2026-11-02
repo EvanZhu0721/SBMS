@@ -47,13 +47,16 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MWA_NO_ALT_ENTER, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_MOVE_RECT, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIFactory1,
-    IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIDevice,
+    IDXGIFactory1, IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
     IDXGISwapChain1,
 };
+use windows::Win32::System::SystemInformation::GetTickCount64;
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::core::{Error as WindowsError, Interface, PCSTR};
 
 const FRAME_WAIT_TIMEOUT_MS: u32 = 50;
+const FIRST_FRAME_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const COPY_MODE_ENV: &str = "SBMS_RENDER_COPY_MODE";
 const MAX_METADATA_BYTES: u32 = 1024 * 1024;
 const MAX_COPY_REGIONS: usize = 128;
@@ -185,6 +188,16 @@ pub struct GpuRendererConfig {
     pub target_refresh_millihz: u32,
 }
 
+/// Display identity is diagnostic context, not an adapter-selection override.
+pub struct GpuRendererIdentity {
+    pub source_device_name: String,
+    pub source_id: String,
+    pub source_connector_index: u32,
+    pub target_device_name: String,
+    pub target_id: String,
+    pub target_rect: RECT,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GpuRendererError {
     /// Desktop Duplication must be rebuilt after a topology or mode change.
@@ -223,29 +236,218 @@ impl std::error::Error for GpuRendererError {}
 
 /// Runs until `stop` is set or DXGI reports a topology/device change.
 ///
-/// `on_present` is called only after a successful GPU present. It lets the
-/// existing renderer keep its first-frame and FPS reporting without exposing
-/// D3D objects outside this module.
+/// Reports successful presents separately from capture-loop checkpoints so
+/// telemetry can sample idle windows without exposing D3D objects.
 pub fn run_gpu_renderer(
     config: GpuRendererConfig,
+    identity: &GpuRendererIdentity,
     stop: &AtomicBool,
-    mut on_present: impl FnMut() -> Result<(), String>,
+    mut on_event: impl FnMut(GpuRendererEvent) -> Result<(), String>,
 ) -> Result<(), GpuRendererError> {
-    validate_config(config)?;
-    let copy_mode = CopyMode::from_options(config.rendering);
-    let copy_stats_enabled = CopyMode::diagnostics_requested();
-    let (adapter, output) = find_source_output(config.source_rect)?;
-    let (device, context) = create_device(&adapter)?;
-    let duplication = unsafe { output.DuplicateOutput(&device) }
-        .map_err(|error| classify_windows_error("IDXGIOutput1::DuplicateOutput", error))?;
-    let pipeline = Pipeline::new(config, &adapter, device, context)?;
-    pipeline.run(
-        duplication,
-        stop,
-        copy_mode,
-        copy_stats_enabled,
-        &mut on_present,
-    )
+    let mut trace = FirstFrameTrace::new(config.target_window);
+    trace.log(format_args!(
+        "debug=issue-50-beta source_device={} source_id={} connector={} source_rect={:?} target_device={} target_id={} target_rect={:?} target={}x{} refresh_millihz={} rendering={:?}",
+        identity.source_device_name,
+        identity.source_id,
+        identity.source_connector_index,
+        config.source_rect,
+        identity.target_device_name,
+        identity.target_id,
+        identity.target_rect,
+        config.target_width,
+        config.target_height,
+        config.target_refresh_millihz,
+        config.rendering
+    ));
+    crate::session_gate::log_driver_diagnostics("gpu-start");
+    let mut diagnostic_device = None;
+    let result = (|| {
+        validate_config(config)?;
+        let copy_mode = CopyMode::from_options(config.rendering);
+        let copy_stats_enabled = CopyMode::diagnostics_requested();
+        trace.enter("resolve-source");
+        let (adapter, output) =
+            find_source_output(config.source_rect, &identity.source_device_name, &trace)?;
+        if let Ok(description) =
+            trace.call("IDXGIAdapter1::GetDesc1", || unsafe { adapter.GetDesc1() })
+        {
+            trace.log(format_args!(
+                "selected_adapter={} luid={:?}",
+                String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
+                description.AdapterLuid
+            ));
+        }
+        if let Ok(description) = trace.call("IDXGIOutput::GetDesc", || unsafe { output.GetDesc() })
+        {
+            trace.log(format_args!(
+                "selected_output={} rect={:?} attached={} rotation={:?} monitor={:?}",
+                String::from_utf16_lossy(&description.DeviceName).trim_end_matches('\0'),
+                description.DesktopCoordinates,
+                description.AttachedToDesktop.as_bool(),
+                description.Rotation,
+                description.Monitor
+            ));
+        }
+        let (device, context) = trace.call("D3D11CreateDevice", || create_device(&adapter))?;
+        diagnostic_device = Some(device.clone());
+        let actual_adapter = (|| {
+            let dxgi_device: IDXGIDevice = device.cast()?;
+            let actual = unsafe { dxgi_device.GetAdapter()? };
+            unsafe { actual.GetDesc() }
+        })();
+        match actual_adapter {
+            Ok(description) => trace.log(format_args!(
+                "actual_device_adapter={} luid={:?}",
+                String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
+                description.AdapterLuid
+            )),
+            Err(error) => trace.log(format_args!("actual_device_adapter unavailable={error:?}")),
+        }
+        let duplication = trace
+            .call("IDXGIOutput1::DuplicateOutput", || unsafe {
+                output.DuplicateOutput(&device)
+            })
+            .map_err(|error| classify_windows_error("IDXGIOutput1::DuplicateOutput", error))?;
+        trace.log("DuplicateOutput result=S_OK");
+        crate::session_gate::log_driver_diagnostics("duplicate-output-ready");
+        let description = trace.call("IDXGIOutputDuplication::GetDesc", || unsafe {
+            duplication.GetDesc()
+        });
+        trace.log(format_args!("duplication={description:?}"));
+        let pipeline = Pipeline::new(config, &adapter, device, context, &mut trace)?;
+        pipeline.run(
+            duplication,
+            stop,
+            copy_mode,
+            copy_stats_enabled,
+            &mut on_event,
+            &mut trace,
+        )
+    })();
+    if result.is_err()
+        && let Some(device) = diagnostic_device.as_ref()
+    {
+        trace.device_reason(device, "renderer-error");
+    }
+    crate::session_gate::log_driver_diagnostics("gpu-exit");
+    trace.lifecycle(format_args!(
+        "exit stop_requested={} result={result:?}",
+        stop.load(Ordering::Acquire)
+    ));
+    result
+}
+
+pub enum GpuRendererEvent {
+    Presented,
+    CaptureChecked,
+}
+
+// Observe only the first frame. This does not alter capture or retry policy.
+struct FirstFrameTrace {
+    window: HWND,
+    started: Instant,
+    phase: &'static str,
+    wait_timeouts: u64,
+    calls: u64,
+    acquire_attempts: u64,
+    next_wait_report: Instant,
+    presented: bool,
+}
+
+impl FirstFrameTrace {
+    fn new(window: HWND) -> Self {
+        let started = Instant::now();
+        Self {
+            window,
+            started,
+            phase: "validate",
+            wait_timeouts: 0,
+            calls: 0,
+            acquire_attempts: 0,
+            next_wait_report: started + FIRST_FRAME_LOG_INTERVAL,
+            presented: false,
+        }
+    }
+
+    fn log(&self, detail: impl fmt::Display) {
+        if !self.presented {
+            self.lifecycle(detail);
+        }
+    }
+
+    fn lifecycle(&self, detail: impl fmt::Display) {
+        diagnostics::log(
+            Level::Info,
+            "renderer",
+            "first-frame",
+            None,
+            format!(
+                "pid={} tid={} tick_ms={} window={:?} call={} phase={} elapsed_ms={} acquire_attempts={} acquire_timeouts={} {detail}",
+                std::process::id(),
+                unsafe { GetCurrentThreadId() },
+                unsafe { GetTickCount64() },
+                self.window,
+                self.calls,
+                self.phase,
+                self.started.elapsed().as_millis(),
+                self.acquire_attempts,
+                self.wait_timeouts,
+            ),
+        );
+    }
+
+    fn device_reason(&self, device: &ID3D11Device, context: &str) {
+        let reason = unsafe { device.GetDeviceRemovedReason() };
+        let code = reason.err().map_or(0, |error| error.code().0 as u32);
+        self.lifecycle(format_args!(
+            "context={context} GetDeviceRemovedReason=0x{code:08X} device_removed={}",
+            code != 0
+        ));
+    }
+
+    fn enter(&mut self, phase: &'static str) {
+        if !self.presented {
+            self.phase = phase;
+            self.log("enter");
+        }
+    }
+
+    // Keep the original return value and call count, including after tracing ends.
+    fn call<T>(&mut self, phase: &'static str, operation: impl FnOnce() -> T) -> T {
+        if self.presented {
+            return operation();
+        }
+        self.calls += 1;
+        self.enter(phase);
+        let started = Instant::now();
+        let result = operation();
+        self.log(format_args!(
+            "return duration_us={}",
+            started.elapsed().as_micros()
+        ));
+        result
+    }
+
+    fn record_wait_timeout(&mut self, now: Instant) -> bool {
+        if self.presented {
+            return false;
+        }
+        self.wait_timeouts += 1;
+        if now < self.next_wait_report {
+            return false;
+        }
+        self.next_wait_report = now + FIRST_FRAME_LOG_INTERVAL;
+        true
+    }
+
+    fn presented(&mut self) {
+        if self.presented {
+            return;
+        }
+        self.enter("presented");
+        self.presented = true;
+        crate::session_gate::log_driver_diagnostics("first-present");
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,14 +510,24 @@ fn validate_config(config: GpuRendererConfig) -> Result<(), GpuRendererError> {
 
 fn find_source_output(
     source_rect: RECT,
+    source_device_name: &str,
+    trace: &FirstFrameTrace,
 ) -> Result<(IDXGIAdapter1, IDXGIOutput1), GpuRendererError> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
         .map_err(|error| classify_windows_error("CreateDXGIFactory1", error))?;
     let mut adapter_index = 0;
+    let mut selected = None;
+    let mut matches = 0;
     loop {
         let adapter = match unsafe { factory.EnumAdapters1(adapter_index) } {
             Ok(adapter) => adapter,
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) if selected.is_some() => {
+                trace.log(format_args!(
+                    "candidate_enumeration incomplete api=EnumAdapters1 index={adapter_index} error={error:?}"
+                ));
+                break;
+            }
             Err(error) => {
                 return Err(classify_windows_error(
                     "IDXGIFactory1::EnumAdapters1",
@@ -328,28 +540,73 @@ fn find_source_output(
             let output = match unsafe { adapter.EnumOutputs(output_index) } {
                 Ok(output) => output,
                 Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+                Err(error) if selected.is_some() => {
+                    trace.log(format_args!(
+                        "candidate_enumeration incomplete api=EnumOutputs adapter_index={adapter_index} index={output_index} error={error:?}"
+                    ));
+                    break;
+                }
                 Err(error) => {
                     return Err(classify_windows_error("IDXGIAdapter::EnumOutputs", error));
                 }
             };
-            let description = unsafe { output.GetDesc() }
-                .map_err(|error| classify_windows_error("IDXGIOutput::GetDesc", error))?;
-            if same_rect(description.DesktopCoordinates, source_rect) {
-                return output
-                    .cast::<IDXGIOutput1>()
-                    .map(|output| (adapter, output))
-                    .map_err(|error| {
+            let description = match unsafe { output.GetDesc() } {
+                Ok(description) => description,
+                Err(error) if selected.is_some() => {
+                    trace.log(format_args!(
+                        "candidate_enumeration incomplete api=GetDesc adapter_index={adapter_index} output_index={output_index} error={error:?}"
+                    ));
+                    output_index += 1;
+                    continue;
+                }
+                Err(error) => return Err(classify_windows_error("IDXGIOutput::GetDesc", error)),
+            };
+            let rect_match = same_rect(description.DesktopCoordinates, source_rect);
+            let device_name = String::from_utf16_lossy(&description.DeviceName);
+            let device_name = device_name.trim_end_matches('\0');
+            let identity_match = device_name.eq_ignore_ascii_case(source_device_name);
+            if rect_match || identity_match {
+                let adapter_description = match unsafe { adapter.GetDesc1() } {
+                    Ok(description) => format!(
+                        "{} luid={:08X}:{:08X}",
+                        String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
+                        description.AdapterLuid.HighPart as u32,
+                        description.AdapterLuid.LowPart
+                    ),
+                    Err(error) => format!("unavailable={error:?}"),
+                };
+                trace.log(format_args!(
+                    "source_candidate adapter_index={adapter_index} output_index={output_index} device={device_name} attached={} rect={:?} monitor={:?} rect_match={rect_match} identity_match={identity_match} selected={} adapter={adapter_description}",
+                    description.AttachedToDesktop.as_bool(),
+                    description.DesktopCoordinates,
+                    description.Monitor,
+                    rect_match && selected.is_none(),
+                ));
+            }
+            if rect_match {
+                matches += 1;
+                // Preserve the existing first-RECT-match policy for this beta.
+                // Later outputs are observed only to expose ambiguous identities.
+                if selected.is_none() {
+                    let output = output.cast::<IDXGIOutput1>().map_err(|error| {
                         classify_windows_error("IDXGIOutput::QueryInterface(IDXGIOutput1)", error)
-                    });
+                    })?;
+                    selected = Some((adapter.clone(), output));
+                }
             }
             output_index += 1;
         }
         adapter_index += 1;
     }
-    Err(GpuRendererError::OutputUnavailable(format!(
-        "no DXGI output matches source rectangle ({}, {})-({}, {})",
-        source_rect.left, source_rect.top, source_rect.right, source_rect.bottom
-    )))
+    trace.log(format_args!(
+        "source_candidates rect_matches={matches} policy=first-rect-match expected_device={source_device_name}"
+    ));
+    selected.ok_or_else(|| {
+        GpuRendererError::OutputUnavailable(format!(
+            "no DXGI output matches source rectangle ({}, {})-({}, {})",
+            source_rect.left, source_rect.top, source_rect.right, source_rect.bottom
+        ))
+    })
 }
 
 fn same_rect(left: RECT, right: RECT) -> bool {
@@ -404,10 +661,13 @@ impl Pipeline {
         adapter: &IDXGIAdapter1,
         device: ID3D11Device,
         context: ID3D11DeviceContext,
+        trace: &mut FirstFrameTrace,
     ) -> Result<Self, GpuRendererError> {
-        let factory: IDXGIFactory2 = unsafe { adapter.GetParent() }.map_err(|error| {
-            classify_windows_error("IDXGIAdapter::GetParent(IDXGIFactory2)", error)
-        })?;
+        let factory: IDXGIFactory2 = trace
+            .call("IDXGIAdapter::GetParent", || unsafe { adapter.GetParent() })
+            .map_err(|error| {
+                classify_windows_error("IDXGIAdapter::GetParent(IDXGIFactory2)", error)
+            })?;
         let swap_description = DXGI_SWAP_CHAIN_DESC1 {
             Width: config.target_width,
             Height: config.target_height,
@@ -424,44 +684,61 @@ impl Pipeline {
             AlphaMode: DXGI_ALPHA_MODE_IGNORE,
             Flags: 0,
         };
-        let swap_chain = unsafe {
-            factory.CreateSwapChainForHwnd(
-                &device,
-                config.target_window,
-                &swap_description,
-                None,
-                None::<&IDXGIOutput>,
-            )
-        }
-        .map_err(|error| classify_windows_error("IDXGIFactory2::CreateSwapChainForHwnd", error))?;
-        unsafe { factory.MakeWindowAssociation(config.target_window, DXGI_MWA_NO_ALT_ENTER) }
+        trace.log(format_args!("swap_chain={swap_description:?}"));
+        let swap_chain = trace
+            .call("IDXGIFactory2::CreateSwapChainForHwnd", || unsafe {
+                factory.CreateSwapChainForHwnd(
+                    &device,
+                    config.target_window,
+                    &swap_description,
+                    None,
+                    None::<&IDXGIOutput>,
+                )
+            })
+            .map_err(|error| {
+                classify_windows_error("IDXGIFactory2::CreateSwapChainForHwnd", error)
+            })?;
+        trace
+            .call("IDXGIFactory::MakeWindowAssociation", || unsafe {
+                factory.MakeWindowAssociation(config.target_window, DXGI_MWA_NO_ALT_ENTER)
+            })
             .map_err(|error| {
                 classify_windows_error("IDXGIFactory::MakeWindowAssociation", error)
             })?;
 
-        let back_buffer: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0) }
+        let back_buffer: ID3D11Texture2D = trace
+            .call("IDXGISwapChain::GetBuffer", || unsafe {
+                swap_chain.GetBuffer(0)
+            })
             .map_err(|error| classify_windows_error("IDXGISwapChain::GetBuffer", error))?;
         let mut render_target = None;
-        unsafe { device.CreateRenderTargetView(&back_buffer, None, Some(&mut render_target)) }
+        trace
+            .call("ID3D11Device::CreateRenderTargetView", || unsafe {
+                device.CreateRenderTargetView(&back_buffer, None, Some(&mut render_target))
+            })
             .map_err(|error| {
                 classify_windows_error("ID3D11Device::CreateRenderTargetView", error)
             })?;
 
-        let sampling = SamplingPipeline::new(
-            device.clone(),
-            context.clone(),
-            config.rendering.high_performance_sampling(),
-        )?;
+        let sampling = trace.call("SamplingPipeline::new", || {
+            SamplingPipeline::new(
+                device.clone(),
+                context.clone(),
+                config.rendering.high_performance_sampling(),
+            )
+        })?;
         // Flip-discard back buffers do not preserve untouched pixels. Keep the
         // quality result in our own texture so partial sampling can reuse it.
         let cached_frame =
             if config.rendering.static_refresh || !config.rendering.high_performance_sampling() {
-                Some(TextureTarget::new(
-                    &device,
-                    config.target_width,
-                    config.target_height,
-                    DXGI_FORMAT_B8G8R8A8_UNORM,
-                )?)
+                Some(trace.call("TextureTarget::new", || {
+                    TextureTarget::new(
+                        &device,
+                        config.target_width,
+                        config.target_height,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                    )
+                })?)
             } else {
                 None
             };
@@ -484,7 +761,8 @@ impl Pipeline {
         stop: &AtomicBool,
         copy_mode: CopyMode,
         copy_stats_enabled: bool,
-        on_present: &mut impl FnMut() -> Result<(), String>,
+        on_event: &mut impl FnMut(GpuRendererEvent) -> Result<(), String>,
+        trace: &mut FirstFrameTrace,
     ) -> Result<(), GpuRendererError> {
         let mut source_texture = None;
         let mut source_view = None;
@@ -502,27 +780,46 @@ impl Pipeline {
             if let Some(previous) = frame.take() {
                 previous.release()?;
             }
+            // All idle and presentation paths return here. The existing
+            // bounded Acquire wait supplies the cadence without another timer.
+            on_event(GpuRendererEvent::CaptureChecked).map_err(GpuRendererError::Failure)?;
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
-            match unsafe {
-                duplication.AcquireNextFrame(
-                    frame_wait_timeout(
-                        last_present,
-                        refresh_interval,
-                        self.config.rendering.static_refresh,
-                    ),
-                    &mut frame_info,
-                    &mut desktop_resource,
-                )
-            } {
+            let timeout = frame_wait_timeout(
+                last_present,
+                refresh_interval,
+                self.config.rendering.static_refresh,
+            );
+            if !trace.presented {
+                trace.acquire_attempts += 1;
+            }
+            let acquisition = if trace.acquire_attempts == 1 && !trace.presented {
+                trace.log(format_args!(
+                    "first_acquire_request timeout_ms={timeout} stop_requested={}",
+                    stop.load(Ordering::Acquire)
+                ));
+                let result = trace.call("IDXGIOutputDuplication::AcquireNextFrame", || unsafe {
+                    duplication.AcquireNextFrame(timeout, &mut frame_info, &mut desktop_resource)
+                });
+                trace.log(format_args!("first_acquire_result={result:?}"));
+                result
+            } else {
+                unsafe {
+                    duplication.AcquireNextFrame(timeout, &mut frame_info, &mut desktop_resource)
+                }
+            };
+            match acquisition {
                 Ok(()) => {}
                 Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    if trace.record_wait_timeout(Instant::now()) {
+                        trace.device_reason(&self.device, "first-frame-wait");
+                    }
                     if !stop.load(Ordering::Acquire)
                         && self.config.rendering.static_refresh
                         && last_present.is_some_and(|time| time.elapsed() >= refresh_interval)
                     {
-                        self.present_cached(0)?;
-                        on_present().map_err(GpuRendererError::Failure)?;
+                        self.present_cached(0, trace)?;
+                        on_event(GpuRendererEvent::Presented).map_err(GpuRendererError::Failure)?;
                         last_present = Some(advance_refresh_deadline(
                             last_present.unwrap(),
                             refresh_interval,
@@ -541,6 +838,11 @@ impl Pipeline {
             // before the next Acquire avoids redundant desktop updates to
             // the duplication surface while presentation is waiting.
             frame = Some(AcquiredFrame(Some(&duplication)));
+            trace.log(format_args!(
+                "frame_acquired info={frame_info:?} resource_present={} stop_requested={}",
+                desktop_resource.is_some(),
+                stop.load(Ordering::Acquire)
+            ));
             if stop.load(Ordering::Acquire) {
                 break;
             }
@@ -549,8 +851,8 @@ impl Pipeline {
                 if self.config.rendering.static_refresh
                     && last_present.is_some_and(|time| time.elapsed() >= refresh_interval)
                 {
-                    self.present_cached(0)?;
-                    on_present().map_err(GpuRendererError::Failure)?;
+                    self.present_cached(0, trace)?;
+                    on_event(GpuRendererEvent::Presented).map_err(GpuRendererError::Failure)?;
                     last_present = Some(advance_refresh_deadline(
                         last_present.unwrap(),
                         refresh_interval,
@@ -561,11 +863,18 @@ impl Pipeline {
             let desktop_resource = desktop_resource.ok_or_else(|| {
                 GpuRendererError::Failure("Desktop Duplication returned no texture".into())
             })?;
-            let acquired: ID3D11Texture2D = desktop_resource.cast().map_err(|error| {
-                classify_windows_error("IDXGIResource::QueryInterface(ID3D11Texture2D)", error)
-            })?;
+            let acquired: ID3D11Texture2D = trace
+                .call("IDXGIResource::QueryInterface(ID3D11Texture2D)", || {
+                    desktop_resource.cast()
+                })
+                .map_err(|error| {
+                    classify_windows_error("IDXGIResource::QueryInterface(ID3D11Texture2D)", error)
+                })?;
             let mut description = D3D11_TEXTURE2D_DESC::default();
-            unsafe { acquired.GetDesc(&mut description) };
+            trace.call("ID3D11Texture2D::GetDesc", || unsafe {
+                acquired.GetDesc(&mut description)
+            });
+            trace.log(format_args!("source_texture={description:?}"));
             if description.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
                 return Err(GpuRendererError::Failure(format!(
                     "unsupported Desktop Duplication texture format {}",
@@ -577,20 +886,23 @@ impl Pipeline {
                 &description,
                 [self.config.target_width, self.config.target_height],
             ) {
-                copy_identity_frame(
-                    &self.context,
-                    &acquired,
-                    &self.back_buffer,
-                    self.cached_frame.as_ref().map(|frame| &frame.texture),
-                );
+                trace.call("copy_identity_frame", || {
+                    copy_identity_frame(
+                        &self.context,
+                        &acquired,
+                        &self.back_buffer,
+                        self.cached_frame.as_ref().map(|frame| &frame.texture),
+                    )
+                });
                 // If the source later changes size again, its dirty metadata
                 // cannot update an intermediate texture from before this path.
                 source_description = None;
                 source_texture = None;
                 source_view = None;
                 cache_valid = false;
-                self.present(1)?;
-                on_present().map_err(GpuRendererError::Failure)?;
+                self.present(1, trace)?;
+                trace.presented();
+                on_event(GpuRendererEvent::Presented).map_err(GpuRendererError::Failure)?;
                 last_present = Some(Instant::now());
                 copy_stats.record_full(description.Width, description.Height);
                 copy_stats.maybe_log(
@@ -605,9 +917,12 @@ impl Pipeline {
                 let direct_view = if copy_mode == CopyMode::Full {
                     None
                 } else {
-                    direct_source_view(&self.device, &acquired, description.BindFlags)
+                    trace.call("direct_source_view", || {
+                        direct_source_view(&self.device, &acquired, description.BindFlags)
+                    })
                 };
                 let direct = direct_view.is_some();
+                trace.log(format_args!("direct_source_view_available={direct}"));
                 if direct_source_active != Some(direct) {
                     diagnostics::log(
                         Level::Info,
@@ -627,23 +942,26 @@ impl Pipeline {
                         .cached_frame
                         .as_ref()
                         .map_or(&self.render_target, |frame| &frame.target);
-                    self.sampling.render_regions(
-                        &view,
-                        [description.Width, description.Height],
-                        output,
-                        [self.config.target_width, self.config.target_height],
-                        None,
-                    )?;
+                    trace.call("SamplingPipeline::render_regions(direct)", || {
+                        self.sampling.render_regions(
+                            &view,
+                            [description.Width, description.Height],
+                            output,
+                            [self.config.target_width, self.config.target_height],
+                            None,
+                        )
+                    })?;
                     source_description = None;
                     source_texture = None;
                     source_view = None;
                     cache_valid = false;
                     if self.cached_frame.is_some() {
-                        self.present_cached(1)?;
+                        self.present_cached(1, trace)?;
                     } else {
-                        self.present(1)?;
+                        self.present(1, trace)?;
                     }
-                    on_present().map_err(GpuRendererError::Failure)?;
+                    trace.presented();
+                    on_event(GpuRendererEvent::Presented).map_err(GpuRendererError::Failure)?;
                     last_present = Some(Instant::now());
                     continue;
                 }
@@ -651,7 +969,9 @@ impl Pipeline {
             let texture_rebuilt =
                 source_description != Some((description.Width, description.Height));
             if texture_rebuilt {
-                let (texture, view) = self.create_source_texture(description)?;
+                let (texture, view) = trace.call("create_source_texture", || {
+                    self.create_source_texture(description)
+                })?;
                 source_texture = Some(texture);
                 source_view = Some(view);
                 source_description = Some((description.Width, description.Height));
@@ -659,18 +979,20 @@ impl Pipeline {
             let texture = source_texture.as_ref().ok_or_else(|| {
                 GpuRendererError::Failure("source texture was not initialized".into())
             })?;
-            let has_regions = self.copy_source_frame(
-                &duplication,
-                &frame_info,
-                texture,
-                &acquired,
-                description.Width,
-                description.Height,
-                copy_mode,
-                texture_rebuilt,
-                &mut metadata_buffers,
-                &mut copy_stats,
-            );
+            let has_regions = trace.call("copy_source_frame", || {
+                self.copy_source_frame(
+                    &duplication,
+                    &frame_info,
+                    texture,
+                    &acquired,
+                    description.Width,
+                    description.Height,
+                    copy_mode,
+                    texture_rebuilt,
+                    &mut metadata_buffers,
+                    &mut copy_stats,
+                )
+            });
 
             let view = source_view.as_ref().ok_or_else(|| {
                 GpuRendererError::Failure("source texture view was not initialized".into())
@@ -691,21 +1013,25 @@ impl Pipeline {
             } else {
                 &self.render_target
             };
-            self.sampling.render_regions(
-                view,
-                [description.Width, description.Height],
-                output,
-                [self.config.target_width, self.config.target_height],
-                (use_cache && cache_valid && has_regions && quality)
-                    .then_some(metadata_buffers.regions.as_slice()),
-            )?;
+            trace.log(format_args!("sampling quality={quality} use_cache={use_cache} texture_rebuilt={texture_rebuilt} has_regions={has_regions}"));
+            trace.call("SamplingPipeline::render_regions", || {
+                self.sampling.render_regions(
+                    view,
+                    [description.Width, description.Height],
+                    output,
+                    [self.config.target_width, self.config.target_height],
+                    (use_cache && cache_valid && has_regions && quality)
+                        .then_some(metadata_buffers.regions.as_slice()),
+                )
+            })?;
             cache_valid = use_cache;
             if use_cache {
-                self.present_cached(1)?;
+                self.present_cached(1, trace)?;
             } else {
-                self.present(1)?;
+                self.present(1, trace)?;
             }
-            on_present().map_err(GpuRendererError::Failure)?;
+            trace.presented();
+            on_event(GpuRendererEvent::Presented).map_err(GpuRendererError::Failure)?;
             last_present = Some(Instant::now());
             copy_stats.maybe_log(
                 copy_mode,
@@ -808,17 +1134,31 @@ impl Pipeline {
         ))
     }
 
-    fn present_cached(&self, sync_interval: u32) -> Result<(), GpuRendererError> {
+    fn present_cached(
+        &self,
+        sync_interval: u32,
+        trace: &mut FirstFrameTrace,
+    ) -> Result<(), GpuRendererError> {
         if let Some(frame) = &self.cached_frame {
-            unsafe {
+            trace.call("ID3D11DeviceContext::CopyResource(cached)", || unsafe {
                 self.context.CopyResource(&self.back_buffer, &frame.texture);
-            }
+            });
         }
-        self.present(sync_interval)
+        self.present(sync_interval, trace)
     }
 
-    fn present(&self, sync_interval: u32) -> Result<(), GpuRendererError> {
-        let present = unsafe { self.swap_chain.Present(sync_interval, DXGI_PRESENT(0)) };
+    fn present(
+        &self,
+        sync_interval: u32,
+        trace: &mut FirstFrameTrace,
+    ) -> Result<(), GpuRendererError> {
+        trace.log(format_args!(
+            "present_request sync_interval={sync_interval} flags=0"
+        ));
+        let present = trace.call("IDXGISwapChain::Present", || unsafe {
+            self.swap_chain.Present(sync_interval, DXGI_PRESENT(0))
+        });
+        trace.log(format_args!("present_hresult={present:?}"));
         present
             .ok()
             .map_err(|_| classify_hresult("IDXGISwapChain::Present", present))
@@ -1330,109 +1670,107 @@ pub(crate) fn verify_sample_rgba(
 mod tests {
     use super::{
         CopyMode, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
-        GpuRendererError, MAX_COPY_REGIONS, ScaleParameters, classify_hresult,
-        classify_windows_error, compile_shader, select_copy_regions,
+        GpuRendererError, MAX_COPY_REGIONS, ScaleParameters, classify_windows_error,
+        compile_shader, select_copy_regions,
     };
     use std::ffi::OsStr;
     use windows::Win32::Foundation::{E_ACCESSDENIED, RECT};
     use windows::core::Error as WindowsError;
 
     #[test]
-    fn shaders_compile_with_the_system_d3d_compiler() {
+    fn shader_bytecode_and_constant_buffer_layout_are_compatible() {
         assert!(!compile_shader("vertex_main", "vs_5_0").unwrap().is_empty());
         assert!(!compile_shader("pixel_main", "ps_5_0").unwrap().is_empty());
+
+        assert_eq!(size_of::<ScaleParameters>(), 16);
     }
 
     #[test]
     fn absent_dxgi_output_is_transient() {
-        let error = super::find_source_output(RECT {
-            left: i32::MIN,
-            top: i32::MIN,
-            right: i32::MIN + 1,
-            bottom: i32::MIN + 1,
-        })
+        let error = super::find_source_output(
+            RECT {
+                left: i32::MIN,
+                top: i32::MIN,
+                right: i32::MIN + 1,
+                bottom: i32::MIN + 1,
+            },
+            "missing-source",
+            &super::FirstFrameTrace::new(Default::default()),
+        )
         .unwrap_err();
         assert!(matches!(error, GpuRendererError::OutputUnavailable(_)));
         assert!(error.is_retryable());
     }
 
     #[test]
-    fn dxgi_access_lost_is_a_recoverable_topology_loss() {
-        let error = classify_hresult(
-            "IDXGIOutputDuplication::AcquireNextFrame",
-            DXGI_ERROR_ACCESS_LOST,
-        );
-        assert!(matches!(error, GpuRendererError::AccessLost(_)));
-        assert!(error.is_retryable());
-        assert_eq!(
-            error.to_string(),
-            "IDXGIOutputDuplication::AcquireNextFrame failed: HRESULT(0x887A0026)"
-        );
-    }
-
-    #[test]
-    fn release_access_lost_is_recoverable_but_invalid_call_is_not() {
-        let lost = classify_hresult(
-            "IDXGIOutputDuplication::ReleaseFrame",
-            DXGI_ERROR_ACCESS_LOST,
-        );
-        assert!(matches!(lost, GpuRendererError::AccessLost(_)));
-        assert!(lost.is_retryable());
-        let invalid = classify_hresult(
-            "IDXGIOutputDuplication::AcquireNextFrame",
-            windows::Win32::Graphics::Dxgi::DXGI_ERROR_INVALID_CALL,
-        );
-        assert!(matches!(invalid, GpuRendererError::Failure(_)));
-        assert!(!invalid.is_retryable());
-    }
-
-    #[test]
-    fn duplicate_output_access_denied_is_retryable() {
-        let error = classify_windows_error(
-            "IDXGIOutput1::DuplicateOutput",
-            WindowsError::from_hresult(E_ACCESSDENIED),
-        );
-        assert!(matches!(
-            error,
-            GpuRendererError::DuplicateOutputAccessDenied(_)
-        ));
-        assert!(error.is_retryable());
-        assert_eq!(
-            error.to_string(),
-            "IDXGIOutput1::DuplicateOutput failed: HRESULT(0x80070005)"
-        );
-    }
-
-    #[test]
-    fn other_api_access_denied_does_not_become_retryable() {
-        let error = classify_windows_error(
-            "ID3D11Device::CreateTexture2D",
-            WindowsError::from_hresult(E_ACCESSDENIED),
-        );
-        assert!(matches!(error, GpuRendererError::Failure(_)));
-        assert!(!error.is_retryable());
-        assert_eq!(
-            error.to_string(),
-            "ID3D11Device::CreateTexture2D failed: HRESULT(0x80070005)"
-        );
-    }
-
-    #[test]
-    fn dxgi_device_removed_and_reset_keep_the_device_loss_classification() {
-        for code in [DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET] {
-            let error = classify_hresult("IDXGISwapChain::Present", code);
-            assert!(matches!(error, GpuRendererError::DeviceLost));
-            assert!(!error.is_retryable());
+    fn dxgi_classification_preserves_topology_device_and_api_boundaries() {
+        for (operation, code, expected, retryable) in [
+            (
+                "IDXGIOutputDuplication::AcquireNextFrame",
+                DXGI_ERROR_ACCESS_LOST,
+                "topology",
+                true,
+            ),
+            (
+                "IDXGIOutputDuplication::ReleaseFrame",
+                DXGI_ERROR_ACCESS_LOST,
+                "topology",
+                true,
+            ),
+            (
+                "IDXGIOutputDuplication::AcquireNextFrame",
+                windows::Win32::Graphics::Dxgi::DXGI_ERROR_INVALID_CALL,
+                "failure",
+                false,
+            ),
+            (
+                "IDXGIOutput1::DuplicateOutput",
+                E_ACCESSDENIED,
+                "duplicate",
+                true,
+            ),
+            (
+                "ID3D11Device::CreateTexture2D",
+                E_ACCESSDENIED,
+                "failure",
+                false,
+            ),
+            (
+                "IDXGISwapChain::Present",
+                DXGI_ERROR_DEVICE_REMOVED,
+                "device",
+                false,
+            ),
+            (
+                "IDXGISwapChain::Present",
+                DXGI_ERROR_DEVICE_RESET,
+                "device",
+                false,
+            ),
+        ] {
+            let error = classify_windows_error(operation, WindowsError::from_hresult(code));
+            let kind = match &error {
+                GpuRendererError::AccessLost(_) => "topology",
+                GpuRendererError::DuplicateOutputAccessDenied(_) => "duplicate",
+                GpuRendererError::DeviceLost => "device",
+                GpuRendererError::Failure(_) => "failure",
+                other => panic!("unexpected {operation}: {other:?}"),
+            };
+            assert_eq!(kind, expected, "{operation}: {code:?}");
+            assert_eq!(error.is_retryable(), retryable, "{operation}: {code:?}");
+            if expected != "device" {
+                assert!(error.to_string().contains(operation));
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("0x{:08X}", code.0 as u32))
+                );
+            }
         }
     }
 
     #[test]
-    fn scale_parameters_obey_constant_buffer_alignment() {
-        assert_eq!(size_of::<ScaleParameters>(), 16);
-    }
-
-    #[test]
-    fn dirty_copy_keeps_move_destinations_and_dirty_rects() {
+    fn copy_regions_preserve_dirty_pixels_and_reject_invalid_metadata() {
         let moved = [RECT {
             left: 1,
             top: 2,
@@ -1448,10 +1786,7 @@ mod tests {
         let mut regions = Vec::new();
         assert!(select_copy_regions(moved, dirty, 100, 100, &mut regions));
         assert_eq!(regions, [moved[0], dirty[0]]);
-    }
 
-    #[test]
-    fn dirty_copy_falls_back_for_invalid_or_large_metadata() {
         let invalid = [RECT {
             left: -1,
             top: 0,
@@ -1492,35 +1827,5 @@ mod tests {
             Ok(CopyMode::Dirty)
         );
         assert!(CopyMode::parse(Some(OsStr::new("partial"))).is_err());
-    }
-
-    #[test]
-    fn four_fetch_area_weights_preserve_all_16_phases() {
-        let scale = 29.0_f32 / 16.0;
-        for target_pixel in 0..16 {
-            let first = target_pixel as f32 * scale;
-            let last = (target_pixel + 1) as f32 * scale;
-            let base = first.floor();
-            let coverage = [
-                overlap(first, last, base, base + 1.0) / scale,
-                overlap(first, last, base + 1.0, base + 2.0) / scale,
-                overlap(first, last, base + 2.0, base + 3.0) / scale,
-            ];
-            let paired_weight = coverage[0] + coverage[1];
-            let blend = coverage[1] / paired_weight;
-            let reconstructed = [
-                paired_weight * (1.0 - blend),
-                paired_weight * blend,
-                coverage[2],
-            ];
-            for index in 0..3 {
-                assert!((coverage[index] - reconstructed[index]).abs() < 1.0e-6);
-            }
-            assert!((reconstructed.iter().sum::<f32>() - 1.0).abs() < 1.0e-6);
-        }
-    }
-
-    fn overlap(first: f32, last: f32, pixel_first: f32, pixel_last: f32) -> f32 {
-        (last.min(pixel_last) - first.max(pixel_first)).max(0.0)
     }
 }

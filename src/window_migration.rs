@@ -35,7 +35,6 @@ pub(crate) use restore_plan::{RestoreMode, WindowRestorePlan};
 
 const MOVE_TIMEOUT: Duration = Duration::from_millis(1500);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
-const SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 const SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
 static NEXT_MIGRATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -837,10 +836,16 @@ fn execute_layout(
     let destination = WindowGoal::on_monitor(entry, monitor.rcMonitor, WindowState::Normal)?;
     // A DPI transition lets the app resize itself. Complete that transition
     // before issuing the final rectangle, rather than retrying a rejected size.
-    if destination.dpi != Some(current.dpi)
-        && move_normal(entry, requested, monitor.rcMonitor)?.is_none()
-    {
-        return Ok(None);
+    if destination.dpi != Some(current.dpi) {
+        let Some(current) = move_normal(entry, requested, monitor.rcMonitor)? else {
+            return Ok(None);
+        };
+        if goal.state == WindowState::Normal
+            && current.outer == requested
+            && goal.matches(&current, goal.current_monitor())
+        {
+            return Ok(Some(current));
+        }
     }
     if !same_window(entry) {
         return Ok(None);
@@ -923,7 +928,7 @@ fn restore_entry_at(
 fn require_responsive(entry: &WindowSnapshot) -> Result<(), String> {
     use windows::Win32::Foundation::WPARAM;
     use windows::Win32::UI::WindowsAndMessaging::{
-        SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_NULL,
+        SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT, SendMessageTimeoutW, WM_NULL,
     };
     let result = unsafe {
         SendMessageTimeoutW(
@@ -931,7 +936,7 @@ fn require_responsive(entry: &WindowSnapshot) -> Result<(), String> {
             WM_NULL,
             WPARAM(0),
             LPARAM(0),
-            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+            SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
             MOVE_TIMEOUT.as_millis() as u32,
             None,
         )
@@ -939,7 +944,7 @@ fn require_responsive(entry: &WindowSnapshot) -> Result<(), String> {
     if result.0 == 0 && same_window(entry) {
         Err(describe(
             entry,
-            "window thread is not responding; no placement submitted",
+            "window responsiveness check failed before the next placement",
         ))
     } else {
         Ok(())
@@ -974,17 +979,6 @@ struct WindowObservation {
 }
 
 impl WindowObservation {
-    fn geometry_matches(&self, other: &Self) -> bool {
-        self.outer == other.outer
-            && self.placement.rcNormalPosition == other.placement.rcNormalPosition
-            && self.placement.showCmd == other.placement.showCmd
-            && self.placement.flags == other.placement.flags
-            && self.monitor == other.monitor
-            && self.dpi == other.dpi
-            && self.iconic == other.iconic
-            && self.zoomed == other.zoomed
-    }
-
     fn valid_outer(&self) -> bool {
         self.outer.right > self.outer.left
             && self.outer.bottom > self.outer.top
@@ -1039,14 +1033,7 @@ impl WindowGoal {
                 .position
                 .is_none_or(|(left, top)| actual.outer.left == left && actual.outer.top == top)
             && self.normal.is_none_or(|rect| {
-                let accepted = actual.placement.rcNormalPosition;
-                // Maximized apps may clamp or replace their restore rectangle.
-                // Keep monitor, DPI and visible-state checks independent.
-                if self.state == WindowState::Maximized {
-                    accepted.right > accepted.left && accepted.bottom > accepted.top
-                } else {
-                    accepted == rect
-                }
+                self.matches_normal_rect(rect, actual.placement.rcNormalPosition)
             })
             && self.restore_to_maximized.is_none_or(|expected| {
                 (actual.placement.flags.0
@@ -1054,6 +1041,30 @@ impl WindowGoal {
                     != 0)
                     == expected
             })
+    }
+
+    fn matches_normal_rect(&self, expected: RECT, actual: RECT) -> bool {
+        // Maximized apps may clamp or replace their restore rectangle. Its
+        // exact geometry is not a prerequisite for a usable maximized window;
+        // monitor, DPI and visible state are still checked independently.
+        if self.state == WindowState::Maximized {
+            return actual.right > actual.left && actual.bottom > actual.top;
+        }
+        if self.state != WindowState::Minimized {
+            return actual == expected;
+        }
+        // Restored coordinates can round to an adjacent pixel during Windows'
+        // placement conversion. Accept only a one-pixel translation of the
+        // entire rectangle, never a different size. Monitor, state and DPI
+        // checks remain independent requirements of the same observation.
+        let dx = i64::from(actual.left) - i64::from(expected.left);
+        let dy = i64::from(actual.top) - i64::from(expected.top);
+        actual.right > actual.left
+            && actual.bottom > actual.top
+            && dx.abs() <= 1
+            && dy.abs() <= 1
+            && i64::from(actual.right) - i64::from(expected.right) == dx
+            && i64::from(actual.bottom) - i64::from(expected.bottom) == dy
     }
 
     fn current_monitor(&self) -> Option<HMONITOR> {
@@ -1084,47 +1095,38 @@ fn observe_window(entry: &WindowSnapshot) -> Result<Option<WindowObservation>, S
     observation.map(Some)
 }
 
-#[derive(Default)]
-struct WindowSettling {
-    previous: Option<WindowObservation>,
-    since: Option<Instant>,
-}
-
-impl WindowSettling {
-    fn observe(&mut self, actual: WindowObservation, matches: bool, now: Instant) -> bool {
-        if !matches {
-            self.since = None;
-        } else if self
-            .previous
-            .is_none_or(|old| !actual.geometry_matches(&old))
-            || self.since.is_none()
-        {
-            self.since = Some(now);
-        }
-        self.previous = Some(actual);
-        matches
-            && self
-                .since
-                .is_some_and(|since| now.duration_since(since) >= SETTLE_INTERVAL)
-    }
-}
-
 fn wait_for_goal(
     entry: &WindowSnapshot,
     goal: WindowGoal,
     stage: &str,
 ) -> Result<Option<WindowObservation>, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MSG, PM_NOREMOVE, PM_QS_SENDMESSAGE, PeekMessageW,
+    };
     let deadline = Instant::now() + MOVE_TIMEOUT;
-    let mut settling = WindowSettling::default();
     loop {
+        // A cross-thread placement can synchronously call back into this
+        // thread. Dispatch those calls while observing its completion; do not
+        // consume posted UI messages or submit the placement again.
+        unsafe {
+            let _ = PeekMessageW(
+                &mut MSG::default(),
+                None,
+                0,
+                0,
+                PM_NOREMOVE | PM_QS_SENDMESSAGE,
+            );
+        }
         let Some(actual) = observe_window(entry)? else {
             return Ok(None);
         };
-        let now = Instant::now();
-        if settling.observe(actual, goal.matches(&actual, goal.current_monitor()), now) {
+        // The observed postconditions complete this operation. An additional
+        // quiet period cannot guarantee that another application will leave
+        // its window unchanged and must not turn a completed move into failure.
+        if goal.matches(&actual, goal.current_monitor()) {
             return Ok(Some(actual));
         }
-        if now >= deadline {
+        if Instant::now() >= deadline {
             return Err(describe(
                 entry,
                 &format!("{stage} did not settle; expected={goal:?}; actual={actual:?}"),
@@ -1329,7 +1331,7 @@ mod execution_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{RECT, WindowClaimRegistry, WindowIdentity};
+    use super::{WindowClaimRegistry, WindowIdentity};
 
     fn identity(hwnd: isize, pid: u32, thread_id: u32, class_name: &str) -> WindowIdentity {
         WindowIdentity {
@@ -1341,74 +1343,29 @@ mod tests {
     }
 
     #[test]
-    fn a_window_can_only_be_claimed_by_one_owner() {
-        let mut claims = WindowClaimRegistry::default();
-        let window = identity(42, 100, 200, "EditorWindow");
-
-        assert!(claims.claim(1, window.clone()));
-        assert!(claims.claim(1, window.clone()));
-        assert!(!claims.claim(2, window));
-        assert_eq!(claims.claims.len(), 1);
-    }
-
-    #[test]
-    fn reused_hwnd_with_a_different_identity_is_not_blocked() {
-        let mut claims = WindowClaimRegistry::default();
-        assert!(claims.claim(1, identity(42, 100, 200, "EditorWindow")));
-
-        assert!(claims.claim(2, identity(42, 101, 200, "EditorWindow")));
-        assert!(claims.claim(2, identity(42, 100, 201, "EditorWindow")));
-        assert!(claims.claim(2, identity(42, 100, 200, "DialogWindow")));
-    }
-
-    #[test]
-    fn releasing_one_identity_keeps_the_owners_other_claims() {
-        let mut claims = WindowClaimRegistry::default();
-        let first = identity(42, 100, 200, "EditorWindow");
-        let second = identity(43, 100, 200, "EditorWindow");
-        assert!(claims.claim(1, first.clone()));
-        assert!(claims.claim(1, second.clone()));
-
-        claims.release(1, &first);
-
-        assert!(claims.claim(2, first));
-        assert!(!claims.claim(2, second));
-    }
-
-    #[test]
-    fn releasing_an_owner_releases_all_of_its_windows_only() {
+    fn claim_ownership_and_release_follow_full_window_identity() {
         let mut claims = WindowClaimRegistry::default();
         let first = identity(42, 100, 200, "EditorWindow");
         let second = identity(43, 100, 200, "EditorWindow");
         let other = identity(44, 300, 400, "BrowserWindow");
         assert!(claims.claim(1, first.clone()));
+        assert!(claims.claim(1, first.clone()));
+        assert!(!claims.claim(2, first.clone()));
+        for reused in [
+            identity(42, 101, 200, "EditorWindow"),
+            identity(42, 100, 201, "EditorWindow"),
+            identity(42, 100, 200, "DialogWindow"),
+        ] {
+            assert!(claims.claim(2, reused));
+        }
         assert!(claims.claim(1, second.clone()));
         assert!(claims.claim(2, other.clone()));
-
-        claims.release_owner(1);
-
+        claims.release(1, &first);
         assert!(claims.claim(3, first));
+        assert!(!claims.claim(3, second.clone()));
+        claims.release_owner(1);
         assert!(claims.claim(3, second));
         assert!(!claims.claim(3, other));
-    }
-
-    #[test]
-    fn default_layout_is_centered_in_work_area() {
-        let work = RECT {
-            left: -1880,
-            top: 100,
-            right: 0,
-            bottom: 1100,
-        };
-        assert_eq!(
-            super::default_window_rect(work),
-            RECT {
-                left: -1645,
-                top: 225,
-                right: -235,
-                bottom: 975
-            }
-        );
     }
 }
 

@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_requires_confirmed_input_desktop() {
+    fn capture_requires_a_confirmed_desktop_at_startup_and_after_query_failure() {
         let mut gate = Gate::default();
         assert!(!gate.can_capture());
         gate.apply(Signal::Recheck, false);
@@ -556,10 +556,19 @@ mod tests {
         gate.apply(Signal::Recheck, true);
         assert!(gate.can_capture());
         assert_eq!(gate.revision, 0);
+
+        let mut gate = available_gate();
+        assert!(gate.apply(Signal::Recheck, false));
+        assert_eq!(gate.revision, 1);
+        assert!(!gate.can_capture());
+        assert!(!gate.apply(Signal::Recheck, false));
+        gate.apply(Signal::Recheck, true);
+        assert!(gate.can_capture());
+        assert_eq!(gate.revision, 1);
     }
 
     #[test]
-    fn unlock_waits_for_the_user_desktop() {
+    fn unlock_and_resume_preserve_each_others_capture_gates() {
         let mut gate = available_gate();
         gate.apply(Signal::Locked, false);
         assert!(!gate.can_capture());
@@ -569,10 +578,7 @@ mod tests {
         gate.apply(Signal::Recheck, true);
         assert!(gate.can_capture());
         assert_eq!(gate.revision, 1);
-    }
 
-    #[test]
-    fn resume_cannot_bypass_lock_and_unlock_cannot_bypass_suspend() {
         let mut gate = available_gate();
         gate.apply(Signal::Locked, false);
         gate.apply(Signal::Suspended, false);
@@ -586,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_notifications_do_not_refresh_revision_or_rechecks() {
+    fn desktop_revisions_only_advance_on_actual_transitions() {
         let mut gate = available_gate();
         for signal in [Signal::Unlocked, Signal::Resumed] {
             assert!(!gate.apply(signal, true));
@@ -602,10 +608,7 @@ mod tests {
             assert!(!gate.apply(Signal::Recheck, false));
         }
         assert_eq!(gate.revision, revision);
-    }
 
-    #[test]
-    fn real_switch_invalidates_even_after_a_fast_return() {
         let mut gate = available_gate();
         assert!(gate.apply(Signal::Switched(100), true));
         assert_eq!(gate.revision, 1);
@@ -613,18 +616,6 @@ mod tests {
         assert_eq!(gate.revision, 1);
         assert!(gate.apply(Signal::Switched(101), true));
         assert_eq!(gate.revision, 2);
-    }
-
-    #[test]
-    fn query_failure_blocks_until_a_successful_recheck() {
-        let mut gate = available_gate();
-        assert!(gate.apply(Signal::Recheck, false));
-        assert_eq!(gate.revision, 1);
-        assert!(!gate.can_capture());
-        assert!(!gate.apply(Signal::Recheck, false));
-        gate.apply(Signal::Recheck, true);
-        assert!(gate.can_capture());
-        assert_eq!(gate.revision, 1);
     }
 
     #[test]

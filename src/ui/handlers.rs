@@ -11,6 +11,7 @@ use super::*;
 
 #[derive(Clone)]
 pub(super) struct HandlerState {
+    tray: TrayHandle,
     displays: Arc<Mutex<Vec<DisplayOption>>>,
     groups: Arc<Mutex<Vec<GroupDraft>>>,
     active_group: Arc<Mutex<usize>>,
@@ -20,6 +21,7 @@ pub(super) struct HandlerState {
 
 impl HandlerState {
     pub(super) fn new(
+        tray: TrayHandle,
         displays: Arc<Mutex<Vec<DisplayOption>>>,
         groups: Arc<Mutex<Vec<GroupDraft>>>,
         active_group: Arc<Mutex<usize>>,
@@ -27,6 +29,7 @@ impl HandlerState {
         profile_revision: Arc<Mutex<ProfileRevision>>,
     ) -> Self {
         Self {
+            tray,
             displays,
             groups,
             active_group,
@@ -85,7 +88,7 @@ pub(super) fn register_lifecycle_handlers(
                     for group in groups.iter_mut() {
                         group.reset_telemetry();
                     }
-                    project_group_telemetry(&ui, &groups, active);
+                    project_group_telemetry(&ui, &start_state.tray, &groups, active);
                     start_sender.start(plan);
                 }
                 Err(error) => {
@@ -372,6 +375,7 @@ fn reload_or_restart_profile(
     }
     apply_config_reload(
         ui,
+        &state.tray,
         &state.displays,
         &state.groups,
         &state.active_group,
@@ -428,7 +432,7 @@ pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerSt
             update_reference_action(&ui, &displays);
             snapshot_group(&ui, &displays, &mut groups, active);
             update_tab_projection(&ui, &groups, active);
-            project_group_telemetry(&ui, &groups, active);
+            project_group_telemetry(&ui, &callback_state.tray, &groups, active);
             persist_groups(&ui, &groups, active, &callback_state.profile_revision);
         }
     });
@@ -451,7 +455,7 @@ pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerSt
                 .lock()
                 .expect("active group poisoned");
             snapshot_group(&ui, &displays, &mut groups, active);
-            hydrate_group(&ui, &displays, &groups, active);
+            hydrate_group(&ui, &callback_state.tray, &displays, &groups, active);
             persist_groups(&ui, &groups, active, &callback_state.profile_revision);
         }
     });
@@ -752,7 +756,7 @@ pub(super) fn register_screen_size_handlers(
             .active_group
             .lock()
             .expect("active group poisoned");
-        hydrate_group(&ui, &displays, &groups, active);
+        hydrate_group(&ui, &screen_state.tray, &displays, &groups, active);
         ui.set_page(QuickAccessPage::Main);
         reposition_after_layout(ui.as_weak());
     });
@@ -775,6 +779,7 @@ pub(super) fn register_group_handlers(flyout: &QuickAccess, state: &HandlerState
         if let Some(ui) = flyout_weak.upgrade() {
             switch_group(
                 &ui,
+                &tab_state.tray,
                 index,
                 &tab_state.groups,
                 &tab_state.active_group,
@@ -804,6 +809,7 @@ pub(super) fn register_group_handlers(flyout: &QuickAccess, state: &HandlerState
             };
             switch_group(
                 &ui,
+                &wheel_state.tray,
                 next as i32,
                 &wheel_state.groups,
                 &wheel_state.active_group,
@@ -842,7 +848,7 @@ pub(super) fn register_group_handlers(flyout: &QuickAccess, state: &HandlerState
                 .active_group
                 .lock()
                 .expect("active group poisoned") = next;
-            hydrate_group(&ui, &displays, &groups, next);
+            hydrate_group(&ui, &add_state.tray, &displays, &groups, next);
             persist_groups(&ui, &groups, next, &add_state.profile_revision);
         }
     });
@@ -871,7 +877,7 @@ pub(super) fn register_group_handlers(flyout: &QuickAccess, state: &HandlerState
                 .active_group
                 .lock()
                 .expect("active group poisoned") = next;
-            hydrate_group(&ui, &displays, &groups, next);
+            hydrate_group(&ui, &remove_state.tray, &displays, &groups, next);
             persist_groups(&ui, &groups, next, &remove_state.profile_revision);
         }
     });
@@ -929,7 +935,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_override_save_does_not_commit_candidate() {
+    fn display_override_commit_follows_persistence_result() {
         let mut current = overrides_with("display-a", 24.0);
         let original = current.clone();
         let candidate = overrides_with("display-a", 27.0);
@@ -940,10 +946,7 @@ mod tests {
 
         assert_eq!(result, Err("disk full".into()));
         assert_eq!(current, original);
-    }
 
-    #[test]
-    fn successful_override_save_commits_candidate() {
         let mut current = overrides_with("display-a", 24.0);
         let candidate = overrides_with("display-a", 27.0);
         let expected = candidate.clone();

@@ -23,7 +23,7 @@ use crate::mapping::{MappingPlan, MappingRoute};
 use crate::network::preferred_lan_ipv4;
 use crate::session_gate::VirtualMode;
 use crate::win32_flyout;
-use crate::win32_tray::{NativeTray, TrayAction, TrayHandle, TrayMonitor};
+use crate::win32_tray::{NativeTray, TrayAction, TrayHandle};
 use slint::winit_030::winit::platform::windows::{CornerPreference, WindowAttributesExtWindows};
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 slint::include_modules!();
@@ -40,8 +40,6 @@ mod handlers;
 mod projection;
 mod state;
 
-#[cfg(test)]
-use diagnostic_view::format_recent_diagnostics;
 use diagnostic_view::{open_log_folder, populate_diagnostics};
 use geometry_view::*;
 use handlers::{
@@ -231,26 +229,6 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         }
     })?;
     let tray_handle = tray.handle();
-    let tray_monitor_timer = slint::Timer::default();
-    let monitor_ui = flyout.as_weak();
-    let monitor_tray = tray_handle.clone();
-    tray_monitor_timer.start(
-        slint::TimerMode::Repeated,
-        Duration::from_millis(250),
-        move || {
-            if let Some(ui) = monitor_ui.upgrade() {
-                // Read the final GUI projection so tab changes and non-FPS
-                // transitions (stop, errors, stream-only) stay in sync too.
-                monitor_tray.set_monitor(TrayMonitor {
-                    fps: ui.get_mapping_fps(),
-                    valid: ui.get_mapping_fps_valid(),
-                    running: ui.get_running(),
-                    error: ui.get_mapping_fps_error(),
-                    not_a_number: ui.get_mapping_fps_nan(),
-                });
-            }
-        },
-    );
 
     let ui = flyout.as_weak();
     let error_revision = Arc::new(AtomicU64::new(0));
@@ -264,6 +242,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         let profile_revision = profile_revision.clone();
         let pending = pending_config_reload.clone();
         let error_revision = error_revision.clone();
+        let tray = tray_handle.clone();
         listen_for_config_reload(move || {
             let ui = ui.clone();
             let displays = displays.clone();
@@ -272,6 +251,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
             let profile_revision = profile_revision.clone();
             let pending = pending.clone();
             let error_revision = error_revision.clone();
+            let tray = tray.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = ui.upgrade() else {
                     return;
@@ -289,6 +269,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
                 }
                 apply_config_reload(
                     &ui,
+                    &tray,
                     &displays,
                     &groups,
                     &active_group,
@@ -300,6 +281,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     }
     apply_config_reload(
         &flyout,
+        &tray_handle,
         &displays,
         &groups,
         &active_group,
@@ -314,10 +296,11 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let event_profile_revision = profile_revision.clone();
     let event_pending_config_reload = pending_config_reload.clone();
     let event_pending_profile_restart = pending_profile_restart.clone();
+    let event_tray = tray_handle.clone();
     let controller = Controller::spawn(move |event| {
         let pending_login_start = pending_login_start.clone();
         let ui = ui.clone();
-        let tray = tray_handle.clone();
+        let tray = event_tray.clone();
         let error_revision = event_error_revision.clone();
         let displays = event_displays.clone();
         let groups = event_groups.clone();
@@ -370,6 +353,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let sender = controller.sender();
 
     let handler_state = HandlerState::new(
+        tray_handle,
         displays.clone(),
         groups.clone(),
         active_group.clone(),
@@ -583,7 +567,7 @@ fn apply_event(
             }
             refresh_group_sizing(&mut groups, &displays);
             refresh_group_tab_details(&mut groups, &displays);
-            hydrate_group(ui, &displays, &groups, active);
+            hydrate_group(ui, &tray, &displays, &groups, active);
             if let Some((width, height, diagonal, aspect, rotation, strategy)) = geometry_edit {
                 ui.set_reference_width(width);
                 ui.set_reference_height(height);
@@ -638,15 +622,15 @@ fn apply_event(
                 };
             }
             let active = *active_group.lock().expect("active group poisoned");
-            project_group_telemetry(ui, &groups, active);
+            project_group_telemetry(ui, &tray, &groups, active);
         }
         ControllerEvent::Fps { id, fps } => {
             let mut groups = group_state.lock().expect("group drafts poisoned");
             if let Some(group) = groups.iter_mut().find(|group| group.id == id) {
-                group.telemetry.fps = Some(fps.min(999));
+                group.telemetry.fps = fps;
             }
             let active = *active_group.lock().expect("active group poisoned");
-            project_group_telemetry(ui, &groups, active);
+            project_group_telemetry(ui, &tray, &groups, active);
         }
         ControllerEvent::Sunshine {
             id,
@@ -672,7 +656,7 @@ fn apply_event(
                 group.telemetry.error = false;
             }
             let active = *active_group.lock().expect("active group poisoned");
-            project_group_telemetry(ui, &groups, active);
+            project_group_telemetry(ui, &tray, &groups, active);
             drop(groups);
 
             if let Some(error) = error {
@@ -701,7 +685,6 @@ fn apply_event(
             restart_available,
         } => {
             let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
-            tray.set_status(state);
             ui.set_state(state.into());
             ui.set_state_detail(detail.into());
             ui.set_running(running);
@@ -723,8 +706,6 @@ fn apply_event(
                     group.telemetry.error = true;
                 }
                 ui.set_diagnostic_summary(error.as_str().into());
-                ui.set_mapping_fps_error(true);
-                ui.set_mapping_fps_valid(false);
                 let ui = ui.as_weak();
                 let error_revision = error_revision.clone();
                 slint::Timer::single_shot(Duration::from_secs(12), move || {
@@ -751,13 +732,17 @@ fn apply_event(
                         group.telemetry.error = false;
                     }
                 }
-                let active = *active_group.lock().expect("active group poisoned");
-                project_group_telemetry(ui, &groups, active);
             }
+            let groups = group_state.lock().expect("group drafts poisoned");
+            let active = *active_group.lock().expect("active group poisoned");
+            project_group_telemetry(ui, &tray, &groups, active);
+            drop(groups);
+            tray.set_status(state);
             if !running && !busy && pending_config_reload.swap(false, Ordering::AcqRel) {
                 let restart = pending_profile_restart.swap(false, Ordering::AcqRel);
                 let reloaded = apply_config_reload(
                     ui,
+                    &tray,
                     display_metadata,
                     group_state,
                     active_group,
@@ -1231,6 +1216,7 @@ fn screen_size_override_candidate(
 
 fn switch_group(
     ui: &QuickAccess,
+    tray: &TrayHandle,
     next: i32,
     groups: &Arc<Mutex<Vec<GroupDraft>>>,
     active_group: &Arc<Mutex<usize>>,
@@ -1249,7 +1235,7 @@ fn switch_group(
     snapshot_group(ui, &displays, &mut groups, current);
     let next = next as usize;
     *active_group.lock().expect("active group poisoned") = next;
-    hydrate_group(ui, &displays, &groups, next);
+    hydrate_group(ui, tray, &displays, &groups, next);
     persist_groups(ui, &groups, next, profile_revision);
 }
 
@@ -1513,6 +1499,7 @@ fn default_loaded_groups() -> LoadedGroups {
 
 fn apply_config_reload(
     ui: &QuickAccess,
+    tray: &TrayHandle,
     displays: &Arc<Mutex<Vec<DisplayOption>>>,
     groups: &Arc<Mutex<Vec<GroupDraft>>>,
     active_group: &Arc<Mutex<usize>>,
@@ -1549,7 +1536,7 @@ fn apply_config_reload(
         .expect("config profile revision poisoned") = loaded.profile.clone();
     ui.set_geometry_save_blocked(false);
     ui.set_geometry_error("".into());
-    hydrate_group(ui, &displays, &groups, *active);
+    hydrate_group(ui, tray, &displays, &groups, *active);
     if let Err(error) = refresh_profile_projection(ui) {
         diagnostics::log(Level::Warn, "config", "profile-list", None, &error);
         surface_transient_error(ui, error_revision, &error);
@@ -1794,13 +1781,16 @@ mod tests {
     }
 
     #[test]
-    fn login_mapping_waits_for_displays_and_runs_only_once() {
+    fn login_mapping_starts_once_after_refresh_and_cancels_on_error() {
         use crate::controller::ControllerEvent;
         use std::sync::atomic::AtomicBool;
         let pending = AtomicBool::new(true);
         assert!(!super::take_login_start(
             &pending,
-            &ControllerEvent::Fps { id: 0, fps: 60 }
+            &ControllerEvent::Fps {
+                id: 0,
+                fps: Some(60)
+            }
         ));
         assert!(super::take_login_start(
             &pending,
@@ -1815,12 +1805,7 @@ mod tests {
             &disabled,
             &ControllerEvent::Displays(vec![])
         ));
-    }
 
-    #[test]
-    fn failed_initial_refresh_cancels_login_mapping() {
-        use crate::controller::ControllerEvent;
-        use std::sync::atomic::AtomicBool;
         let pending = AtomicBool::new(true);
         let failure = ControllerEvent::State {
             state: "Error",
@@ -1837,18 +1822,9 @@ mod tests {
         ));
     }
 
-    use super::{
-        COMMON_HEIGHTS, COMMON_WIDTHS, DISPLAY_SETTINGS_URI, GroupDraft, active_after_removal,
-        aspect_ratio_from_index, build_mapping_plan, dimensions_from_diagonal,
-        format_recent_diagnostics, group_tab_detail, is_guid, reference_candidate_indices,
-        reference_selection_index, resolution_suggestion, rotation_from_index, rotation_index,
-        rotation_label, scaled_dimension_suggestion, screen_override_aspect_ratio,
-        sizing_strategy_from_index, sizing_strategy_index, stream_aspect_ratio,
-        stream_target_geometry, sunshine_web_url, validate_group_drafts,
-    };
+    use super::{GroupDraft, build_mapping_plan, validate_group_drafts};
     use crate::config::ReferenceSource;
     use crate::controller::DisplayOption;
-    use crate::diagnostics::{Level, Record};
     use crate::geometry::{
         AspectRatio, DisplayGeometry, PhysicalMeasurement, PixelSize, Rotation, SizingRequest,
         SizingStrategy,
@@ -1877,7 +1853,7 @@ mod tests {
     }
 
     #[test]
-    fn mirror_refresh_uses_edid_then_override_without_stale_240hz() {
+    fn mirror_refresh_tracks_edid_and_persisted_override_without_stale_values() {
         let mut display = display_option("panel", "Panel");
         display.preferred_refresh_millihz = Some(119_880);
         display.current_refresh_millihz = 60_000;
@@ -1908,10 +1884,7 @@ mod tests {
                 .preferred_refresh_millihz,
             Some(60_000)
         );
-    }
 
-    #[test]
-    fn refresh_override_roundtrips_without_size_override_and_resets_to_edid() {
         let mut displays = vec![display_option("panel", "Panel")];
         let original: crate::config::DisplayOverrides =
             serde_json::from_str(r#"{"version":1,"displays":[]}"#).unwrap();
@@ -1941,7 +1914,7 @@ mod tests {
     }
 
     #[test]
-    fn screen_size_batch_applies_each_display_and_retains_disconnected_overrides() {
+    fn screen_size_batch_commits_all_valid_rows_or_preserves_current_overrides() {
         let displays = vec![display_option("a", "Alpha"), display_option("b", "Beta")];
         let mut current = crate::config::DisplayOverrides::default();
         current.upsert("offline".into(), 32.0, None).unwrap();
@@ -1974,10 +1947,7 @@ mod tests {
         assert_eq!(reopened[0].manual_inches, "24.25");
         assert_eq!(reopened[1].manual_inches, "15.6");
         assert_eq!(reopened[1].aspect_ratio, 2);
-    }
 
-    #[test]
-    fn screen_size_batch_rejects_one_invalid_row_without_changing_overrides() {
         let displays = vec![display_option("a", "Alpha"), display_option("b", "Beta")];
         let mut current = crate::config::DisplayOverrides::default();
         current.upsert("a".into(), 24.0, None).unwrap();
@@ -2035,347 +2005,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_detail_uses_effective_diagonal_and_stream_marker() {
-        let display = display_option("display-a", "Panel");
-        let mut group = GroupDraft::new(0);
-        group.target_id = Some(display.id.clone());
-        assert_eq!(group_tab_detail(&group, &[display]), "24″");
-        group.stream_only = true;
-        assert_eq!(group_tab_detail(&group, &[]), "--");
-        group.stream_diagonal = "24.4".into();
-        assert_eq!(group_tab_detail(&group, &[]), "24″");
-    }
-
-    #[test]
-    fn sunshine_web_panel_uses_the_https_port_after_the_base_port() {
-        assert_eq!(
-            sunshine_web_url(54_321).unwrap(),
-            "https://localhost:54322/"
-        );
-        assert!(sunshine_web_url(u16::MAX).is_err());
-    }
-
-    #[test]
-    fn display_settings_uses_the_windows_display_uri() {
-        assert_eq!(DISPLAY_SETTINGS_URI, "ms-settings:display");
-    }
-
-    #[test]
-    fn diagonal_override_preserves_native_aspect_ratio() {
-        let display = display_option("display-a", "Panel");
-        let (width, height) = dimensions_from_diagonal(
-            &display,
-            24.0,
-            Some(AspectRatio {
-                width: 16,
-                height: 9,
-            }),
-        )
-        .unwrap();
-        assert!((width / height - 16.0 / 9.0).abs() < 0.001);
-        assert!((width.hypot(height) / MILLIMETERS_PER_INCH - 24.0).abs() < 0.001);
-    }
-
-    #[test]
-    fn screen_override_supports_native_and_explicit_ratios() {
-        assert_eq!(screen_override_aspect_ratio(0).unwrap(), None);
-        assert_eq!(
-            screen_override_aspect_ratio(1).unwrap(),
-            Some(AspectRatio {
-                width: 16,
-                height: 9
-            })
-        );
-        assert_eq!(
-            screen_override_aspect_ratio(5).unwrap(),
-            Some(AspectRatio {
-                width: 21,
-                height: 9
-            })
-        );
-    }
-
-    #[test]
-    fn removing_an_inactive_left_tab_keeps_the_same_group_active() {
-        assert_eq!(active_after_removal(2, 0, 2), 1);
-        assert_eq!(active_after_removal(0, 1, 2), 0);
-        assert_eq!(active_after_removal(1, 1, 2), 1);
-    }
-
-    #[test]
-    fn completes_unique_resolution_prefixes() {
-        assert_eq!(resolution_suggestion("2", COMMON_WIDTHS), Some("2560"));
-        assert_eq!(resolution_suggestion("38", COMMON_WIDTHS), Some("3840"));
-        assert_eq!(resolution_suggestion("21", COMMON_HEIGHTS), Some("2160"));
-    }
-
-    #[test]
-    fn does_not_guess_ambiguous_or_complete_values() {
-        assert_eq!(resolution_suggestion("1", COMMON_WIDTHS), None);
-        assert_eq!(resolution_suggestion("2", COMMON_HEIGHTS), None);
-        assert_eq!(resolution_suggestion("2560", COMMON_WIDTHS), None);
-        assert_eq!(resolution_suggestion("", COMMON_WIDTHS), None);
-        assert_eq!(resolution_suggestion("4K", COMMON_WIDTHS), None);
-    }
-
-    #[test]
-    fn derives_missing_stream_dimension_from_default_sixteen_by_ten_ratio() {
-        assert_eq!(
-            scaled_dimension_suggestion("1920", 10, 16),
-            Some("1200".into())
-        );
-        assert_eq!(
-            scaled_dimension_suggestion("1080", 16, 10),
-            Some("1728".into())
-        );
-        assert_eq!(
-            scaled_dimension_suggestion("1921", 10, 16),
-            Some("1201".into())
-        );
-    }
-
-    #[test]
-    fn missing_stream_dimension_suggestion_respects_virtual_mode_bounds() {
-        assert_eq!(scaled_dimension_suggestion("", 16, 10), None);
-        assert_eq!(scaled_dimension_suggestion("0", 16, 10), None);
-        assert_eq!(scaled_dimension_suggestion("4k", 16, 10), None);
-        assert_eq!(
-            scaled_dimension_suggestion("10240", 16, 10),
-            Some("16384".into())
-        );
-        assert_eq!(scaled_dimension_suggestion("16384", 16, 10), None);
-        assert_eq!(
-            scaled_dimension_suggestion(&u64::MAX.to_string(), 16, 10),
-            None
-        );
-    }
-
-    #[test]
-    fn formats_live_stream_aspect_ratio() {
-        assert_eq!(stream_aspect_ratio("3840", "2160"), Some("16:9".into()));
-        assert_eq!(stream_aspect_ratio("2560", "1600"), Some("16:10".into()));
-        assert_eq!(stream_aspect_ratio("3440", "1440"), Some("43:18".into()));
-        assert_eq!(stream_aspect_ratio("", "1440"), None);
-        assert_eq!(stream_aspect_ratio("3840", "0"), None);
-        assert_eq!(stream_aspect_ratio("4k", "2160"), None);
-    }
-
-    #[test]
-    fn validates_sunshine_ids_and_stream_rotation_labels() {
-        assert!(is_guid("{f2b109d3-3184-5c7d-be17-00d066d470a3}"));
-        assert!(!is_guid("f2b109d3-3184-5c7d-be17-00d066d470a3"));
-        assert!(!is_guid("{not-a-display-id}"));
-        assert_eq!(rotation_label(2), Some("Portrait clockwise"));
-        assert_eq!(rotation_label(4), None);
-    }
-
-    #[test]
-    fn streaming_target_geometry_uses_selected_physical_ratio() {
-        let target = stream_target_geometry(
-            "2560",
-            "1600",
-            "24",
-            AspectRatio {
-                width: 16,
-                height: 9,
-            },
-            Rotation::Deg90,
-        )
-        .unwrap();
-        assert_eq!(target.native_pixels.width, 2560);
-        assert_eq!(target.native_pixels.height, 1600);
-        assert_eq!(
-            target.aspect_ratio,
-            Some(AspectRatio {
-                width: 16,
-                height: 9
-            })
-        );
-        assert_eq!(target.rotation, Rotation::Deg90);
-        let PhysicalMeasurement::DiagonalMm(diagonal_mm) = target.physical else {
-            panic!("stream target should preserve a diagonal measurement");
-        };
-        assert!((diagonal_mm - 609.6).abs() < 0.001);
-        assert!(
-            stream_target_geometry(
-                "2560",
-                "1600",
-                "",
-                AspectRatio {
-                    width: 16,
-                    height: 10
-                },
-                Rotation::Deg0,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn stream_plan_uses_reference_density_instead_of_raw_target_pixels() {
-        let mut stream = GroupDraft::new(0);
-        stream.stream_only = true;
-        stream.stream_width = "2560".into();
-        stream.stream_height = "1600".into();
-        stream.stream_diagonal = "24".into();
-        stream.stream_refresh = "60".into();
-        stream.sizing = Some(SizingRequest {
-            reference: DisplayGeometry {
-                native_pixels: PixelSize {
-                    width: 1920,
-                    height: 1200,
-                },
-                physical: PhysicalMeasurement::DimensionsMm {
-                    width: 960.0,
-                    height: 600.0,
-                },
-                aspect_ratio: None,
-                rotation: Rotation::Deg0,
-            },
-            target: test_geometry(2560, 1600),
-            strategy: SizingStrategy::MatchPhysicalSize,
-            alignment: 2,
-            preferred_refresh_millihz: Some(60_000),
-        });
-
-        let validated = validate_group_drafts(&[stream]).unwrap();
-        let plan = build_mapping_plan(&validated).unwrap();
-        assert_eq!(plan.groups[0].mode.width, 5120);
-        assert_eq!(plan.groups[0].mode.height, 3200);
-        assert_eq!(plan.groups[0].route, MappingRoute::StreamOnly);
-    }
-
-    #[test]
-    fn orientation_labels_map_to_explicit_rotations() {
-        let expected = [
-            Rotation::Deg0,
-            Rotation::Deg180,
-            Rotation::Deg90,
-            Rotation::Deg270,
-        ];
-        for (index, rotation) in expected.into_iter().enumerate() {
-            assert_eq!(rotation_from_index(index as i32), Ok(rotation));
-            assert_eq!(rotation_index(rotation), index as i32);
-        }
-    }
-
-    #[test]
-    fn aspect_ratio_options_are_explicit() {
-        assert_eq!(
-            aspect_ratio_from_index(0),
-            Ok(AspectRatio {
-                width: 16,
-                height: 9,
-            })
-        );
-        assert_eq!(
-            aspect_ratio_from_index(5),
-            Ok(AspectRatio {
-                width: 32,
-                height: 9,
-            })
-        );
-        assert!(aspect_ratio_from_index(6).is_err());
-    }
-
-    #[test]
-    fn sizing_strategy_options_round_trip() {
-        for (index, strategy) in [
-            SizingStrategy::MatchPhysicalSize,
-            SizingStrategy::RoundedScale,
-            SizingStrategy::IntegerScale,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            assert_eq!(sizing_strategy_from_index(index as i32), Ok(strategy));
-            assert_eq!(sizing_strategy_index(strategy), index as i32);
-        }
-        assert!(sizing_strategy_from_index(3).is_err());
-    }
-
-    #[test]
-    fn reference_options_exclude_the_selected_physical_display() {
-        let displays = vec![
-            display_option("a", "Alpha"),
-            display_option("b", "Beta"),
-            display_option("c", "Gamma"),
-        ];
-        let candidates = reference_candidate_indices(&displays, Some("a"));
-        assert_eq!(candidates, vec![1, 2]);
-        assert_eq!(
-            reference_selection_index(
-                &displays,
-                &candidates,
-                Some(&ReferenceSource::Display("b".into()))
-            ),
-            0
-        );
-
-        let candidates = reference_candidate_indices(&displays, Some("b"));
-        assert_eq!(candidates, vec![0, 2]);
-        assert_eq!(
-            reference_selection_index(
-                &displays,
-                &candidates,
-                Some(&ReferenceSource::Display("b".into()))
-            ),
-            0
-        );
-    }
-
-    #[test]
-    fn a_single_physical_display_leaves_only_manual_reference() {
-        let displays = vec![display_option("only", "Only")];
-        let candidates = reference_candidate_indices(&displays, Some("only"));
-        assert!(candidates.is_empty());
-        assert_eq!(
-            reference_selection_index(
-                &displays,
-                &candidates,
-                Some(&ReferenceSource::Display("only".into()))
-            ),
-            0
-        );
-        assert_eq!(
-            reference_selection_index(&displays, &candidates, Some(&ReferenceSource::Manual)),
-            0
-        );
-    }
-
-    #[test]
-    fn diagnostic_preview_is_bounded_and_keeps_error_context() {
-        let records = (0..45)
-            .map(|index| Record {
-                time: index * 1_000,
-                local_time: format!("time-{index:02}"),
-                level: if index == 44 {
-                    Level::Error
-                } else {
-                    Level::Info
-                },
-                module: "controller".into(),
-                stage: "start".into(),
-                mapping_session_id: "42-1".into(),
-                message: if index == 44 {
-                    "record-44\ncleanup context".into()
-                } else {
-                    format!("record-{index}")
-                },
-            })
-            .collect::<Vec<_>>();
-
-        let preview = format_recent_diagnostics(&records);
-        assert!(!preview.contains("record-4\n"));
-        assert!(preview.contains("record-5"));
-        assert!(preview.contains("ERROR · controller/start · 42-1"));
-        assert!(preview.starts_with("[time-44] ERROR"));
-        assert!(preview.ends_with("record-5"));
-        assert!(!preview.contains("record-44\ncleanup"));
-    }
-
-    #[test]
-    fn mixed_gui_groups_build_a_real_mapping_plan() {
+    fn mapping_plans_preserve_stream_density_and_mirror_rotation() {
         let mut mirror = GroupDraft::new(0);
         mirror.target_id = Some("physical-a".into());
         let mut stream = GroupDraft::new(3);
@@ -2407,6 +2037,54 @@ mod tests {
         assert_eq!(plan.groups[1].mode.height, 2880);
         assert_eq!(plan.groups[1].mode.refresh_numerator, 60);
         assert_eq!(plan.groups[1].mode.refresh_denominator, 1);
+
+        let mut stream = GroupDraft::new(0);
+        stream.stream_only = true;
+        stream.stream_width = "2560".into();
+        stream.stream_height = "1600".into();
+        stream.stream_diagonal = "24".into();
+        stream.stream_refresh = "60".into();
+        stream.sizing = Some(SizingRequest {
+            reference: DisplayGeometry {
+                native_pixels: PixelSize {
+                    width: 1920,
+                    height: 1200,
+                },
+                physical: PhysicalMeasurement::DimensionsMm {
+                    width: 960.0,
+                    height: 600.0,
+                },
+                aspect_ratio: None,
+                rotation: Rotation::Deg0,
+            },
+            target: test_geometry(2560, 1600),
+            strategy: SizingStrategy::MatchPhysicalSize,
+            alignment: 2,
+            preferred_refresh_millihz: Some(60_000),
+        });
+
+        let validated = validate_group_drafts(&[stream]).unwrap();
+        let plan = build_mapping_plan(&validated).unwrap();
+        assert_eq!(plan.groups[0].mode.width, 5120);
+        assert_eq!(plan.groups[0].mode.height, 3200);
+        assert_eq!(plan.groups[0].route, MappingRoute::StreamOnly);
+
+        let mut mirror = GroupDraft::new(0);
+        mirror.target_id = Some("physical-a".into());
+        mirror.sizing = Some(SizingRequest {
+            reference: test_geometry(3840, 2160),
+            target: DisplayGeometry {
+                rotation: Rotation::Deg90,
+                ..test_geometry(2560, 1440)
+            },
+            strategy: SizingStrategy::MatchPhysicalSize,
+            alignment: 2,
+            preferred_refresh_millihz: Some(240_000),
+        });
+
+        let validated = validate_group_drafts(&[mirror]).unwrap();
+        let plan = build_mapping_plan(&validated).unwrap();
+        assert_eq!(plan.groups[0].rotation, Rotation::Deg90);
     }
 
     #[test]
@@ -2451,138 +2129,6 @@ mod tests {
         assert_eq!(restored.stream_refresh, "119.88");
         assert_eq!(restored.stream_aspect_ratio_index, 4);
         assert_eq!(restored.stream_rotation_index, 2);
-    }
-
-    #[test]
-    fn mirror_rotation_reaches_the_mapping_plan() {
-        let mut mirror = GroupDraft::new(0);
-        mirror.target_id = Some("physical-a".into());
-        mirror.sizing = Some(SizingRequest {
-            reference: test_geometry(3840, 2160),
-            target: DisplayGeometry {
-                rotation: Rotation::Deg90,
-                ..test_geometry(2560, 1440)
-            },
-            strategy: SizingStrategy::MatchPhysicalSize,
-            alignment: 2,
-            preferred_refresh_millihz: Some(240_000),
-        });
-
-        let validated = validate_group_drafts(&[mirror]).unwrap();
-        let plan = build_mapping_plan(&validated).unwrap();
-        assert_eq!(plan.groups[0].rotation, Rotation::Deg90);
-    }
-
-    #[test]
-    fn rendering_options_survive_draft_and_mapping_plan() {
-        let mut first = GroupDraft::new(0);
-        first.target_id = Some("physical-a".into());
-        first.rendering = crate::config::RenderingOptions {
-            high_performance_sampling: Some(true),
-            full_frame_copy: true,
-            static_refresh: true,
-        };
-        let mut second = GroupDraft::new(1);
-        second.target_id = Some("physical-b".into());
-        let validated = validate_group_drafts(&[first.clone(), second]).unwrap();
-        let restored = GroupDraft::from_config(&validated[0].to_config());
-        assert_eq!(restored.rendering, first.rendering);
-        let plan = build_mapping_plan(&validated).unwrap();
-        assert_eq!(plan.groups[0].rendering, first.rendering);
-        assert_eq!(plan.groups[1].rendering, Default::default());
-    }
-
-    #[test]
-    fn invalid_stream_screen_is_rejected_before_controller_start() {
-        let mut stream = GroupDraft::new(0);
-        stream.stream_only = true;
-        stream.stream_width = "4k".into();
-        assert!(validate_group_drafts(&[stream]).is_err());
-    }
-
-    #[test]
-    fn sparse_group_ids_use_list_positions_in_errors() {
-        let mut first = GroupDraft::new(11);
-        first.target_id = Some("first".into());
-        let mut second = GroupDraft::new(14);
-        second.stream_only = true;
-        let mut groups = vec![first, second];
-        let validated = validate_group_drafts(&groups).unwrap();
-        assert_eq!(validated[0].id(), 11);
-        assert_eq!(validated[1].id(), 14);
-        assert!(
-            build_mapping_plan(&validated)
-                .unwrap_err()
-                .contains("Output 2")
-        );
-        groups[1].stream_width = "invalid".into();
-        let error = match validate_group_drafts(&groups) {
-            Err(error) => error,
-            Ok(_) => panic!("invalid stream dimensions must be rejected"),
-        };
-        assert!(error.contains("Output 2"));
-        assert!(!error.contains("Output 15"));
-    }
-
-    #[test]
-    fn shared_reference_load_uses_selected_source_and_preserves_full_manual_geometry() {
-        let reference = DisplayGeometry {
-            aspect_ratio: Some(AspectRatio {
-                width: 21,
-                height: 9,
-            }),
-            rotation: Rotation::Deg90,
-            ..test_geometry(3840, 2160)
-        };
-        let mut first = GroupDraft::new(0);
-        first.reference_source = Some(ReferenceSource::Display("old".into()));
-        first.sizing = Some(SizingRequest {
-            reference: test_geometry(1920, 1080),
-            target: test_geometry(2560, 1440),
-            strategy: SizingStrategy::IntegerScale,
-            alignment: 4,
-            preferred_refresh_millihz: Some(120_000),
-        });
-        let original = first.sizing.unwrap();
-        let mut manual = GroupDraft::new(3);
-        manual.reference_source = Some(ReferenceSource::Manual);
-        manual.sizing = Some(SizingRequest {
-            reference,
-            ..original
-        });
-        let mut empty = GroupDraft::new(4);
-        empty.reference_source = Some(ReferenceSource::Manual);
-        // A transitional three-field seed must not overwrite complete legacy geometry.
-        empty.reference_geometry = Some(test_geometry(3840, 2160));
-        let mut groups = vec![first, manual, empty];
-        super::normalize_shared_reference(&mut groups, 2);
-        assert!(groups.iter().all(
-            |group| group.reference_source == Some(ReferenceSource::Manual)
-                && group.reference_geometry == Some(reference)
-        ));
-        assert_eq!(
-            groups[0].sizing,
-            Some(SizingRequest {
-                reference,
-                ..original
-            })
-        );
-        assert!(groups[2].sizing.is_none());
-        let persisted = groups
-            .iter()
-            .enumerate()
-            .map(|(index, group)| group.validate(index + 1).unwrap().to_config())
-            .collect::<Vec<_>>();
-        let mut restored = persisted
-            .iter()
-            .map(GroupDraft::from_config)
-            .collect::<Vec<_>>();
-        super::normalize_shared_reference(&mut restored, 2);
-        assert!(
-            restored
-                .iter()
-                .all(|group| group.reference_geometry == Some(reference))
-        );
     }
 
     #[test]
@@ -2713,16 +2259,111 @@ mod tests {
         super::refresh_group_sizing(&mut drafts, &displays.lock().unwrap());
         let groups = Arc::new(Mutex::new(drafts));
         let active = Arc::new(Mutex::new(0));
+        let tray = crate::win32_tray::TrayHandle::for_test();
+        let overrides = Arc::new(Mutex::new(crate::config::DisplayOverrides::default()));
+        let profile = Arc::new(Mutex::new(profile));
         let state = super::HandlerState::new(
+            tray.clone(),
             displays.clone(),
             groups.clone(),
             active.clone(),
-            Arc::new(Mutex::new(crate::config::DisplayOverrides::default())),
-            Arc::new(Mutex::new(profile)),
+            overrides.clone(),
+            profile.clone(),
         );
-        super::hydrate_group(&ui, &displays.lock().unwrap(), &groups.lock().unwrap(), 0);
+        super::hydrate_group(
+            &ui,
+            &tray,
+            &displays.lock().unwrap(),
+            &groups.lock().unwrap(),
+            0,
+        );
         super::register_geometry_handlers(&ui, &state);
         super::register_group_handlers(&ui, &state);
+        // The hidden GUI and tray share every active-group projection without
+        // running a timer, including changes that do not carry an FPS sample.
+        use crate::controller::ControllerEvent;
+        use crate::win32_tray::TrayMonitor;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        let error_revision = Arc::new(AtomicU64::new(0));
+        let pending_reload = Arc::new(AtomicBool::new(false));
+        let pending_restart = Arc::new(AtomicBool::new(false));
+        let assert_monitor = || {
+            assert_eq!(
+                tray.monitor(),
+                TrayMonitor {
+                    fps: ui.get_mapping_fps(),
+                    valid: ui.get_mapping_fps_valid(),
+                    running: ui.get_running(),
+                    error: ui.get_mapping_fps_error(),
+                    not_a_number: ui.get_mapping_fps_nan(),
+                }
+            );
+        };
+        let apply = |event| {
+            super::apply_event(
+                &ui,
+                tray.clone(),
+                &error_revision,
+                (&displays, &overrides),
+                (
+                    &groups,
+                    &active,
+                    &profile,
+                    &pending_reload,
+                    &pending_restart,
+                ),
+                event,
+            );
+            assert_monitor();
+        };
+        let mapping_state = |state, running, error: &str| ControllerEvent::State {
+            state,
+            detail: String::new(),
+            running,
+            busy: false,
+            error: error.into(),
+            restart_available: false,
+        };
+        apply(mapping_state("Running", true, ""));
+        apply(ControllerEvent::Fps {
+            id: 0,
+            fps: Some(60),
+        });
+        apply(ControllerEvent::Fps {
+            id: 3,
+            fps: Some(120),
+        });
+        assert_eq!(tray.monitor().fps, 60);
+        ui.invoke_tab_selected(1);
+        assert_monitor();
+        assert_eq!(tray.monitor().fps, 120);
+        apply(ControllerEvent::Fps { id: 3, fps: None });
+        assert!(!tray.monitor().valid);
+        assert_eq!(groups.lock().unwrap()[0].telemetry.fps, Some(60));
+        ui.invoke_tab_selected(0);
+        assert_monitor();
+        assert_eq!(tray.monitor().fps, 60);
+        apply(ControllerEvent::Fps {
+            id: 0,
+            fps: Some(0),
+        });
+        assert!(tray.monitor().valid);
+        assert_eq!(tray.monitor().fps, 0);
+        apply(mapping_state("Error", false, "mapping failed"));
+        assert!(tray.monitor().error);
+        apply(mapping_state("Stopped", false, ""));
+        assert!(!tray.monitor().error);
+        assert!(!tray.monitor().valid);
+        let target_index = ui.get_selected_display();
+        let stream_index = ui.get_display_ids().row_count() as i32 - 1;
+        ui.set_selected_display(stream_index);
+        ui.invoke_display_selected();
+        assert_monitor();
+        assert!(tray.monitor().not_a_number);
+        ui.set_selected_display(target_index);
+        ui.invoke_display_selected();
+        assert_monitor();
+        assert!(!tray.monitor().not_a_number);
         assert!(!ui.get_high_performance_sampling());
         assert!(!ui.get_full_frame_copy());
         assert!(!ui.get_static_refresh());

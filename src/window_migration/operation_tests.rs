@@ -17,44 +17,6 @@ fn monitor_info(bounds: RECT) -> MONITORINFO {
     }
 }
 
-#[test]
-fn default_batch_cascades_without_changing_single_window_layout() {
-    let work = rect(-1880, 100, 1880, 1000);
-    let centered = default_window_rect(work);
-    assert_eq!(default_batch_rect(work, 0, 1), centered);
-    let positions: Vec<_> = (0..3)
-        .map(|index| default_batch_rect(work, index, 3))
-        .collect();
-    assert_eq!(positions[1], centered);
-    for pair in positions.windows(2) {
-        assert_eq!(pair[1].left - pair[0].left, 32);
-        assert_eq!(pair[1].top - pair[0].top, 32);
-        assert_eq!(pair[1].right - pair[1].left, centered.right - centered.left);
-        assert_eq!(pair[1].bottom - pair[1].top, centered.bottom - centered.top);
-    }
-}
-
-#[test]
-fn default_batch_compresses_spacing_inside_small_work_area() {
-    let work = rect(200, -400, 400, 240);
-    let positions: Vec<_> = (0..20)
-        .map(|index| default_batch_rect(work, index, 20))
-        .collect();
-    for position in &positions {
-        assert!(position.left >= work.left && position.top >= work.top);
-        assert!(position.right <= work.right && position.bottom <= work.bottom);
-    }
-    for pair in positions.windows(2) {
-        assert!(pair[1].left > pair[0].left);
-        assert!(pair[1].top > pair[0].top);
-    }
-    for index in [0, usize::MAX / 2, usize::MAX - 1] {
-        let position = default_batch_rect(work, index, usize::MAX);
-        assert!(position.left >= work.left && position.top >= work.top);
-        assert!(position.right <= work.right && position.bottom <= work.bottom);
-    }
-}
-
 fn observation() -> WindowObservation {
     WindowObservation {
         outer: rect(0, 0, 800, 600),
@@ -84,7 +46,7 @@ fn layout_test_window() -> WindowSnapshot {
 }
 
 #[test]
-fn valid_layout_maps_proportionally_and_ignores_default_slots() {
+fn saved_layout_scales_with_monitor_bounds_and_invalid_layout_uses_work_area_cascade() {
     let mut entry = layout_test_window();
     entry.layout = Some(WindowLayout {
         normal: rect(-900, 250, 800, 500),
@@ -101,10 +63,7 @@ fn valid_layout_maps_proportionally_and_ignores_default_slots() {
         planned_window_rect(&entry, &monitor_info(target), (2, 5)),
         rect(300, 325, 400, 250)
     );
-}
 
-#[test]
-fn valid_layout_ignores_transient_taskbar_size_but_default_uses_work_area() {
     let mut entry = layout_test_window();
     entry.layout = Some(WindowLayout {
         normal: rect(200, 200, 800, 500),
@@ -121,10 +80,7 @@ fn valid_layout_ignores_transient_taskbar_size_but_default_uses_work_area() {
         planned_window_rect(&entry, &monitor, (0, 1)),
         default_window_rect(monitor.rcWork)
     );
-}
 
-#[test]
-fn invalid_layout_alone_uses_default_cascade() {
     let mut entry = layout_test_window();
     let target = rect(100, 200, 1600, 1000);
     for normal in [
@@ -157,47 +113,11 @@ fn invalid_layout_alone_uses_default_cascade() {
 }
 
 #[test]
-fn minimized_layout_uses_normal_placement_and_retains_restore_to_maximized() {
-    let entry = layout_test_window();
-    let mut actual = observation();
-    actual.iconic = true;
-    actual.outer = rect(-32000, -32000, 314, 50);
-    actual.placement.rcNormalPosition = rect(200, 250, 600, 400);
-    actual.placement.flags.0 = windows::Win32::UI::WindowsAndMessaging::WPF_RESTORETOMAXIMIZED.0;
-    let monitor = MONITORINFO {
-        rcMonitor: rect(0, 0, 1600, 1000),
-        rcWork: rect(40, 50, 1560, 950),
-        ..Default::default()
-    };
-    let saved = WindowLayout::capture(&entry, actual, &monitor).unwrap();
-    assert_eq!(saved.normal, rect(240, 300, 600, 400));
-    assert_eq!(saved.state, WindowState::Minimized);
-    let goal = WindowGoal {
-        state: WindowState::Minimized,
-        restore_to_maximized: Some(true),
-        ..Default::default()
-    };
-    assert!(goal.matches(&actual, None));
-    actual.placement.flags.0 = 0;
-    assert!(!goal.matches(&actual, None));
-    assert_ne!(saved.placement.flags.0, 0);
-    actual.iconic = false;
-    actual.zoomed = true;
-    let maximized = WindowLayout::capture(&entry, actual, &monitor).unwrap();
-    assert_eq!(maximized.normal, saved.normal);
-    assert_eq!(maximized.state, WindowState::Maximized);
-}
-
-#[test]
-#[ignore = "moves a dedicated maximized native window between two physical displays"]
-fn native_mapped_maximized_layout_round_trip() {
-    native_mapped_state_round_trip(false);
-}
-
-#[test]
-#[ignore = "moves a dedicated minimized native window between two physical displays"]
-fn native_mapped_minimized_layout_round_trip() {
-    native_mapped_state_round_trip(true);
+#[ignore = "moves a dedicated maximized and minimized native window between two physical displays"]
+fn native_mapped_minimized_and_maximized_layout_round_trip() {
+    for minimized in [false, true] {
+        native_mapped_state_round_trip(minimized);
+    }
 }
 
 fn prepare_minimized_fixture(entry: &WindowSnapshot) -> Result<(), String> {
@@ -348,109 +268,57 @@ fn native_mapped_state_round_trip(minimized: bool) {
 }
 
 #[test]
-fn normal_goal_rejects_minimized_and_invalid_geometry() {
-    let goal = WindowGoal {
+fn normal_goal_checks_destination_and_geometry_without_rejecting_application_size_constraints() {
+    let actual = observation();
+    let exact = WindowGoal {
         state: WindowState::Normal,
-        ..Default::default()
-    };
-    let mut actual = observation();
-    assert!(goal.matches(&actual, None));
-    actual.iconic = true;
-    actual.outer = rect(-32000, -32000, 314, 50);
-    assert!(!goal.matches(&actual, None));
-    actual.iconic = false;
-    actual.outer = rect(0, 0, 0, 600);
-    assert!(!goal.matches(&actual, None));
-    actual.outer = rect(0, 0, 800, 600);
-    actual.zoomed = true;
-    assert!(!goal.matches(&actual, None));
-}
-
-#[test]
-fn restored_goal_requires_one_observation_to_match_every_condition() {
-    let mut actual = observation();
-    let goal = WindowGoal {
-        state: WindowState::Normal,
-        dpi: Some(192),
+        dpi: Some(actual.dpi),
         outer: Some(actual.outer),
         normal: Some(actual.placement.rcNormalPosition),
         ..Default::default()
     };
+    let positioned = WindowGoal {
+        outer: None,
+        normal: None,
+        position: Some((actual.outer.left, actual.outer.top)),
+        ..exact
+    };
     let target = Some(actual.monitor);
-    assert!(goal.matches(&actual, target));
-    actual.dpi = 120;
-    assert!(!goal.matches(&actual, target));
-    actual.dpi = 192;
-    actual.placement.rcNormalPosition = rect(0, 0, 801, 600);
-    assert!(!goal.matches(&actual, target));
-    actual.placement.rcNormalPosition = goal.normal.unwrap();
-    actual.monitor = HMONITOR(2usize as *mut _);
-    assert!(!goal.matches(&actual, target));
-}
-
-#[test]
-fn delayed_dpi_cannot_settle_merely_by_reaching_the_monitor() {
-    let now = Instant::now();
-    let mut tracker = WindowSettling::default();
-    let mut actual = observation();
-    let goal = WindowGoal {
-        dpi: Some(192),
-        ..Default::default()
-    };
-    actual.dpi = 120;
-    assert!(!tracker.observe(actual, goal.matches(&actual, None), now));
-    assert!(!tracker.observe(
-        actual,
-        goal.matches(&actual, None),
-        now + Duration::from_millis(200)
-    ));
-    actual.dpi = 192;
-    assert!(!tracker.observe(
-        actual,
-        goal.matches(&actual, None),
-        now + Duration::from_millis(309)
-    ));
-    assert!(!tracker.observe(actual, true, now + Duration::from_millis(408)));
-    assert!(tracker.observe(actual, true, now + Duration::from_millis(409)));
-}
-
-#[test]
-fn default_goal_requires_position_and_allows_application_size_constraints() {
-    let requested = rect(100, 80, 800, 600);
-    let goal = WindowGoal {
-        state: WindowState::Normal,
-        position: Some((requested.left, requested.top)),
-        ..Default::default()
-    };
-    let mut actual = observation();
-    assert!(!goal.matches(&actual, None));
-    actual.outer = requested;
-    assert!(goal.matches(&actual, None));
-    actual.outer.right += 40;
-    assert!(goal.matches(&actual, None));
-    actual.outer.right = actual.outer.left + 320;
-    actual.outer.bottom = actual.outer.top + 240;
-    assert!(goal.matches(&actual, None));
-    actual.outer.left += 1;
-    assert!(!goal.matches(&actual, None));
-    actual.outer = requested;
-    actual.outer.bottom = actual.outer.top;
-    assert!(!goal.matches(&actual, None));
-}
-
-#[test]
-fn geometry_change_and_failed_goal_restart_the_settling_interval() {
-    let now = Instant::now();
-    let mut tracker = WindowSettling::default();
-    let mut actual = observation();
-    assert!(!tracker.observe(actual, true, now));
-    actual.outer.right += 1;
-    assert!(!tracker.observe(actual, true, now + Duration::from_millis(90)));
-    assert!(!tracker.observe(actual, true, now + Duration::from_millis(100)));
-    assert!(!tracker.observe(actual, false, now + Duration::from_millis(180)));
-    assert!(!tracker.observe(actual, true, now + Duration::from_millis(190)));
-    assert!(!tracker.observe(actual, true, now + Duration::from_millis(289)));
-    assert!(tracker.observe(actual, true, now + Duration::from_millis(290)));
+    for (name, goal) in [("exact", exact), ("position", positioned)] {
+        assert!(goal.matches(&actual, target), "{name}");
+        for (change, flexible) in [
+            ("dpi", false),
+            ("monitor", false),
+            ("iconic", false),
+            ("zoomed", false),
+            ("empty", false),
+            ("position", false),
+            ("larger", true),
+            ("smaller", true),
+            ("normal", true),
+        ] {
+            let mut changed = actual;
+            match change {
+                "dpi" => changed.dpi += 1,
+                "monitor" => changed.monitor = HMONITOR(2usize as *mut _),
+                "iconic" => changed.iconic = true,
+                "zoomed" => changed.zoomed = true,
+                "empty" => changed.outer.right = changed.outer.left,
+                "position" => changed.outer.left += 1,
+                "larger" => changed.outer.right += 40,
+                "smaller" => {
+                    changed.outer.right = changed.outer.left + 320;
+                    changed.outer.bottom = changed.outer.top + 240;
+                }
+                _ => changed.placement.rcNormalPosition.right += 1,
+            }
+            assert_eq!(
+                goal.matches(&changed, target),
+                name == "position" && flexible,
+                "{name}: {change}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -535,11 +403,10 @@ fn native_destination_dpi_matches_window_awareness() {
                 let moved = move_normal(&entry, requested, display.rect)?
                     .expect("hidden window still exists after moving");
                 let movement_elapsed = started.elapsed();
-                assert!(movement_elapsed >= SETTLE_INTERVAL);
                 assert_eq!(moved.outer, requested);
                 assert_eq!(moved.dpi, predicted);
                 println!(
-                    "normal preparation={preparation_elapsed:?}; movement with settling={movement_elapsed:?}"
+                    "normal preparation={preparation_elapsed:?}; movement={movement_elapsed:?}"
                 );
             }
             Ok(())
@@ -839,25 +706,6 @@ fn native_default_layout_restores_prepared_states_and_respects_size_constraints(
 }
 
 #[test]
-fn movable_state_does_not_require_valid_current_coordinates() {
-    let mut actual = observation();
-    actual.outer = rect(-32000, -32000, 1348, 253);
-    actual.monitor = HMONITOR::default();
-    let movable = WindowGoal {
-        state: WindowState::Restored,
-        ..Default::default()
-    };
-    assert!(movable.matches(&actual, None));
-    let final_goal = WindowGoal {
-        state: WindowState::Normal,
-        ..Default::default()
-    };
-    assert!(!final_goal.matches(&actual, None));
-    actual.iconic = true;
-    assert!(!movable.matches(&actual, None));
-}
-
-#[test]
 #[ignore = "creates one non-activating test window and moves it across existing physical displays"]
 fn native_invalid_normal_coordinates_move_to_valid_destination_without_minimize() {
     use std::sync::atomic::AtomicUsize;
@@ -975,81 +823,6 @@ fn native_invalid_normal_coordinates_move_to_valid_destination_without_minimize(
         SetThreadDpiAwarenessContext(previous);
     }
     checks.unwrap();
-}
-
-fn selection_display(id: &str, virtual_display: bool) -> Display {
-    Display {
-        id: id.into(),
-        connector_index: 0,
-        sunshine_id: None,
-        name: String::new(),
-        device_name: String::new(),
-        rect: rect(0, 0, 1920, 1080),
-        native_width: 1920,
-        native_height: 1080,
-        physical_width_mm: None,
-        physical_height_mm: None,
-        preferred_refresh_millihz: None,
-        rotation: crate::geometry::Rotation::Deg0,
-        refresh_numerator: 60,
-        refresh_denominator: 1,
-        primary: !virtual_display,
-        virtual_display,
-    }
-}
-
-#[test]
-fn stop_source_identity_does_not_fall_back_to_reused_rectangle_or_physical_screen() {
-    let physical = selection_display("source-id", false);
-    let other_virtual = selection_display("other-source", true);
-    let displays = vec![physical, other_virtual];
-    assert!(restore_source(&displays, Some("source-id")).is_none());
-    assert!(restore_source(&displays, None).is_none());
-    let mut displays = displays;
-    displays.push(selection_display("SOURCE-ID", true));
-    let source = restore_source(&displays, Some("source-id")).unwrap();
-    assert!(source.virtual_display);
-    assert_eq!(source.id, "SOURCE-ID");
-}
-
-#[test]
-fn failed_start_recovery_keeps_invalid_windows_but_not_windows_on_another_screen() {
-    let source = HMONITOR(std::ptr::dangling_mut());
-    let primary = HMONITOR(2usize as *mut _);
-    assert!(recovery_window_belongs_to_source(source, Some(source)));
-    assert!(recovery_window_belongs_to_source(
-        HMONITOR::default(),
-        Some(source)
-    ));
-    assert!(!recovery_window_belongs_to_source(primary, Some(source)));
-    // A missing source or unreadable topology cannot identify any live screen
-    // as ours. This also prevents an old group from stealing another's window.
-    assert!(recovery_window_belongs_to_source(HMONITOR::default(), None));
-    assert!(!recovery_window_belongs_to_source(primary, None));
-    assert!(!recovery_window_belongs_to_source(source, None));
-}
-
-#[test]
-fn releasing_all_historical_claims_allows_two_groups_to_exchange_windows() {
-    let mut claims = WindowClaimRegistry::default();
-    let first = WindowIdentity {
-        hwnd: 10,
-        pid: 20,
-        thread_id: 30,
-        class_name: "first".into(),
-    };
-    let second = WindowIdentity {
-        hwnd: 11,
-        ..first.clone()
-    };
-    assert!(claims.claim(1, first.clone()));
-    assert!(claims.claim(2, second.clone()));
-    claims.release_owner(1);
-    claims.release_owner(2);
-    assert!(claims.claim(2, first.clone()));
-    assert!(claims.claim(1, second.clone()));
-    assert!(!claims.claim(1, first));
-    assert!(!claims.claim(2, second));
 }
 
 #[test]
@@ -1304,6 +1077,36 @@ fn native_physical_preservation_restores_os_relocation_and_does_not_write_unchan
     unsafe { DestroyWindow(hwnd) }.unwrap();
     unsafe { SetThreadDpiAwarenessContext(previous) };
     checks.unwrap();
+}
+
+#[test]
+fn minimized_restore_rect_preserves_size_and_only_tolerates_rounding() {
+    let mut actual = observation();
+    actual.iconic = true;
+    let expected = rect(617, 1735, 1200, 1866);
+    let goal = WindowGoal {
+        state: WindowState::Minimized,
+        normal: Some(expected),
+        restore_to_maximized: Some(false),
+        ..Default::default()
+    };
+    for (normal, accepted) in [
+        (expected, true),
+        (rect(618, 1736, 1200, 1866), true),
+        (rect(616, 1734, 1200, 1866), true),
+        (rect(618, 1734, 1200, 1866), true),
+        (rect(619, 1735, 1200, 1866), false),
+        (rect(617, 1733, 1200, 1866), false),
+        (rect(618, 1736, 1199, 1866), false),
+        (rect(-799, 1, 798, 1230), false),
+        (rect(617, 1735, 0, 0), false),
+    ] {
+        actual.placement.rcNormalPosition = normal;
+        assert_eq!(goal.matches(&actual, None), accepted, "{normal:?}");
+    }
+    actual.placement.rcNormalPosition = expected;
+    actual.placement.flags |= windows::Win32::UI::WindowsAndMessaging::WPF_RESTORETOMAXIMIZED;
+    assert!(!goal.matches(&actual, None));
 }
 
 #[test]

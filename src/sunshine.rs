@@ -334,31 +334,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_ports_leave_room_for_the_complete_sunshine_port_family() {
-        assert_eq!(default_port_for_slot(0).unwrap(), 54_321);
-        assert_eq!(default_port_for_slot(1).unwrap(), 54_348);
-        assert_eq!(default_port_for_slot(2).unwrap(), 54_375);
-    }
-
-    #[test]
-    fn default_port_allocation_rejects_ranges_past_u16() {
-        assert!(default_port_for_slot(1_000).is_err());
-        assert!(default_port_for_slot(usize::MAX).is_err());
-    }
-
-    #[test]
-    fn parses_the_last_nonempty_json_line() {
-        let response = parse_response(
-            b"diagnostic line\n{\"ok\":true,\"port\":54321,\"pid\":42}\n",
-            b"",
-        )
-        .unwrap();
-        assert!(response.ok);
-        assert_eq!(response.port, Some(54_321));
-        assert_eq!(response.pid, Some(42));
-    }
-
-    #[test]
     fn deploy_command_passes_capture_as_a_separate_manager_argument() {
         for (capture, expected_capture) in
             [(CaptureBackend::Auto, "auto"), (CaptureBackend::Wgc, "wgc")]

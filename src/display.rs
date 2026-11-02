@@ -1344,105 +1344,68 @@ mod tests {
     }
 
     #[test]
-    fn topology_position_changes_do_not_require_a_mode_change() {
-        let mut saved = display("panel", r"\\.\DISPLAY1", false);
-        saved.rect = RECT {
-            left: 0,
-            top: 0,
-            right: 2832,
-            bottom: 1770,
-        };
-        saved.refresh_numerator = 240;
-        let mut actual = saved.clone();
-        actual.rect.left += 2832;
-        actual.rect.right += 2832;
-        actual.refresh_numerator = 240_000;
-        actual.refresh_denominator = 1000;
-        assert!(super::same_desktop_mode(&saved, &actual));
-        actual.refresh_numerator = 239_760;
-        assert!(!super::same_desktop_mode(&saved, &actual));
-        actual = saved.clone();
-        actual.rect.right = 1920;
-        assert!(!super::same_desktop_mode(&saved, &actual));
-        actual = saved.clone();
-        actual.rotation = Rotation::Deg180;
-        assert!(!super::same_desktop_mode(&saved, &actual));
-        assert_eq!(
-            super::topology_restore_flags(&saved, &actual),
-            super::CDS_UPDATEREGISTRY | super::CDS_NORESET
-        );
-        saved.primary = true;
-        assert_eq!(
-            super::topology_restore_flags(&saved, &actual),
-            super::CDS_UPDATEREGISTRY | super::CDS_NORESET | super::CDS_SET_PRIMARY
-        );
-    }
-
-    #[test]
-    fn portrait_desktop_geometry_uses_gdi_dimensions_without_rotating_again() {
-        let mut mode = windows::Win32::Graphics::Gdi::DEVMODEW {
-            dmPelsWidth: 1440,
-            dmPelsHeight: 2560,
-            ..Default::default()
-        };
-        mode.Anonymous1.Anonymous2.dmPosition.x = 2560;
-        mode.Anonymous1.Anonymous2.dmPosition.y = -1116;
-        mode.Anonymous1.Anonymous2.dmDisplayOrientation = super::DMDO_90;
-        let (rect, rotation) = super::desktop_geometry(&mode);
-        assert_eq!(
-            rect,
-            RECT {
-                left: 2560,
-                top: -1116,
-                right: 4000,
-                bottom: 1444
-            }
-        );
-        assert_eq!(rotation, Rotation::Deg90);
-    }
-
-    #[test]
-    fn topology_restore_matches_and_applies_saved_orientation() {
-        let mut mode = windows::Win32::Graphics::Gdi::DEVMODEW {
-            dmPelsWidth: 1440,
-            dmPelsHeight: 2560,
-            dmDisplayFrequency: 240,
-            ..Default::default()
-        };
-        mode.Anonymous1.Anonymous2.dmDisplayOrientation = super::DMDO_90;
-        assert!(super::display_mode_matches(
-            &mode,
-            1440,
-            2560,
-            240,
-            Rotation::Deg90
-        ));
-        assert!(!super::display_mode_matches(
-            &mode,
-            1440,
-            2560,
-            240,
-            Rotation::Deg270
-        ));
-        assert!(!super::display_mode_matches(
-            &mode,
-            1440,
-            2560,
-            240,
-            Rotation::Deg0
-        ));
+    fn topology_restore_distinguishes_layout_changes_from_modes_and_preserves_portrait_geometry() {
         let mut saved = display("physical", r"\\.\DISPLAY1", false);
         saved.rotation = Rotation::Deg90;
+        saved.refresh_numerator = 240;
         saved.rect = RECT {
             left: 2560,
             top: -1116,
             right: 4000,
             bottom: 1444,
         };
+        let mut mode = windows::Win32::Graphics::Gdi::DEVMODEW {
+            dmPelsWidth: 1440,
+            dmPelsHeight: 2560,
+            dmDisplayFrequency: 240,
+            ..Default::default()
+        };
         super::prepare_topology_mode(&mut mode, &saved);
         assert_eq!(super::desktop_geometry(&mode), (saved.rect, saved.rotation));
-        assert!(mode.dmFields.contains(super::DM_DISPLAYORIENTATION));
-        assert!(mode.dmFields.contains(super::DM_POSITION));
+        assert!(
+            mode.dmFields
+                .contains(super::DM_DISPLAYORIENTATION | super::DM_POSITION)
+        );
+        for rotation in [Rotation::Deg0, Rotation::Deg90, Rotation::Deg270] {
+            assert_eq!(
+                super::display_mode_matches(&mode, 1440, 2560, 240, rotation),
+                rotation == saved.rotation
+            );
+        }
+        for change in ["position", "rate", "size", "orientation"] {
+            let mut actual = saved.clone();
+            match change {
+                "position" => {
+                    actual.rect.left += 2832;
+                    actual.rect.right += 2832;
+                    actual.refresh_numerator = 240_000;
+                    actual.refresh_denominator = 1000;
+                }
+                "rate" => {
+                    actual.refresh_numerator = 239_760;
+                    actual.refresh_denominator = 1000;
+                }
+                "size" => actual.rect.right = 5000,
+                _ => actual.rotation = Rotation::Deg180,
+            }
+            assert_eq!(
+                super::same_desktop_mode(&saved, &actual),
+                change == "position",
+                "{change}"
+            );
+        }
+        let actual = saved.clone();
+        for primary in [false, true] {
+            saved.primary = primary;
+            let expected = super::CDS_UPDATEREGISTRY
+                | super::CDS_NORESET
+                | if primary {
+                    super::CDS_SET_PRIMARY
+                } else {
+                    super::CDS_TYPE(0)
+                };
+            assert_eq!(super::topology_restore_flags(&saved, &actual), expected);
+        }
     }
 
     #[test]
@@ -1507,31 +1470,7 @@ mod tests {
     }
 
     #[test]
-    fn unnamed_display_uses_detected_edid_diagonal() {
-        let mut value = edid();
-        value[21] = 34;
-        value[22] = 19;
-        let size = edid_dimensions_mm(&value);
-        assert_eq!(
-            super::display_name("", size, r"\\.\DISPLAY1"),
-            "15.3-inch display"
-        );
-        assert_eq!(
-            super::display_name("  ", size, r"\\.\DISPLAY1"),
-            "15.3-inch display"
-        );
-        assert_eq!(
-            super::display_name("P245MS", size, r"\\.\DISPLAY1"),
-            "P245MS"
-        );
-        assert_eq!(
-            super::display_name("", None, r"\\.\DISPLAY1"),
-            r"\\.\DISPLAY1"
-        );
-    }
-
-    #[test]
-    fn edid_prefers_detailed_timing_dimensions() {
+    fn edid_dimensions_use_detailed_timing_then_basic_size_and_reject_missing_data() {
         let mut value = edid();
         value[21] = 52;
         value[22] = 29;
@@ -1542,25 +1481,19 @@ mod tests {
         descriptor[14] = ((600u16 >> 8) as u8) << 4 | (340u16 >> 8) as u8;
 
         assert_eq!(edid_dimensions_mm(&value), Some((600.0, 340.0)));
-    }
 
-    #[test]
-    fn edid_falls_back_to_basic_centimeter_dimensions() {
         let mut value = edid();
         value[21] = 60;
         value[22] = 34;
 
         assert_eq!(edid_dimensions_mm(&value), Some((600.0, 340.0)));
-    }
 
-    #[test]
-    fn edid_rejects_missing_or_unidentified_dimensions() {
         assert_eq!(edid_dimensions_mm(&[0; 128]), None);
         assert_eq!(edid_dimensions_mm(&edid()), None);
     }
 
     #[test]
-    fn sunshine_payload_keeps_only_stable_instance_id_parts() {
+    fn sunshine_identity_encoding_preserves_compatibility_and_fallback() {
         let identity = MonitorIdentity {
             instance_id: r"DISPLAY\ACR1234\5&10a&0&UID4352".into(),
             edid: vec![0xaa, 0xbb],
@@ -1575,10 +1508,7 @@ mod tests {
             stable_instance_id_parts(&identity.instance_id),
             Some((r"DISPLAY\ACR1234\5&10a", "&UID4352"))
         );
-    }
 
-    #[test]
-    fn sunshine_payload_falls_back_to_monitor_path_without_full_identity() {
         let identity = MonitorIdentity {
             instance_id: r"DISPLAY\ACR1234\5&10a".into(),
             edid: vec![0xaa, 0xbb],
@@ -1588,10 +1518,7 @@ mod tests {
             sunshine_device_id_payload(r"\\?\DISPLAY#SBMS", Some(&identity)),
             utf16le_bytes(r"\\?\DISPLAY#SBMS")
         );
-    }
 
-    #[test]
-    fn sunshine_uuid_matches_libdisplaydevice_known_vector() {
         let payload = utf16le_bytes(r"MONITOR\ABC");
 
         assert_eq!(

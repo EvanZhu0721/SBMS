@@ -368,30 +368,50 @@ mod tests {
     }
 
     #[test]
-    fn screenshot_layout_allowing_1_and_3_uses_clip_only() {
-        let layout = screenshot_layout();
-        let boundary = Boundary::build(
-            &layout,
-            &[GuardRects {
-                target: layout[1],
-                source: layout[0],
-            }],
-        )
-        .expect("valid registration");
-        assert!(clip_is_disjoint_from_forbidden(&boundary));
-        let clip = boundary.clip_rect();
-        assert_eq!(
-            (clip.left, clip.top, clip.right, clip.bottom),
-            (0, 0, 1920, 2160)
-        );
-        assert!(boundary.is_forbidden(point(-1, -1)));
-        assert!(boundary.is_forbidden(point(-1280, -720)));
-        assert!(!boundary.is_forbidden(point(0, 0)));
-        assert!(!boundary.is_forbidden(point(500, 1500)));
+    fn clip_boundary_preserves_all_unmapped_monitors() {
+        for (layout, expected, allowed) in [
+            (
+                screenshot_layout().to_vec(),
+                rect(0, 0, 1920, 2160),
+                point(500, 1500),
+            ),
+            (
+                vec![
+                    rect(-2560, -1440, 0, 0),
+                    rect(0, 0, 1920, 1080),
+                    rect(-640, 0, 0, 720),
+                ],
+                rect(-2560, -1440, 0, 720),
+                point(-500, 500),
+            ),
+            (
+                {
+                    let mut layout = screenshot_layout().to_vec();
+                    layout.push(rect(3000, 0, 4920, 1080));
+                    layout
+                },
+                rect(0, 0, 4920, 2160),
+                point(3500, 500),
+            ),
+        ] {
+            let boundary = Boundary::build(
+                &layout,
+                &[GuardRects {
+                    target: layout[1],
+                    source: layout[0],
+                }],
+            )
+            .unwrap();
+            assert!(clip_is_disjoint_from_forbidden(&boundary));
+            assert_eq!(boundary.clip_rect(), expected);
+            assert!(boundary.is_forbidden(point(layout[1].left, layout[1].top)));
+            assert!(!boundary.is_forbidden(allowed));
+            assert_eq!(boundary.warp_to_allowed(allowed), allowed);
+        }
     }
 
     #[test]
-    fn forbidden_between_allowed_monitors_requires_hook_correction() {
+    fn movement_correction_preserves_tangents_and_half_open_edges() {
         let layout = [
             rect(0, 0, 1920, 1080),
             rect(640, 1080, 1280, 1380),
@@ -404,77 +424,18 @@ mod tests {
                 source: layout[2],
             }],
         )
-        .expect("valid registration");
+        .unwrap();
         assert!(!clip_is_disjoint_from_forbidden(&boundary));
-        let clip = boundary.clip_rect();
-        assert_eq!(
-            (clip.left, clip.top, clip.right, clip.bottom),
-            (0, 0, 1920, 1980)
-        );
-    }
-
-    #[test]
-    fn movement_correction_preserves_tangent_on_previous_monitor() {
-        let layout = [
-            rect(0, 0, 1920, 1080),
-            rect(640, 1080, 1280, 1380),
-            rect(0, 1380, 1920, 1980),
-        ];
-        let boundary = Boundary::build(
-            &layout,
-            &[GuardRects {
-                target: layout[1],
-                source: layout[2],
-            }],
-        )
-        .expect("valid registration");
-        // Exiting through the top edge of 3 keeps the x coordinate.
-        assert_eq!(
-            boundary.correct_movement(point(700, 1200), Some(point(700, 1500))),
-            point(700, 1380)
-        );
-        // Exiting through the bottom edge of 1 keeps the x coordinate.
-        assert_eq!(
-            boundary.correct_movement(point(700, 1200), Some(point(700, 500))),
-            point(700, 1079)
-        );
-        // A diagonal entry clamps to the touched corner of the previous monitor.
-        assert_eq!(
-            boundary.correct_movement(point(641, 1081), Some(point(641, 1079))),
-            point(641, 1079)
-        );
-    }
-
-    #[test]
-    fn correction_falls_back_to_nearest_allowed_monitor() {
-        let layout = [
-            rect(0, 0, 1920, 1080),
-            rect(640, 1080, 1280, 1380),
-            rect(0, 1380, 1920, 1980),
-        ];
-        let boundary = Boundary::build(
-            &layout,
-            &[GuardRects {
-                target: layout[1],
-                source: layout[2],
-            }],
-        )
-        .expect("valid registration");
-        // Without a usable previous monitor the nearest allowed monitor wins.
-        assert_eq!(
-            boundary.correct_movement(point(700, 1200), Some(point(700, 1250))),
-            point(700, 1079)
-        );
-        assert_eq!(
-            boundary.correct_movement(point(700, 1200), None),
-            point(700, 1079)
-        );
-    }
-
-    #[test]
-    fn negative_and_unequal_layouts_use_half_open_edges() {
-        // Unequal sizes and negative coordinates; the forbidden target sits
-        // between the two allowed monitors, so hook correction applies.
+        assert_eq!(boundary.clip_rect(), rect(0, 0, 1920, 1980));
+        for (cursor, previous, expected) in [
+            (point(700, 1200), Some(point(700, 1500)), point(700, 1380)),
+            (point(700, 1200), Some(point(700, 500)), point(700, 1079)),
+            (point(641, 1081), Some(point(641, 1079)), point(641, 1079)),
+            (point(700, 1200), Some(point(700, 1250)), point(700, 1079)),
+            (point(700, 1200), None, point(700, 1079)),
+        ] {
+            assert_eq!(boundary.correct_movement(cursor, previous), expected);
+        }
         let layout = [
             rect(-2560, -1440, 0, -480),
             rect(-1600, -480, -320, 0),
@@ -487,57 +448,19 @@ mod tests {
                 source: layout[0],
             }],
         )
-        .expect("valid registration");
+        .unwrap();
         assert!(!clip_is_disjoint_from_forbidden(&boundary));
-        // Tangent preservation with negative coordinates.
-        assert_eq!(
-            boundary.correct_movement(point(-1000, -200), Some(point(-1000, -1000))),
-            point(-1000, -481)
-        );
-        // The monitor below owns the exit and clamps to its first row.
-        assert_eq!(
-            boundary.correct_movement(point(-1000, -200), Some(point(-1000, 100))),
-            point(-1000, 0)
-        );
-        // Half-open clamp: the last pixel of the previous monitor is kept.
-        assert_eq!(
-            boundary.correct_movement(point(-1599, -479), Some(point(-1000, -1000))),
-            point(-1599, -481)
-        );
-        // Nearest allowed monitor fallback still lands on an edge pixel.
+        for (cursor, previous, expected) in [
+            (point(-1000, -200), point(-1000, -1000), point(-1000, -481)),
+            (point(-1000, -200), point(-1000, 100), point(-1000, 0)),
+            (point(-1599, -479), point(-1000, -1000), point(-1599, -481)),
+        ] {
+            assert_eq!(boundary.correct_movement(cursor, Some(previous)), expected);
+        }
         assert_eq!(
             boundary.warp_to_allowed(point(-1000, -200)),
             point(-1000, 0)
         );
-    }
-
-    #[test]
-    fn clip_only_layout_with_negative_target_outside_bbox() {
-        // The forbidden target lies completely right of the allowed bounding
-        // box: the single clip rectangle is a complete boundary.
-        let layout = [
-            rect(-2560, -1440, 0, 0),
-            rect(0, 0, 1920, 1080),
-            rect(-640, 0, 0, 720),
-        ];
-        let boundary = Boundary::build(
-            &layout,
-            &[GuardRects {
-                target: layout[1],
-                source: layout[0],
-            }],
-        )
-        .expect("valid registration");
-        assert!(clip_is_disjoint_from_forbidden(&boundary));
-        let clip = boundary.clip_rect();
-        assert_eq!(
-            (clip.left, clip.top, clip.right, clip.bottom),
-            (-2560, -1440, 0, 720)
-        );
-    }
-
-    #[test]
-    fn edge_pixels_are_half_open_and_preserved() {
         let layout = screenshot_layout();
         let boundary = Boundary::build(
             &layout,
@@ -546,61 +469,20 @@ mod tests {
                 source: layout[0],
             }],
         )
-        .expect("valid registration");
-        // Half-open: the corner pixel (0, 0) is allowed, (-1, -1) is forbidden.
+        .unwrap();
         assert!(!boundary.is_forbidden(point(0, 0)));
         assert!(!boundary.is_forbidden(point(0, 2159)));
         assert!(boundary.is_forbidden(point(-1, -1)));
-        // The last allowed pixel is preserved and never warped.
         assert_eq!(
             boundary.warp_to_allowed(point(1919, 2159)),
             point(1919, 2159)
         );
-        // A forbidden attempt clamps to the adjacent edge pixel of the previous
-        // allowed monitor; unknown previous state falls back to the nearest one.
-        assert_eq!(
-            boundary.correct_movement(point(-5, -5), Some(point(5, 5))),
-            point(0, 0)
-        );
-        assert_eq!(
-            boundary.correct_movement(point(-5, -5), Some(point(5, 1500))),
-            point(0, 1080)
-        );
-    }
-
-    #[test]
-    fn unmapped_displays_remain_usable_and_never_forbidden() {
-        let mut layout = screenshot_layout().to_vec();
-        layout.push(rect(3000, 0, 4920, 1080));
-        let boundary = Boundary::build(
-            &layout,
-            &[GuardRects {
-                target: layout[1],
-                source: layout[0],
-            }],
-        )
-        .expect("valid registration");
-        assert!(!boundary.is_forbidden(point(3500, 500)));
-        let clip = boundary.clip_rect();
-        assert!((clip.left, clip.top, clip.right, clip.bottom) == (0, 0, 4920, 2160));
-    }
-
-    #[test]
-    fn warp_keeps_already_allowed_points_untouched() {
-        let layout = screenshot_layout();
-        let boundary = Boundary::build(
-            &layout,
-            &[GuardRects {
-                target: layout[1],
-                source: layout[0],
-            }],
-        )
-        .expect("valid registration");
-        assert_eq!(boundary.warp_to_allowed(point(5, 5)), point(5, 5));
-        assert_eq!(
-            boundary.warp_to_allowed(point(1919, 1079)),
-            point(1919, 1079)
-        );
+        for (previous, expected) in [(point(5, 5), point(0, 0)), (point(5, 1500), point(0, 1080))] {
+            assert_eq!(
+                boundary.correct_movement(point(-5, -5), Some(previous)),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -651,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_guard_add_remove_updates_boundary() {
+    fn registry_lifecycle_invalidates_stale_layout_and_balances_pause() {
         let layout = screenshot_layout();
         let mut registry = BoundaryRegistry::new();
         assert!(registry.snapshot().is_none());
@@ -682,10 +564,7 @@ mod tests {
             registry.snapshot().is_none(),
             "empty guards restore baseline"
         );
-    }
 
-    #[test]
-    fn registry_invalidates_until_layout_is_refreshed() {
         let layout = screenshot_layout();
         let mut registry = BoundaryRegistry::new();
         registry.set_layout(layout.to_vec());
@@ -717,10 +596,7 @@ mod tests {
             registry.snapshot().is_some(),
             "refresh restores validated geometry"
         );
-    }
 
-    #[test]
-    fn registry_pause_balances_across_mappers() {
         let layout = screenshot_layout();
         let mut registry = BoundaryRegistry::new();
         registry.set_layout(layout.to_vec());
@@ -747,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn clip_action_transitions_preserve_baseline_across_swaps() {
+    fn clip_transitions_preserve_baseline_through_capture_pause_and_stop() {
         let source = rect(0, 0, 1920, 1080);
         let clip = rect(-10, -10, 2000, 2000);
         // First own clip preserves the external baseline.
@@ -764,10 +640,7 @@ mod tests {
             clip_action(Some(source), false, Some(clip), true),
             ClipAction::Set(source)
         );
-    }
 
-    #[test]
-    fn clip_action_screenshot_pause_releases_only_the_native_boundary() {
         let source = rect(0, 0, 1920, 1080);
         let clip = rect(-10, -10, 2000, 2000);
         // Pause releases the native boundary back to the baseline.
@@ -780,10 +653,7 @@ mod tests {
             clip_action(Some(source), true, Some(clip), true),
             ClipAction::Set(source)
         );
-    }
 
-    #[test]
-    fn clip_action_balances_down_to_the_baseline() {
         let source = rect(0, 0, 1920, 1080);
         let clip = rect(-10, -10, 2000, 2000);
         // Empty guards restore the baseline exactly once.

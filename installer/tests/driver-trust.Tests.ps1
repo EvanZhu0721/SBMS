@@ -59,14 +59,6 @@ Describe 'Explicit driver certificate trust' {
         Assert-MockCalled pnputil.exe -Times 0 -Exactly -Scope It
     }
 
-    It 'installs with existing trust without requesting approval or modifying it' {
-        $script:trusted.Root = $true
-        $script:trusted.TrustedPublisher = $true
-        Invoke-SbmsDriverInstall -DriverInf $script:driverInf
-        $script:events.Count | Should Be 0
-        Assert-MockCalled pnputil.exe -Times 1 -Exactly -Scope It
-    }
-
     It 'rolls back the first addition if the second store rejects the import' {
         Mock Invoke-SbmsCertificateStore {
             param($Name, $Certificate, $Action)
@@ -112,12 +104,19 @@ Describe 'Explicit driver certificate trust' {
         ($script:events -join ',') | Should Be 'Add/Root,Add/TrustedPublisher,Remove/Root,Remove/TrustedPublisher'
     }
 
-    It 'accepts restart-required success and retains approved trust' {
+    It 'retains approved trust after restart-required success and reuses it on reinstall' {
         Mock pnputil.exe { $global:LASTEXITCODE = 3010 }
         $restartRequired = $false
         Invoke-SbmsDriverInstall -DriverInf $script:driverInf -TrustCertificate `
             -RestartRequired ([ref]$restartRequired) | Should Match 'restart'
         $restartRequired | Should Be $true
         ($script:events -join ',') | Should Be 'Add/Root,Add/TrustedPublisher'
+
+        $script:events.Clear()
+        Mock pnputil.exe { $global:LASTEXITCODE = 0 }
+        Invoke-SbmsDriverInstall -DriverInf $script:driverInf -RestartRequired ([ref]$restartRequired)
+        $restartRequired | Should Be $false
+        $script:events.Count | Should Be 0
+        Assert-MockCalled pnputil.exe -Times 2 -Exactly -Scope It
     }
 }
