@@ -92,6 +92,8 @@ claims; it never performs an implicit second window restoration.
 User configuration is stored as at most three named profiles in
 `%LOCALAPPDATA%\SBMS\config-profiles-v1.json`. The collection, active profile
 and per-profile revisions are committed atomically under a cross-process lock.
+Each profile also has an instance id that is not reused when a deleted name
+is created again. Saves compare that id together with the revision.
 On first use, the existing `config-v2.json` is preserved and imported as the
 `default` profile. The tray supports revision-checked live reloads without
 changing a mapping that is already running. A damaged profile collection is

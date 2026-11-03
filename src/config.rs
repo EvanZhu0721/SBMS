@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0};
+use windows::Win32::Security::Cryptography::{BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom};
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, REPLACEFILE_WRITE_THROUGH,
     ReplaceFileW,
@@ -27,7 +28,8 @@ use crate::limits::{
 
 const CONFIG_VERSION: u32 = 2;
 const LEGACY_CONFIG_VERSION: u32 = 1;
-const CONFIG_PROFILES_VERSION: u32 = 1;
+const LEGACY_CONFIG_PROFILES_VERSION: u32 = 1;
+const CONFIG_PROFILES_VERSION: u32 = 2;
 pub const RECOVER_PROFILE_COLLECTION_COMMAND: &str = "sbms config reset --all --backup";
 pub const MAX_CONFIG_PROFILES: usize = 3;
 const DISPLAY_OVERRIDES_VERSION: u32 = 1;
@@ -180,6 +182,7 @@ pub struct ConfigStore {
 #[serde(deny_unknown_fields)]
 pub struct ConfigProfile {
     pub id: String,
+    pub instance_id: String,
     pub revision: u64,
     pub config: AppConfig,
 }
@@ -203,6 +206,7 @@ fn is_false(value: &bool) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProfileRevision {
     pub id: String,
+    pub instance_id: String,
     pub revision: u64,
 }
 
@@ -906,6 +910,12 @@ impl ConfigProfiles {
         validate_profile_id(&self.active_profile)?;
         for (index, profile) in self.profiles.iter().enumerate() {
             validate_profile_id(&profile.id)?;
+            if !valid_profile_instance_id(&profile.instance_id) {
+                return Err(ConfigError(format!(
+                    "config profile {} has an invalid instance id",
+                    profile.id
+                )));
+            }
             if profile.revision == 0 {
                 return Err(ConfigError(format!(
                     "config profile {} has an invalid zero revision",
@@ -919,6 +929,15 @@ impl ConfigProfiles {
                 return Err(ConfigError(format!(
                     "config profile id {} is duplicated",
                     profile.id
+                )));
+            }
+            if self.profiles[..index]
+                .iter()
+                .any(|other| other.instance_id == profile.instance_id)
+            {
+                return Err(ConfigError(format!(
+                    "config profile instance id {} is duplicated",
+                    profile.instance_id
                 )));
             }
             profile.config.validate()?;
@@ -1049,16 +1068,22 @@ impl ConfigProfileStore {
         let mut profiles = self.load_or_initialize_locked()?;
         if !profiles.active_profile.eq_ignore_ascii_case(&expected.id) {
             return Err(ConfigError(format!(
-                "active config profile changed from {} to {}; reload before saving",
+                "active config profile changed from {} to {}. Reload the configuration before saving",
                 expected.id, profiles.active_profile
             )));
         }
         let profile = profiles
             .profile_mut(&expected.id)
             .expect("validated config profiles contain the active profile");
+        if profile.instance_id != expected.instance_id {
+            return Err(ConfigError(format!(
+                "config profile {} was replaced by a different profile with the same name. Reload the configuration before saving",
+                profile.id
+            )));
+        }
         if profile.revision != expected.revision {
             return Err(ConfigError(format!(
-                "config profile {} changed from revision {} to {}; reload before saving",
+                "config profile {} changed from revision {} to {}. Reload the configuration before saving",
                 profile.id, expected.revision, profile.revision
             )));
         }
@@ -1100,11 +1125,12 @@ impl ConfigProfileStore {
                     "cannot create config profile {id}; the {MAX_CONFIG_PROFILES}-profile limit is reached"
                 )));
             }
-            profiles.profiles.push(ConfigProfile {
-                id: id.into(),
-                revision: 1,
-                config: config.clone(),
-            });
+            profiles.profiles.push(config_profile_with_instance(
+                &profiles.profiles,
+                id.into(),
+                1,
+                config.clone(),
+            )?);
             profiles.profiles.len() - 1
         };
         if activate {
@@ -1138,11 +1164,12 @@ impl ConfigProfileStore {
                 "cannot create config profile {id}; the {MAX_CONFIG_PROFILES}-profile limit is reached"
             )));
         }
-        profiles.profiles.push(ConfigProfile {
-            id: id.into(),
-            revision: 1,
+        profiles.profiles.push(config_profile_with_instance(
+            &profiles.profiles,
+            id.into(),
+            1,
             config,
-        });
+        )?);
         let result = snapshot(profiles.profiles.last().expect("profile was pushed"));
         self.save_locked(&profiles)?;
         Ok(result)
@@ -1165,11 +1192,12 @@ impl ConfigProfileStore {
             )));
         }
         let config = profiles.active().config.clone();
-        profiles.profiles.push(ConfigProfile {
-            id: id.into(),
-            revision: 1,
+        profiles.profiles.push(config_profile_with_instance(
+            &profiles.profiles,
+            id.into(),
+            1,
             config,
-        });
+        )?);
         let index = profiles.profiles.len() - 1;
         if activate {
             profiles.active_profile = profiles.profiles[index].id.clone();
@@ -1294,7 +1322,7 @@ impl ConfigProfileStore {
         let mut profiles = if self.path.exists() {
             self.load_or_initialize_locked()?
         } else {
-            default_config_profiles()
+            default_config_profiles()?
         };
         let active_id = profiles.active_profile.clone();
         let profile = profiles
@@ -1330,7 +1358,7 @@ impl ConfigProfileStore {
         // Flush the original bytes before replacing the store. A backup error
         // returns while the source file is still untouched.
         let backup = write_unique_profile_backup(&self.path, &bytes)?;
-        let profiles = default_config_profiles();
+        let profiles = default_config_profiles()?;
         if let Err(error) = self.save_locked(&profiles) {
             return Err(ConfigError(format!(
                 "config profile recovery was not committed; {}; backup remains at {}: {error}",
@@ -1346,7 +1374,7 @@ impl ConfigProfileStore {
 
     fn load_or_initialize_locked(&self) -> Result<ConfigProfiles, ConfigError> {
         match fs::read(&self.path) {
-            Ok(bytes) => parse_profile_store(&self.path, &bytes),
+            Ok(bytes) => self.load_existing_locked(&bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let legacy_store = ConfigStore {
                     path: self.legacy_config_path.clone(),
@@ -1368,7 +1396,7 @@ impl ConfigProfileStore {
                     }
                     Err(error) => return Err(error),
                 };
-                let profiles = single_profile_collection(config);
+                let profiles = single_profile_collection(config)?;
                 self.save_locked(&profiles)?;
                 Ok(profiles)
             }
@@ -1382,6 +1410,70 @@ impl ConfigProfileStore {
     fn save_locked(&self, profiles: &ConfigProfiles) -> Result<(), ConfigError> {
         profiles.validate()?;
         save_json_atomically(&self.path, profiles, "config profiles", "config profiles")
+    }
+
+    fn load_existing_locked(&self, bytes: &[u8]) -> Result<ConfigProfiles, ConfigError> {
+        if let Some(version) = recognized_future_profiles_version(bytes) {
+            return Err(future_profile_store(&self.path, &version));
+        }
+        if is_legacy_profile_collection(bytes) {
+            return self.migrate_legacy_profiles_locked(bytes);
+        }
+        parse_profile_store(&self.path, bytes)
+    }
+
+    fn migrate_legacy_profiles_locked(&self, bytes: &[u8]) -> Result<ConfigProfiles, ConfigError> {
+        let legacy = serde_json::from_slice::<LegacyConfigProfiles>(bytes)
+            .map_err(|error| damaged_profile_store(&self.path, error))?;
+        if legacy.version != LEGACY_CONFIG_PROFILES_VERSION {
+            return Err(damaged_profile_store(
+                &self.path,
+                format!("unsupported config profiles version {}", legacy.version),
+            ));
+        }
+        preview_legacy_collection(&legacy)
+            .validate()
+            .map_err(|error| damaged_profile_store(&self.path, error))?;
+        let profiles = assign_profile_instances(legacy)?;
+        self.persist_migrated_profiles(&profiles)
+    }
+
+    fn persist_migrated_profiles(
+        &self,
+        profiles: &ConfigProfiles,
+    ) -> Result<ConfigProfiles, ConfigError> {
+        if let Err(error) = self.save_locked(profiles) {
+            return Err(ConfigError(format!(
+                "could not persist migrated config profile identities in {}: {error}",
+                self.path.display()
+            )));
+        }
+        let bytes = fs::read(&self.path).map_err(|error| {
+            ConfigError(format!(
+                "migrated config profile identities were written to {} but could not be reloaded: {error}",
+                self.path.display()
+            ))
+        })?;
+        let persisted = parse_profile_store(&self.path, &bytes).map_err(|error| {
+            ConfigError(format!(
+                "migrated config profile identities were written to {} but could not be reloaded: {error}",
+                self.path.display()
+            ))
+        })?;
+        let identities_match =
+            persisted.profiles.len() == profiles.profiles.len()
+                && persisted.profiles.iter().zip(profiles.profiles.iter()).all(
+                    |(saved, assigned)| {
+                        saved.id == assigned.id && saved.instance_id == assigned.instance_id
+                    },
+                );
+        if !identities_match {
+            return Err(ConfigError(format!(
+                "migrated config profile identities were written to {} but did not reload with the assigned identities",
+                self.path.display()
+            )));
+        }
+        Ok(persisted)
     }
 }
 
@@ -1463,22 +1555,171 @@ fn consume_profile_store_test_fault(expected: ProfileStoreTestFault) -> bool {
     })
 }
 
-fn single_profile_collection(config: AppConfig) -> ConfigProfiles {
-    ConfigProfiles {
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyConfigProfile {
+    id: String,
+    revision: u64,
+    config: AppConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyConfigProfiles {
+    version: u32,
+    active_profile: String,
+    #[serde(default)]
+    launch_intro_disabled: bool,
+    #[serde(default)]
+    auto_map_on_login: bool,
+    profiles: Vec<LegacyConfigProfile>,
+}
+
+fn single_profile_collection(config: AppConfig) -> Result<ConfigProfiles, ConfigError> {
+    Ok(ConfigProfiles {
         version: CONFIG_PROFILES_VERSION,
         active_profile: "default".into(),
         launch_intro_disabled: false,
         auto_map_on_login: false,
-        profiles: vec![ConfigProfile {
-            id: "default".into(),
-            revision: 1,
+        profiles: vec![config_profile_with_instance(
+            &[],
+            "default".into(),
+            1,
             config,
-        }],
+        )?],
+    })
+}
+
+fn default_config_profiles() -> Result<ConfigProfiles, ConfigError> {
+    single_profile_collection(AppConfig::default())
+}
+
+fn config_profile_with_instance(
+    existing: &[ConfigProfile],
+    id: String,
+    revision: u64,
+    config: AppConfig,
+) -> Result<ConfigProfile, ConfigError> {
+    Ok(ConfigProfile {
+        id,
+        instance_id: fresh_profile_instance_id(existing)?,
+        revision,
+        config,
+    })
+}
+
+fn preview_legacy_collection(legacy: &LegacyConfigProfiles) -> ConfigProfiles {
+    ConfigProfiles {
+        version: CONFIG_PROFILES_VERSION,
+        active_profile: legacy.active_profile.clone(),
+        launch_intro_disabled: legacy.launch_intro_disabled,
+        auto_map_on_login: legacy.auto_map_on_login,
+        profiles: legacy
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(index, profile)| ConfigProfile {
+                id: profile.id.clone(),
+                instance_id: format!("00000000-0000-4000-8000-{index:012x}"),
+                revision: profile.revision,
+                config: profile.config.clone(),
+            })
+            .collect(),
     }
 }
 
-fn default_config_profiles() -> ConfigProfiles {
-    single_profile_collection(AppConfig::default())
+fn assign_profile_instances(legacy: LegacyConfigProfiles) -> Result<ConfigProfiles, ConfigError> {
+    let mut profiles = Vec::with_capacity(legacy.profiles.len());
+    for profile in legacy.profiles {
+        profiles.push(config_profile_with_instance(
+            &profiles,
+            profile.id,
+            profile.revision,
+            profile.config,
+        )?);
+    }
+    Ok(ConfigProfiles {
+        version: CONFIG_PROFILES_VERSION,
+        active_profile: legacy.active_profile,
+        launch_intro_disabled: legacy.launch_intro_disabled,
+        auto_map_on_login: legacy.auto_map_on_login,
+        profiles,
+    })
+}
+
+fn fresh_profile_instance_id(existing: &[ConfigProfile]) -> Result<String, ConfigError> {
+    for _ in 0..8 {
+        let instance_id = new_profile_instance_id()?;
+        if existing
+            .iter()
+            .all(|profile| profile.instance_id != instance_id)
+        {
+            return Ok(instance_id);
+        }
+    }
+    Err(ConfigError(
+        "could not allocate a unique config profile instance id".into(),
+    ))
+}
+
+fn new_profile_instance_id() -> Result<String, ConfigError> {
+    let mut bytes = [0u8; 16];
+    let status = unsafe { BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+    if status.0 < 0 {
+        return Err(ConfigError(format!(
+            "could not allocate a config profile instance id: BCryptGenRandom failed: 0x{:08x}",
+            status.0 as u32
+        )));
+    }
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Ok(format_profile_instance_id(&bytes))
+}
+
+fn format_profile_instance_id(bytes: &[u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15]
+    )
+}
+
+fn valid_profile_instance_id(instance_id: &str) -> bool {
+    let bytes = instance_id.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    let mut index = 0;
+    for (group, length) in [8, 4, 4, 4, 12].into_iter().enumerate() {
+        if group > 0 {
+            if bytes[index] != b'-' {
+                return false;
+            }
+            index += 1;
+        }
+        if !bytes[index..index + length]
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return false;
+        }
+        index += length;
+    }
+    bytes[14] == b'4' && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
 }
 
 fn damaged_profile_store(path: &Path, detail: impl Display) -> ConfigError {
@@ -1495,10 +1736,19 @@ fn future_profile_store(path: &Path, version: &str) -> ConfigError {
     ))
 }
 
-fn recognized_future_profiles_version(bytes: &[u8]) -> Option<String> {
+fn profiles_version_number(bytes: &[u8]) -> Option<serde_json::Number> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = serde_json::Value::deserialize(&mut deserializer).ok()?;
-    let version = value.as_object()?.get("version")?.as_number()?;
+    value.as_object()?.get("version")?.as_number().cloned()
+}
+
+fn is_legacy_profile_collection(bytes: &[u8]) -> bool {
+    profiles_version_number(bytes).and_then(|version| version.as_u64())
+        == Some(u64::from(LEGACY_CONFIG_PROFILES_VERSION))
+}
+
+fn recognized_future_profiles_version(bytes: &[u8]) -> Option<String> {
+    let version = profiles_version_number(bytes)?;
     if let Some(integer) = version.as_u64() {
         return (integer > u64::from(CONFIG_PROFILES_VERSION)).then(|| integer.to_string());
     }
@@ -1625,6 +1875,7 @@ fn snapshot(profile: &ConfigProfile) -> ProfileSnapshot {
     ProfileSnapshot {
         profile: ProfileRevision {
             id: profile.id.clone(),
+            instance_id: profile.instance_id.clone(),
             revision: profile.revision,
         },
         config: profile.config.clone(),
@@ -2492,13 +2743,21 @@ mod tests {
         profiles.duplicate_active("gaming", false).unwrap();
         profiles.duplicate_active("streaming", false).unwrap();
 
+        let gaming = profiles.load_profile("gaming").unwrap();
+        assert_ne!(gaming.profile.instance_id, original.profile.instance_id);
+
         let (case_changed, case_changed_active) = profiles.rename("default", "DEFAULT").unwrap();
         assert!(case_changed_active);
         assert_eq!(case_changed.profile.id, "DEFAULT");
+        assert_eq!(
+            case_changed.profile.instance_id,
+            original.profile.instance_id
+        );
         assert_eq!(case_changed.profile.revision, original.profile.revision + 1);
         assert_eq!(case_changed.config, original.config);
 
         let (renamed, renamed_active) = profiles.rename("DEFAULT", "primary").unwrap();
+        assert_eq!(renamed.profile.instance_id, original.profile.instance_id);
         assert!(renamed_active);
         assert_eq!(profiles.load_active().unwrap(), renamed);
         assert!(profiles.load_profile("default").is_err());
@@ -2547,6 +2806,256 @@ mod tests {
     }
 
     #[test]
+    fn recreated_profile_rejects_a_snapshot_from_the_deleted_instance() {
+        let (root, store) = test_profile_store("recreated-instance");
+        store.load_active().unwrap();
+        let (created, active) = store
+            .save_profile("gaming", &config_with_target("old-gaming"), false, true)
+            .unwrap();
+        assert!(active);
+        assert_eq!(created.profile.id, "gaming");
+        assert_eq!(created.profile.revision, 1);
+        let snapshot_a = store.load_active().unwrap();
+        assert_eq!(snapshot_a, created);
+
+        store.activate("default").unwrap();
+        store.delete("gaming").unwrap();
+        let (recreated, active) = store
+            .save_profile("gaming", &config_with_target("new-gaming"), false, true)
+            .unwrap();
+        assert!(active);
+        assert_eq!(recreated.profile.revision, 1);
+        let snapshot_b = store.load_active().unwrap();
+        assert_eq!(snapshot_b, recreated);
+        assert_eq!(snapshot_b.config, config_with_target("new-gaming"));
+        assert_ne!(
+            snapshot_a.profile.instance_id,
+            snapshot_b.profile.instance_id
+        );
+
+        let error = store
+            .save_active_if_revision(&snapshot_a.profile, &config_with_target("stale-gaming"))
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Reload the configuration before saving"),
+            "{message}"
+        );
+        let unchanged = store.load_active().unwrap();
+        assert_eq!(unchanged, snapshot_b);
+
+        let saved = store
+            .save_active_if_revision(&snapshot_b.profile, &config_with_target("saved-gaming"))
+            .unwrap();
+        assert_eq!(saved.profile.instance_id, snapshot_b.profile.instance_id);
+        assert_eq!(saved.profile.revision, snapshot_b.profile.revision + 1);
+        assert_eq!(saved.config, config_with_target("saved-gaming"));
+        assert_eq!(store.load_active().unwrap(), saved);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_instance_snapshot_saves_and_keeps_its_identity() {
+        let (root, store) = test_profile_store("current-instance");
+        let current = store.load_active().unwrap();
+        let saved = store
+            .save_active_if_revision(&current.profile, &config_with_target("kept-target"))
+            .unwrap();
+        assert_eq!(saved.profile.instance_id, current.profile.instance_id);
+        assert_eq!(saved.profile.revision, current.profile.revision + 1);
+        assert_eq!(saved.config, config_with_target("kept-target"));
+        assert_eq!(store.load_active().unwrap(), saved);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_profile_collection_keeps_assigned_instance_ids_after_reload() {
+        let (root, store) = test_profile_store("legacy-ids");
+        store.load_active().unwrap();
+        store.set_launch_intro_disabled(true).unwrap();
+        store.set_auto_map_on_login(true).unwrap();
+        store
+            .save_profile(
+                "gaming",
+                &config_with_target("gaming-display"),
+                false,
+                false,
+            )
+            .unwrap();
+        let legacy = legacy_collection_without_instance_ids(&store);
+        fs::write(store.path(), &legacy).unwrap();
+
+        let first = store.list().unwrap();
+        assert_eq!(first.version, 2);
+        assert!(first.launch_intro_disabled);
+        assert!(first.auto_map_on_login);
+        assert_eq!(first.profiles.len(), 2);
+        assert_ne!(first.profiles[0].instance_id, first.profiles[1].instance_id);
+        assert_eq!(
+            first.profile("gaming").unwrap().config,
+            config_with_target("gaming-display")
+        );
+        let migrated = fs::read(store.path()).unwrap();
+        assert_ne!(migrated, legacy);
+
+        assert_eq!(store.list().unwrap(), first);
+        assert_eq!(fs::read(store.path()).unwrap(), migrated);
+
+        let mut smuggled: serde_json::Value = serde_json::from_slice(&legacy).unwrap();
+        smuggled["profiles"][0]["instance_id"] =
+            serde_json::json!("00000000-0000-4000-8000-000000000001");
+        let smuggled_bytes = serde_json::to_vec_pretty(&smuggled).unwrap();
+        fs::write(store.path(), &smuggled_bytes).unwrap();
+        let error = store.load_active().unwrap_err();
+        assert!(error.allows_profile_collection_recovery(), "{error}");
+        assert_eq!(fs::read(store.path()).unwrap(), smuggled_bytes);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_profile_migration_keeps_the_source_when_replacement_fails() {
+        let (root, store) = test_profile_store("legacy-replace-fails");
+        store.load_active().unwrap();
+        let legacy = legacy_collection_without_instance_ids(&store);
+        fs::write(store.path(), &legacy).unwrap();
+        let _fault = inject_profile_store_fault(ProfileStoreTestFault::Replace);
+        let error = store.load_active().unwrap_err();
+        drop(_fault);
+        let message = error.to_string();
+        assert!(
+            message.contains("could not persist migrated config profile identities"),
+            "{message}"
+        );
+        assert!(!error.allows_profile_collection_recovery(), "{message}");
+        assert_eq!(fs::read(store.path()).unwrap(), legacy);
+
+        let loaded = store.load_active().unwrap();
+        assert_eq!(loaded.profile.id, "default");
+        assert!(valid_profile_instance_id(&loaded.profile.instance_id));
+        assert_eq!(store.load_active().unwrap(), loaded);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_collection_recovery_rejects_snapshots_taken_before_it() {
+        let (root, store) = test_profile_store("recovery-identity");
+        let before = store.load_active().unwrap();
+        let recovered = store.recover_with_backup().unwrap();
+        assert_eq!(recovered.snapshot.profile.id, before.profile.id);
+        assert_eq!(recovered.snapshot.profile.revision, before.profile.revision);
+        assert_ne!(
+            recovered.snapshot.profile.instance_id,
+            before.profile.instance_id
+        );
+
+        let error = store
+            .save_active_if_revision(&before.profile, &config_with_target("old-default"))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Reload the configuration before saving"),
+            "{error}"
+        );
+        assert_eq!(store.load_active().unwrap(), recovered.snapshot);
+
+        let saved = store
+            .save_active_if_revision(
+                &recovered.snapshot.profile,
+                &config_with_target("new-default"),
+            )
+            .unwrap();
+        assert_eq!(
+            saved.profile.instance_id,
+            recovered.snapshot.profile.instance_id
+        );
+        assert_eq!(store.load_active().unwrap(), saved);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imported_app_config_cannot_supply_a_profile_instance_id() {
+        let (root, store) = test_profile_store("import-identity");
+        let (created, _) = store
+            .save_profile("gaming", &config_with_target("old-gaming"), false, true)
+            .unwrap();
+        let (replaced, _) = store
+            .save_profile("gaming", &config_with_target("new-gaming"), true, true)
+            .unwrap();
+        assert_eq!(replaced.profile.instance_id, created.profile.instance_id);
+        assert_eq!(replaced.profile.revision, created.profile.revision + 1);
+
+        let export_path = root.join("export.json");
+        ConfigStore::new(export_path.clone())
+            .save(&replaced.config)
+            .unwrap();
+        let exported: serde_json::Value =
+            serde_json::from_slice(&fs::read(&export_path).unwrap()).unwrap();
+        assert!(exported.get("instance_id").is_none());
+
+        let mut document = exported;
+        document.as_object_mut().unwrap().insert(
+            "instance_id".into(),
+            serde_json::json!(created.profile.instance_id),
+        );
+        let import_path = root.join("import.json");
+        fs::write(&import_path, serde_json::to_vec_pretty(&document).unwrap()).unwrap();
+        let error = ConfigStore::new(import_path).load_strict().unwrap_err();
+        assert!(error.to_string().contains("instance_id"), "{error}");
+        assert_eq!(
+            store.load_profile("gaming").unwrap().profile.instance_id,
+            created.profile.instance_id
+        );
+        assert_eq!(
+            store.load_profile("gaming").unwrap().config,
+            config_with_target("new-gaming")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn version_two_rejects_invalid_or_duplicate_instance_ids_without_writing() {
+        let (root, store) = test_profile_store("bad-instance");
+        store.load_active().unwrap();
+        store
+            .save_profile(
+                "gaming",
+                &config_with_target("gaming-display"),
+                false,
+                false,
+            )
+            .unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        value["profiles"][0]["instance_id"] = serde_json::json!("not-an-instance");
+        let invalid = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(store.path(), &invalid).unwrap();
+        let error = store.load_active().unwrap_err();
+        assert!(error.allows_profile_collection_recovery(), "{error}");
+        assert!(error.to_string().contains("invalid instance id"), "{error}");
+        assert_eq!(fs::read(store.path()).unwrap(), invalid);
+
+        value["profiles"][0]["instance_id"] = value["profiles"][1]["instance_id"].clone();
+        let duplicated = serde_json::to_vec_pretty(&value).unwrap();
+        fs::write(store.path(), &duplicated).unwrap();
+        let error = store.load_active().unwrap_err();
+        assert!(error.to_string().contains("duplicated"), "{error}");
+        assert!(error.allows_profile_collection_recovery(), "{error}");
+        assert_eq!(fs::read(store.path()).unwrap(), duplicated);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn legacy_collection_without_instance_ids(store: &ConfigProfileStore) -> Vec<u8> {
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        value["version"] = serde_json::json!(LEGACY_CONFIG_PROFILES_VERSION);
+        for profile in value["profiles"].as_array_mut().unwrap() {
+            profile.as_object_mut().unwrap().remove("instance_id");
+        }
+        serde_json::to_vec_pretty(&value).unwrap()
+    }
+
+    #[test]
     fn stale_profile_revision_cannot_overwrite_reloaded_config() {
         let (root, profiles) = test_profile_store("revision");
         let stale = profiles.load_active().unwrap();
@@ -2561,7 +3070,12 @@ mod tests {
             .save_active_if_revision(&stale.profile, &config_with_target("stale-target"))
             .unwrap_err();
 
-        assert!(error.to_string().contains("changed from revision"));
+        let message = error.to_string();
+        assert!(message.contains("changed from revision"), "{message}");
+        assert!(
+            message.contains("Reload the configuration before saving"),
+            "{message}"
+        );
         assert_eq!(profiles.load_active().unwrap(), updated);
         fs::remove_dir_all(root).unwrap();
     }
@@ -2839,9 +3353,9 @@ mod tests {
                 "version-99",
                 br#"{"version":99,"active_profile":"default","profiles":[]}"#,
             ),
-            ("version-2-extra", br#"{"version":2,"extra":true}"#),
+            ("version-3-extra", br#"{"version":3,"extra":true}"#),
             ("version-prefix", br#"{"version":99} trailing"#),
-            ("version-float", br#"{"version":1.5,"profiles":[]}"#),
+            ("version-float", br#"{"version":2.5,"profiles":[]}"#),
         ];
         for (name, original) in cases {
             let (root, store) = prepare_profile_bytes(name, original);
@@ -2925,8 +3439,17 @@ mod tests {
             .save_profile("gaming", &config_with_target("gaming-display"), false, true)
             .unwrap();
 
+        let gaming_before = store.load_profile("gaming").unwrap();
         let snapshot = store.reset_active().unwrap();
         assert_eq!(snapshot.profile.id, "gaming");
+        assert_eq!(
+            snapshot.profile.instance_id,
+            gaming_before.profile.instance_id
+        );
+        assert_eq!(
+            snapshot.profile.revision,
+            gaming_before.profile.revision + 1
+        );
         assert_eq!(snapshot.config, AppConfig::default());
         let profiles = store.list().unwrap();
         assert_eq!(profiles.profiles.len(), 2);

@@ -1496,6 +1496,7 @@ fn default_loaded_groups() -> LoadedGroups {
         active: 0,
         profile: ProfileRevision {
             id: "default".into(),
+            instance_id: String::new(),
             revision: 0,
         },
     }

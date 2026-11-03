@@ -1,11 +1,13 @@
 # Configuration profiles
 
 SBMS stores up to three persistent configuration profiles in
-`%LOCALAPPDATA%\SBMS\config-profiles-v1.json`. The complete profile collection,
-the active profile identifier, every profile revision and every nested
-`AppConfig` are committed as one pretty-printed JSON document. Writes use a
-cross-process mutex, a same-directory temporary file, `sync_all`, and a
-write-through atomic replacement.
+`%LOCALAPPDATA%\SBMS\config-profiles-v1.json`. The file name stays
+`config-profiles-v1.json`; the document inside it is version 2. The complete
+profile collection, the active profile identifier, every profile instance id,
+every profile revision and every nested `AppConfig` are committed as one
+pretty-printed JSON document. Writes use a cross-process mutex, a
+same-directory temporary file, `sync_all`, and a write-through atomic
+replacement.
 
 The first profile operation imports the existing `config-v2.json` as the
 `default` profile. The legacy file is left unchanged. If the old file is
@@ -75,7 +77,8 @@ notification failed.
 
 Ordinary profile commands, including `sbms config reset`, load the collection
 before changing it. A truncated file, invalid JSON, or a version 1 collection
-that fails semantic validation therefore cannot be repaired by `reset`.
+that fails semantic validation therefore cannot be repaired by `reset`. A
+valid version 1 collection is migrated in place, as described below.
 
 `sbms config reset --all --backup` is the explicit recovery command. Under the
 existing cross-process profile lock it:
@@ -92,11 +95,14 @@ The command discards every saved profile and both global preferences. It does
 not delete display overrides, logs, stream credentials, `config-v2.json`, or
 `config-v1.json`.
 
-A numeric `version` greater than 1 is a newer schema. Recovery refuses it and
+A numeric `version` greater than 2 is a newer schema. Recovery refuses it and
 leaves the file unchanged, without writing a backup. A non-numeric `version`,
 truncated JSON, or any other file whose schema version cannot be recognized is
 damaged. Only this command can rebuild it. The command also accepts a valid
 collection: it still backs up the raw bytes and replaces the whole collection.
+The rebuilt collection receives new profile instance ids, so snapshots taken
+before recovery no longer match.
+
 Permission errors and other read/write failures are not treated as damage: the
 source file stays in place. If the backup itself fails, nothing is replaced.
 If the backup succeeds and the atomic replacement fails, the command reports
@@ -109,6 +115,27 @@ sbms config reset --all --backup
 ```text
 recovered=default revision=1 backup=%LOCALAPPDATA%\SBMS\config-profiles-v1.json.recovery-<pid>-<sequence>.bak reload=not-running
 ```
+
+## Profile instance migration
+
+A valid version 1 collection has no instance ids. The first operation that
+loads it, under the existing profile lock, allocates one UUID version-4
+instance id per profile with `BCryptGenRandom` and atomically writes document
+version 2. The following load reads those same ids. They are not generated
+again during deserialization.
+
+If allocating an id or the atomic write fails, the version 1 file stays in
+place and the call returns an error. It does not return a snapshot whose ids
+were never stored. A version 1 document that already contains `instance_id`,
+or that fails semantic validation, is damaged and is not migrated. A version 2
+document with an invalid or duplicate instance id is also rejected and left
+unchanged.
+
+SBMS 2.0.2 cannot read a version 2 collection. Deserialization fails on the
+unknown `instance_id` field, and that build accepts only document version 1.
+The failure returns before any write, so the newer file stays in place. A
+build that treats every numeric version greater than 1 as a newer schema also
+leaves a version 2 file unchanged.
 
 ## JSON exchange format
 
@@ -133,7 +160,10 @@ not the internal multi-profile collection:
 
 Unknown fields, unsupported versions, empty or oversized group collections,
 duplicate group IDs or mirror targets, invalid geometry and invalid selected
-group IDs are rejected before any persistent state changes.
+group IDs are rejected before any persistent state changes. An import file
+cannot carry a profile instance id. `instance_id` is rejected as an unknown
+field. Replacing an existing profile keeps that profile's instance id and
+increases its revision. Creating a profile allocates a new instance id.
 
 ## Rendering options
 
@@ -180,10 +210,15 @@ controller reports both `running=false` and `busy=false`. Reload never restarts,
 stops or mutates the active mapping. It changes the configuration used by the
 next mapping start.
 
-Each profile has a monotonically increasing revision. UI saves use a
-profile-ID-and-revision compare-and-swap. A stale UI draft therefore cannot
-overwrite a profile imported or activated by another process; the user must
-reload before saving again.
+Each profile has an instance id and a monotonically increasing revision. The
+instance id is created with the profile. Copying a profile, deleting it and
+creating the same name again, and rebuilding the whole collection all allocate
+a new id. Renaming a profile, editing or replacing its contents, and
+`sbms config reset` keep the id and increase the revision. UI saves compare
+the active profile's name, instance id, and revision. A matching name and
+revision are not enough after that name has been deleted and created again.
+The save is refused with `Reload the configuration before saving`. The UI
+shows that error and does not retry the stale draft.
 
 ## Rust interface
 
@@ -198,7 +233,8 @@ The public API is exported from `sbms::config`:
   backup path. `ConfigError::allows_profile_collection_recovery` is true only
   for a damaged collection this build can rebuild.
 - `save_active_if_revision` is the compare-and-swap save operation for a pinned
-  UI session.
+  UI session. It accepts the save only when the active profile's name,
+  instance id, and revision all match the caller's snapshot.
 - `ConfigStore::load_strict` validates standalone import files; `save` writes
   standalone exports atomically.
 - `sbms::control::signal_config_reload` and `listen_for_config_reload` expose
