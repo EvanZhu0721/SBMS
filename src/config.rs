@@ -28,6 +28,7 @@ use crate::limits::{
 const CONFIG_VERSION: u32 = 2;
 const LEGACY_CONFIG_VERSION: u32 = 1;
 const CONFIG_PROFILES_VERSION: u32 = 1;
+pub const RECOVER_PROFILE_COLLECTION_COMMAND: &str = "sbms config reset --all --backup";
 pub const MAX_CONFIG_PROFILES: usize = 3;
 const DISPLAY_OVERRIDES_VERSION: u32 = 1;
 const CONFIG_DIRECTORY: &str = "SBMS";
@@ -217,6 +218,12 @@ pub struct ProfileDeleteOutcome {
     pub active_changed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileRecovery {
+    pub snapshot: ProfileSnapshot,
+    pub backup_path: PathBuf,
+}
+
 #[derive(Clone, Debug)]
 pub struct ConfigProfileStore {
     path: PathBuf,
@@ -291,6 +298,10 @@ pub struct ConfigError(String);
 impl ConfigError {
     pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
+    }
+
+    pub fn allows_profile_collection_recovery(&self) -> bool {
+        self.0.contains("is a damaged SBMS config profile store:")
     }
 }
 
@@ -1283,17 +1294,7 @@ impl ConfigProfileStore {
         let mut profiles = if self.path.exists() {
             self.load_or_initialize_locked()?
         } else {
-            ConfigProfiles {
-                version: CONFIG_PROFILES_VERSION,
-                active_profile: "default".into(),
-                launch_intro_disabled: false,
-                auto_map_on_login: false,
-                profiles: vec![ConfigProfile {
-                    id: "default".into(),
-                    revision: 1,
-                    config: AppConfig::default(),
-                }],
-            }
+            default_config_profiles()
         };
         let active_id = profiles.active_profile.clone();
         let profile = profiles
@@ -1306,19 +1307,46 @@ impl ConfigProfileStore {
         Ok(result)
     }
 
+    pub fn recover_with_backup(&self) -> Result<ProfileRecovery, ConfigError> {
+        let _guard = CrossProcessConfigGuard::acquire()?;
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ConfigError(format!(
+                    "config profile store {} does not exist and was not created",
+                    self.path.display()
+                )));
+            }
+            Err(error) => {
+                return Err(ConfigError(format!(
+                    "could not read {}: {error}",
+                    self.path.display()
+                )));
+            }
+        };
+        if let Some(version) = recognized_future_profiles_version(&bytes) {
+            return Err(future_profile_store(&self.path, &version));
+        }
+        // Flush the original bytes before replacing the store. A backup error
+        // returns while the source file is still untouched.
+        let backup = write_unique_profile_backup(&self.path, &bytes)?;
+        let profiles = default_config_profiles();
+        if let Err(error) = self.save_locked(&profiles) {
+            return Err(ConfigError(format!(
+                "config profile recovery was not committed; {}; backup remains at {}: {error}",
+                profile_store_after_failed_replace(&self.path, &bytes),
+                backup.display()
+            )));
+        }
+        Ok(ProfileRecovery {
+            snapshot: snapshot(profiles.active()),
+            backup_path: backup,
+        })
+    }
+
     fn load_or_initialize_locked(&self) -> Result<ConfigProfiles, ConfigError> {
         match fs::read(&self.path) {
-            Ok(bytes) => {
-                let profiles =
-                    serde_json::from_slice::<ConfigProfiles>(&bytes).map_err(|error| {
-                        ConfigError(format!(
-                            "{} is not a valid SBMS config profile store: {error}",
-                            self.path.display()
-                        ))
-                    })?;
-                profiles.validate()?;
-                Ok(profiles)
-            }
+            Ok(bytes) => parse_profile_store(&self.path, &bytes),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let legacy_store = ConfigStore {
                     path: self.legacy_config_path.clone(),
@@ -1340,17 +1368,7 @@ impl ConfigProfileStore {
                     }
                     Err(error) => return Err(error),
                 };
-                let profiles = ConfigProfiles {
-                    version: CONFIG_PROFILES_VERSION,
-                    active_profile: "default".into(),
-                    launch_intro_disabled: false,
-                    auto_map_on_login: false,
-                    profiles: vec![ConfigProfile {
-                        id: "default".into(),
-                        revision: 1,
-                        config,
-                    }],
-                };
+                let profiles = single_profile_collection(config);
                 self.save_locked(&profiles)?;
                 Ok(profiles)
             }
@@ -1401,6 +1419,206 @@ impl Drop for CrossProcessConfigGuard {
             let _ = CloseHandle(self.0);
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProfileStoreTestFault {
+    Backup,
+    Replace,
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROFILE_STORE_TEST_FAULT: std::cell::Cell<Option<ProfileStoreTestFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+#[must_use]
+struct ProfileStoreTestFaultGuard;
+
+#[cfg(test)]
+impl Drop for ProfileStoreTestFaultGuard {
+    fn drop(&mut self) {
+        PROFILE_STORE_TEST_FAULT.with(|fault| fault.set(None));
+    }
+}
+
+#[cfg(test)]
+fn inject_profile_store_fault(fault: ProfileStoreTestFault) -> ProfileStoreTestFaultGuard {
+    PROFILE_STORE_TEST_FAULT.with(|slot| slot.set(Some(fault)));
+    ProfileStoreTestFaultGuard
+}
+
+#[cfg(test)]
+fn consume_profile_store_test_fault(expected: ProfileStoreTestFault) -> bool {
+    PROFILE_STORE_TEST_FAULT.with(|slot| {
+        if slot.get() == Some(expected) {
+            slot.set(None);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+fn single_profile_collection(config: AppConfig) -> ConfigProfiles {
+    ConfigProfiles {
+        version: CONFIG_PROFILES_VERSION,
+        active_profile: "default".into(),
+        launch_intro_disabled: false,
+        auto_map_on_login: false,
+        profiles: vec![ConfigProfile {
+            id: "default".into(),
+            revision: 1,
+            config,
+        }],
+    }
+}
+
+fn default_config_profiles() -> ConfigProfiles {
+    single_profile_collection(AppConfig::default())
+}
+
+fn damaged_profile_store(path: &Path, detail: impl Display) -> ConfigError {
+    let path = path.display();
+    ConfigError(format!(
+        "{path} is a damaged SBMS config profile store: {detail}. Run `{RECOVER_PROFILE_COLLECTION_COMMAND}` to back up and rebuild the entire profile collection"
+    ))
+}
+
+fn future_profile_store(path: &Path, version: &str) -> ConfigError {
+    let path = path.display();
+    ConfigError(format!(
+        "{path} uses config profiles version {version}, which is newer than this SBMS and was left unchanged"
+    ))
+}
+
+fn recognized_future_profiles_version(bytes: &[u8]) -> Option<String> {
+    let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+    let value = serde_json::Value::deserialize(&mut deserializer).ok()?;
+    let version = value.as_object()?.get("version")?.as_number()?;
+    if let Some(integer) = version.as_u64() {
+        return (integer > u64::from(CONFIG_PROFILES_VERSION)).then(|| integer.to_string());
+    }
+    if version.as_i64().is_some() {
+        return None;
+    }
+    let float = version.as_f64()?;
+    (float.is_finite() && float > f64::from(CONFIG_PROFILES_VERSION)).then(|| version.to_string())
+}
+
+fn parse_profile_store(path: &Path, bytes: &[u8]) -> Result<ConfigProfiles, ConfigError> {
+    if let Some(version) = recognized_future_profiles_version(bytes) {
+        return Err(future_profile_store(path, &version));
+    }
+    let profiles = serde_json::from_slice::<ConfigProfiles>(bytes)
+        .map_err(|error| damaged_profile_store(path, error))?;
+    profiles
+        .validate()
+        .map_err(|error| damaged_profile_store(path, error))?;
+    Ok(profiles)
+}
+
+fn profile_store_after_failed_replace(path: &Path, original: &[u8]) -> String {
+    match fs::read(path) {
+        Ok(current) if current == original => {
+            format!("original file {} is unchanged", path.display())
+        }
+        Ok(_) => format!(
+            "original file {} no longer matches the backed-up bytes",
+            path.display()
+        ),
+        Err(error) => format!(
+            "original file {} could not be read after the failed replacement: {error}",
+            path.display()
+        ),
+    }
+}
+
+fn backup_parent(source: &Path) -> Result<&Path, ConfigError> {
+    match source.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => Ok(parent),
+        Some(_) => Ok(Path::new(".")),
+        None => Err(ConfigError(format!(
+            "config profile backup path has no parent directory: {}",
+            source.display()
+        ))),
+    }
+}
+
+fn write_backup_file(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+fn write_unique_profile_backup(source: &Path, bytes: &[u8]) -> Result<PathBuf, ConfigError> {
+    #[cfg(test)]
+    if consume_profile_store_test_fault(ProfileStoreTestFault::Backup) {
+        return Err(ConfigError(
+            "could not create config profile backup: injected failure".into(),
+        ));
+    }
+
+    let parent = backup_parent(source)?;
+    let file_name = source
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or(CONFIG_PROFILES_FILE);
+    let mut collision = None;
+    for _ in 0..128 {
+        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            "{file_name}.recovery-{}-{sequence}.bak",
+            std::process::id()
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = write_backup_file(&mut file, bytes) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(ConfigError(format!(
+                        "could not write config profile backup {}: {error}",
+                        path.display()
+                    )));
+                }
+                drop(file);
+                match fs::read(&path) {
+                    Ok(stored) if stored == bytes => return Ok(path),
+                    Ok(_) => {
+                        let _ = fs::remove_file(&path);
+                        return Err(ConfigError(format!(
+                            "config profile backup {} did not retain the original bytes",
+                            path.display()
+                        )));
+                    }
+                    Err(error) => {
+                        let _ = fs::remove_file(&path);
+                        return Err(ConfigError(format!(
+                            "could not read config profile backup {}: {error}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                collision = Some(error);
+            }
+            Err(error) => {
+                return Err(ConfigError(format!(
+                    "could not create config profile backup {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Err(ConfigError(format!(
+        "could not allocate a unique config profile backup: {}",
+        collision
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "too many attempts".into())
+    )))
 }
 
 fn snapshot(profile: &ConfigProfile) -> ProfileSnapshot {
@@ -1615,6 +1833,13 @@ fn create_temporary(parent: &Path, destination: &Path) -> Result<(PathBuf, File)
 }
 
 fn atomic_replace(temporary: &Path, destination: &Path) -> Result<(), ConfigError> {
+    #[cfg(test)]
+    if consume_profile_store_test_fault(ProfileStoreTestFault::Replace) {
+        return Err(ConfigError(format!(
+            "could not atomically replace {}: injected failure",
+            destination.display()
+        )));
+    }
     let temporary_wide = wide(temporary.as_os_str());
     let destination_wide = wide(destination.as_os_str());
     let temporary_pcwstr = PCWSTR(temporary_wide.as_ptr());
@@ -2338,6 +2563,386 @@ mod tests {
 
         assert!(error.to_string().contains("changed from revision"));
         assert_eq!(profiles.load_active().unwrap(), updated);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_unrelated_files(root: &Path) -> Vec<(PathBuf, &'static [u8])> {
+        let files = [
+            (
+                DISPLAY_OVERRIDES_FILE,
+                br#"{"version":1,"displays":[]}"#.as_slice(),
+            ),
+            (CONFIG_FILE, br#"{"version":2,"groups":[]}"#),
+            (LEGACY_CONFIG_FILE, b"{legacy source"),
+            ("sbms.log", b"log-bytes"),
+            ("credentials.json", b"stream-secret"),
+        ];
+        files
+            .into_iter()
+            .map(|(name, bytes)| {
+                let path = root.join(name);
+                fs::write(&path, bytes).unwrap();
+                (path, bytes)
+            })
+            .collect()
+    }
+
+    fn assert_unrelated_unchanged(files: &[(PathBuf, &'static [u8])]) {
+        for (path, bytes) in files {
+            assert_eq!(fs::read(path).unwrap(), *bytes, "{}", path.display());
+        }
+    }
+
+    fn recovery_backups(root: &Path) -> Vec<PathBuf> {
+        let mut paths: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.contains(".recovery-") && name.ends_with(".bak"))
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    fn temporary_profile_files(root: &Path) -> Vec<PathBuf> {
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let name = path.file_name()?.to_str()?;
+                name.contains(".tmp").then_some(path)
+            })
+            .collect()
+    }
+
+    fn prepare_profile_bytes(name: &str, bytes: &[u8]) -> (PathBuf, ConfigProfileStore) {
+        let (root, store) = test_profile_store(name);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(store.path(), bytes).unwrap();
+        (root, store)
+    }
+
+    #[test]
+    fn explicit_recovery_restores_unreadable_profile_bytes_and_keeps_neighbors() {
+        let cases: &[(&str, &[u8])] = &[
+            ("truncated", b"{not json"),
+            ("cut-off", br#"{"version":1,"profiles":["#),
+            ("non-utf8", b"\xff\xfe{not json"),
+            ("string-version", br#"{"version":"99","profiles":[]}"#),
+            ("incomplete-future", br#"{"version":99"#),
+        ];
+        for (name, original) in cases {
+            let (root, store) = prepare_profile_bytes(name, original);
+            let unrelated = write_unrelated_files(&root);
+            let plain_reset = store.reset_active().unwrap_err();
+            assert!(
+                plain_reset.allows_profile_collection_recovery(),
+                "{name}: {plain_reset}"
+            );
+            assert!(
+                !plain_reset.to_string().contains("was not committed"),
+                "{name}"
+            );
+            assert_eq!(fs::read(store.path()).unwrap(), *original, "{name}");
+            assert!(recovery_backups(&root).is_empty(), "{name}");
+
+            let recovered = store.recover_with_backup().unwrap();
+            assert_eq!(
+                fs::read(&recovered.backup_path).unwrap(),
+                *original,
+                "{name}"
+            );
+            assert_eq!(recovered.snapshot.profile.id, "default");
+            assert_eq!(recovered.snapshot.profile.revision, 1);
+            assert_eq!(recovered.snapshot.config, AppConfig::default());
+            assert_ne!(fs::read(store.path()).unwrap(), *original, "{name}");
+            let loaded = store.load_active().unwrap();
+            assert_eq!(loaded, recovered.snapshot);
+            assert_unrelated_unchanged(&unrelated);
+
+            let updated = store
+                .update_active(|config| {
+                    *config = config_with_target("recovered-target");
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(updated.profile.revision, 2);
+            assert_eq!(store.load_active().unwrap(), updated);
+            let (saved, active) = store
+                .save_profile("edited", &config_with_target("edited-target"), false, false)
+                .unwrap();
+            assert!(!active);
+            assert_eq!(saved.profile.id, "edited");
+            assert_eq!(store.list().unwrap().profiles.len(), 2);
+            assert_eq!(
+                store.load_active().unwrap().config,
+                config_with_target("recovered-target")
+            );
+            assert_eq!(
+                fs::read(&recovered.backup_path).unwrap(),
+                *original,
+                "{name}"
+            );
+            assert_unrelated_unchanged(&unrelated);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn explicit_recovery_rebuilds_a_known_but_semantically_invalid_collection() {
+        let original = br#"{"version":1,"active_profile":"missing","launch_intro_disabled":true,"auto_map_on_login":true,"profiles":[{"id":"default","revision":3,"config":{"version":2,"groups":[{"id":0,"route":{"kind":"mirror","target_id":"office"}}],"selected_group_id":0}},{"id":"gaming","revision":4,"config":{"version":2,"groups":[{"id":0,"route":{"kind":"mirror","target_id":"gaming"}}],"selected_group_id":0}}]}"#;
+        let (root, store) = prepare_profile_bytes("semantic", original);
+        let unrelated = write_unrelated_files(&root);
+        let error = store.load_active().unwrap_err();
+        assert!(error.allows_profile_collection_recovery(), "{error}");
+        assert!(error.to_string().contains("does not exist"), "{error}");
+
+        let recovered = store.recover_with_backup().unwrap();
+        assert_eq!(fs::read(&recovered.backup_path).unwrap(), original);
+        let profiles = store.list().unwrap();
+        assert_eq!(profiles.profiles.len(), 1);
+        assert_eq!(profiles.active_profile, "default");
+        assert!(!profiles.launch_intro_disabled);
+        assert!(!profiles.auto_map_on_login);
+        assert_eq!(profiles.active().config, AppConfig::default());
+        assert_eq!(profiles.active().revision, 1);
+        assert_unrelated_unchanged(&unrelated);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn explicit_recovery_backs_up_raw_bytes_and_repeated_runs_keep_every_backup() {
+        let (root, store) = test_profile_store("repeat");
+        store.load_active().unwrap();
+        store.set_launch_intro_disabled(true).unwrap();
+        store.set_auto_map_on_login(true).unwrap();
+        store
+            .save_profile("gaming", &config_with_target("gaming-display"), false, true)
+            .unwrap();
+        let original = fs::read(store.path()).unwrap();
+        let first = store.recover_with_backup().unwrap();
+        assert_eq!(fs::read(&first.backup_path).unwrap(), original);
+        let rebuilt = fs::read(store.path()).unwrap();
+        assert_ne!(rebuilt, original);
+        let profiles = store.list().unwrap();
+        assert_eq!(profiles.profiles.len(), 1);
+        assert!(!profiles.launch_intro_disabled);
+        assert!(!profiles.auto_map_on_login);
+
+        let second = store.recover_with_backup().unwrap();
+        assert_ne!(first.backup_path, second.backup_path);
+        assert_eq!(fs::read(&first.backup_path).unwrap(), original);
+        assert_eq!(fs::read(&second.backup_path).unwrap(), rebuilt);
+        assert_eq!(recovery_backups(&root).len(), 2);
+        assert_eq!(store.load_active().unwrap().profile.revision, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_backup_creation_fails_when_the_parent_is_not_a_directory() {
+        let parent = env::temp_dir().join(format!(
+            "sbms-config-backup-parent-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&parent, b"not-a-directory").unwrap();
+        let source = parent.join(CONFIG_PROFILES_FILE);
+        let error = write_unique_profile_backup(&source, b"raw-bytes").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("could not create config profile backup"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&parent).unwrap(), b"not-a-directory");
+        assert!(!source.exists());
+        fs::remove_file(parent).unwrap();
+    }
+
+    #[test]
+    fn profile_recovery_keeps_the_source_when_backup_fails() {
+        let original = b"{not-json";
+        let (root, store) = prepare_profile_bytes("backup-fails", original);
+        let unrelated = write_unrelated_files(&root);
+        // The transaction holds the profile lock across backup and replacement,
+        // so an external process cannot fail only the backup step. This fault
+        // stands in for that IO error before any backup file is created.
+        let _fault = inject_profile_store_fault(ProfileStoreTestFault::Backup);
+        let error = store.recover_with_backup().unwrap_err();
+        drop(_fault);
+        let message = error.to_string();
+        assert!(
+            message.contains("could not create config profile backup"),
+            "{message}"
+        );
+        assert!(!message.contains("was not committed"), "{message}");
+        assert!(
+            !message.contains("configuration recovery was committed"),
+            "{message}"
+        );
+        assert!(!error.allows_profile_collection_recovery(), "{message}");
+        assert_eq!(fs::read(store.path()).unwrap(), original);
+        assert!(recovery_backups(&root).is_empty());
+        assert!(temporary_profile_files(&root).is_empty());
+        assert_unrelated_unchanged(&unrelated);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_recovery_keeps_the_backup_when_atomic_replace_fails() {
+        let original = b"\xff\xfe{truncated";
+        let (root, store) = prepare_profile_bytes("replace-fails", original);
+        let unrelated = write_unrelated_files(&root);
+        let _fault = inject_profile_store_fault(ProfileStoreTestFault::Replace);
+        let error = store.recover_with_backup().unwrap_err();
+        drop(_fault);
+        let message = error.to_string();
+        assert!(message.contains("was not committed"), "{message}");
+        assert!(message.contains("is unchanged"), "{message}");
+        assert!(message.contains("backup remains at"), "{message}");
+        assert!(
+            message.contains("could not atomically replace"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("configuration recovery was committed"),
+            "{message}"
+        );
+        assert_eq!(fs::read(store.path()).unwrap(), original);
+        let backups = recovery_backups(&root);
+        assert_eq!(backups.len(), 1);
+        assert_eq!(fs::read(&backups[0]).unwrap(), original);
+        let backup_name = backups[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap();
+        assert!(message.contains(backup_name), "{message}");
+        assert!(temporary_profile_files(&root).is_empty());
+        assert_unrelated_unchanged(&unrelated);
+
+        let recovered = store.recover_with_backup().unwrap();
+        assert_ne!(recovered.backup_path, backups[0]);
+        assert_eq!(fs::read(&backups[0]).unwrap(), original);
+        assert_eq!(fs::read(&recovered.backup_path).unwrap(), original);
+        assert_eq!(store.load_active().unwrap().config, AppConfig::default());
+        assert_unrelated_unchanged(&unrelated);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn future_profile_schema_is_refused_without_backup_or_replacement() {
+        let cases: &[(&str, &[u8])] = &[
+            (
+                "version-99",
+                br#"{"version":99,"active_profile":"default","profiles":[]}"#,
+            ),
+            ("version-2-extra", br#"{"version":2,"extra":true}"#),
+            ("version-prefix", br#"{"version":99} trailing"#),
+            ("version-float", br#"{"version":1.5,"profiles":[]}"#),
+        ];
+        for (name, original) in cases {
+            let (root, store) = prepare_profile_bytes(name, original);
+            let unrelated = write_unrelated_files(&root);
+            for error in [
+                store.reset_active().unwrap_err(),
+                store.recover_with_backup().unwrap_err(),
+                store.load_active().unwrap_err(),
+            ] {
+                let message = error.to_string();
+                assert!(
+                    message.contains("newer than this SBMS"),
+                    "{name}: {message}"
+                );
+                assert!(message.contains("left unchanged"), "{name}: {message}");
+                assert!(
+                    !error.allows_profile_collection_recovery(),
+                    "{name}: {message}"
+                );
+                assert!(
+                    !message.contains(RECOVER_PROFILE_COLLECTION_COMMAND),
+                    "{name}"
+                );
+                assert!(!message.contains("was not committed"), "{name}: {message}");
+            }
+            assert_eq!(fs::read(store.path()).unwrap(), *original, "{name}");
+            assert!(recovery_backups(&root).is_empty(), "{name}");
+            assert_unrelated_unchanged(&unrelated);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn profile_recovery_does_not_treat_read_errors_or_absence_as_damage() {
+        let (root, store) = test_profile_store("missing-store");
+        let missing = store.recover_with_backup().unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("does not exist and was not created"),
+            "{missing}"
+        );
+        assert!(!missing.allows_profile_collection_recovery(), "{missing}");
+        assert!(!root.exists());
+
+        let (root, store) = test_profile_store("directory-store");
+        fs::create_dir_all(store.path()).unwrap();
+        let unrelated = root.join("credentials.json");
+        fs::write(&unrelated, b"stream-secret").unwrap();
+        let error = store.recover_with_backup().unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("could not read"), "{message}");
+        assert!(!error.allows_profile_collection_recovery(), "{message}");
+        assert!(
+            !message.contains(RECOVER_PROFILE_COLLECTION_COMMAND),
+            "{message}"
+        );
+        assert!(store.path().is_dir());
+        assert_eq!(fs::read(&unrelated).unwrap(), b"stream-secret");
+        assert!(recovery_backups(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reset_active_resets_only_the_active_profile_inside_a_valid_collection() {
+        let (root, store) = test_profile_store("reset-active-only");
+        let unrelated = {
+            fs::create_dir_all(&root).unwrap();
+            write_unrelated_files(&root)
+        };
+        store.load_active().unwrap();
+        store
+            .update_active(|config| {
+                *config = config_with_target("default-display");
+                Ok(())
+            })
+            .unwrap();
+        store.set_launch_intro_disabled(true).unwrap();
+        store.set_auto_map_on_login(true).unwrap();
+        store
+            .save_profile("gaming", &config_with_target("gaming-display"), false, true)
+            .unwrap();
+
+        let snapshot = store.reset_active().unwrap();
+        assert_eq!(snapshot.profile.id, "gaming");
+        assert_eq!(snapshot.config, AppConfig::default());
+        let profiles = store.list().unwrap();
+        assert_eq!(profiles.profiles.len(), 2);
+        assert_eq!(profiles.active_profile, "gaming");
+        assert!(profiles.launch_intro_disabled);
+        assert!(profiles.auto_map_on_login);
+        assert_eq!(
+            profiles.profile("default").unwrap().config,
+            config_with_target("default-display")
+        );
+        assert_eq!(
+            profiles.profile("gaming").unwrap().config,
+            AppConfig::default()
+        );
+        assert!(recovery_backups(&root).is_empty());
+        assert_unrelated_unchanged(&unrelated);
         fs::remove_dir_all(root).unwrap();
     }
 }

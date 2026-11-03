@@ -6,8 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{
-    AppConfig, ConfigProfileStore, ConfigProfiles, DisplayOverrideStore, DisplayOverrides,
-    MAX_CONFIG_PROFILES, ProfileRevision, ReferenceSource,
+    AppConfig, ConfigError, ConfigProfileStore, ConfigProfiles, DisplayOverrideStore,
+    DisplayOverrides, MAX_CONFIG_PROFILES, ProfileRevision, RECOVER_PROFILE_COLLECTION_COMMAND,
+    ReferenceSource,
 };
 use crate::control::{TrayInstance, listen_for_config_reload, listen_for_shutdown};
 use crate::controller::{Controller, ControllerEvent, DisplayOption};
@@ -1460,7 +1461,8 @@ fn load_group_config(ui: &QuickAccess) -> LoadedGroups {
         Err(error) => {
             set_geometry_unconfigured(ui);
             ui.set_geometry_save_blocked(true);
-            ui.set_geometry_error(error.to_string().into());
+            diagnostics::log(Level::Error, "config", "load", None, error.to_string());
+            ui.set_geometry_error(profile_load_message(&error).into());
             return default_loaded_groups();
         }
     };
@@ -1512,10 +1514,11 @@ fn apply_config_reload(
         Ok(snapshot) => snapshot,
         Err(error) => {
             diagnostics::log(Level::Error, "config", "reload", None, error.to_string());
+            let detail = profile_load_message(&error);
             surface_transient_error(
                 ui,
                 error_revision,
-                &format!("Couldn’t reload configuration: {error}"),
+                &format!("Couldn’t reload configuration: {detail}"),
             );
             return false;
         }
@@ -1582,10 +1585,13 @@ fn persist_groups(
     profile_revision: &Arc<Mutex<ProfileRevision>>,
 ) -> bool {
     if ui.get_geometry_save_blocked() {
-        surface_persistence_error(
-            ui,
-            "The saved configuration is invalid; reset or repair it before saving",
-        );
+        let existing = ui.get_geometry_error().to_string();
+        let message = if existing.is_empty() {
+            "The saved configuration could not be loaded and was left unchanged".to_string()
+        } else {
+            existing
+        };
+        surface_persistence_error(ui, &message);
         return false;
     }
     let validated = match validate_group_drafts(groups) {
@@ -1658,6 +1664,16 @@ fn finish_profile_save(ui: slint::Weak<QuickAccess>, generation: u64, succeeded:
         slint::Timer::single_shot(Duration::from_millis(800), finish);
     } else {
         finish();
+    }
+}
+
+fn profile_load_message(error: &ConfigError) -> String {
+    if error.allows_profile_collection_recovery() {
+        format!(
+            "The saved configuration is damaged. Run `{RECOVER_PROFILE_COLLECTION_COMMAND}` to back up and rebuild the entire profile collection before saving"
+        )
+    } else {
+        error.to_string()
     }
 }
 
