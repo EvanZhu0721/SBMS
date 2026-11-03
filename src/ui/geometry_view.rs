@@ -463,7 +463,9 @@ pub(super) fn set_geometry_result(ui: &QuickAccess, result: SizingResult, config
         format!("Scale {:.2}× × {:.2}×", result.scale_x, result.scale_y).into(),
     );
     ui.set_geometry_valid(!ui.get_geometry_save_blocked());
-    ui.set_geometry_error("".into());
+    if !ui.get_geometry_save_blocked() {
+        ui.set_geometry_error("".into());
+    }
     if configured {
         let refresh = result
             .preferred_refresh_millihz

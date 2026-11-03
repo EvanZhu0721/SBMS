@@ -20,4 +20,7 @@ sbms shutdown
 foreground session cleanly. A mapping plan can contain up to sixteen mirror and
 stream-only groups. Up to three persistent configuration profiles can coexist;
 see [Configuration profiles](configuration.md) for import, export,
-activation and hot-reload interfaces.
+activation and hot-reload interfaces. `sbms config reset` resets only the
+active profile in a valid collection. `sbms config reset --all --backup`
+backs up the raw profile file and rebuilds the entire collection; both flags
+are required.

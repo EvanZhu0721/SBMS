@@ -94,7 +94,9 @@ User configuration is stored as at most three named profiles in
 and per-profile revisions are committed atomically under a cross-process lock.
 On first use, the existing `config-v2.json` is preserved and imported as the
 `default` profile. The tray supports revision-checked live reloads without
-changing a mapping that is already running. See
+changing a mapping that is already running. A damaged profile collection is
+left unchanged by ordinary profile commands. `sbms config reset --all --backup`
+backs up the original bytes and rebuilds the entire collection. See
 [configuration.md](configuration.md) for the storage, CLI, JSON and Rust API
 contracts.
 
