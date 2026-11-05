@@ -1,6 +1,9 @@
 use super::*;
 
 pub(super) fn update_geometry_preview(ui: &QuickAccess, displays: &[DisplayOption]) {
+    if ui.get_geometry_save_blocked() {
+        return;
+    }
     update_resolution_suggestions(ui);
     ui.set_geometry_error("".into());
     ui.set_geometry_valid(false);
@@ -148,6 +151,9 @@ pub(super) fn update_resolution_suggestions(ui: &QuickAccess) {
 }
 
 pub(super) fn calculate_geometry(ui: &QuickAccess, displays: &[DisplayOption]) {
+    if ui.get_geometry_save_blocked() {
+        return;
+    }
     update_geometry_preview(ui, displays);
     if !ui.get_geometry_valid() {
         if ui.get_page() != QuickAccessPage::Geometry && !ui.get_geometry_error().is_empty() {
@@ -463,9 +469,7 @@ pub(super) fn set_geometry_result(ui: &QuickAccess, result: SizingResult, config
         format!("Scale {:.2}× × {:.2}×", result.scale_x, result.scale_y).into(),
     );
     ui.set_geometry_valid(!ui.get_geometry_save_blocked());
-    if !ui.get_geometry_save_blocked() {
-        ui.set_geometry_error("".into());
-    }
+    ui.set_geometry_error("".into());
     if configured {
         let refresh = result
             .preferred_refresh_millihz

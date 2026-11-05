@@ -6,9 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::config::{
-    AppConfig, ConfigError, ConfigProfileStore, ConfigProfiles, DisplayOverrideStore,
-    DisplayOverrides, MAX_CONFIG_PROFILES, ProfileRevision, RECOVER_PROFILE_COLLECTION_COMMAND,
-    ReferenceSource,
+    AppConfig, ConfigProfileStore, ConfigProfiles, DisplayOverrideStore, DisplayOverrides,
+    MAX_CONFIG_PROFILES, ProfileRevision, ReferenceSource,
 };
 use crate::control::{TrayInstance, listen_for_config_reload, listen_for_shutdown};
 use crate::controller::{Controller, ControllerEvent, DisplayOption};
@@ -1459,10 +1458,10 @@ fn load_group_config(ui: &QuickAccess) -> LoadedGroups {
     let snapshot = match ConfigProfileStore::default_store().and_then(|store| store.load_active()) {
         Ok(snapshot) => snapshot,
         Err(error) => {
+            diagnostics::log(Level::Error, "config", "load", None, error.to_string());
             set_geometry_unconfigured(ui);
             ui.set_geometry_save_blocked(true);
-            diagnostics::log(Level::Error, "config", "load", None, error.to_string());
-            ui.set_geometry_error(profile_load_message(&error).into());
+            ui.set_geometry_error(error.to_string().into());
             return default_loaded_groups();
         }
     };
@@ -1514,12 +1513,9 @@ fn apply_config_reload(
         Ok(snapshot) => snapshot,
         Err(error) => {
             diagnostics::log(Level::Error, "config", "reload", None, error.to_string());
-            let detail = profile_load_message(&error);
-            surface_transient_error(
-                ui,
-                error_revision,
-                &format!("Couldn’t reload configuration: {detail}"),
-            );
+            ui.set_geometry_save_blocked(true);
+            ui.set_geometry_valid(false);
+            ui.set_geometry_error(error.to_string().into());
             return false;
         }
     };
@@ -1585,13 +1581,6 @@ fn persist_groups(
     profile_revision: &Arc<Mutex<ProfileRevision>>,
 ) -> bool {
     if ui.get_geometry_save_blocked() {
-        let existing = ui.get_geometry_error().to_string();
-        let message = if existing.is_empty() {
-            "The saved configuration could not be loaded and was left unchanged".to_string()
-        } else {
-            existing
-        };
-        surface_persistence_error(ui, &message);
         return false;
     }
     let validated = match validate_group_drafts(groups) {
@@ -1610,6 +1599,9 @@ fn persist_validated_groups(
     active: usize,
     profile_revision: &Arc<Mutex<ProfileRevision>>,
 ) -> bool {
+    if ui.get_geometry_save_blocked() {
+        return false;
+    }
     let persisted = groups.iter().map(ValidatedGroupDraft::to_config).collect();
     let Some(selected_group_id) = groups.get(active).map(ValidatedGroupDraft::id) else {
         surface_persistence_error(ui, "The selected mapping group no longer exists");
@@ -1664,16 +1656,6 @@ fn finish_profile_save(ui: slint::Weak<QuickAccess>, generation: u64, succeeded:
         slint::Timer::single_shot(Duration::from_millis(800), finish);
     } else {
         finish();
-    }
-}
-
-fn profile_load_message(error: &ConfigError) -> String {
-    if error.allows_profile_collection_recovery() {
-        format!(
-            "The saved configuration is damaged. Run `{RECOVER_PROFILE_COLLECTION_COMMAND}` to back up and rebuild the entire profile collection before saving"
-        )
-    } else {
-        error.to_string()
     }
 }
 
@@ -2478,6 +2460,62 @@ mod tests {
             restored.groups[0].sizing.unwrap().strategy,
             SizingStrategy::RoundedScale
         );
+
+        // A failed read must survive UI edits and hydration until a good reload.
+        // This child process uses a temporary LOCALAPPDATA, never the real profile.
+        let saved = std::fs::read(store.path()).unwrap();
+        std::fs::write(store.path(), b"{").unwrap();
+        let read_error = store.load_active().unwrap_err().to_string();
+        let fallback = super::load_group_config(&ui);
+        assert_eq!(fallback.groups.len(), 1);
+        assert!(ui.get_geometry_save_blocked());
+        assert!(!ui.get_geometry_valid());
+        ui.invoke_geometry_edited();
+        ui.invoke_save_geometry();
+        ui.invoke_rendering_edited();
+        super::hydrate_group(
+            &ui,
+            &tray,
+            &displays.lock().unwrap(),
+            &groups.lock().unwrap(),
+            *active.lock().unwrap(),
+        );
+        assert_eq!(ui.get_geometry_error(), read_error.as_str());
+        assert!(!ui.get_geometry_valid());
+        // Invalid drafts must not replace the original read error with validation.
+        assert!(!super::persist_groups(&ui, &[], 0, &profile));
+        assert!(!super::persist_validated_groups(&ui, &[], 0, &profile));
+        assert_eq!(ui.get_geometry_error(), read_error.as_str());
+        assert_eq!(std::fs::read(store.path()).unwrap(), b"{");
+        let reload = || {
+            super::apply_config_reload(
+                &ui,
+                &tray,
+                &displays,
+                &groups,
+                &active,
+                &profile,
+                &error_revision,
+            )
+        };
+        ui.set_geometry_save_blocked(false);
+        ui.set_geometry_valid(true);
+        assert!(!reload());
+        assert!(ui.get_geometry_save_blocked());
+        assert!(!ui.get_geometry_valid());
+        assert_eq!(ui.get_geometry_error(), read_error.as_str());
+        std::fs::write(store.path(), saved).unwrap();
+        assert!(reload());
+        assert!(!ui.get_geometry_save_blocked());
+        assert!(ui.get_geometry_error().is_empty());
+        assert!(ui.get_geometry_valid());
+        assert!(super::persist_groups(
+            &ui,
+            &groups.lock().unwrap(),
+            *active.lock().unwrap(),
+            &profile,
+        ));
+
         // Only unfinished stream groups remain: the transitional seed must carry
         // the full manual settings even when there is no sizing mirror left.
         while groups

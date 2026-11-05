@@ -183,7 +183,9 @@ pub(super) fn hydrate_group(
     }
     ui.set_sizing_strategy(sizing_strategy_index(group.sizing_strategy));
     rebuild_reference_options(ui, displays, groups, group.reference_source.clone());
-    if let Ok(request) = group_sizing_request(group, displays) {
+    if ui.get_geometry_save_blocked() {
+        ui.set_geometry_valid(false);
+    } else if let Ok(request) = group_sizing_request(group, displays) {
         match request.calculate() {
             Ok(result) => set_geometry_result(ui, result, true),
             Err(error) => {
