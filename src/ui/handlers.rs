@@ -57,6 +57,9 @@ pub(super) fn register_lifecycle_handlers(
     let start_state = state.clone();
     flyout.on_start(move || {
         if let Some(ui) = flyout_weak.upgrade() {
+            if ui.get_geometry_save_blocked() {
+                return;
+            }
             let displays = start_state
                 .displays
                 .lock()
@@ -102,7 +105,14 @@ pub(super) fn register_lifecycle_handlers(
     let stop_sender = sender.clone();
     flyout.on_stop(move || stop_sender.stop());
     let restart_sender = sender.clone();
-    flyout.on_restart_mapping(move || restart_sender.restart_mapping());
+    let flyout_weak = flyout.as_weak();
+    flyout.on_restart_mapping(move || {
+        if let Some(ui) = flyout_weak.upgrade()
+            && !ui.get_geometry_save_blocked()
+        {
+            restart_sender.restart_mapping();
+        }
+    });
 
     let flyout_weak = flyout.as_weak();
     let display_settings_error_revision = error_revision.clone();

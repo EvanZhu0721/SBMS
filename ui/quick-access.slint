@@ -176,11 +176,11 @@ export component QuickAccess inherits Window {
         reference-action-enabled: root.reference-action-enabled;
         sizing-strategy <=> root.sizing-strategy;
         state: root.state;
-        state-detail: root.state-detail;
+        state-detail: root.geometry-save-blocked ? "Configuration unavailable" : root.state-detail;
         running: root.running;
         busy: root.busy;
         restart-available: root.restart-available;
-        error-text: root.error-text;
+        error-text: root.geometry-save-blocked ? root.geometry-error : root.error-text;
         mapping-fps: root.mapping-fps;
         mapping-fps-valid: root.mapping-fps-valid;
         mapping-fps-error: root.mapping-fps-error;

@@ -1458,6 +1458,7 @@ fn load_group_config(ui: &QuickAccess) -> LoadedGroups {
     let snapshot = match ConfigProfileStore::default_store().and_then(|store| store.load_active()) {
         Ok(snapshot) => snapshot,
         Err(error) => {
+            diagnostics::log(Level::Error, "config", "load", None, error.to_string());
             set_geometry_unconfigured(ui);
             ui.set_geometry_save_blocked(true);
             ui.set_geometry_error(error.to_string().into());
@@ -1512,11 +1513,9 @@ fn apply_config_reload(
         Ok(snapshot) => snapshot,
         Err(error) => {
             diagnostics::log(Level::Error, "config", "reload", None, error.to_string());
-            surface_transient_error(
-                ui,
-                error_revision,
-                &format!("Couldn’t reload configuration: {error}"),
-            );
+            ui.set_geometry_save_blocked(true);
+            ui.set_geometry_valid(false);
+            ui.set_geometry_error(error.to_string().into());
             return false;
         }
     };
@@ -1582,10 +1581,6 @@ fn persist_groups(
     profile_revision: &Arc<Mutex<ProfileRevision>>,
 ) -> bool {
     if ui.get_geometry_save_blocked() {
-        surface_persistence_error(
-            ui,
-            "The saved configuration is invalid; reset or repair it before saving",
-        );
         return false;
     }
     let validated = match validate_group_drafts(groups) {
@@ -1604,6 +1599,9 @@ fn persist_validated_groups(
     active: usize,
     profile_revision: &Arc<Mutex<ProfileRevision>>,
 ) -> bool {
+    if ui.get_geometry_save_blocked() {
+        return false;
+    }
     let persisted = groups.iter().map(ValidatedGroupDraft::to_config).collect();
     let Some(selected_group_id) = groups.get(active).map(ValidatedGroupDraft::id) else {
         surface_persistence_error(ui, "The selected mapping group no longer exists");
@@ -2462,6 +2460,62 @@ mod tests {
             restored.groups[0].sizing.unwrap().strategy,
             SizingStrategy::RoundedScale
         );
+
+        // A failed read must survive UI edits and hydration until a good reload.
+        // This child process uses a temporary LOCALAPPDATA, never the real profile.
+        let saved = std::fs::read(store.path()).unwrap();
+        std::fs::write(store.path(), b"{").unwrap();
+        let read_error = store.load_active().unwrap_err().to_string();
+        let fallback = super::load_group_config(&ui);
+        assert_eq!(fallback.groups.len(), 1);
+        assert!(ui.get_geometry_save_blocked());
+        assert!(!ui.get_geometry_valid());
+        ui.invoke_geometry_edited();
+        ui.invoke_save_geometry();
+        ui.invoke_rendering_edited();
+        super::hydrate_group(
+            &ui,
+            &tray,
+            &displays.lock().unwrap(),
+            &groups.lock().unwrap(),
+            *active.lock().unwrap(),
+        );
+        assert_eq!(ui.get_geometry_error(), read_error.as_str());
+        assert!(!ui.get_geometry_valid());
+        // Invalid drafts must not replace the original read error with validation.
+        assert!(!super::persist_groups(&ui, &[], 0, &profile));
+        assert!(!super::persist_validated_groups(&ui, &[], 0, &profile));
+        assert_eq!(ui.get_geometry_error(), read_error.as_str());
+        assert_eq!(std::fs::read(store.path()).unwrap(), b"{");
+        let reload = || {
+            super::apply_config_reload(
+                &ui,
+                &tray,
+                &displays,
+                &groups,
+                &active,
+                &profile,
+                &error_revision,
+            )
+        };
+        ui.set_geometry_save_blocked(false);
+        ui.set_geometry_valid(true);
+        assert!(!reload());
+        assert!(ui.get_geometry_save_blocked());
+        assert!(!ui.get_geometry_valid());
+        assert_eq!(ui.get_geometry_error(), read_error.as_str());
+        std::fs::write(store.path(), saved).unwrap();
+        assert!(reload());
+        assert!(!ui.get_geometry_save_blocked());
+        assert!(ui.get_geometry_error().is_empty());
+        assert!(ui.get_geometry_valid());
+        assert!(super::persist_groups(
+            &ui,
+            &groups.lock().unwrap(),
+            *active.lock().unwrap(),
+            &profile,
+        ));
+
         // Only unfinished stream groups remain: the transitional seed must carry
         // the full manual settings even when there is no sizing mirror left.
         while groups
