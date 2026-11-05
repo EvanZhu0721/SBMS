@@ -34,7 +34,6 @@ sbms config reload
 sbms config set-target <monitor-device-path>
 sbms config clear-target
 sbms config reset
-sbms config reset --all --backup
 ```
 
 - `path` prints the profile-store path.
@@ -54,61 +53,12 @@ sbms config reset --all --backup
 - `activate` atomically changes the active profile and requests a live reload.
 - `delete` rejects the active profile and unknown profiles.
 - `reload` requests that the running tray reload the already-active profile.
-- `set-target` and `clear-target` update only the active profile and request
-  a live reload.
-- `reset` with no other arguments resets only the active profile inside a
-  valid collection. Other profiles and the global preferences
-  `launch_intro_disabled` and `auto_map_on_login` stay unchanged. A missing
-  profile store is created from the normal default. If the store is damaged,
-  unreadable, or uses a newer schema version, `reset` fails and does not write.
-- `reset --all --backup` rebuilds the entire profile collection. Both flags are
-  required, in either order. Any other argument combination prints usage and
-  exits without writing.
+- `set-target`, `clear-target` and `reset` update only the active profile and
+  request a live reload.
 
 A successful configuration commit is not rolled back when the tray is not
 running. CLI output reports `reload=not-running`; the configuration is loaded
-on the next tray or mapping start. After `reset --all --backup` commits,
-`reload=failed` means the new collection is already on disk and only the tray
-notification failed.
-
-## Damaged profile collection
-
-Ordinary profile commands, including `sbms config reset`, load the collection
-before changing it. A truncated file, invalid JSON, or a version 1 collection
-that fails semantic validation therefore cannot be repaired by `reset`.
-
-`sbms config reset --all --backup` is the explicit recovery command. Under the
-existing cross-process profile lock it:
-
-1. Reads the current `config-profiles-v1.json` bytes.
-2. Writes those exact bytes to a new file in the same directory:
-   `config-profiles-v1.json.recovery-<pid>-<sequence>.bak`.
-   The file is created with `create_new` and flushed before the store is
-   replaced, so a later recovery cannot overwrite an earlier backup.
-3. Atomically replaces the store with one `default` profile at revision 1 and
-   default global preferences.
-
-The command discards every saved profile and both global preferences. It does
-not delete display overrides, logs, stream credentials, `config-v2.json`, or
-`config-v1.json`.
-
-A numeric `version` greater than 1 is a newer schema. Recovery refuses it and
-leaves the file unchanged, without writing a backup. A non-numeric `version`,
-truncated JSON, or any other file whose schema version cannot be recognized is
-damaged. Only this command can rebuild it. The command also accepts a valid
-collection: it still backs up the raw bytes and replaces the whole collection.
-Permission errors and other read/write failures are not treated as damage: the
-source file stays in place. If the backup itself fails, nothing is replaced.
-If the backup succeeds and the atomic replacement fails, the command reports
-that recovery was not committed and leaves the backup in place.
-
-```text
-sbms config reset --all --backup
-```
-
-```text
-recovered=default revision=1 backup=%LOCALAPPDATA%\SBMS\config-profiles-v1.json.recovery-<pid>-<sequence>.bak reload=not-running
-```
+on the next tray or mapping start.
 
 ## JSON exchange format
 
@@ -191,12 +141,8 @@ The public API is exported from `sbms::config`:
 
 - `ConfigProfileStore::default_store()` locates the collection.
 - `list`, `load_active` and `load_profile` return validated persistent state.
-- `save_profile`, `save_active_as`, `activate`, `delete`, `update_active` and
-  `reset_active` perform locked atomic transactions.
-- `recover_with_backup` is the locked recovery used by
-  `sbms config reset --all --backup`. It returns the new snapshot and the
-  backup path. `ConfigError::allows_profile_collection_recovery` is true only
-  for a damaged collection this build can rebuild.
+- `save_profile`, `save_active_as`, `activate`, `delete` and `update_active`
+  perform locked atomic transactions.
 - `save_active_if_revision` is the compare-and-swap save operation for a pinned
   UI session.
 - `ConfigStore::load_strict` validates standalone import files; `save` writes

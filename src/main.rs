@@ -6,9 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sbms::config::{
-    ConfigError, ConfigProfileStore, ConfigStore, GroupRouteConfig, ProfileRecovery,
-};
+use sbms::config::{ConfigError, ConfigProfileStore, ConfigStore, GroupRouteConfig};
 use sbms::diagnostics::{self, Level, MappingSessionId};
 use sbms::display::{active_displays, unique_physical_display};
 use sbms::geometry::Rotation;
@@ -644,25 +642,15 @@ fn config(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
                 reload_status(signal_config_reload()?)
             );
         }
-        Some("reset") => match reset_args(arguments) {
-            ResetArgs::Active => {
-                let snapshot = store.reset_active()?;
-                println!(
-                    "reset={} revision={} reload={}",
-                    snapshot.profile.id,
-                    snapshot.profile.revision,
-                    reload_status(signal_config_reload()?)
-                );
-            }
-            ResetArgs::RecoverCollection => {
-                let recovery = store.recover_with_backup()?;
-                report_profile_recovery(
-                    &recovery,
-                    signal_config_reload().map_err(|error| error.to_string()),
-                )?;
-            }
-            ResetArgs::Invalid => usage(),
-        },
+        Some("reset") if arguments.next().is_none() => {
+            let snapshot = store.reset_active()?;
+            println!(
+                "reset={} revision={} reload={}",
+                snapshot.profile.id,
+                snapshot.profile.revision,
+                reload_status(signal_config_reload()?)
+            );
+        }
         _ => usage(),
     }
     Ok(())
@@ -670,57 +658,6 @@ fn config(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Err
 
 fn signal_config_reload() -> Result<bool, Box<dyn Error>> {
     sbms::control::signal_config_reload().map_err(Into::into)
-}
-
-enum ResetArgs {
-    Active,
-    RecoverCollection,
-    Invalid,
-}
-
-fn reset_args(arguments: impl Iterator<Item = String>) -> ResetArgs {
-    let arguments: Vec<String> = arguments.collect();
-    match arguments.as_slice() {
-        [] => ResetArgs::Active,
-        [left, right]
-            if (left == "--all" && right == "--backup")
-                || (left == "--backup" && right == "--all") =>
-        {
-            ResetArgs::RecoverCollection
-        }
-        _ => ResetArgs::Invalid,
-    }
-}
-
-fn report_profile_recovery(
-    recovery: &ProfileRecovery,
-    reload: Result<bool, String>,
-) -> Result<(), Box<dyn Error>> {
-    match reload {
-        Ok(signaled) => {
-            println!(
-                "recovered={} revision={} backup={} reload={}",
-                recovery.snapshot.profile.id,
-                recovery.snapshot.profile.revision,
-                recovery.backup_path.display(),
-                reload_status(signaled)
-            );
-            Ok(())
-        }
-        Err(error) => {
-            println!(
-                "recovered={} revision={} backup={} reload=failed",
-                recovery.snapshot.profile.id,
-                recovery.snapshot.profile.revision,
-                recovery.backup_path.display()
-            );
-            Err(committed_recovery_reload_error(&error).into())
-        }
-    }
-}
-
-fn committed_recovery_reload_error(error: &str) -> String {
-    format!("configuration recovery was committed; tray reload failed: {error}")
 }
 
 fn reload_status(signaled: bool) -> &'static str {
@@ -774,26 +711,8 @@ fn usage() -> ! {
   sbms config activate|delete <profile>
   sbms config reload
   sbms config set-target <monitor-device-path>|clear-target|reset
-  sbms config reset --all --backup
   sbms shutdown
   sbms ui"
     );
     std::process::exit(2);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::committed_recovery_reload_error;
-
-    #[test]
-    fn reload_failure_reports_that_recovery_stays_committed() {
-        let message = committed_recovery_reload_error(
-            "OpenEventW(config reload) failed: Access is denied. (os error 5)",
-        );
-        assert!(message.contains("configuration recovery was committed"));
-        assert!(message.contains("tray reload failed"));
-        assert!(message.contains("OpenEventW(config reload) failed"));
-        assert!(!message.contains("rolled back"));
-        assert!(!message.contains("was not committed"));
-    }
 }
