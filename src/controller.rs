@@ -761,6 +761,7 @@ impl Controller {
                                             display_id,
                                             port,
                                             active.sunshine_capture,
+                                            Arc::clone(&active.cancel),
                                         );
                                     }
                                     emit(ControllerEvent::GroupReady(group));
@@ -839,9 +840,10 @@ impl Controller {
                             }
                         }
                         Message::Sunshine(event)
-                            if active
-                                .as_ref()
-                                .is_some_and(|active| active.generation == event.generation) =>
+                            if active.as_ref().is_some_and(|active| {
+                                active.generation == event.generation
+                                    && !active.cancel.load(Ordering::Acquire)
+                            }) =>
                         {
                             emit(ControllerEvent::Sunshine {
                                 id: event.group_id,

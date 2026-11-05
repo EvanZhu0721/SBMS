@@ -89,6 +89,47 @@ function Get-FreeSunshineBasePort {
     throw 'No free Sunshine test port family was found.'
 }
 
+function Start-ManagerAsync {
+    param([string[]]$ManagerArguments)
+
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $script:HostExecutable
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $script:ManagerScript) + $ManagerArguments
+    $startInfo.Arguments = ($arguments | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    return [Diagnostics.Process]::Start($startInfo)
+}
+
+function Wait-TestCondition {
+    param([scriptblock]$Condition)
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        if (& $Condition) { return }
+        Start-Sleep -Milliseconds 50
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw 'The test condition was not reached within 10 seconds.'
+}
+
+# Load only function definitions for the two failure-injection boundary tests.
+$parseErrors = $null
+$tokens = $null
+$managerAst = [Management.Automation.Language.Parser]::ParseFile(
+    $script:ManagerScript, [ref]$tokens, [ref]$parseErrors
+)
+foreach ($definition in $managerAst.EndBlock.Statements) {
+    if ($definition -is [Management.Automation.Language.FunctionDefinitionAst]) {
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+}
+$script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
+$script:ManagerName = 'SBMS'
+$script:ManifestSchema = 1
+$script:CancelEvent = $null
+
 New-Item -ItemType Directory `
     -Path (Join-Path $script:FakeRoot 'config') `
     -Force |
@@ -114,12 +155,16 @@ fn main() {
             std::process::exit(2);
         })
         .join("argv.txt");
-    fs::write(argument_log, arguments.join("\n")).unwrap_or_else(|_| {
+    fs::write(&argument_log, arguments.join("\n")).unwrap_or_else(|_| {
         std::process::exit(2);
     });
     let contents = fs::read_to_string(configuration).unwrap_or_else(|_| {
         std::process::exit(2);
     });
+    let delay_path = argument_log.with_file_name("ready-delay-ms");
+    if let Ok(delay) = fs::read_to_string(delay_path) {
+        thread::sleep(Duration::from_millis(delay.trim().parse().unwrap()));
+    }
     let port = contents
         .lines()
         .find_map(|line| {
@@ -194,6 +239,9 @@ Describe 'manage-sunshine-instance.ps1' {
         $start.Json.ok | Should Be $true
         $start.Json.status | Should Be 'started'
         $start.Json.port | Should Be $port
+        [uint64]$start.Json.processStartTimeFileTime | Should Be (
+            [uint64](Get-Process -Id ([int]$start.Json.pid)).StartTime.ToFileTimeUtc()
+        )
         (Get-Process -Id ([int]$start.Json.pid) -ErrorAction Stop).HasExited |
             Should Be $false
 
@@ -433,41 +481,236 @@ Describe 'manage-sunshine-instance.ps1' {
         $secondRemaining | Should BeNullOrEmpty
     }
 
-    It 'refuses to stop a PID whose executable or command line is not owned' {
+    It 'recovers <Action> from a stale <Mismatch> PID without stopping the replacement' -TestCases @(
+        @{ Action = 'Start'; Mismatch = 'executable' }
+        @{ Action = 'Restart'; Mismatch = 'configuration' }
+        @{ Action = 'Start'; Mismatch = 'creation time' }
+    ) {
+        param($Action, $Mismatch)
+
         $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
-        $instance = Join-Path `
-            $env:LOCALAPPDATA `
-            "SBMS\sunshine\group-$groupId"
-        New-Item -ItemType Directory -Path $instance -Force | Out-Null
-        $manifest = [ordered]@{
-            schema_version = 1
-            managed_by     = 'SBMS'
-            group_id       = $groupId
-            display_id     = '{23f8cce0-fefe-4a5b-9e14-abcdef012345}'
-            port           = 54321
-            pid            = $PID
-            sunshine_exe   = $script:FakeExecutable
-            config_path    = Join-Path $instance 'sunshine.conf'
-            log_path       = Join-Path $instance 'sunshine.log'
-            started_at     = [DateTimeOffset]::Now.ToString('o')
+        $displayId = '{23f8cce0-fefe-4a5b-9e14-abcdef012345}'
+        $port = Get-FreeSunshineBasePort
+        $first = Invoke-Manager -ManagerArguments @(
+            '-Action', 'Start', '-GroupId', $groupId, '-DisplayId', $displayId, '-Port', "$port"
+        )
+        $first.ExitCode | Should Be 0
+        $replacement = Get-Process -Id ([int]$first.Json.pid) -ErrorAction Stop
+        $null = $replacement.Handle
+        $layout = Get-InstanceLayout -Id $groupId
+        $manifest = Get-Content -LiteralPath $layout.Manifest -Encoding UTF8 -Raw | ConvertFrom-Json
+        try {
+            switch ($Mismatch) {
+                'executable' { $manifest.sunshine_exe = $script:HostExecutable }
+                'configuration' {
+                    $groupId += '-new'
+                    $layout = Get-InstanceLayout -Id $groupId
+                    New-Item -ItemType Directory -Path $layout.Instance -Force | Out-Null
+                    $manifest.group_id = $groupId
+                    $manifest.config_path = $layout.Config
+                    $manifest.log_path = $layout.Log
+                }
+                'creation time' { $manifest.processStartTimeFileTime = [uint64]$manifest.processStartTimeFileTime - 1 }
+            }
+            Write-ManagedTextFile -Path $layout.Manifest -Contents ($manifest | ConvertTo-Json -Compress)
+            $start = Invoke-Manager -ManagerArguments @(
+                '-Action', $Action, '-GroupId', $groupId, '-DisplayId', $displayId, '-Port', "$port"
+            )
+            $start.ExitCode | Should Be 0
+            $start.Json.status | Should Be 'started'
+            $start.Json.pid | Should Not Be $replacement.Id
+            $replacement.HasExited | Should Be $false
+            $stop = Invoke-Manager -ManagerArguments @('-Action', 'Stop', '-GroupId', $groupId)
+            $stop.ExitCode | Should Be 0
+            $replacement.HasExited | Should Be $false
+        } finally {
+            if (-not $replacement.HasExited) {
+                $replacement.Kill()
+                $null = $replacement.WaitForExit(5000)
+            }
+            $replacement.Dispose()
         }
-        [IO.File]::WriteAllText(
-            (Join-Path $instance 'instance.json'),
-            ($manifest | ConvertTo-Json -Compress),
-            [Text.UTF8Encoding]::new($false)
-        )
+    }
 
-        $stop = Invoke-Manager -ManagerArguments @(
-            '-Action'
-            'Stop'
-            '-GroupId'
-            $groupId
+    It 'clears an exited PID and accepts legacy manifests without a creation time' {
+        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+        $port = Get-FreeSunshineBasePort
+        $arguments = @(
+            '-Action', 'Start', '-GroupId', $groupId,
+            '-DisplayId', '{23f8cce0-fefe-4a5b-9e14-abcdef012345}', '-Port', "$port"
         )
+        $first = Invoke-Manager -ManagerArguments $arguments
+        $first.ExitCode | Should Be 0
+        $layout = Get-InstanceLayout -Id $groupId
+        $manifest = Get-Content -LiteralPath $layout.Manifest -Encoding UTF8 -Raw | ConvertFrom-Json
+        $manifest.PSObject.Properties.Remove('processStartTimeFileTime')
+        Write-ManagedTextFile -Path $layout.Manifest -Contents ($manifest | ConvertTo-Json -Compress)
+        $legacy = Invoke-Manager -ManagerArguments $arguments
+        $legacy.ExitCode | Should Be 0
+        $legacy.Json.status | Should Be 'already_running'
+        $legacy.Json.processStartTimeFileTime | Should Be $first.Json.processStartTimeFileTime
+        $stop = Invoke-Manager -ManagerArguments @('-Action', 'Stop', '-GroupId', $groupId)
+        $stop.ExitCode | Should Be 0
+        Write-ManagedTextFile -Path $layout.Manifest -Contents ($manifest | ConvertTo-Json -Compress)
+        $restarted = Invoke-Manager -ManagerArguments $arguments
+        $restarted.ExitCode | Should Be 0
+        $restarted.Json.status | Should Be 'started'
+        $null = Invoke-Manager -ManagerArguments @('-Action', 'Stop', '-GroupId', $groupId)
+    }
 
-        $stop.ExitCode | Should Not Be 0
-        $stop.Json.ok | Should Be $false
-        $stop.Json.message | Should Match 'not the Sunshine executable'
-        (Get-Process -Id $PID -ErrorAction Stop).HasExited | Should Be $false
+    It 'retains the manifest when process identity is <Failure>' -TestCases @(
+        @{ Failure = 'unavailable' }
+        @{ Failure = 'unqueryable' }
+        @{ Failure = 'missing from query' }
+    ) {
+        param($Failure)
+
+        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+        $port = Get-FreeSunshineBasePort
+        $displayId = '{23f8cce0-fefe-4a5b-9e14-abcdef012345}'
+        $start = Invoke-Manager -ManagerArguments @(
+            '-Action', 'Start', '-GroupId', $groupId, '-DisplayId', $displayId, '-Port', "$port"
+        )
+        $start.ExitCode | Should Be 0
+        $layout = Get-InstanceLayout -Id $groupId
+        $before = Get-Content -LiteralPath $layout.Manifest -Encoding UTF8 -Raw
+        if ($Failure -eq 'unqueryable') {
+            Mock Get-CimInstance { throw 'Simulated process query access denied.' }
+        } elseif ($Failure -eq 'missing from query') {
+            Mock Get-CimInstance { $null }
+        } else {
+            Mock Get-CimInstance {
+                [pscustomobject]@{ ExecutablePath = $script:FakeExecutable; CommandLine = $null }
+            }
+        }
+        {
+            Start-ManagedInstance -Layout $layout -Id $groupId -NormalizedDisplayId $displayId `
+                -BasePort $port -SunshineExecutable $script:FakeExecutable -CaptureBackend 'auto' -AllowAlreadyRunning
+        } | Should Throw
+        { Stop-ManagedInstance -Layout $layout -Id $groupId } | Should Throw
+        Get-Content -LiteralPath $layout.Manifest -Encoding UTF8 -Raw | Should Be $before
+        (Get-Process -Id ([int]$start.Json.pid)).HasExited | Should Be $false
+        $stop = Invoke-Manager -ManagerArguments @('-Action', 'Stop', '-GroupId', $groupId)
+        $stop.ExitCode | Should Be 0
+    }
+
+    It 'cancels delayed readiness and removes only the process it just started' {
+        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+        $layout = Get-InstanceLayout -Id $groupId
+        New-Item -ItemType Directory -Path $layout.Instance -Force | Out-Null
+        Write-ManagedTextFile -Path (Join-Path $layout.Instance 'ready-delay-ms') -Contents '15000'
+        $eventName = "Local\SBMS-Sunshine-Test-$([Guid]::NewGuid().ToString('N'))"
+        $cancelEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $eventName)
+        $manager = $null
+        $started = $null
+        try {
+            $manager = Start-ManagerAsync -ManagerArguments @(
+                '-Action', 'Start', '-GroupId', $groupId,
+                '-DisplayId', '{23f8cce0-fefe-4a5b-9e14-abcdef012345}',
+                '-Port', "$(Get-FreeSunshineBasePort)", '-CancelEventName', $eventName
+            )
+            Wait-TestCondition { Test-Path -LiteralPath $layout.Manifest }
+            $manifest = Get-Content -LiteralPath $layout.Manifest -Encoding UTF8 -Raw | ConvertFrom-Json
+            $started = Get-Process -Id ([int]$manifest.pid) -ErrorAction Stop
+            $null = $started.Handle
+            $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+            $null = $cancelEvent.Set()
+            $manager.WaitForExit(5000) | Should Be $true
+            $stopwatch.Elapsed.TotalSeconds | Should BeLessThan 5
+            $manager.ExitCode | Should Be 1
+            $result = $manager.StandardOutput.ReadToEnd() | ConvertFrom-Json
+            $result.ok | Should Be $false
+            $result.cancelled | Should Be $true
+            $result.message | Should Match 'cancelled'
+            $started.HasExited | Should Be $true
+            Test-Path -LiteralPath $layout.Manifest | Should Be $false
+        } finally {
+            $null = $cancelEvent.Set()
+            if ($null -ne $manager) {
+                $null = $manager.WaitForExit(10000)
+                $manager.Dispose()
+            }
+            if ($null -ne $started) {
+                if (-not $started.HasExited) {
+                    $started.Kill()
+                    $null = $started.WaitForExit(5000)
+                }
+                $started.Dispose()
+            }
+            $cancelEvent.Dispose()
+        }
+    }
+
+    It 'cancels while the manager lock is held without creating an instance' {
+        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+        $layout = Get-InstanceLayout -Id $groupId
+        $eventName = "Local\SBMS-Sunshine-Test-$([Guid]::NewGuid().ToString('N'))"
+        $cancelEvent = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $eventName)
+        $mutex = [Threading.Mutex]::new($false, 'Local\SBMSSunshineInstanceManager-v1')
+        $lockTaken = $false
+        $manager = $null
+        try {
+            $lockTaken = $mutex.WaitOne(5000)
+            $lockTaken | Should Be $true
+            $manager = Start-ManagerAsync -ManagerArguments @(
+                '-Action', 'Start', '-GroupId', $groupId,
+                '-DisplayId', '{23f8cce0-fefe-4a5b-9e14-abcdef012345}',
+                '-Port', '56000', '-CancelEventName', $eventName
+            )
+            Start-Sleep -Milliseconds 500
+            $null = $cancelEvent.Set()
+            $manager.WaitForExit(5000) | Should Be $true
+            $manager.ExitCode | Should Be 1
+            $result = $manager.StandardOutput.ReadToEnd() | ConvertFrom-Json
+            $result.message | Should Match 'cancelled'
+            $result.cancelled | Should Be $true
+            Test-Path -LiteralPath $layout.Manifest | Should Be $false
+        } finally {
+            if ($lockTaken) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+            $null = $cancelEvent.Set()
+            if ($null -ne $manager) {
+                $null = $manager.WaitForExit(10000)
+                $manager.Dispose()
+            }
+            $cancelEvent.Dispose()
+        }
+    }
+
+    It 'retains startup evidence if cancellation cleanup cannot stop the process' {
+        $groupId = "pester-$([Guid]::NewGuid().ToString('N'))"
+        $layout = Get-InstanceLayout -Id $groupId
+        $started = Invoke-Manager -ManagerArguments @(
+            '-Action', 'Start', '-GroupId', "$groupId-source",
+            '-DisplayId', '{23f8cce0-fefe-4a5b-9e14-abcdef012345}', '-Port', "$(Get-FreeSunshineBasePort)"
+        )
+        $started.ExitCode | Should Be 0
+        $script:CleanupFailureProcess = Get-Process -Id ([int]$started.Json.pid) -ErrorAction Stop
+        $script:CleanupFailureProcess | Add-Member -MemberType ScriptMethod -Name Kill -Force -Value {
+            throw 'Simulated termination denied.'
+        }
+        Mock Start-HiddenSunshine { $script:CleanupFailureProcess }
+        Mock Wait-SunshineReady { throw [OperationCanceledException]::new('Sunshine startup was cancelled.') }
+        try {
+            $caught = $null
+            try {
+                Start-ManagedInstance -Layout $layout -Id $groupId `
+                    -NormalizedDisplayId '{23f8cce0-fefe-4a5b-9e14-abcdef012345}' `
+                    -BasePort (Get-FreeSunshineBasePort) -SunshineExecutable $script:FakeExecutable -CaptureBackend 'auto'
+            } catch {
+                $caught = $_
+            }
+            $caught | Should Not BeNullOrEmpty
+            $caught.Exception.Message | Should Match 'cancelled.*Cleanup failed.*Manifest retained'
+            ($caught.Exception -is [OperationCanceledException]) | Should Be $false
+            Test-Path -LiteralPath $layout.Manifest | Should Be $true
+            $manifest = Get-Content -LiteralPath $layout.Manifest -Encoding UTF8 -Raw | ConvertFrom-Json
+            $manifest.pid | Should Be $started.Json.pid
+            [uint64]$manifest.processStartTimeFileTime | Should BeGreaterThan 0
+        } finally {
+            $null = Invoke-Manager -ManagerArguments @('-Action', 'Stop', '-GroupId', "$groupId-source")
+            Remove-Item -LiteralPath $layout.Manifest -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
@@ -501,6 +744,11 @@ try {
     $env:LOCALAPPDATA = $script:OriginalLocalAppData
     $env:SBMS_SUNSHINE_EXE = $script:OriginalSunshineExe
     if (Test-Path -LiteralPath $script:TestRoot) {
+        $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        $resolvedTestRoot = [IO.Path]::GetFullPath($script:TestRoot)
+        if (-not $resolvedTestRoot.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'The Sunshine test cleanup root is outside the temporary directory.'
+        }
         Remove-Item -LiteralPath $script:TestRoot -Recurse -Force
     }
 }

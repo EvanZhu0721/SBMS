@@ -14,7 +14,9 @@ param(
     [int]$Port = 0,
 
     [ValidateSet('auto', 'ddx', 'wgc')]
-    [string]$Capture = 'auto'
+    [string]$Capture = 'auto',
+
+    [string]$CancelEventName = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +27,13 @@ Set-StrictMode -Version Latest
 $script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
 $script:ManagerName = 'SBMS'
 $script:ManifestSchema = 1
+$script:CancelEvent = $null
+
+function Assert-NotCancelled {
+    if ($null -ne $script:CancelEvent -and $script:CancelEvent.WaitOne(0)) {
+        throw [OperationCanceledException]::new('Sunshine startup was cancelled.')
+    }
+}
 
 function Write-JsonResult {
     param(
@@ -241,6 +250,9 @@ function Write-InstanceManifest {
         [int]$ProcessId,
 
         [Parameter(Mandatory)]
+        [uint64]$ProcessStartTimeFileTime,
+
+        [Parameter(Mandatory)]
         [string]$SunshineExecutable
     )
 
@@ -251,10 +263,11 @@ function Write-InstanceManifest {
         display_id     = $NormalizedDisplayId
         port           = $BasePort
         pid            = $ProcessId
+        processStartTimeFileTime = $ProcessStartTimeFileTime
         sunshine_exe   = Get-FullPath -Path $SunshineExecutable
         config_path    = Get-FullPath -Path $Layout.Config
         log_path       = Get-FullPath -Path $Layout.Log
-        started_at     = [DateTimeOffset]::Now.ToString('o')
+        started_at     = [DateTime]::FromFileTimeUtc([long]$ProcessStartTimeFileTime).ToString('o')
     }
     $json = $manifest | ConvertTo-Json -Compress -Depth 4
     Write-ManagedTextFile -Path $Layout.Manifest -Contents $json
@@ -308,6 +321,15 @@ function Read-InstanceManifest {
         throw 'The Sunshine instance manifest does not contain a valid managed process.'
     }
 
+    $startTime = $manifest.PSObject.Properties['processStartTimeFileTime']
+    $parsedStartTime = [uint64]0
+    if ($null -ne $startTime -and (
+        -not [uint64]::TryParse([string]$startTime.Value, [ref]$parsedStartTime) -or
+        $parsedStartTime -eq 0
+    )) {
+        throw 'The Sunshine instance manifest contains an invalid process creation time.'
+    }
+
     return $manifest
 }
 
@@ -321,45 +343,69 @@ function Get-ManagedProcessRecord {
     )
 
     $processId = [int]$Manifest.pid
-    $record = Get-CimInstance -ClassName Win32_Process `
-        -Filter "ProcessId = $processId" `
-        -ErrorAction Stop |
-        Select-Object -First 1
-    if ($null -eq $record) {
-        return $null
+    try {
+        $process = Get-Process -Id $processId -ErrorAction Stop
+    } catch {
+        if ($_.FullyQualifiedErrorId -like 'NoProcessFoundForGivenId,*') {
+            return $null
+        }
+        throw
     }
 
-    $actualExecutable = [string]$record.ExecutablePath
-    if ([string]::IsNullOrWhiteSpace($actualExecutable)) {
-        try {
-            $actualExecutable = (
-                Get-Process -Id $processId -ErrorAction Stop
-            ).MainModule.FileName
-        } catch {
+    $verified = $false
+    try {
+        # Keep this handle through identity checks and stop; a reused PID must
+        # never redirect cleanup to the replacement process.
+        $null = $process.Handle
+        $processStartTime = [uint64]$process.StartTime.ToFileTimeUtc()
+        $startTime = $Manifest.PSObject.Properties['processStartTimeFileTime']
+        if ($null -ne $startTime -and [uint64]$startTime.Value -ne $processStartTime) {
+            return $null
+        }
+
+        $record = Get-CimInstance -ClassName Win32_Process `
+            -Filter "ProcessId = $processId" `
+            -ErrorAction Stop |
+            Select-Object -First 1
+        if ($process.HasExited) {
+            return $null
+        }
+        if ($null -eq $record) {
+            throw "PID $processId exists, but its process identity cannot be verified."
+        }
+
+        $actualExecutable = [string]$record.ExecutablePath
+        if ([string]::IsNullOrWhiteSpace($actualExecutable)) {
+            $actualExecutable = $process.MainModule.FileName
+        }
+        if ([string]::IsNullOrWhiteSpace($actualExecutable)) {
             throw "PID $processId exists, but its executable path cannot be verified."
         }
-    }
+        if (-not (Test-SamePath -Left $actualExecutable -Right ([string]$Manifest.sunshine_exe))) {
+            return $null
+        }
 
-    if (
-        -not (Test-SamePath `
-            -Left $actualExecutable `
-            -Right ([string]$Manifest.sunshine_exe))
-    ) {
-        throw "PID $processId is not the Sunshine executable recorded for this group."
-    }
+        $commandLine = [string]$record.CommandLine
+        if ([string]::IsNullOrWhiteSpace($commandLine)) {
+            throw "PID $processId exists, but its command line cannot be verified."
+        }
+        $escapedConfig = [regex]::Escape((Get-FullPath -Path $ExpectedConfig))
+        $configArgument = "(?i)(?:^|\s)`"?$escapedConfig`"?(?=\s|$)"
+        if ($commandLine -notmatch $configArgument) {
+            return $null
+        }
 
-    $commandLine = [string]$record.CommandLine
-    if ([string]::IsNullOrWhiteSpace($commandLine)) {
-        throw "PID $processId exists, but its command line cannot be verified."
+        $verified = $true
+        return [pscustomobject]@{
+            Process = $process
+            CommandLine = $commandLine
+            ProcessStartTimeFileTime = $processStartTime
+        }
+    } finally {
+        if (-not $verified) {
+            $process.Dispose()
+        }
     }
-
-    $escapedConfig = [regex]::Escape((Get-FullPath -Path $ExpectedConfig))
-    $configArgument = "(?i)(?:^|\s)`"?$escapedConfig`"?(?=\s|$)"
-    if ($commandLine -notmatch $configArgument) {
-        throw "PID $processId is not using this group's Sunshine configuration."
-    }
-
-    return $record
 }
 
 function Get-CaptureBackendFromCommandLine {
@@ -432,23 +478,27 @@ function Stop-ManagedInstance {
     }
 
     $processId = [int]$manifest.pid
-    $process = Get-Process -Id $processId -ErrorAction Stop
-    $closed = $false
+    $process = $record.Process
     try {
-        $closed = $process.CloseMainWindow()
-    } catch {
         $closed = $false
-    }
+        try {
+            $closed = $process.CloseMainWindow()
+        } catch {
+            $closed = $false
+        }
 
-    if ($closed) {
-        $null = $process.WaitForExit(2000)
-    }
-    if (-not $process.HasExited) {
-        Stop-Process -Id $processId -Force -ErrorAction Stop
-        $null = $process.WaitForExit(10000)
-    }
-    if (-not $process.HasExited) {
-        throw "Managed Sunshine PID $processId did not stop within 10 seconds."
+        if ($closed) {
+            $null = $process.WaitForExit(2000)
+        }
+        if (-not $process.HasExited) {
+            $process.Kill()
+            $null = $process.WaitForExit(10000)
+        }
+        if (-not $process.HasExited) {
+            throw "Managed Sunshine PID $processId did not stop within 10 seconds."
+        }
+    } finally {
+        $process.Dispose()
     }
 
     Remove-StaleManifest -Layout $Layout
@@ -609,6 +659,7 @@ function Find-AvailableSunshinePort {
 
     $candidate = [int64]$PreferredPort
     while ($candidate -le 65514) {
+        Assert-NotCancelled
         if (Test-PortFamilyAvailable -BasePort ([int]$candidate)) {
             return [int]$candidate
         }
@@ -721,6 +772,7 @@ function Wait-SunshineReady {
 
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
     do {
+        Assert-NotCancelled
         $Process.Refresh()
         if ($Process.HasExited) {
             throw "Sunshine exited before its port opened (exit code $($Process.ExitCode)); see $LogPath"
@@ -730,10 +782,15 @@ function Wait-SunshineReady {
             (Test-TcpEndpoint -EndpointPort ($BasePort + 1)) -or
             (Test-TcpEndpoint -EndpointPort $BasePort)
         ) {
+            Assert-NotCancelled
             return
         }
 
-        Start-Sleep -Milliseconds 250
+        if ($null -ne $script:CancelEvent) {
+            $null = $script:CancelEvent.WaitOne(250)
+        } else {
+            Start-Sleep -Milliseconds 250
+        }
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
 
     throw "Sunshine did not open TCP port $BasePort or $($BasePort + 1) within 20 seconds; see $LogPath"
@@ -781,37 +838,44 @@ function Start-ManagedInstance {
         [switch]$AllowAlreadyRunning
     )
 
+    Assert-NotCancelled
     $existing = Read-InstanceManifest -Layout $Layout -Id $Id
     if ($null -ne $existing) {
         $record = Get-ManagedProcessRecord `
             -Manifest $existing `
             -ExpectedConfig $Layout.Config
         if ($null -ne $record) {
-            $sameDisplay = [string]$existing.display_id -ieq $NormalizedDisplayId
-            $existingPort = [int]$existing.port
-            $isRequestedSequence = (
-                $existingPort -ge $BasePort -and
-                (($existingPort - $BasePort) % 27) -eq 0
-            )
-            $existingCapture = Get-CaptureBackendFromCommandLine `
-                -CommandLine ([string]$record.CommandLine)
-            $sameCapture = $existingCapture -eq $CaptureBackend
-            if (
-                $AllowAlreadyRunning -and
-                $sameDisplay -and
-                $isRequestedSequence -and
-                $sameCapture
-            ) {
-                return [ordered]@{
-                    status     = 'already_running'
-                    pid        = [int]$existing.pid
-                    port       = [int]$existing.port
-                    display_id = [string]$existing.display_id
-                    config_path = [string]$existing.config_path
-                    log_path   = [string]$existing.log_path
+            try {
+                $sameDisplay = [string]$existing.display_id -ieq $NormalizedDisplayId
+                $existingPort = [int]$existing.port
+                $isRequestedSequence = (
+                    $existingPort -ge $BasePort -and
+                    (($existingPort - $BasePort) % 27) -eq 0
+                )
+                $existingCapture = Get-CaptureBackendFromCommandLine `
+                    -CommandLine ([string]$record.CommandLine)
+                $sameCapture = $existingCapture -eq $CaptureBackend
+                if (
+                    $AllowAlreadyRunning -and
+                    $sameDisplay -and
+                    $isRequestedSequence -and
+                    $sameCapture
+                ) {
+                    Assert-NotCancelled
+                    return [ordered]@{
+                        status     = 'already_running'
+                        pid        = [int]$existing.pid
+                        processStartTimeFileTime = $record.ProcessStartTimeFileTime
+                        port       = [int]$existing.port
+                        display_id = [string]$existing.display_id
+                        config_path = [string]$existing.config_path
+                        log_path   = [string]$existing.log_path
+                    }
                 }
+                throw 'A managed Sunshine instance is already running for this group; use Restart.'
+            } finally {
+                $record.Process.Dispose()
             }
-            throw 'A managed Sunshine instance is already running for this group; use Restart.'
         }
         Remove-StaleManifest -Layout $Layout
     }
@@ -829,45 +893,56 @@ function Start-ManagedInstance {
 
     $process = $null
     try {
+        Assert-NotCancelled
         $process = Start-HiddenSunshine `
             -SunshineExecutable $SunshineExecutable `
             -Configuration $Layout.Config `
             -WorkingDirectory (Split-Path -Parent $SunshineExecutable) `
             -CaptureBackend $CaptureBackend
+        $processStartTime = [uint64]$process.StartTime.ToFileTimeUtc()
         Write-InstanceManifest `
             -Layout $Layout `
             -Id $Id `
             -NormalizedDisplayId $NormalizedDisplayId `
             -BasePort $actualPort `
             -ProcessId $process.Id `
+            -ProcessStartTimeFileTime $processStartTime `
             -SunshineExecutable $SunshineExecutable
         Wait-SunshineReady `
             -Process $process `
             -BasePort $actualPort `
             -LogPath $Layout.Log
+        Assert-NotCancelled
+        return [ordered]@{
+            status      = 'started'
+            pid         = $process.Id
+            processStartTimeFileTime = $processStartTime
+            port        = $actualPort
+            display_id  = $NormalizedDisplayId
+            config_path = Get-FullPath -Path $Layout.Config
+            log_path    = Get-FullPath -Path $Layout.Log
+        }
     } catch {
-        if ($null -ne $process) {
-            try {
+        $startupError = $_
+        try {
+            if ($null -ne $process) {
                 $process.Refresh()
                 if (-not $process.HasExited) {
                     $process.Kill()
-                    $null = $process.WaitForExit(5000)
+                    if (-not $process.WaitForExit(5000)) {
+                        throw "Sunshine PID $($process.Id) did not stop within 5 seconds."
+                    }
                 }
-            } catch {
-                # The original startup error is more useful than cleanup noise.
             }
+            Remove-StaleManifest -Layout $Layout
+        } catch {
+            throw "$($startupError.Exception.Message) Cleanup failed: $($_.Exception.Message) Manifest retained at $($Layout.Manifest)."
         }
-        Remove-StaleManifest -Layout $Layout
-        throw
-    }
-
-    return [ordered]@{
-        status      = 'started'
-        pid         = $process.Id
-        port        = $actualPort
-        display_id  = $NormalizedDisplayId
-        config_path = Get-FullPath -Path $Layout.Config
-        log_path    = Get-FullPath -Path $Layout.Log
+        throw $startupError
+    } finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
     }
 }
 
@@ -878,15 +953,24 @@ $exitCode = 0
 $result = $null
 $normalizedAction = $Action.ToLowerInvariant()
 try {
+    if (-not [string]::IsNullOrWhiteSpace($CancelEventName)) {
+        $script:CancelEvent = [Threading.EventWaitHandle]::OpenExisting($CancelEventName)
+    }
+    Assert-NotCancelled
     $mutex = [Threading.Mutex]::new(
         $false,
         'Local\SBMSSunshineInstanceManager-v1'
     )
     try {
-        $lockTaken = $mutex.WaitOne([TimeSpan]::FromSeconds(30))
+        $waitHandles = @($mutex)
+        if ($null -ne $script:CancelEvent) {
+            $waitHandles += $script:CancelEvent
+        }
+        $lockTaken = [Threading.WaitHandle]::WaitAny($waitHandles, 30000) -eq 0
     } catch [Threading.AbandonedMutexException] {
         $lockTaken = $true
     }
+    Assert-NotCancelled
     if (-not $lockTaken) {
         throw 'Timed out waiting for the SBMS Sunshine instance manager lock.'
     }
@@ -907,6 +991,7 @@ try {
             $sunshineExecutable = Resolve-SunshineExecutable
 
             if ($Action -eq 'Restart') {
+                Assert-NotCancelled
                 $null = Stop-ManagedInstance -Layout $layout -Id $GroupId
             }
 
@@ -953,12 +1038,18 @@ try {
     }
     $result = [ordered]@{
         ok           = $true
+        cancelled    = $false
         action       = $normalizedAction
         status       = $operation.status
         groupId      = if ($Action -eq 'StopAll') { $null } else { $GroupId }
         displayId    = $operation.display_id
         port         = $operation.port
         pid          = $operation.pid
+        processStartTimeFileTime = if ($operation.Contains('processStartTimeFileTime')) {
+            $operation.processStartTimeFileTime
+        } else {
+            $null
+        }
         message      = $message
         configPath   = $configPath
         logPath      = $operation.log_path
@@ -966,6 +1057,21 @@ try {
             $operation.stoppedCount
         } else {
             $null
+        }
+    }
+    if ($Action -in @('Start', 'Restart')) {
+        try {
+            Assert-NotCancelled
+        } catch {
+            $cancellation = $_
+            if ($operation.status -eq 'started') {
+                try {
+                    $null = Stop-ManagedInstance -Layout $layout -Id $GroupId
+                } catch {
+                    throw "$($cancellation.Exception.Message) Cleanup failed: $($_.Exception.Message) Manifest retained at $($layout.Manifest)."
+                }
+            }
+            throw $cancellation
         }
     }
 } catch {
@@ -977,6 +1083,7 @@ try {
     }
     $result = [ordered]@{
         ok         = $false
+        cancelled  = $_.Exception -is [OperationCanceledException]
         action     = $normalizedAction
         groupId    = if ([string]::IsNullOrWhiteSpace($GroupId)) {
             $null
@@ -1000,6 +1107,9 @@ try {
     }
     if ($null -ne $mutex) {
         $mutex.Dispose()
+    }
+    if ($null -ne $script:CancelEvent) {
+        $script:CancelEvent.Dispose()
     }
 }
 
