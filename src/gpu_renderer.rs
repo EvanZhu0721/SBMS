@@ -47,8 +47,8 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET,
     DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT, DXGI_MWA_NO_ALT_ENTER, DXGI_OUTDUPL_FRAME_INFO,
     DXGI_OUTDUPL_MOVE_RECT, DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIFactory1,
-    IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIAdapter1, IDXGIDevice,
+    IDXGIFactory1, IDXGIFactory2, IDXGIOutput, IDXGIOutput1, IDXGIOutputDuplication, IDXGIResource,
     IDXGISwapChain1,
 };
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -61,6 +61,9 @@ const MAX_METADATA_BYTES: u32 = 1024 * 1024;
 const MAX_COPY_REGIONS: usize = 128;
 const MAX_PARTIAL_COPY_PERCENT: u64 = 50;
 const COPY_STATS_INTERVAL: Duration = Duration::from_secs(10);
+// Set only while building the issue #50 diagnostic package. Stable builds keep
+// their original initialization order and startup recovery policy.
+const ISSUE50_BETA: bool = option_env!("SBMS_ISSUE50_BETA").is_some();
 
 const SHADER: &str = r#"
 Texture2D source_texture : register(t0);
@@ -233,8 +236,13 @@ pub fn run_gpu_renderer(
     mut on_event: impl FnMut(GpuRendererEvent) -> Result<(), String>,
 ) -> Result<(), GpuRendererError> {
     let mut trace = FirstFrameTrace::new(config.target_window);
+    let debug_marker = if ISSUE50_BETA {
+        "issue50-beta2"
+    } else {
+        "first-frame-detailed-v1"
+    };
     trace.log(format_args!(
-        "debug=first-frame-detailed-v1 source={:?} target={}x{} refresh_millihz={} rendering={:?}",
+        "debug={debug_marker} source={:?} target={}x{} refresh_millihz={} rendering={:?}",
         config.source_rect,
         config.target_width,
         config.target_height,
@@ -268,30 +276,170 @@ pub fn run_gpu_renderer(
             ));
         }
         let (device, context) = trace.call("D3D11CreateDevice", || create_device(&adapter))?;
+        let diagnostic_device = ISSUE50_BETA.then(|| device.clone());
+        let prepared_pipeline = if ISSUE50_BETA {
+            trace.log(format_args!(
+                "debug=issue50-beta2 version={} build={} probe_timeout_ms={FRAME_WAIT_TIMEOUT_MS} startup_budget=unchanged",
+                env!("CARGO_PKG_VERSION"),
+                env!("SBMS_BUILD_STAMP")
+            ));
+            log_issue50_pair(&output, &device, &trace);
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            probe_issue50_capture(&output, &device, &mut trace);
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            trace.log("debug=issue50-beta2 path=B pipeline-before-duplication; probe-may-warm-driver=true");
+            let pipeline = Pipeline::new(
+                config,
+                &adapter,
+                device.clone(),
+                context.clone(),
+                &mut trace,
+            )?;
+            if stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            Some(pipeline)
+        } else {
+            None
+        };
         let duplication = trace
             .call("IDXGIOutput1::DuplicateOutput", || unsafe {
                 output.DuplicateOutput(&device)
             })
             .map_err(|error| classify_windows_error("IDXGIOutput1::DuplicateOutput", error))?;
+        if ISSUE50_BETA {
+            trace.log("debug=issue50-beta2 path=B DuplicateOutput result=S_OK");
+        }
         let description = trace.call("IDXGIOutputDuplication::GetDesc", || unsafe {
             duplication.GetDesc()
         });
         trace.log(format_args!("duplication={description:?}"));
-        let pipeline = Pipeline::new(config, &adapter, device, context, &mut trace)?;
-        pipeline.run(
+        let pipeline = match prepared_pipeline {
+            Some(pipeline) => pipeline,
+            None => Pipeline::new(config, &adapter, device, context, &mut trace)?,
+        };
+        let result = pipeline.run(
             duplication,
             stop,
             copy_mode,
             copy_stats_enabled,
             &mut on_event,
             &mut trace,
-        )
+        );
+        if let Some(device) = diagnostic_device
+            && result.is_err()
+        {
+            trace.log(format_args!(
+                "debug=issue50-beta2 path=B GetDeviceRemovedReason={:?}",
+                unsafe { device.GetDeviceRemovedReason() }
+            ));
+        }
+        result
     })();
+    let result = if ISSUE50_BETA && !trace.presented {
+        match result {
+            Err(GpuRendererError::AccessLost(detail)) => Err(GpuRendererError::Failure(format!(
+                "issue50-beta2 path=B: {detail}; diagnostic startup stopped after one pipeline attempt"
+            ))),
+            other => other,
+        }
+    } else {
+        result
+    };
     trace.log(format_args!(
         "exit stop_requested={} result={result:?}",
         stop.load(Ordering::Acquire)
     ));
     result
+}
+
+fn log_issue50_pair(output: &IDXGIOutput1, device: &ID3D11Device, trace: &FirstFrameTrace) {
+    let parent = (|| -> windows::core::Result<_> {
+        let adapter: IDXGIAdapter1 = unsafe { output.GetParent()? };
+        unsafe { adapter.GetDesc1() }
+    })();
+    match parent {
+        Ok(description) => trace.log(format_args!(
+            "debug=issue50-beta2 output_parent_adapter={} luid={:?}",
+            String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
+            description.AdapterLuid
+        )),
+        Err(error) => trace.log(format_args!(
+            "debug=issue50-beta2 output_parent_adapter error={error:?}"
+        )),
+    }
+    let actual = (|| -> windows::core::Result<_> {
+        let dxgi_device: IDXGIDevice = device.cast()?;
+        let adapter = unsafe { dxgi_device.GetAdapter()? };
+        unsafe { adapter.GetDesc() }
+    })();
+    match actual {
+        Ok(description) => trace.log(format_args!(
+            "debug=issue50-beta2 actual_device_adapter={} luid={:?}",
+            String::from_utf16_lossy(&description.Description).trim_end_matches('\0'),
+            description.AdapterLuid
+        )),
+        Err(error) => trace.log(format_args!(
+            "debug=issue50-beta2 actual_device_adapter error={error:?}"
+        )),
+    }
+}
+
+fn probe_issue50_capture(
+    output: &IDXGIOutput1,
+    device: &ID3D11Device,
+    trace: &mut FirstFrameTrace,
+) {
+    trace.log("debug=issue50-beta2 path=A before-pipeline; one-acquire; never-reports-ready");
+    let duplication = trace.call("issue50-A::DuplicateOutput", || unsafe {
+        output.DuplicateOutput(device)
+    });
+    let duplication = match duplication {
+        Ok(duplication) => duplication,
+        Err(error) => {
+            trace.log(format_args!(
+                "debug=issue50-beta2 path=A DuplicateOutput result={error:?}"
+            ));
+            return;
+        }
+    };
+    trace.log("debug=issue50-beta2 path=A DuplicateOutput result=S_OK");
+    let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+    let mut resource = None;
+    let acquisition = trace.call("issue50-A::AcquireNextFrame", || unsafe {
+        duplication.AcquireNextFrame(FRAME_WAIT_TIMEOUT_MS, &mut frame_info, &mut resource)
+    });
+    let resource_present = resource.is_some();
+    drop(resource);
+    match acquisition {
+        Ok(()) => {
+            let frame = AcquiredFrame(Some(&duplication));
+            trace.log(format_args!(
+                "debug=issue50-beta2 path=A outcome=acquired resource_present={resource_present} frame_info={frame_info:?}"
+            ));
+            let release = trace.call("issue50-A::ReleaseFrame", || frame.release());
+            trace.log(format_args!(
+                "debug=issue50-beta2 path=A ReleaseFrame result={release:?}"
+            ));
+        }
+        Err(error) => {
+            let outcome = if error.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                "inconclusive-timeout"
+            } else {
+                "acquire-error"
+            };
+            trace.log(format_args!(
+                "debug=issue50-beta2 path=A outcome={outcome} result={error:?} GetDeviceRemovedReason={:?}",
+                unsafe { device.GetDeviceRemovedReason() }
+            ));
+        }
+    }
+    drop(duplication);
+    trace.log("debug=issue50-beta2 path=A duplication-dropped; no-probe-frame-retained");
 }
 
 pub enum GpuRendererEvent {
