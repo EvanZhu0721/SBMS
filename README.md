@@ -184,6 +184,13 @@ SBMS 通过脏区域更新, 资源复用和动态刷新减少开销. 实际占�
 
 每个串流输出组都有独立的连接地址, 请使用对应组显示的信息.
 
+## 已知问题
+
+在部分多 GPU 系统中，如果将本程序指定到非当前显示器输出的显卡上运行，可能出现无法取帧、映射失败的情况。
+若出现类似情况，建议将本程序指定到负责在当前显示器输出的显卡上运行。
+
+详见 [issue#50](https://github.com/EvanZhu0721/SBMS/issues/50)。
+
 
 ## 致谢
 First of all, thank you for taking the time to read this far.

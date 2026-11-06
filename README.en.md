@@ -161,6 +161,14 @@ Add output groups for additional displays. Click `Stop and restore` to return wi
 
 Each streaming output group has its own connection address. Use the information shown for the corresponding group.
 
+## Known Issue
+
+On some multi-GPU systems, if this program is assigned to run on a GPU that is not driving the current display output, frame capture failure or mapping errors may occur.
+
+If you encounter such issues, it is recommended to assign this program to run on the GPU that is responsible for the current display output.
+
+For details, see [issue#50](https://github.com/EvanZhu0721/SBMS/issues/50).
+
 ## Acknowledgments
 First of all, thank you for taking the time to read this far.
 
