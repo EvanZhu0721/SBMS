@@ -454,7 +454,7 @@ function Restore-SbmsTasks {
 function Test-SbmsTrayReady {
     param([int[]]$ProcessIds)
     if (-not ('SBMS.TrayStartup' -as [type])) {
-        Add-Type -TypeDefinition @'
+        Add-Type -IgnoreWarnings -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 namespace SBMS {
