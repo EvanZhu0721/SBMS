@@ -156,24 +156,25 @@ struct ActiveRun {
 
 /// A pending group belongs to its ActiveRun, so Stop also discards all timers.
 /// Only desktop transitions may rearm an exhausted transient failure.
+/// Successful captures retain the recent attempt history to bound repeated losses.
 struct PendingRecovery {
     next: Option<Instant>,
-    deadline: Option<Instant>,
-    attempts: u8,
+    attempts: Vec<Instant>,
     error: Option<String>,
     resumable: bool,
     pause: bool,
+    healthy: bool,
 }
 
 impl PendingRecovery {
     fn new(now: Instant, available: bool) -> Self {
         Self {
             next: available.then_some(now),
-            deadline: None,
-            attempts: 0,
+            attempts: Vec::new(),
             error: None,
             resumable: true,
             pause: false,
+            healthy: false,
         }
     }
 
@@ -183,24 +184,45 @@ impl PendingRecovery {
         }
     }
 
-    fn begin_attempt(&mut self, now: Instant) -> Instant {
+    fn begin_attempt(&mut self, now: Instant) -> Option<Instant> {
+        if self.exhausted() {
+            return None;
+        }
         self.next = None;
-        self.attempts += 1;
-        *self.deadline.get_or_insert(now + RENDERER_RECOVERY_WINDOW)
+        self.attempts
+            .retain(|started| now.saturating_duration_since(*started) < RENDERER_RECOVERY_WINDOW);
+        if self.attempts.len() >= usize::from(RENDERER_RECOVERY_ATTEMPTS) {
+            self.error = Some("Capture recovery limit reached (4 attempts in 30 seconds); stop and restart mapping to retry".into());
+            return None;
+        }
+        self.attempts.push(now);
+        self.error = None;
+        Some(now + RENDERER_RECOVERY_WINDOW)
     }
 
     fn failed(&mut self, now: Instant, error: String, retryable: bool) {
+        self.healthy = false;
         self.error = Some(error);
         self.resumable = retryable;
-        let delay = Duration::from_millis(500 * u64::from(self.attempts.max(1)));
-        self.next = (retryable
-            && self.attempts < RENDERER_RECOVERY_ATTEMPTS
-            && self.deadline.is_some_and(|deadline| now + delay < deadline))
-        .then_some(now + delay);
+        let delay = Duration::from_millis(500 * self.attempts.len().max(1) as u64);
+        self.next = retryable.then_some(now + delay);
     }
 
     fn exhausted(&self) -> bool {
         self.next.is_none() && self.error.is_some()
+    }
+
+    fn recovered(&mut self) {
+        self.healthy = true;
+        self.error = None;
+        self.next = None;
+    }
+
+    fn capture_lost(&mut self, now: Instant, available: bool) {
+        if self.healthy {
+            self.healthy = false;
+            self.next = available.then_some(now);
+        }
     }
 }
 
@@ -770,11 +792,12 @@ impl Controller {
                                     event: RendererEvent::Fps(fps),
                                     ..
                                 } => {
-                                    if !active
+                                    if active
                                         .as_ref()
                                         .expect("guard checked active run")
                                         .recovery
-                                        .contains_key(&id)
+                                        .get(&id)
+                                        .is_none_or(|pending| pending.healthy)
                                     {
                                         emit(ControllerEvent::Fps {
                                             id,
@@ -1026,10 +1049,23 @@ fn queue_renderer_recovery(
     available: bool,
     emit: &impl Fn(ControllerEvent),
 ) {
-    active.recovery.entry(id).or_insert_with(|| {
+    let now = Instant::now();
+    if active
+        .recovery
+        .get(&id)
+        .is_none_or(|pending| pending.healthy)
+    {
         emit(ControllerEvent::Fps { id, fps: None });
-        PendingRecovery::new(Instant::now(), available)
-    });
+    }
+    active
+        .recovery
+        .entry(id)
+        .or_insert_with(|| PendingRecovery::new(now, available));
+    active
+        .recovery
+        .get_mut(&id)
+        .expect("queued recovery")
+        .capture_lost(now, available);
     active.recovery.get_mut(&id).expect("queued recovery").pause = active.session.has_renderer(id);
     if let Some(cancel) = active.recovery_jobs.get(&id) {
         cancel.store(true, Ordering::Release);
@@ -1039,7 +1075,7 @@ fn queue_renderer_recovery(
 }
 
 fn emit_recovery_state(active: &ActiveRun, available: bool, emit: &impl Fn(ControllerEvent)) {
-    if active.recovery.is_empty() {
+    if active.recovery.values().all(|pending| pending.healthy) {
         emit(state(
             "Running",
             "Mapping is active".into(),
@@ -1110,14 +1146,33 @@ fn recover_due_renderer(
         return;
     }
     let pending = active.recovery.get_mut(&id).expect("selected recovery");
-    let pause_only = pending.pause && (!before.0 || !pending.resumable);
-    pending.pause = false;
-    let deadline = if !pause_only {
-        pending.begin_attempt(now)
+    let mut pause_only = pending.pause && (!before.0 || !pending.resumable || pending.exhausted());
+    let deadline = if pause_only {
+        now
+    } else if let Some(deadline) = pending.begin_attempt(now) {
+        deadline
     } else {
-        pending.next = None;
+        diagnostics::log(
+            Level::Warn,
+            "controller",
+            "renderer-recovery-paused",
+            Some(active.session_id),
+            format!(
+                "group {id}: {}",
+                pending.error.as_deref().unwrap_or_default()
+            ),
+        );
+        if !pending.pause {
+            emit_recovery_state(active, before.0, emit);
+            return;
+        }
+        pause_only = true;
         now
     };
+    pending.pause = false;
+    if pause_only {
+        pending.next = None;
+    }
     let mut group = active.session.take_recovery_group(id);
     let job_cancel = Arc::new(AtomicBool::new(false));
     active.recovery_jobs.insert(id, Arc::clone(&job_cancel));
@@ -1132,7 +1187,8 @@ fn recover_due_renderer(
         Some(active.session_id),
         format!(
             "group {id}: background attempt {}, desktop revision {}",
-            pending.attempts, before.1
+            pending.attempts.len(),
+            before.1
         ),
     );
     thread::spawn(move || {
@@ -1223,7 +1279,10 @@ fn complete_recovery(
     match completed.result {
         Ok(()) if completed.paused => {}
         Ok(()) => {
-            run.recovery.remove(&completed.id);
+            run.recovery
+                .get_mut(&completed.id)
+                .expect("completed recovery")
+                .recovered();
             diagnostics::log(
                 Level::Info,
                 "controller",
@@ -1247,6 +1306,11 @@ fn complete_recovery(
                 error.to_string()
             };
             pending.failed(Instant::now(), message.clone(), retryable);
+            // Accepted clean cancellation means this attempt exhausted its topology wait.
+            // Keep it paused until a desktop transition or an explicit restart.
+            if error.is_clean_cancellation() {
+                pending.next = None;
+            }
             diagnostics::log(
                 if pending.exhausted() {
                     Level::Error
@@ -1667,13 +1731,13 @@ mod tests {
         let now = Instant::now();
         let mut pending = PendingRecovery::new(now, false);
         assert!(pending.next.is_none());
-        assert!(pending.deadline.is_none());
+        assert!(pending.attempts.is_empty());
         let unlocked = now + Duration::from_secs(3600);
         pending.desktop_changed(unlocked, true);
         assert_eq!(pending.next, Some(unlocked));
         assert_eq!(
             pending.begin_attempt(unlocked),
-            unlocked + RENDERER_RECOVERY_WINDOW
+            Some(unlocked + RENDERER_RECOVERY_WINDOW)
         );
 
         let now = Instant::now();
@@ -1682,8 +1746,7 @@ mod tests {
         pending.failed(now, "access lost".into(), true);
         pending.desktop_changed(now + Duration::from_secs(1), false);
         assert!(pending.next.is_none());
-        assert!(pending.deadline.is_none());
-        assert_eq!(pending.attempts, 0);
+        assert!(pending.attempts.is_empty());
         assert!(!pending.exhausted());
 
         let now = Instant::now();
@@ -1697,31 +1760,46 @@ mod tests {
     }
 
     #[test]
-    fn transient_recovery_keeps_attempt_and_deadline_bounds_until_a_desktop_change() {
+    fn transient_recovery_is_rate_limited_until_a_desktop_change() {
         let now = Instant::now();
         let mut pending = PendingRecovery::new(now, true);
         for attempt in 0..RENDERER_RECOVERY_ATTEMPTS {
             let time = now + Duration::from_secs(u64::from(attempt) * 2);
-            pending.begin_attempt(time);
+            assert!(pending.begin_attempt(time).is_some());
+            assert!(!pending.exhausted());
             pending.failed(time, "DuplicateOutput: E_ACCESSDENIED".into(), true);
         }
-        assert!(pending.exhausted());
-        assert!(pending.next.is_none());
-        pending.desktop_changed(now + Duration::from_secs(60), true);
-        assert_eq!(pending.attempts, 0);
-        assert!(pending.error.is_none());
-        assert!(pending.next.is_some());
-
-        let now = Instant::now();
-        let mut pending = PendingRecovery::new(now, true);
-        let deadline = pending.begin_attempt(now);
-        pending.failed(now, "access denied".into(), true);
-        assert_eq!(
-            pending.begin_attempt(now + Duration::from_secs(25)),
-            deadline
+        assert!(
+            pending
+                .begin_attempt(now + Duration::from_secs(8))
+                .is_none()
         );
-        pending.failed(deadline, "access denied".into(), true);
         assert!(pending.exhausted());
+        assert!(
+            pending
+                .begin_attempt(now + Duration::from_secs(60))
+                .is_none()
+        );
+        pending.desktop_changed(now + Duration::from_secs(60), true);
+        assert!(pending.attempts.is_empty());
+        assert!(
+            pending
+                .begin_attempt(now + Duration::from_secs(60))
+                .is_some()
+        );
+
+        let mut pending = PendingRecovery::new(now, true);
+        assert_eq!(
+            pending.begin_attempt(now),
+            Some(now + RENDERER_RECOVERY_WINDOW)
+        );
+        pending.failed(now + RENDERER_RECOVERY_WINDOW, "access denied".into(), true);
+        let next = now + Duration::from_secs(31);
+        assert_eq!(
+            pending.begin_attempt(next),
+            Some(next + RENDERER_RECOVERY_WINDOW)
+        );
+        assert_eq!(pending.attempts, vec![next]);
     }
 
     fn recovery_run() -> ActiveRun {
@@ -1891,42 +1969,155 @@ mod tests {
     }
 
     #[test]
-    fn healthy_capture_can_present_after_the_topology_budget() {
-        let mut run = recovery_run();
-        let mut pending = PendingRecovery::new(Instant::now(), true);
-        pending.begin_attempt(Instant::now() - RENDERER_RECOVERY_WINDOW - Duration::from_secs(1));
-        run.recovery.insert(0, pending);
-        run.recovery_jobs
-            .insert(0, Arc::new(AtomicBool::new(false)));
-        let group = run.session.take_recovery_group(0);
-        let mut active = Some(run);
-        let (tx, _) = mpsc::channel();
-        let (events, rx) = mpsc::channel();
-        complete_recovery(
-            &mut active,
-            RecoveryCompletion {
-                generation: 1,
-                id: 0,
-                desktop: (true, 0),
-                group,
-                topology: None,
-                result: Ok(()),
-                cleaned: false,
-                paused: false,
-            },
-            None,
-            &tx,
-            &|event| {
-                events.send(event).unwrap();
-            },
-        );
-        let run = active.as_ref().unwrap();
-        assert!(run.recovery.is_empty());
-        assert!(run.recovery_jobs.is_empty());
-        assert!(rx.try_iter().any(|event| matches!(event,
-            ControllerEvent::State { state: "Running", error, .. } if error.is_empty()
-        )));
+    fn recovery_completion_distinguishes_late_success_from_topology_timeout() {
+        for success in [true, false] {
+            let mut run = recovery_run();
+            let mut pending = PendingRecovery::new(Instant::now(), true);
+            let deadline = pending
+                .begin_attempt(Instant::now() - RENDERER_RECOVERY_WINDOW - Duration::from_secs(1))
+                .unwrap();
+            run.recovery.insert(0, pending);
+            run.recovery_jobs
+                .insert(0, Arc::new(AtomicBool::new(false)));
+            let mut group = run.session.take_recovery_group(0);
+            let result = if success {
+                Ok(())
+            } else {
+                // Expired before the first topology read: no real desktop operations.
+                let (_, result) = group.recover(Arc::clone(&run.reporter), deadline, || false);
+                assert!(result.as_ref().unwrap_err().is_clean_cancellation());
+                result
+            };
+            let mut active = Some(run);
+            let (tx, _) = mpsc::channel();
+            let (events, rx) = mpsc::channel();
+            complete_recovery(
+                &mut active,
+                RecoveryCompletion {
+                    generation: 1,
+                    id: 0,
+                    desktop: (true, 0),
+                    group,
+                    topology: None,
+                    result,
+                    cleaned: false,
+                    paused: false,
+                },
+                None,
+                &tx,
+                &|event| {
+                    events.send(event).unwrap();
+                },
+            );
+            let run = active.as_ref().unwrap();
+            let pending = &run.recovery[&0];
+            assert_eq!(pending.healthy, success);
+            assert_eq!(pending.exhausted(), !success);
+            assert!(pending.resumable);
+            assert!(run.recovery_jobs.is_empty());
+            assert!(next_recovery_delay(run).is_none());
+            let expected_state = if success { "Running" } else { "Degraded" };
+            assert!(rx.try_iter().any(|event| matches!(event,
+                ControllerEvent::State { state, error, .. }
+                    if state == expected_state && error.is_empty() == success
+            )));
+        }
     }
+    #[test]
+    fn capture_recovery_counts_attempts_in_a_sliding_window() {
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        for attempt in 0..RENDERER_RECOVERY_ATTEMPTS {
+            let time = now + Duration::from_secs(u64::from(attempt) * 2);
+            assert!(pending.begin_attempt(time).is_some());
+            pending.recovered();
+            pending.capture_lost(time + Duration::from_millis(600), true);
+        }
+        assert!(
+            pending
+                .begin_attempt(now + Duration::from_secs(8))
+                .is_none()
+        );
+        assert!(pending.exhausted());
+        pending.capture_lost(now + Duration::from_secs(60), true);
+        assert!(
+            pending
+                .begin_attempt(now + Duration::from_secs(60))
+                .is_none()
+        );
+
+        let mut pending = PendingRecovery::new(now, true);
+        for second in [0, 20, 35] {
+            let time = now + Duration::from_secs(second);
+            assert_eq!(
+                pending.begin_attempt(time),
+                Some(time + RENDERER_RECOVERY_WINDOW)
+            );
+            pending.recovered();
+            pending.capture_lost(time, true);
+        }
+        assert_eq!(
+            pending.attempts,
+            vec![now + Duration::from_secs(20), now + Duration::from_secs(35)]
+        );
+
+        // A long first attempt must not consume the next attempt's timeout.
+        let mut pending = PendingRecovery::new(now, true);
+        pending.begin_attempt(now);
+        pending.recovered();
+        pending.capture_lost(now + Duration::from_secs(31), true);
+        assert_eq!(
+            pending.begin_attempt(now + Duration::from_secs(31)),
+            Some(now + Duration::from_secs(61))
+        );
+        assert_eq!(pending.attempts.len(), 1);
+    }
+
+    #[test]
+    fn exhausted_flapping_capture_only_cleans_up_and_keeps_stop_available() {
+        let mut run = recovery_run();
+        let now = Instant::now();
+        let mut pending = PendingRecovery::new(now, true);
+        for _ in 0..RENDERER_RECOVERY_ATTEMPTS {
+            pending.begin_attempt(now);
+            pending.recovered();
+            pending.capture_lost(now, true);
+        }
+        pending.pause = true;
+        run.recovery.insert(0, pending);
+        let (tx, rx) = mpsc::channel();
+        let (events, event_rx) = mpsc::channel();
+        let emit = |event| events.send(event).unwrap();
+        recover_due_renderer(&mut run, None, (true, 0), &tx, &emit);
+        let Message::Recovered(completed) = rx.recv_timeout(Duration::from_secs(3)).unwrap() else {
+            panic!("expected cleanup completion");
+        };
+        assert!(completed.paused, "must not start another capture attempt");
+        assert!(completed.result.is_ok());
+        let mut active = Some(run);
+        complete_recovery(&mut active, *completed, None, &tx, &emit);
+        let run = active.as_mut().unwrap();
+        assert_eq!(
+            run.recovery[&0].attempts.len(),
+            usize::from(RENDERER_RECOVERY_ATTEMPTS)
+        );
+        assert!(run.recovery[&0].exhausted());
+        assert!(run.recovery_jobs.is_empty());
+        assert!(next_recovery_delay(run).is_none());
+        recover_due_renderer(run, None, (true, 0), &tx, &emit);
+        assert!(run.recovery_jobs.is_empty());
+        assert!(event_rx.try_iter().any(|event| matches!(
+            event,
+            ControllerEvent::State {
+                state: "Degraded",
+                running: true,
+                ..
+            }
+        )));
+        request_stop(&active, &emit);
+        assert!(active.as_ref().unwrap().cancel.load(Ordering::Acquire));
+    }
+
     #[test]
     fn scheduled_recovery_leaves_refresh_and_stop_handlers_available() {
         let mut run = recovery_run();
