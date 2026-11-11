@@ -1,5 +1,11 @@
 ![SBMS banner](assets/sbms-banner.png?v=75f6b3b)
 
+![SBMS 代码历史：新增行数为绿色上涨，删除行数为红色下跌](assets/readme/code-history.svg)
+
+![手机后盖上的 ChatGPT Logo](assets/readme/coding-chatgpt.png)
+
+~~老实coding, 很枯燥吧~~
+
 # SBMS
 
 > [!TIP]

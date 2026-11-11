@@ -1,5 +1,11 @@
 ![SBMS banner](assets/sbms-banner.png?v=75f6b3b)
 
+![SBMS code history: added lines rise in green, deleted lines fall in red](assets/readme/code-history.svg)
+
+![ChatGPT logo on the back of a phone](assets/readme/coding-chatgpt.png)
+
+~~Just coding. Pretty boring, huh?~~
+
 # SBMS
 
 [简体中文](README.md) · [Download](https://github.com/EvanZhu0721/SBMS/releases/latest) · [Documentation](docs/README.md#english)
