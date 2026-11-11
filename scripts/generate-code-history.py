@@ -31,8 +31,13 @@ for line in history.splitlines():
     # Compare each mainline tree to its predecessor, including merge results once.
     args = ("diff", previous, sha) if previous else ("diff-tree", "--root", "--no-commit-id", "-r", sha)
     stats = git(*args, "--numstat", "--no-renames")
+    entries = stats.splitlines()
+    # Chart-only commits must not add points or change the snapshot metadata.
+    if entries and all(entry.split("\t", 2)[2] == "assets/readme/code-history.svg" for entry in entries):
+        previous = sha
+        continue
     added = deleted = 0
-    for entry in stats.splitlines():
+    for entry in entries:
         a, d, path = entry.split("\t", 2)
         if a != "-" and is_code(path):
             added += int(a)
@@ -56,7 +61,7 @@ def y(value):
 
 svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-labelledby="title desc">',
        '<title id="title">SBMS code history</title>',
-       f'<desc id="desc">Mainline source-code changes, {commits[0][1]} to {commits[-1][1]}. Each commit adds green upward candles then red downward candles. Linear cumulative net lines; equal spacing per commit. Excludes vendor code, non-code files and this chart generator. Snapshot {ref}.</desc>',
+       f'<desc id="desc">Mainline source-code changes, {commits[0][1]} to {commits[-1][1]}. Each commit adds green upward candles then red downward candles. Linear cumulative net lines; equal spacing per commit. Excludes vendor code, non-code files, this chart generator and chart-only commits. Snapshot {commits[-1][0]}.</desc>',
        f'<rect width="{W}" height="{H}" rx="24" fill="#10161e"/>',
        '<g font-family="Segoe UI,Arial,sans-serif">']
 
