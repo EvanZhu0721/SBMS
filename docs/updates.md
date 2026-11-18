@@ -36,9 +36,9 @@ updates. A signing-certificate change requires a manual upgrade.
 - Keep `UPDATE_REVISION` at `1` for a new package version. Increment it for a
   replacement installer with the same version. Each version/revision identifies
   one installer and must not be reused for different content.
-- Run the normal signed `build-installer.ps1` without `OutputSuffix`. In addition
-  to the usual installer, it creates `SBMS-Setup-<version>-x64-r<revision>.exe`
-  and `update.json` under `target/installer`.
+- Run the normal signed `build-installer.ps1` without `OutputSuffix`. It creates
+  one `SBMS-Setup-<version>-x64-r<revision>.exe` and `update.json` under
+  `target/installer`. Manual downloads and automatic updates use this same installer.
 - Upload the revision-specific installer first, then `update.json`, to the stable
   `v<version>` Release. Keep that Release selected as the latest stable release.
   Beta and unsigned builds do not produce update metadata.
@@ -50,7 +50,6 @@ updates. A signing-certificate change requires a manual upgrade.
   re-sign the mirrored installer. Both sources use the same signature checks.
   The blog's mirror timer handles this about every 15 minutes; starting
   `blog-mirror.service` after publication synchronizes it immediately.
-- Preserve the existing `SBMS-Setup-<version>-x64.exe` asset for manual downloads.
 
 The updater reads
 `https://github.com/EvanZhu0721/SBMS/releases/latest/download/update.json` first,

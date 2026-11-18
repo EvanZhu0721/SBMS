@@ -18,22 +18,6 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-function Get-Sha256Hex {
-    param([Parameter(Mandatory)][string]$LiteralPath)
-
-    $algorithm = [Security.Cryptography.SHA256]::Create()
-    $stream = [IO.File]::OpenRead($LiteralPath)
-    try {
-        return [BitConverter]::ToString(
-            $algorithm.ComputeHash($stream)
-        ).Replace('-', '')
-    }
-    finally {
-        $stream.Dispose()
-        $algorithm.Dispose()
-    }
-}
-
 $repository = $PSScriptRoot
 & (Join-Path $repository 'installer\generate-ui-assets.ps1')
 $release = Join-Path $repository 'target\release'
@@ -127,6 +111,9 @@ if ($signedBuild) {
 
 New-Item -ItemType Directory -Path $installer -Force | Out-Null
 $packageSuffix = if ($signedBuild) { $OutputSuffix } else { '-unsigned' + $OutputSuffix }
+if ($signedBuild -and $OutputSuffix -eq '') {
+    $packageSuffix = "-r$updateRevision"
+}
 $package = Join-Path $installer "SBMS-Setup-$version-x64$packageSuffix.exe"
 if (Test-Path -LiteralPath $package) {
     Remove-Item -LiteralPath $package -Force
@@ -176,16 +163,13 @@ if ($signedBuild) {
 Write-Host "installer_package=$package"
 Write-Host "installer_signed=$signedBuild"
 if ($signedBuild -and $OutputSuffix -eq '') {
-    # Keep the public download filename and provide an immutable asset for each revision.
-    $updatePackage = Join-Path $installer "SBMS-Setup-$version-x64-r$updateRevision.exe"
-    Copy-Item -LiteralPath $package -Destination $updatePackage -Force
     $updateManifest = Join-Path $installer 'update.json'
     $updateMetadata = [ordered]@{
         version = $version
         revision = $updateRevision
-        size = (Get-Item -LiteralPath $updatePackage).Length
+        size = (Get-Item -LiteralPath $package).Length
     } | ConvertTo-Json
     [IO.File]::WriteAllText($updateManifest, $updateMetadata, [Text.UTF8Encoding]::new($false))
-    Write-Host "update_package=$updatePackage"
+    Write-Host "update_package=$package"
     Write-Host "update_manifest=$updateManifest"
 }
