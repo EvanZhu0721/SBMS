@@ -5,6 +5,7 @@
 ![手机后盖上的 ChatGPT Logo](assets/readme/coding-chatgpt.png)
 
 ~~老实coding, 很枯燥吧~~
+
 1.2.0只是技术性调整, 才不是什么屎山山体滑坡()
 
 # SBMS
