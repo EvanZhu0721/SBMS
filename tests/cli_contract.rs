@@ -55,6 +55,7 @@ fn usage() -> &'static str {
     "usage:
   sbms --version
   sbms list
+  sbms gpus
   sbms map [--target <monitor-device-path>] [--hold-ms <milliseconds>]
   sbms plan validate <plan.json>
   sbms plan run <plan.json> [--hold-ms <milliseconds>]

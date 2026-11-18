@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, GetLastError, HANDLE, HLOCAL,
-    INVALID_HANDLE_VALUE, LocalFree,
+    INVALID_HANDLE_VALUE, LUID, LocalFree,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -25,9 +25,9 @@ use windows::core::{PCWSTR, PWSTR, w};
 
 use crate::limits::{MAX_OUTPUTS, MAX_REFRESH_HZ, MAX_VIRTUAL_DIMENSION, MIN_REFRESH_HZ};
 
-const GATE_MAGIC: u32 = 0x5342_4738;
-const PROTOCOL_VERSION: u32 = 8;
-const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v8");
+const GATE_MAGIC: u32 = 0x5342_4739;
+const PROTOCOL_VERSION: u32 = 9;
+const GATE_MAPPING: PCWSTR = w!("Global\\SBMSSession-v9");
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VirtualMode {
@@ -161,6 +161,9 @@ struct GateConfig {
     header: GateHeader,
     entries: [GateEntry; MAX_OUTPUTS],
     identities: [GateIdentity; MAX_OUTPUTS],
+    preferred_adapter_low: u32,
+    preferred_adapter_high: i32,
+    render_adapters: [GateRenderAdapter; MAX_OUTPUTS],
 }
 
 // The driver brackets each publication with InterlockedExchange. Odd sequence
@@ -172,6 +175,23 @@ struct GateIdentity {
     adapter_low: AtomicU32,
     adapter_high: AtomicI32,
     target_id: AtomicU32,
+}
+
+#[repr(C)]
+#[derive(Debug, Default)]
+struct GateRenderAdapter {
+    sequence: AtomicU32,
+    adapter_low: AtomicU32,
+    adapter_high: AtomicI32,
+    active: AtomicU32,
+}
+
+/// The adapter read back from the driver's successfully initialized D3D device.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConnectorRenderAdapter {
+    pub connector_index: u32,
+    pub adapter_low: u32,
+    pub adapter_high: i32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -200,19 +220,41 @@ impl GateConfig {
             },
             entries,
             identities: std::array::from_fn(|_| GateIdentity::default()),
+            preferred_adapter_low: 0,
+            preferred_adapter_high: 0,
+            render_adapters: std::array::from_fn(|_| GateRenderAdapter::default()),
         })
     }
 
-    fn published_identities(&self) -> Result<Vec<ConnectorIdentity>, SessionGateError> {
+    fn with_adapter(
+        displays: &[VirtualDisplayConfig],
+        adapter: Option<LUID>,
+    ) -> Result<Self, SessionGateError> {
+        let mut config = Self::from_displays(displays)?;
+        if let Some(adapter) = adapter {
+            config.header.reserved = 1;
+            config.preferred_adapter_low = adapter.LowPart;
+            config.preferred_adapter_high = adapter.HighPart;
+        }
+        Ok(config)
+    }
+
+    fn validate_header(&self) -> Result<(), SessionGateError> {
         if self.header.magic != GATE_MAGIC
             || self.header.version != PROTOCOL_VERSION
             || self.header.count == 0
             || self.header.count as usize > MAX_OUTPUTS
+            || self.header.reserved > 1
         {
             return Err(SessionGateError(
                 "invalid driver identity protocol header".into(),
             ));
         }
+        Ok(())
+    }
+
+    fn published_identities(&self) -> Result<Vec<ConnectorIdentity>, SessionGateError> {
+        self.validate_header()?;
         let mut identities = Vec::new();
         for entry in &self.entries[..self.header.count as usize] {
             let slot = self
@@ -252,6 +294,32 @@ impl GateConfig {
         }
         Ok(identities)
     }
+
+    fn published_render_adapters(&self) -> Result<Vec<ConnectorRenderAdapter>, SessionGateError> {
+        self.validate_header()?;
+        let mut adapters = Vec::new();
+        for entry in &self.entries[..self.header.count as usize] {
+            let slot = self
+                .render_adapters
+                .get(entry.connector_index as usize)
+                .ok_or_else(|| SessionGateError("driver GPU connector is out of range".into()))?;
+            let sequence = slot.sequence.load(Ordering::Acquire);
+            if sequence == 0 || sequence % 2 != 0 {
+                continue;
+            }
+            let adapter = ConnectorRenderAdapter {
+                connector_index: entry.connector_index,
+                adapter_low: slot.adapter_low.load(Ordering::Relaxed),
+                adapter_high: slot.adapter_high.load(Ordering::Relaxed),
+            };
+            let active = slot.active.load(Ordering::Relaxed);
+            std::sync::atomic::fence(Ordering::AcqRel);
+            if slot.sequence.load(Ordering::Acquire) == sequence && active == 1 {
+                adapters.push(adapter);
+            }
+        }
+        Ok(adapters)
+    }
 }
 
 pub(crate) fn published_connector_identities() -> Result<Vec<ConnectorIdentity>, SessionGateError> {
@@ -259,6 +327,13 @@ pub(crate) fn published_connector_identities() -> Result<Vec<ConnectorIdentity>,
 }
 
 fn read_connector_identities(name: PCWSTR) -> Result<Vec<ConnectorIdentity>, SessionGateError> {
+    read_gate(name, GateConfig::published_identities)
+}
+
+fn read_gate<T>(
+    name: PCWSTR,
+    read: fn(&GateConfig) -> Result<Vec<T>, SessionGateError>,
+) -> Result<Vec<T>, SessionGateError> {
     let gate = match unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, name) } {
         Ok(gate) => gate,
         Err(error)
@@ -268,28 +343,36 @@ fn read_connector_identities(name: PCWSTR) -> Result<Vec<ConnectorIdentity>, Ses
         }
         Err(error) => return Err(SessionGateError(format!("open driver identities: {error}"))),
     };
-    let view = unsafe { MapViewOfFile(gate, FILE_MAP_READ, 0, 0, size_of::<GateConfig>()) };
-    let result = if view.Value.is_null() {
-        Err(SessionGateError(format!(
-            "map driver identities: {}",
-            windows::core::Error::from_thread()
-        )))
-    } else {
-        // The immutable request and atomic response remain mapped for this read.
-        let result = unsafe { &*view.Value.cast::<GateConfig>() }.published_identities();
-        unsafe {
-            let _ = UnmapViewOfFile(view);
-        }
-        result
-    };
+    let result = read_gate_handle(gate, read);
     unsafe {
         let _ = CloseHandle(gate);
     }
     result
 }
 
+fn read_gate_handle<T>(
+    gate: HANDLE,
+    read: fn(&GateConfig) -> Result<Vec<T>, SessionGateError>,
+) -> Result<Vec<T>, SessionGateError> {
+    let view = unsafe { MapViewOfFile(gate, FILE_MAP_READ, 0, 0, size_of::<GateConfig>()) };
+    if view.Value.is_null() {
+        Err(SessionGateError(format!(
+            "map driver identities: {}",
+            windows::core::Error::from_thread()
+        )))
+    } else {
+        // The immutable request and atomic response remain mapped for this read.
+        let result = read(unsafe { &*view.Value.cast::<GateConfig>() });
+        unsafe {
+            let _ = UnmapViewOfFile(view);
+        }
+        result
+    }
+}
+
 pub struct SessionGate {
     gate: HANDLE,
+    legacy_gate: HANDLE,
 }
 
 #[derive(Debug)]
@@ -304,12 +387,26 @@ impl Display for SessionGateError {
 impl Error for SessionGateError {}
 
 impl SessionGate {
+    pub fn published_render_adapters(
+        &self,
+    ) -> Result<Vec<ConnectorRenderAdapter>, SessionGateError> {
+        read_gate_handle(self.gate, GateConfig::published_render_adapters)
+    }
+
     pub fn create(mode: VirtualMode) -> Result<Self, SessionGateError> {
         Self::create_many(&[VirtualDisplayConfig::new(0, mode)])
     }
 
     pub fn create_many(displays: &[VirtualDisplayConfig]) -> Result<Self, SessionGateError> {
-        let config = GateConfig::from_displays(displays)?;
+        Self::create_many_with_adapter(displays, None)
+    }
+
+    /// One IDD adapter owns every display in this session, so this preference is global.
+    pub fn create_many_with_adapter(
+        displays: &[VirtualDisplayConfig],
+        adapter: Option<LUID>,
+    ) -> Result<Self, SessionGateError> {
+        let config = GateConfig::with_adapter(displays, adapter)?;
         let descriptor = SecurityDescriptor::for_current_user()?;
         let attributes = descriptor.attributes();
         let gate = unsafe {
@@ -345,7 +442,41 @@ impl SessionGate {
             let _ = UnmapViewOfFile(gate_view);
         }
 
-        Ok(Self { gate })
+        // Old products and diagnostic packages use this name as their busy check.
+        // Reserve it without a valid v8 request, so an old driver cannot start a
+        // different session alongside the v9 host.
+        let legacy = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                Some(&attributes),
+                PAGE_READWRITE,
+                0,
+                1,
+                w!("Global\\SBMSSession-v8"),
+            )
+        };
+        let legacy_gate = match legacy {
+            Ok(handle) if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS => handle,
+            Ok(handle) => {
+                unsafe {
+                    let _ = CloseHandle(handle);
+                    let _ = CloseHandle(gate);
+                }
+                return Err(SessionGateError(
+                    "another SBMS mapping or diagnostic session is active; stop it before starting"
+                        .into(),
+                ));
+            }
+            Err(error) => {
+                unsafe {
+                    let _ = CloseHandle(gate);
+                }
+                return Err(SessionGateError(format!(
+                    "reserve legacy session gate: {error}"
+                )));
+            }
+        };
+        Ok(Self { gate, legacy_gate })
     }
 }
 
@@ -389,6 +520,7 @@ impl Drop for SessionGate {
     fn drop(&mut self) {
         unsafe {
             let _ = CloseHandle(self.gate);
+            let _ = CloseHandle(self.legacy_gate);
         }
     }
 }
@@ -479,7 +611,9 @@ mod tests {
         assert_eq!(size_of::<GateEntry>(), 20);
         assert_eq!(size_of::<GateIdentity>(), 16);
         assert_eq!(std::mem::offset_of!(GateConfig, identities), 336);
-        assert_eq!(size_of::<GateConfig>(), 592);
+        assert_eq!(size_of::<GateRenderAdapter>(), 16);
+        assert_eq!(std::mem::offset_of!(GateConfig, render_adapters), 600);
+        assert_eq!(size_of::<GateConfig>(), 856);
         assert_eq!(config.header.count, 1);
         assert_eq!(config.entries[0].width, 4640);
         assert_eq!(config.entries[0].height, 2610);
@@ -508,6 +642,19 @@ mod tests {
         assert_eq!(config.entries[1].connector_index, 2);
         assert_eq!(config.entries[1].refresh_numerator, 165);
         assert_eq!(config.entries[2], GateEntry::default());
+
+        let explicit = GateConfig::with_adapter(
+            &displays,
+            Some(LUID {
+                LowPart: 0xaabbccdd,
+                HighPart: -2,
+            }),
+        )
+        .unwrap();
+        assert_eq!(explicit.header.reserved, 1);
+        assert_eq!(explicit.preferred_adapter_low, 0xaabbccdd);
+        assert_eq!(explicit.preferred_adapter_high, -2);
+        assert!(explicit.published_render_adapters().unwrap().is_empty());
     }
 
     #[test]
@@ -649,6 +796,34 @@ mod tests {
         slot.target_id.store(0, Ordering::Relaxed);
         slot.sequence.store(2, Ordering::Release);
         let received = read_connector_identities(PCWSTR(name.as_ptr())).unwrap();
+        let render_slot = unsafe { &(*view.Value.cast::<GateConfig>()).render_adapters[5] };
+        render_slot.sequence.store(1, Ordering::SeqCst);
+        render_slot.adapter_low.store(77, Ordering::Relaxed);
+        render_slot.adapter_high.store(-3, Ordering::Relaxed);
+        render_slot.active.store(1, Ordering::Relaxed);
+        assert!(
+            read_gate(PCWSTR(name.as_ptr()), GateConfig::published_render_adapters)
+                .unwrap()
+                .is_empty()
+        );
+        render_slot.sequence.store(2, Ordering::Release);
+        assert_eq!(
+            read_gate(PCWSTR(name.as_ptr()), GateConfig::published_render_adapters).unwrap(),
+            vec![ConnectorRenderAdapter {
+                connector_index: 5,
+                adapter_low: 77,
+                adapter_high: -3,
+            }]
+        );
+        // Unassign invalidates the old GPU even though its payload remains in memory.
+        render_slot.sequence.store(3, Ordering::SeqCst);
+        render_slot.active.store(0, Ordering::Relaxed);
+        render_slot.sequence.store(4, Ordering::Release);
+        assert!(
+            read_gate(PCWSTR(name.as_ptr()), GateConfig::published_render_adapters)
+                .unwrap()
+                .is_empty()
+        );
         unsafe {
             let _ = UnmapViewOfFile(view);
             let _ = CloseHandle(handle);

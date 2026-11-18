@@ -12,6 +12,18 @@ session.groups();
 session.stop()?;
 ```
 
+`MappingPlan::preferred_gpu` optionally contains a persistent adapter device path
+from `sbms gpus`; `MappingPlan::new` defaults it to `None`. One preference applies
+to all groups because they share an IDD adapter. An unavailable explicit GPU
+fails startup before virtual device creation. Automatic (`None`) leaves the
+choice to Windows. Restarts preserve the selected preference.
+
+`session.gpu_changes()` returns changed `(group_id, Option<gpu_name>)` values
+read from the driver's actual device receipts. `None` clears an assignment that
+became unavailable; the saved preference alone is not evidence of actual use.
+Library hosts must initialize `capture_routing::initialize_from_env()` once,
+before their first DXGI/D3D call, as the CLI and tray hosts do.
+
 `MappingRoute::Mirror { target }` creates a virtual display, migrates windows
 from the physical target, and starts the GPU mirror and input endpoint.
 `MappingRoute::StreamOnly` only creates and mode-confirms the virtual display.
@@ -80,7 +92,12 @@ The CLI provides a GUI-independent validation and execution surface:
 sbms plan validate plan.json
 sbms plan run plan.json
 sbms plan run plan.json --hold-ms 30000
+sbms gpus
 ```
+
+The plan JSON accepts an optional top-level `"preferred_gpu": "<adapter-id>"`.
+Omitted or `null` means Automatic. GPU availability is checked when starting the
+plan; offline `plan validate` does not require that GPU to be present.
 
 Example with one local mirror and one streaming desktop:
 

@@ -169,9 +169,9 @@ Each streaming output group has its own connection address. Use the information 
 
 ## Known Issue
 
-On some multi-GPU systems, if this program is assigned to run on a GPU that is not driving the current display output, frame capture failure or mapping errors may occur.
+Version 2.2.0 preserves native output ownership during capture to avoid failures caused by Windows application GPU preferences reassigning outputs. To choose the preferred GPU for virtual displays, stop mapping and use `GPU · All groups` in SBMS settings. Windows per-application GPU preferences no longer select SBMS's capture GPU. `Active` reports the driver's actual GPU, which may differ from the preference.
 
-If you encounter such issues, it is recommended to assign this program to run on the GPU that is responsible for the current display output.
+This path has been verified locally; the different hardware reported in [#50](https://github.com/EvanZhu0721/SBMS/issues/50) and [#59](https://github.com/EvanZhu0721/SBMS/issues/59) still needs retesting. If startup fails, include SBMS logs, GPU models and driver versions. See [GPU routing](docs/rendering.md#gpu-routing) for compatibility limits and troubleshooting.
 
 For details, see [issue#50](https://github.com/EvanZhu0721/SBMS/issues/50).
 

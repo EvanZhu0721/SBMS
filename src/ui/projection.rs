@@ -47,12 +47,15 @@ pub(super) fn project_group_telemetry(
         return;
     };
     let telemetry = &group.telemetry;
+    ui.set_actual_gpu(telemetry.gpu_name.as_deref().unwrap_or("").into());
+    let error = telemetry.runtime_error
+        || (group.stream_only && telemetry.sunshine_state == SunshineState::Failed);
     let monitor = TrayMonitor {
         fps: telemetry.fps.unwrap_or_default().min(999) as i32,
         valid: telemetry.fps.is_some(),
         running: ui.get_running(),
-        error: telemetry.error,
-        not_a_number: ui.get_stream_only() && !telemetry.error,
+        error,
+        not_a_number: ui.get_stream_only() && !error,
     };
     ui.set_mapping_fps(monitor.fps);
     ui.set_mapping_fps_valid(monitor.valid);

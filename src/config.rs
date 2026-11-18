@@ -49,6 +49,9 @@ pub enum ReferenceSource {
 pub struct AppConfig {
     pub version: u32,
     pub groups: Vec<GroupConfig>,
+    /// Preferred render GPU for all virtual displays in this profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_gpu: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_group_id: Option<u32>,
 }
@@ -307,6 +310,7 @@ impl Default for AppConfig {
         Self {
             version: CONFIG_VERSION,
             groups: vec![GroupConfig::default()],
+            preferred_gpu: None,
             selected_group_id: Some(0),
         }
     }
@@ -517,6 +521,7 @@ impl From<LegacyAppConfig> for AppConfig {
     fn from(legacy: LegacyAppConfig) -> Self {
         Self {
             version: CONFIG_VERSION,
+            preferred_gpu: None,
             groups: vec![GroupConfig {
                 id: 0,
                 route: GroupRouteConfig::Mirror {
@@ -1743,6 +1748,7 @@ mod tests {
         let store = test_store("round-trip");
         let mut config = AppConfig {
             version: CONFIG_VERSION,
+            preferred_gpu: Some("persistent-gpu-id".into()),
             groups: vec![
                 GroupConfig {
                     id: 0,

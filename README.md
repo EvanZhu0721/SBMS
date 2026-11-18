@@ -192,8 +192,9 @@ SBMS 通过脏区域更新, 资源复用和动态刷新减少开销. 实际占�
 
 ## 已知问题
 
-在部分多 GPU 系统中，如果将本程序指定到非当前显示器输出的显卡上运行，可能出现无法取帧、映射失败的情况。
-若出现类似情况，建议将本程序指定到负责在当前显示器输出的显卡上运行。
+2.2.0 调整了多显卡环境下的采集路由，避免 Windows 的应用显卡偏好把输出移到另一张显卡后导致无法取帧。需要指定虚拟屏使用的显卡时，请停止映射，在 SBMS 设置中的 `GPU · All groups` 选择；Windows 图形设置中的应用显卡偏好不再决定 SBMS 的采集显卡。`Active` 显示驱动实际使用的显卡，可能与偏好不同。
+
+该方案已在本机验证，但 [#50](https://github.com/EvanZhu0721/SBMS/issues/50)、[#59](https://github.com/EvanZhu0721/SBMS/issues/59) 的不同硬件仍需复测。若仍启动失败，请提供 SBMS 日志、显卡型号和驱动版本。兼容边界与排障方式见 [GPU routing](docs/rendering.md#gpu-routing)。
 
 详见 [issue#50](https://github.com/EvanZhu0721/SBMS/issues/50)。
 

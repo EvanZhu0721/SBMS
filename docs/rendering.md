@@ -13,7 +13,7 @@ Stop mapping before editing these options.
 | Static refresh | Present when new desktop pixels arrive | Also present the cached output at the target display's refresh rate while the desktop is unchanged |
 
 These settings control SBMS's local mirror renderer. Stream-only groups send the
-virtual screen directly to Sunshine and therefore do not show this control.
+virtual screen directly to Sunshine and do not use these three rendering options.
 Manual reference editing remains available through the pencil beside the shared
 reference.
 
@@ -31,6 +31,30 @@ directly to the output, using the output cache if static refresh is enabled.
 For other sizes, when Full-frame copy is off and the acquired texture supports
 a shader-resource view, the renderer samples it directly without a source copy.
 Otherwise it uses the source-copy policy above.
+
+## GPU routing
+
+**GPU · All groups** selects the preferred GPU for the profile's virtual
+displays. Automatic leaves that choice to Windows. SBMS captures and scales on
+the source output's native adapter; the **Active** value comes from the driver's
+actual device, not the saved preference. Change the preference while mapping is
+stopped. A missing explicitly selected GPU blocks startup instead of silently
+substituting another card.
+
+The process-local native-routing hook prevents Windows application GPU
+preferences from moving DXGI outputs away from their native adapters. Windows
+Settings' per-application **Power saving / High performance** choice therefore
+no longer forces SBMS's capture GPU; use SBMS's preference instead. Other
+processes, including games and Sunshine, keep their own GPU selection behavior.
+This does not change the sampling algorithm or its automatic default.
+
+The hook uses an undocumented Windows export and has no OS compatibility
+guarantee. Hook installation failures stop the graphics host with an error.
+For troubleshooting, `SBMS_NATIVE_OUTPUT_ROUTING=0` restores the old routing
+behavior on a fresh process. Set it in the actual host's environment: an existing
+tray or an elevated host launched by a scheduled task does not inherit a
+forwarding launcher's temporary environment. Mapping stop/start alone does not
+change this process-lifetime policy.
 
 ## Quality filter
 

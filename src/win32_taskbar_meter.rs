@@ -17,7 +17,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Error, PCWSTR, Result, w};
 
-use super::{TrayMonitor, WM_METER_MENU, WM_METER_TOGGLE};
+use super::{TrayMonitor, WM_METER_LAYOUT, WM_METER_MENU, WM_METER_TOGGLE};
 
 const CLASS: PCWSTR = w!("SbmsTaskbarMeter");
 const CONTROL_CLASS: PCWSTR = w!("SbmsTaskbarMeterControl");
@@ -27,6 +27,7 @@ const WM_STOP: u32 = WM_APP + 3;
 const LAYOUT_TIMER: usize = 1;
 // Nonzero alpha gives the entire rectangle native hit testing, including digit gaps.
 const BACKGROUND_PIXEL: u32 = 0x01000000;
+const UPDATE_READY_PIXEL: u32 = 0xffef4444;
 static CURRENT_METER: Mutex<Weak<Shared>> = Mutex::new(Weak::new());
 
 struct DpiContext(DPI_AWARENESS_CONTEXT);
@@ -46,6 +47,7 @@ struct Snapshot {
     control: isize,
     stopped: bool,
     monitor: TrayMonitor,
+    update_ready: bool,
     rect: Option<RECT>,
     #[cfg(test)]
     layout: Option<tests::TestLayout>,
@@ -84,6 +86,7 @@ impl TaskbarMeter {
                 control: 0,
                 stopped: false,
                 monitor: TrayMonitor::default(),
+                update_ready: false,
                 rect: None,
                 #[cfg(test)]
                 layout,
@@ -113,6 +116,14 @@ impl TaskbarMeter {
         let mut state = self.shared.lock();
         if state.monitor != monitor {
             state.monitor = monitor;
+            post_control(&state, WM_UPDATE);
+        }
+    }
+
+    pub(super) fn set_update_ready(&self, ready: bool) {
+        let mut state = self.shared.lock();
+        if state.update_ready != ready {
+            state.update_ready = ready;
             post_control(&state, WM_UPDATE);
         }
     }
@@ -369,15 +380,29 @@ impl Worker {
             None
         };
         let mut state = self.shared.lock();
-        if !state.stopped {
+        if !state.stopped && state.rect != screen {
             state.rect = screen;
+            // Publish the screen anchor before waking the UI, including parent-only moves.
+            if state.host != 0 {
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(HWND(state.host as *mut _)),
+                        WM_METER_LAYOUT,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
+            }
         }
         Ok(())
     }
 
     fn render(&self, rect: RECT) -> Result<bool> {
-        let monitor = self.shared.lock().monitor;
-        let frame = Frame::new(rect, monitor, self.light.get());
+        let (monitor, update_ready) = {
+            let state = self.shared.lock();
+            (state.monitor, state.update_ready)
+        };
+        let frame = Frame::new(rect, monitor, self.light.get(), update_ready);
         if self.rendered.get() == Some(frame) {
             return Ok(false);
         }
@@ -426,10 +451,11 @@ struct Frame {
     height: i32,
     glyphs: [u8; 3],
     color: u32,
+    update_ready: bool,
 }
 
 impl Frame {
-    fn new(rect: RECT, monitor: TrayMonitor, light: bool) -> Self {
+    fn new(rect: RECT, monitor: TrayMonitor, light: bool, update_ready: bool) -> Self {
         Self {
             width: rect.right - rect.left,
             height: rect.bottom - rect.top,
@@ -440,6 +466,7 @@ impl Frame {
                 (false, false) => 0xffcacaca,
                 (false, true) => 0xffffb4ab,
             },
+            update_ready,
         }
     }
 }
@@ -517,7 +544,7 @@ impl Drop for Surface {
 fn paint_pixels(pixels: &mut [u32], frame: Frame) {
     // BGRA bytes are premultiplied: black alpha=1 background; fully opaque colored segments.
     pixels.fill(BACKGROUND_PIXEL);
-    let scale = frame.width as f64 / 58.0;
+    let scale = frame.width as f64 / 60.0;
     let y = (frame.height as f64 - 24.0 * scale) / 2.0;
     let segments = [
         (2, 0, 10, 2),
@@ -542,6 +569,25 @@ fn paint_pixels(pixels: &mut [u32], frame: Frame) {
             for row in top_row..bottom {
                 let start = (row * frame.width) as usize;
                 pixels[start + left..start + right].fill(frame.color);
+            }
+        }
+    }
+    if frame.update_ready {
+        // Anchor the four-logical-pixel dot inside the meter's top-right corner.
+        let radius = 2.0 * scale;
+        let center_x = frame.width as f64 - radius;
+        let center_y = radius + 2.0 * scale;
+        let left = (center_x - radius).floor() as i32;
+        let right = (center_x + radius).ceil() as i32;
+        let top = (center_y - radius).floor() as i32;
+        let bottom = (center_y + radius).ceil() as i32;
+        for row in top.max(0)..bottom.min(frame.height) {
+            for column in left.max(0)..right.min(frame.width) {
+                let dx = column as f64 + 0.5 - center_x;
+                let dy = row as f64 + 0.5 - center_y;
+                if dx * dx + dy * dy <= radius * radius {
+                    pixels[(row * frame.width + column) as usize] = UPDATE_READY_PIXEL;
+                }
             }
         }
     }
@@ -630,8 +676,8 @@ unsafe extern "system" fn control_proc(
 fn layout(parent: RECT, notify_left: i32, dpi: u32) -> Option<RECT> {
     let height = parent.bottom - parent.top;
     let scale = (height as f64 / 36.0).min(dpi.max(96) as f64 / 96.0);
-    let width = (58.0 * scale).round() as i32;
-    let gap = (4.0 * scale).round() as i32;
+    let width = (60.0 * scale).round() as i32;
+    let gap = (2.0 * scale).round() as i32;
     let left = notify_left - gap - width;
     (height > 0 && width > 0 && left >= parent.left && notify_left <= parent.right).then_some(
         RECT {
@@ -726,6 +772,7 @@ mod tests {
     use windows::Win32::System::Threading::GetCurrentThreadId;
 
     static ACTIONS: AtomicU32 = AtomicU32::new(0);
+    static LAYOUT_NOTIFICATIONS: Mutex<Vec<Option<RECT>>> = Mutex::new(Vec::new());
 
     #[derive(Clone, Copy)]
     pub(super) struct TestLayout {
@@ -765,6 +812,10 @@ mod tests {
         wp: WPARAM,
         lp: LPARAM,
     ) -> LRESULT {
+        if message == WM_METER_LAYOUT {
+            LAYOUT_NOTIFICATIONS.lock().unwrap().push(meter_rect());
+            return LRESULT(0);
+        }
         if message == WM_METER_TOGGLE || message == WM_METER_MENU {
             ACTIONS.fetch_add(
                 if message == WM_METER_TOGGLE { 1 } else { 16 },
@@ -789,7 +840,7 @@ mod tests {
             Self(
                 unsafe {
                     CreateWindowExW(
-                        WINDOW_EX_STYLE::default(),
+                        WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                         class.lpszClassName,
                         PCWSTR::null(),
                         WS_POPUP,
@@ -830,16 +881,16 @@ mod tests {
             )
             .unwrap();
             for (column, sample) in samples.iter().enumerate() {
-                let frame = Frame::new(rect, *sample, light);
+                let frame = Frame::new(rect, *sample, light, column == 0);
                 let surface = Surface::new(frame).unwrap();
                 let pixels = unsafe {
                     std::slice::from_raw_parts(surface.bits, (frame.width * frame.height) as usize)
                 };
-                assert!(
-                    pixels
-                        .iter()
-                        .all(|pixel| *pixel == BACKGROUND_PIXEL || *pixel == frame.color)
-                );
+                assert!(pixels.iter().all(|pixel| {
+                    *pixel == BACKGROUND_PIXEL
+                        || *pixel == frame.color
+                        || (frame.update_ready && *pixel == UPDATE_READY_PIXEL)
+                }));
                 assert!(
                     pixels.contains(&frame.color),
                     "visible strokes at DPI {dpi}"
@@ -902,8 +953,9 @@ mod tests {
 
     #[test]
     fn taskbar_meter_preview() {
-        // Real layered-child API, with a hidden parent: no Explorer access or desktop input.
+        // Real layered-child API with test windows: no Explorer access or desktop input.
         ACTIONS.store(0, Ordering::Relaxed);
+        LAYOUT_NOTIFICATIONS.lock().unwrap().clear();
         let host = HiddenHost::new();
         let parent = HiddenHost::new();
         let rect = layout(
@@ -966,8 +1018,11 @@ mod tests {
             "no color-key/global-alpha path"
         );
 
+        meter.set_update_ready(true);
+        pump_until(|| meter.shared.lock().observed.frame.unwrap().update_ready);
         let before = meter.shared.lock().observed;
         meter.set_monitor(sample);
+        meter.set_update_ready(true);
         meter.refresh_layout();
         pump_until(|| meter.shared.lock().observed.layouts > before.layouts);
         let after = meter.shared.lock().observed;
@@ -981,6 +1036,7 @@ mod tests {
         );
         meter.set_monitor(TrayMonitor { fps: 222, ..sample });
         pump_until(|| meter.shared.lock().observed.frame.unwrap().glyphs == [0x5b; 3]);
+        assert!(meter.shared.lock().observed.frame.unwrap().update_ready);
         meter.shared.lock().layout.as_mut().unwrap().light = true;
         meter.refresh_layout();
         pump_until(|| meter.shared.lock().observed.frame.unwrap().color == 0xff343236);
@@ -998,21 +1054,80 @@ mod tests {
         meter.refresh_layout();
         pump_until(|| {
             let observed = meter.shared.lock().observed;
-            observed.frame.unwrap().width == 116 && observed.positions > before.positions
+            observed.frame.unwrap().width == 120 && observed.positions > before.positions
         });
         let mut actual = RECT::default();
         unsafe { GetClientRect(hwnd, &mut actual) }.unwrap();
-        assert_eq!((actual.right, actual.bottom), (116, 96));
+        assert_eq!((actual.right, actual.bottom), (120, 96));
         assert!(meter.shared.lock().observed.positions > before.positions);
+
+        // Keep the host hidden and show only the test parent off-screen without activation.
         unsafe {
+            SetWindowPos(
+                parent.0,
+                None,
+                30_000,
+                30_000,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            )
+            .unwrap();
+        }
+        meter.refresh_layout();
+        pump_until(|| !LAYOUT_NOTIFICATIONS.lock().unwrap().is_empty());
+        unsafe { GetWindowRect(hwnd, &mut actual) }.unwrap();
+        assert_eq!(
+            *LAYOUT_NOTIFICATIONS.lock().unwrap(),
+            [Some(actual)],
+            "host notification observes the committed screen rectangle"
+        );
+        let first_screen = actual;
+        unsafe {
+            SetWindowPos(
+                parent.0,
+                None,
+                30_100,
+                30_040,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .unwrap();
+        }
+        // Parent movement leaves the child's local layout unchanged; the worker timer notices it.
+        pump_until(|| LAYOUT_NOTIFICATIONS.lock().unwrap().len() >= 2);
+        unsafe { GetWindowRect(hwnd, &mut actual) }.unwrap();
+        assert_eq!(
+            (
+                actual.left - first_screen.left,
+                actual.top - first_screen.top
+            ),
+            (100, 40)
+        );
+        assert_eq!(meter.shared.lock().layout.unwrap().rect, larger);
+        assert_eq!(
+            *LAYOUT_NOTIFICATIONS.lock().unwrap(),
+            [Some(first_screen), Some(actual)]
+        );
+        meter.refresh_layout();
+        unsafe {
+            // Click delivery is also a queue barrier for the unchanged layout request above.
             PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(0), LPARAM(0)).unwrap();
             PostMessageW(Some(hwnd), WM_RBUTTONUP, WPARAM(0), LPARAM(0)).unwrap();
         }
         pump_until(|| ACTIONS.load(Ordering::Relaxed) == 17);
+        assert_eq!(
+            LAYOUT_NOTIFICATIONS.lock().unwrap().len(),
+            2,
+            "unchanged screen anchor does not notify again"
+        );
 
         drop(parent);
-        pump_until(|| meter.shared.lock().observed.hwnd == 0);
-        assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
+        // WM_NCDESTROY clears the observation before the worker finishes destroying the HWND.
+        pump_until(|| {
+            meter.shared.lock().observed.hwnd == 0 && !unsafe { IsWindow(Some(hwnd)) }.as_bool()
+        });
         assert_eq!(meter_rect(), None);
         meter.set_monitor(sample);
         let replacement = HiddenHost::new();
@@ -1026,6 +1141,9 @@ mod tests {
         let recreated = HWND(meter.shared.lock().observed.hwnd as *mut _);
         assert_eq!(unsafe { GetParent(recreated) }.unwrap(), replacement.0);
         pump_until(|| meter.shared.lock().observed.frame.unwrap().glyphs == sample.glyphs());
+        assert!(meter.shared.lock().observed.frame.unwrap().update_ready);
+        meter.set_update_ready(false);
+        pump_until(|| !meter.shared.lock().observed.frame.unwrap().update_ready);
         let shared = Arc::clone(&meter.shared);
         drop(meter);
         assert_eq!(
@@ -1052,7 +1170,7 @@ mod tests {
         assert_eq!(startup_shared.lock().control, 0);
         assert_eq!(startup_shared.lock().observed.hwnd, 0);
         let samples = [
-            sample,
+            TrayMonitor { fps: 888, ..sample },
             TrayMonitor::default(),
             TrayMonitor {
                 error: true,
@@ -1075,7 +1193,52 @@ mod tests {
             &samples,
         );
         println!(
-            "Threaded hidden layered child: distinct UI/worker threads, first frame, data, theme, resize, timer parent recreation, dedup, async routes, startup-drop and GDI/window cleanup passed; BMP rows=96/144/192 DPI, columns=111/---/Err/nAn"
+            "Threaded hidden layered child: distinct UI/worker threads, first frame, data, ready badge retention/clear, theme, resize, timer parent recreation, dedup, async routes, startup-drop and GDI/window cleanup passed; BMP rows=96/144/192 DPI, columns=888+ready/---/Err/nAn"
         );
+    }
+
+    #[test]
+    fn update_badge_only_paints_the_upper_right_background() {
+        let rect = RECT {
+            right: 120,
+            bottom: 72,
+            ..Default::default()
+        };
+        let frame = Frame::new(
+            rect,
+            TrayMonitor {
+                fps: 888,
+                valid: true,
+                running: true,
+                ..Default::default()
+            },
+            false,
+            false,
+        );
+        let mut plain = vec![0; (frame.width * frame.height) as usize];
+        paint_pixels(&mut plain, frame);
+        assert!(!plain.contains(&UPDATE_READY_PIXEL));
+        let mut ready = plain.clone();
+        paint_pixels(
+            &mut ready,
+            Frame {
+                update_ready: true,
+                ..frame
+            },
+        );
+        let mut red_count = 0;
+        for (index, (&plain, &ready)) in plain.iter().zip(&ready).enumerate() {
+            if ready == UPDATE_READY_PIXEL {
+                let (x, y) = (index as i32 % frame.width, index as i32 / frame.width);
+                assert!((112..120).contains(&x) && (4..12).contains(&y));
+                assert_eq!(plain, BACKGROUND_PIXEL, "badge must not cover a segment");
+                red_count += 1;
+            } else {
+                assert_eq!(ready, plain, "other pixels and hit alpha remain unchanged");
+            }
+        }
+        assert!(red_count > 0, "ready paints a visible red dot");
+        assert_eq!(ready[0], BACKGROUND_PIXEL);
+        assert_eq!(ready[ready.len() - 1], BACKGROUND_PIXEL);
     }
 }

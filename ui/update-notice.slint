@@ -1,0 +1,215 @@
+import { Button } from "vendor/material/std-widgets.slint";
+import { BackButton } from "controls.slint";
+import { MdTokens } from "theme.slint";
+
+export component UpdateNotice inherits FocusScope {
+    in property <string> version;
+    in property <string> download-size;
+    in property <bool> mapping-active: false;
+    in property <bool> installing: false;
+    in property <string> action-error;
+    callback install();
+    callback later();
+    callback skip();
+
+    private property <bool> keyboard-skip: false;
+    private property <bool> skip-open: !root.installing && (later-hover.has-hover || root.keyboard-skip);
+    private property <float> skip-reveal: root.skip-open ? 1 : 0;
+    animate skip-reveal { duration: 120ms; easing: ease-out; }
+
+    init => { later-button.focus(); }
+    key-pressed(event) => {
+        if event.text == Key.Escape && !root.installing { root.later(); }
+        if event.text == Key.Tab && !root.installing {
+            if (later-button.has-focus && !event.modifiers.shift)
+                    || (install-button.has-focus && event.modifiers.shift) {
+                root.keyboard-skip = true;
+                skip-button.focus();
+            } else if (skip-button.has-focus && !event.modifiers.shift)
+                    || (later-button.has-focus && event.modifiers.shift) {
+                install-button.focus();
+            } else { later-button.focus(); }
+        }
+        if event.text == Key.UpArrow && later-button.has-focus && !root.installing {
+            root.keyboard-skip = true;
+            skip-button.focus();
+        }
+        if event.text == Key.DownArrow && skip-button.has-focus && !root.installing {
+            later-button.focus();
+        }
+        return accept;
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #66000000;
+        TouchArea {
+            accessible-role: none;
+            scroll-event(event) => { return accept; }
+        }
+    }
+
+    // Physical-pixel contours keep the glow aligned without per-frame blur.
+    for layer in [
+        { spread: 5phx, tint: #ffffff01 },
+        { spread: 4phx, tint: #ffffff02 },
+        { spread: 3phx, tint: #ffffff04 },
+        { spread: 2phx, tint: #ffffff08 },
+        { spread: 1phx, tint: #ffffff10 },
+    ] : Rectangle {
+        x: card.x - layer.spread;
+        y: card.y - layer.spread;
+        width: card.width + layer.spread * 2;
+        height: card.height + layer.spread * 2;
+        border-radius: card.border-radius + layer.spread;
+        background: layer.tint;
+        accessible-role: none;
+    }
+
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 352px;
+        height: 248px;
+        border-radius: 24px;
+        border-width: 1px;
+        border-color: #ffffff16;
+        background: MdTokens.surface;
+
+        VerticalLayout {
+            padding: 24px;
+            spacing: 20px;
+            HorizontalLayout {
+                height: 64px;
+                spacing: 16px;
+                Rectangle {
+                    width: 56px;
+                    height: 56px;
+                    border-radius: 18px;
+                    background: MdTokens.primary-container;
+                    Path {
+                        x: 16px;
+                        y: 14px;
+                        width: 24px;
+                        height: 28px;
+                        viewbox-width: 24;
+                        viewbox-height: 28;
+                        commands: "M11 2H13V15L18 10L19.4 11.4L12 18.8L4.6 11.4L6 10L11 15ZM3 21H5V24H19V21H21V26H3Z";
+                        fill: MdTokens.on-primary-container;
+                        accessible-role: none;
+                    }
+                }
+                VerticalLayout {
+                    spacing: 4px;
+                    HorizontalLayout {
+                        height: 20px;
+                        Text {
+                            text: "SBMS update";
+                            font-size: MdTokens.type-body-medium;
+                            color: MdTokens.on-surface;
+                            opacity: 0.7;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: root.download-size;
+                            font-size: MdTokens.type-body-small;
+                            color: MdTokens.on-surface;
+                            opacity: 0.5;
+                            vertical-alignment: center;
+                        }
+                    }
+                    Text {
+                        text: root.version;
+                        font-size: 30px;
+                        font-weight: MdTokens.weight-medium;
+                        color: MdTokens.on-surface;
+                    }
+                }
+            }
+            Rectangle {
+                height: 48px;
+                border-radius: MdTokens.shape-medium;
+                background: MdTokens.surface-container;
+                HorizontalLayout {
+                    padding-left: 14px;
+                    padding-right: 14px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 20px;
+                        Path {
+                            y: (parent.height - self.height) / 2;
+                            width: 20px;
+                            height: 20px;
+                            viewbox-width: 20;
+                            viewbox-height: 20;
+                            commands: root.action-error == ""
+                                ? "M7.4 14.8L2.6 10L4 8.6L7.4 12L16 3.4L17.4 4.8Z"
+                                : "M9 3H11V12H9ZM9 15H11V17H9Z";
+                            fill: root.action-error == "" ? MdTokens.on-success-container : MdTokens.error;
+                            accessible-role: none;
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.action-error != "" ? root.action-error
+                            : root.mapping-active ? "Ready. Installing will stop mapping."
+                            : "Ready. SBMS will close during setup.";
+                        font-size: 13px;
+                        color: MdTokens.on-surface;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            HorizontalLayout {
+                height: MdTokens.target;
+                spacing: 8px;
+                Rectangle {
+                    width: 96px;
+                    height: MdTokens.target;
+                    // One continuous region owns Later, the gap, and Skip.
+                    later-hover := TouchArea {
+                        y: root.skip-open || root.skip-reveal > 0 ? -56px : 0px;
+                        width: parent.width;
+                        height: MdTokens.target - self.y;
+                        enabled: !root.installing;
+                        accessible-role: none;
+                        skip-button := BackButton {
+                            y: (1 - root.skip-reveal) * 8px;
+                            width: parent.width;
+                            text: "Skip";
+                            text-color: MdTokens.error;
+                            accessible-label: "Skip this version";
+                            visible: root.skip-open || root.skip-reveal > 0;
+                            opacity: root.skip-reveal;
+                            enabled: root.skip-open;
+                            border-width: 2phx;
+                            border-color: MdTokens.profile-outline.with-alpha(0.72);
+                            changed has-focus => {
+                                if !self.has-focus { root.keyboard-skip = false; }
+                            }
+                            clicked => { root.skip(); }
+                        }
+                        later-button := BackButton {
+                            y: parent.height - self.height;
+                            width: parent.width;
+                            text: "Later";
+                            enabled: !root.installing;
+                            background: transparent;
+                            clicked => { root.later(); }
+                        }
+                    }
+                }
+                install-button := Button {
+                    text: root.installing ? "Opening…" : "Install update";
+                    enabled: !root.installing;
+                    horizontal-stretch: 1;
+                    height: MdTokens.target;
+                    primary: true;
+                    clicked => { root.install(); }
+                }
+            }
+        }
+    }
+}

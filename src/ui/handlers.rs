@@ -52,12 +52,40 @@ pub(super) fn register_lifecycle_handlers(
         }
     });
 
+    let refresh_sender = sender.clone();
+    let flyout_weak = flyout.as_weak();
+    let refresh_state = state.clone();
+    flyout.on_start(move || {
+        let Some(ui) = flyout_weak.upgrade() else {
+            return;
+        };
+        if ui.get_geometry_save_blocked() || ui.get_running() || ui.get_busy() {
+            return;
+        }
+        let displays = refresh_state
+            .displays
+            .lock()
+            .expect("display metadata poisoned");
+        let mut groups = refresh_state.groups.lock().expect("group drafts poisoned");
+        let active = *refresh_state
+            .active_group
+            .lock()
+            .expect("active group poisoned");
+        snapshot_group(&ui, &displays, &mut groups, active);
+        ui.set_start_refresh_pending(true);
+        ui.set_busy(true);
+        ui.set_state("Starting".into());
+        ui.set_state_detail("Reading display information…".into());
+        ui.set_error_text("".into());
+        refresh_sender.refresh();
+    });
+
     let start_sender = sender.clone();
     let flyout_weak = flyout.as_weak();
     let start_state = state.clone();
-    flyout.on_start(move || {
+    flyout.on_start_refreshed(move || {
         if let Some(ui) = flyout_weak.upgrade() {
-            if ui.get_geometry_save_blocked() {
+            if ui.get_geometry_save_blocked() || ui.get_running() || ui.get_busy() {
                 return;
             }
             let displays = start_state
@@ -87,11 +115,15 @@ pub(super) fn register_lifecycle_handlers(
                 return;
             }
             match build_mapping_plan(&validated) {
-                Ok(plan) => {
+                Ok(mut plan) => {
+                    plan.preferred_gpu = gpu::selection(&ui);
                     for group in groups.iter_mut() {
                         group.reset_telemetry();
                     }
                     project_group_telemetry(&ui, &start_state.tray, &groups, active);
+                    ui.set_busy(true);
+                    ui.set_state("Starting".into());
+                    ui.set_state_detail("Creating virtual display…".into());
                     start_sender.start(plan);
                 }
                 Err(error) => {
@@ -103,7 +135,13 @@ pub(super) fn register_lifecycle_handlers(
     });
 
     let stop_sender = sender.clone();
-    flyout.on_stop(move || stop_sender.stop());
+    let flyout_weak = flyout.as_weak();
+    flyout.on_stop(move || {
+        if let Some(ui) = flyout_weak.upgrade() {
+            cancel_start_refresh(&ui);
+        }
+        stop_sender.stop();
+    });
     let restart_sender = sender.clone();
     let flyout_weak = flyout.as_weak();
     flyout.on_restart_mapping(move || {
@@ -377,6 +415,7 @@ fn reload_or_restart_profile(
     pending_config_reload: &Arc<AtomicBool>,
     pending_profile_restart: &Arc<AtomicBool>,
 ) {
+    cancel_start_refresh(ui);
     if ui.get_running() || ui.get_busy() {
         pending_config_reload.store(true, Ordering::Release);
         pending_profile_restart.store(true, Ordering::Release);
@@ -395,6 +434,37 @@ fn reload_or_restart_profile(
 }
 
 pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerState) {
+    let weak = flyout.as_weak();
+    flyout.on_refresh_gpus(move || {
+        if let Some(ui) = weak.upgrade() {
+            gpu::refresh_options(&ui);
+        }
+    });
+    let weak = flyout.as_weak();
+    let gpu_state = state.clone();
+    flyout.on_gpu_selected(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        if ui.get_running() || ui.get_busy() || ui.get_geometry_save_blocked() {
+            gpu::refresh_options(&ui);
+            return;
+        }
+        let Some(id) = ui.get_gpu_ids().row_data(ui.get_selected_gpu() as usize) else {
+            return;
+        };
+        let previous = ui.get_preferred_gpu();
+        ui.set_preferred_gpu(id);
+        let groups = gpu_state.groups.lock().expect("group drafts poisoned");
+        let active = *gpu_state
+            .active_group
+            .lock()
+            .expect("active group poisoned");
+        if !persist_groups(&ui, &groups, active, &gpu_state.profile_revision) {
+            ui.set_preferred_gpu(previous);
+            gpu::refresh_options(&ui);
+        }
+    });
     let flyout_weak = flyout.as_weak();
     let callback_state = state.clone();
     flyout.on_rendering_edited(move || {
@@ -441,8 +511,7 @@ pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerSt
             rebuild_reference_options(&ui, &displays, &groups, previous_reference);
             update_reference_action(&ui, &displays);
             snapshot_group(&ui, &displays, &mut groups, active);
-            update_tab_projection(&ui, &groups, active);
-            project_group_telemetry(&ui, &callback_state.tray, &groups, active);
+            hydrate_group(&ui, &callback_state.tray, &displays, &groups, active);
             persist_groups(&ui, &groups, active, &callback_state.profile_revision);
         }
     });
@@ -490,7 +559,7 @@ pub(super) fn register_geometry_handlers(flyout: &QuickAccess, state: &HandlerSt
                     .lock()
                     .expect("active group poisoned");
                 snapshot_group(&ui, &displays, &mut groups, active);
-                update_tab_projection(&ui, &groups, active);
+                hydrate_group(&ui, &callback_state.tray, &displays, &groups, active);
                 persist_groups(&ui, &groups, active, &callback_state.profile_revision);
             }
         }

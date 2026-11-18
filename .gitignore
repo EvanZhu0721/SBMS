@@ -1,4 +1,6 @@
-/target/
+target/
+/.codex-attachments/
+/.archify/
 /driver/x64/
 /.vs/
 *.user

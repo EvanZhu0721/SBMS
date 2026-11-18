@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt::{Display as FmtDisplay, Formatter};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -32,6 +32,8 @@ static NEXT_RENDERER_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MappingPlan {
     pub groups: Vec<MappingGroupRequest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_gpu: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -166,6 +168,8 @@ impl RendererEventGate {
 }
 
 pub struct MappingSession {
+    preferred_gpu: Option<String>,
+    reported_gpus: HashMap<u32, (u32, i32)>,
     groups: Vec<ActiveGroup>,
     display: Option<VirtualDisplay>,
     session_gate: Option<SessionGate>,
@@ -232,7 +236,10 @@ impl MappingError {
 
 impl MappingPlan {
     pub fn new(groups: Vec<MappingGroupRequest>) -> Result<Self, MappingError> {
-        let plan = Self { groups };
+        let plan = Self {
+            groups,
+            preferred_gpu: None,
+        };
         plan.validate()?;
         Ok(plan)
     }
@@ -322,6 +329,23 @@ impl MappingSession {
     ) -> Result<Self, MappingError> {
         plan.validate()?;
         check_start_cancelled(cancel)?;
+        let adapter = crate::gpu_adapter::resolve(plan.preferred_gpu.as_deref())
+            .map_err(|error| stage("gpu", error))?;
+        crate::diagnostics::log(
+            crate::diagnostics::Level::Info,
+            "mapping",
+            "gpu-request",
+            None,
+            adapter.as_ref().map_or_else(
+                || "automatic".into(),
+                |gpu| {
+                    format!(
+                        "{}; id={}; luid={:08X}:{:08X}",
+                        gpu.name, gpu.id, gpu.luid.HighPart as u32, gpu.luid.LowPart
+                    )
+                },
+            ),
+        );
         let displays = active_displays().map_err(|error| stage("target", error))?;
         check_start_cancelled(cancel)?;
         for group in &plan.groups {
@@ -346,10 +370,15 @@ impl MappingSession {
             })
             .collect();
         check_start_cancelled(cancel)?;
-        let session_gate = SessionGate::create_many(&gate_configs)
-            .map_err(|error| stage("session-gate", error))?;
+        let session_gate = SessionGate::create_many_with_adapter(
+            &gate_configs,
+            adapter.as_ref().map(|gpu| gpu.luid),
+        )
+        .map_err(|error| stage("session-gate", error))?;
         check_start_cancelled(cancel)?;
         let mut session = Self {
+            preferred_gpu: plan.preferred_gpu.clone(),
+            reported_gpus: HashMap::new(),
             groups: Vec::with_capacity(plan.groups.len()),
             display: None,
             session_gate: Some(session_gate),
@@ -509,6 +538,47 @@ impl MappingSession {
         self.stop_with_window_plan(RestoreMode::NormalStop)
     }
 
+    /// Report the driver's actual device, including reassignment after a reset.
+    /// Reading unchanged receipts does not enumerate adapters or emit logs.
+    pub fn gpu_changes(&mut self) -> Result<Vec<(u32, Option<String>)>, MappingError> {
+        let Some(gate) = &self.session_gate else {
+            return Ok(Vec::new());
+        };
+        let current: HashMap<_, _> = gate
+            .published_render_adapters()
+            .map_err(|error| stage("gpu-receipt", error))?
+            .into_iter()
+            .map(|gpu| (gpu.connector_index, (gpu.adapter_low, gpu.adapter_high)))
+            .collect();
+        let mut changes = Vec::new();
+        for &id in &self.connector_indices {
+            let actual = current.get(&id);
+            if actual == self.reported_gpus.get(&id) {
+                continue;
+            }
+            let name = actual.map(|&(low, high)| {
+                crate::gpu_adapter::name_for_luid(windows::Win32::Foundation::LUID {
+                    LowPart: low,
+                    HighPart: high,
+                })
+                .unwrap_or_else(|_| "Unavailable GPU".into())
+            });
+            crate::diagnostics::log(
+                crate::diagnostics::Level::Info,
+                "mapping",
+                "gpu-actual",
+                None,
+                format!(
+                    "group={id}; requested={:?}; actual={actual:?}; name={name:?}",
+                    self.preferred_gpu
+                ),
+            );
+            changes.push((id, name));
+        }
+        self.reported_gpus = current;
+        Ok(changes)
+    }
+
     fn stop_with_window_plan(&mut self, mode: RestoreMode) -> Result<(), MappingError> {
         if self
             .groups
@@ -666,6 +736,8 @@ impl MappingSession {
     #[cfg(test)]
     pub(crate) fn recovery_test_session(reporter: MappingReporter) -> Self {
         Self {
+            preferred_gpu: None,
+            reported_gpus: HashMap::new(),
             groups: vec![ActiveGroup {
                 info: MappingGroupInfo {
                     id: 0,
@@ -706,6 +778,7 @@ impl MappingSession {
 
     pub(crate) fn plan(&self) -> MappingPlan {
         MappingPlan {
+            preferred_gpu: self.preferred_gpu.clone(),
             groups: self
                 .groups
                 .iter()
@@ -1927,7 +2000,7 @@ mod tests {
             native_height: 2160,
             physical_width_mm: None,
             physical_height_mm: None,
-            preferred_refresh_millihz: None,
+            maximum_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 240,
             refresh_denominator: 1,
@@ -1969,6 +2042,7 @@ mod tests {
 
         let cancel = AtomicBool::new(true);
         let valid = MappingPlan {
+            preferred_gpu: None,
             groups: vec![group(0, MappingRoute::StreamOnly)],
         };
         let Err(cancelled) =
@@ -1988,7 +2062,10 @@ mod tests {
         assert!(!incomplete.is_clean_cancellation());
         assert!(incomplete.message().contains("rollback was incomplete"));
 
-        let invalid = MappingPlan { groups: Vec::new() };
+        let invalid = MappingPlan {
+            groups: Vec::new(),
+            preferred_gpu: None,
+        };
         let Err(plan_error) = MappingSession::start_plan_with_reporter_cancellable(
             invalid,
             Arc::new(|_| {}),
@@ -2024,7 +2101,7 @@ mod tests {
             native_height: 2880,
             physical_width_mm: None,
             physical_height_mm: None,
-            preferred_refresh_millihz: None,
+            maximum_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 120,
             refresh_denominator: 1,

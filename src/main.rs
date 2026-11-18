@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use sbms::config::{ConfigError, ConfigProfileStore, ConfigStore, GroupRouteConfig};
+use sbms::config::{
+    ConfigError, ConfigProfileStore, ConfigStore, DisplayOverrideStore, GroupRouteConfig,
+};
 use sbms::diagnostics::{self, Level, MappingSessionId};
 use sbms::display::{active_displays, unique_physical_display};
 use sbms::geometry::Rotation;
@@ -64,13 +66,31 @@ fn run() -> Result<(), Box<dyn Error>> {
     match arguments.next().as_deref() {
         Some("--version") => version(arguments),
         Some("list") => list(arguments),
+        Some("gpus") if arguments.next().is_none() => {
+            sbms::capture_routing::initialize_from_env()?;
+            let adapters = sbms::gpu_adapter::enumerate()?;
+            let rows: Vec<_> = adapters
+                .iter()
+                .map(|gpu| {
+                    serde_json::json!({
+                        "id": gpu.id, "name": gpu.name,
+                        "luid_low": gpu.luid.LowPart, "luid_high": gpu.luid.HighPart
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&rows)?);
+            Ok(())
+        }
         Some("map") => map(arguments),
         Some("plan") => plan(arguments),
         Some("config") => config(arguments),
         Some("shutdown") => shutdown(arguments),
         Some("ui") if arguments.next().is_none() => match launch_broker::route_tray(true)? {
             LaunchDisposition::Exit => Ok(()),
-            LaunchDisposition::RunHere(instance) => sbms::ui::run_host(instance, true),
+            LaunchDisposition::RunHere(instance) => {
+                sbms::capture_routing::initialize_from_env()?;
+                sbms::ui::run_host(instance, true)
+            }
         },
         _ => usage(),
     }
@@ -91,6 +111,7 @@ fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
             Ok(())
         }
         Some("run") => {
+            sbms::capture_routing::initialize_from_env()?;
             let path = arguments.next().ok_or("plan run requires a JSON file")?;
             let mut hold = None;
             while let Some(argument) = arguments.next() {
@@ -168,6 +189,9 @@ fn plan(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
             });
             let mut session = MappingSession::start_plan_with_reporter(plan, reporter)
                 .map_err(|error| log_mapping_error(session_id, error))?;
+            for (id, gpu) in session.gpu_changes()? {
+                println!("group={id} gpu={}", gpu.as_deref().unwrap_or("pending"));
+            }
             diagnostics::log(
                 Level::Info,
                 "mapping",
@@ -261,6 +285,7 @@ fn list(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error
 }
 
 fn map(mut arguments: impl Iterator<Item = String>) -> Result<(), Box<dyn Error>> {
+    sbms::capture_routing::initialize_from_env()?;
     let mut target = None;
     let mut hold = None;
     while let Some(argument) = arguments.next() {
@@ -394,15 +419,12 @@ fn configured_map_plan(target: Option<String>) -> Result<MappingPlan, MapPreflig
         )
     });
     let sizing = group.and_then(|group| group.sizing);
+    let refresh_millihz = target_refresh_millihz(&target)?;
     let mode = match sizing {
         Some(sizing) => {
             let result = sizing
                 .calculate()
                 .map_err(|error| MapPreflightError::new("geometry", error))?;
-            let refresh_millihz = match result.preferred_refresh_millihz {
-                Some(refresh) => refresh,
-                None => target_refresh_millihz(&target)?,
-            };
             VirtualMode::from_millihz(
                 result.virtual_mode.width,
                 result.virtual_mode.height,
@@ -410,7 +432,12 @@ fn configured_map_plan(target: Option<String>) -> Result<MappingPlan, MapPreflig
             )
             .map_err(|error| MapPreflightError::new("mode", error))?
         }
-        None => VirtualMode::default(),
+        None => VirtualMode::from_millihz(
+            VirtualMode::default().width,
+            VirtualMode::default().height,
+            refresh_millihz,
+        )
+        .map_err(|error| MapPreflightError::new("mode", error))?,
     };
     MappingPlan::new(vec![MappingGroupRequest {
         id: group.map_or(0, |group| group.id),
@@ -419,6 +446,10 @@ fn configured_map_plan(target: Option<String>) -> Result<MappingPlan, MapPreflig
         route: MappingRoute::Mirror { target },
         rendering: group.map(|group| group.rendering).unwrap_or_default(),
     }])
+    .map(|mut plan| {
+        plan.preferred_gpu = snapshot.config.preferred_gpu;
+        plan
+    })
     .map_err(|error| MapPreflightError::new(error.stage(), error.message()))
 }
 
@@ -432,14 +463,25 @@ fn target_refresh_millihz(target_id: &str) -> Result<u32, MapPreflightError> {
             "target display reported an invalid refresh rate",
         ));
     }
-    u64::from(target.refresh_numerator)
+    let current = u64::from(target.refresh_numerator)
         .checked_mul(1_000)
         .and_then(|value| value.checked_div(u64::from(target.refresh_denominator)))
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| {
             MapPreflightError::new("mode", "target refresh rate is outside the supported range")
-        })
+        })?;
+    let overrides = DisplayOverrideStore::default_store()
+        .and_then(|store| store.load())
+        .map_err(|error| MapPreflightError::new("config", error))?;
+    if let Some(warning) = overrides.warning {
+        return Err(MapPreflightError::new("config", warning));
+    }
+    Ok(overrides
+        .overrides
+        .refresh_for(target_id)
+        .or(target.maximum_refresh_millihz)
+        .unwrap_or(current))
 }
 
 fn log_map_preflight_error(
@@ -701,6 +743,7 @@ fn usage() -> ! {
         "usage:
   sbms --version
   sbms list
+  sbms gpus
   sbms map [--target <monitor-device-path>] [--hold-ms <milliseconds>]
   sbms plan validate <plan.json>
   sbms plan run <plan.json> [--hold-ms <milliseconds>]

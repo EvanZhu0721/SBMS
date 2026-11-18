@@ -7,6 +7,8 @@ import { DiagnosticsPage } from "pages/diagnostics.slint";
 import { RenderingPage } from "pages/rendering.slint";
 import { RemoveGroupDialog } from "remove-group-dialog.slint";
 import { LaunchIntro } from "launch-intro.slint";
+export { RefreshNoticeWindow } from "refresh-notice.slint";
+import { UpdateNotice } from "update-notice.slint";
 import { MdTokens } from "theme.slint";
 
 export enum QuickAccessPage {
@@ -29,6 +31,12 @@ export component QuickAccess inherits Window {
     in-out property <QuickAccessPage> page: QuickAccessPage.main;
     in-out property <bool> intro-active: false;
     in-out property <int> intro-stage: 0;
+    in property <bool> update-ready: false;
+    in-out property <bool> update-visible: false;
+    in property <string> update-version;
+    in property <string> update-download-size;
+    in property <bool> update-installing: false;
+    in property <string> update-action-error;
     in-out property <[string]> display-names;
     in-out property <[string]> display-labels;
     in-out property <[string]> display-ids;
@@ -52,9 +60,15 @@ export component QuickAccess inherits Window {
     in property <string> state-detail: "Choose a target screen to begin";
     in property <bool> running: false;
     in property <bool> busy: false;
+    in property <bool> start-refresh-pending: false;
     in-out property <bool> high-performance-sampling: false;
     in-out property <bool> full-frame-copy: false;
     in-out property <bool> static-refresh: false;
+    in-out property <[string]> gpu-names;
+    in-out property <[string]> gpu-ids;
+    in-out property <int> selected-gpu: 0;
+    in-out property <string> preferred-gpu: "";
+    in property <string> actual-gpu: "";
     in property <bool> restart-available: false;
     in property <string> error-text: "";
     in property <int> mapping-fps: 0;
@@ -111,6 +125,7 @@ export component QuickAccess inherits Window {
     in property <int> max-profile-count: 3;
 
     callback start();
+    callback start-refreshed();
     callback stop();
     callback restart-mapping();
     callback display-selected();
@@ -118,6 +133,8 @@ export component QuickAccess inherits Window {
     callback strategy-selected();
     callback calculate-geometry();
     callback rendering-edited();
+    callback gpu-selected();
+    callback refresh-gpus();
     callback open-manual-geometry();
     callback dismiss();
     callback close-geometry();
@@ -151,6 +168,8 @@ export component QuickAccess inherits Window {
     callback rename-profile(string, string);
     callback delete-profile(string);
     callback activate-profile(string);
+    callback install-update();
+    callback skip-update();
 
     if root.page == QuickAccessPage.main : MainPage {
         visible: !root.intro-active;
@@ -179,6 +198,7 @@ export component QuickAccess inherits Window {
         state-detail: root.geometry-save-blocked ? "Configuration unavailable" : root.state-detail;
         running: root.running;
         busy: root.busy;
+        start-refresh-pending: root.start-refresh-pending;
         restart-available: root.restart-available;
         error-text: root.geometry-save-blocked ? root.geometry-error : root.error-text;
         mapping-fps: root.mapping-fps;
@@ -204,7 +224,7 @@ export component QuickAccess inherits Window {
         reference-selected => { root.reference-selected(); }
         strategy-selected => { root.strategy-selected(); }
         calculate-geometry => { root.calculate-geometry(); }
-        open-rendering => { root.page = QuickAccessPage.rendering; }
+        open-rendering => { root.refresh-gpus(); root.page = QuickAccessPage.rendering; }
         open-manual-geometry => { root.open-manual-geometry(); }
         dismiss => { root.dismiss(); }
         open-diagnostics => { root.open-diagnostics(); }
@@ -227,6 +247,11 @@ export component QuickAccess inherits Window {
         height: parent.height;
         group-number: root.active-group-index + 1;
         controls-enabled: !root.running && !root.busy && !root.stream-only;
+        gpu-control-enabled: !root.running && !root.busy && !root.geometry-save-blocked;
+        gpu-names: root.gpu-names;
+        selected-gpu <=> root.selected-gpu;
+        actual-gpu: root.actual-gpu;
+        gpu-selected => { root.gpu-selected(); }
         auto-map-on-login: root.auto-map-on-login;
         login-control-enabled: !root.profile-saving;
         set-auto-map-on-login(enabled) => { root.set-auto-map-on-login(enabled); }
@@ -329,5 +354,19 @@ export component QuickAccess inherits Window {
         stage: root.intro-stage;
         disable-forever => { root.disable-launch-intro(); }
         open-project-home => { root.open-project-home(); }
+    }
+
+    if root.update-visible : UpdateNotice {
+        z: 101;
+        width: parent.width;
+        height: parent.height;
+        version: root.update-version;
+        download-size: root.update-download-size;
+        mapping-active: root.running || root.busy;
+        installing: root.update-installing;
+        action-error: root.update-action-error;
+        install => { root.install-update(); }
+        skip => { if !root.update-installing { root.skip-update(); } }
+        later => { if !root.update-installing { root.update-visible = false; } }
     }
 }

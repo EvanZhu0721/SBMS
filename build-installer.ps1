@@ -50,6 +50,8 @@ if (-not $versionMatch.Success) {
     throw 'The package version could not be read from Cargo.toml.'
 }
 $version = $versionMatch.Groups[1].Value
+$updateRevision = [UInt16]::Parse(
+    [IO.File]::ReadAllText((Join-Path $repository 'UPDATE_REVISION'), [Text.Encoding]::UTF8).Trim())
 $signedBuild = $PSCmdlet.ParameterSetName -eq 'Signed'
 if (-not $signedBuild -and -not $Unsigned) {
     throw 'Unsigned packaging must be explicitly enabled with -Unsigned.'
@@ -130,7 +132,7 @@ if (Test-Path -LiteralPath $package) {
     Remove-Item -LiteralPath $package -Force
 }
 $versionDefinition = "/DAppVersion=$version"
-$compilerArguments = @($versionDefinition)
+$compilerArguments = @($versionDefinition, "/DAppRevision=$updateRevision")
 $compilerArguments += "/DOutputSuffix=$packageSuffix"
 if ($signedBuild) {
     $driverSignature = Get-AuthenticodeSignature -LiteralPath (Join-Path $driver 'SBMSIndirectDisplay.cat')
@@ -173,3 +175,17 @@ if ($signedBuild) {
 }
 Write-Host "installer_package=$package"
 Write-Host "installer_signed=$signedBuild"
+if ($signedBuild -and $OutputSuffix -eq '') {
+    # Keep the public download filename and provide an immutable asset for each revision.
+    $updatePackage = Join-Path $installer "SBMS-Setup-$version-x64-r$updateRevision.exe"
+    Copy-Item -LiteralPath $package -Destination $updatePackage -Force
+    $updateManifest = Join-Path $installer 'update.json'
+    $updateMetadata = [ordered]@{
+        version = $version
+        revision = $updateRevision
+        size = (Get-Item -LiteralPath $updatePackage).Length
+    } | ConvertTo-Json
+    [IO.File]::WriteAllText($updateManifest, $updateMetadata, [Text.UTF8Encoding]::new($false))
+    Write-Host "update_package=$updatePackage"
+    Write-Host "update_manifest=$updateManifest"
+}

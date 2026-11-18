@@ -19,9 +19,29 @@ three profiles and exactly one active profile. Display IDs inside a profile are
 Windows device identities and may need to be changed after importing onto a
 different computer.
 
+Shared option dropdowns open on hover and omit the saved option. Highlighting
+another option previews it in the field; clicking saves it. Leaving the field
+and menu cancels the preview. With the menu open, arrow keys preview, Enter
+confirms, and Escape cancels.
+
+For a physical target, automatic refresh uses the highest progressive mode
+Windows exposes at its current resolution and orientation. A per-display
+refresh override takes priority; if mode enumeration is unavailable, SBMS uses
+the current target refresh. EDID still supplies physical dimensions, but its
+first preferred timing no longer determines the virtual refresh. The target's
+physical refresh remains unchanged. The GUI and ordinary `sbms map` command
+refresh this choice from live display data; explicit plans and stream-only
+outputs keep their specified refresh.
+
+After the first frame, a refresh mismatch briefly shows a centered, rounded
+notice on the target. The higher rate is green and the lower rate red. It has
+no buttons, does not activate or intercept clicks, and fades after five seconds.
+Equivalent nominal rates such as 59.94 and 60 Hz do not trigger the notice.
+
 ## CLI interface
 
 ```text
+sbms gpus
 sbms config path
 sbms config list
 sbms config show [<profile>]
@@ -36,6 +56,8 @@ sbms config clear-target
 sbms config reset
 ```
 
+- `gpus` prints hardware GPU names, persistent adapter IDs and current-session
+  LUIDs as JSON. Use the `id` field for configuration, not the LUID or list index.
 - `path` prints the profile-store path.
 - `list` prints a JSON array containing each profile ID, revision and active
   state.
@@ -84,6 +106,34 @@ not the internal multi-profile collection:
 Unknown fields, unsupported versions, empty or oversized group collections,
 duplicate group IDs or mirror targets, invalid geometry and invalid selected
 group IDs are rejected before any persistent state changes.
+
+## GPU preference
+
+The optional top-level `preferred_gpu` field selects the preferred GPU for every
+virtual display in the profile. All groups share one IDD adapter, so this is not
+a per-group rendering option. Omit it or use `null` for **Automatic**, which
+leaves the virtual display's render-adapter choice to Windows.
+
+```json
+"preferred_gpu": "<id from sbms gpus>"
+```
+
+The settings page exposes **GPU · All groups** while mapping is stopped. The
+saved value is the adapter's device interface path and is resolved to its current
+LUID on each start. An unavailable explicit selection remains saved and blocks
+startup before creating a virtual display; choose another GPU or Automatic.
+Imported profiles may therefore need a new GPU selection on another computer.
+
+The selection is a preference, not a guarantee. Windows can assign another GPU;
+**Active** displays the selected group's actual GPU after the driver has created
+its device. Requested and actual assignments are logged separately. See
+[rendering.md](rendering.md#gpu-routing) for how this interacts with Windows
+application GPU preferences.
+
+Version 2.2.0 reads existing version 2 profiles without migration. Older SBMS
+versions reject the new `preferred_gpu` field. Before downgrading, select
+Automatic and save each profile in 2.2.0 so that the field is omitted; otherwise
+restore a profile backup made before choosing an explicit GPU.
 
 ## Rendering options
 

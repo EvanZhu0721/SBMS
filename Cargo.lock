@@ -2683,6 +2683,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "minhook"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "455e088cb1600ffa5f1524c9702c9eeb0ba3604e0f4932efa165b99973272a8d"
+dependencies = [
+ "cc",
+ "tracing",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4035,8 +4045,9 @@ dependencies = [
 
 [[package]]
 name = "sbms"
-version = "2.0.2"
+version = "2.2.0"
 dependencies = [
+ "minhook",
  "raw-window-handle",
  "serde",
  "serde_json",

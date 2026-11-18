@@ -1,0 +1,58 @@
+import { MdTokens } from "theme.slint";
+
+component RefreshReading inherits VerticalLayout {
+    in property <string> label;
+    in property <string> rate;
+    in property <brush> value-color;
+    spacing: 6px;
+    Text {
+        text: root.label;
+        font-size: 12px;
+        color: MdTokens.on-surface;
+        opacity: 0.6;
+        horizontal-alignment: center;
+    }
+    Text {
+        text: root.rate + " Hz";
+        font-size: 24px;
+        color: root.value-color;
+        horizontal-alignment: center;
+    }
+}
+
+export component RefreshNoticeWindow inherits Window {
+    title: "SBMS Refresh Notice";
+    width: 280px;
+    height: 104px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: "Microsoft YaHei UI";
+    in property <string> virtual-rate: "330";
+    in property <string> target-rate: "144";
+    in property <int> rate-order: 1;
+    in property <bool> presented: true;
+    property <brush> higher-color: #86c995;
+    property <brush> lower-color: #e59898;
+
+    Rectangle {
+        background: MdTokens.surface;
+        opacity: root.presented ? 1 : 0;
+        HorizontalLayout {
+            padding: 24px;
+            spacing: 24px;
+            RefreshReading {
+                label: "虚拟屏";
+                rate: root.virtual-rate;
+                value-color: root.rate-order > 0 ? root.higher-color
+                    : root.rate-order < 0 ? root.lower-color : MdTokens.on-surface;
+            }
+            RefreshReading {
+                label: "目标屏";
+                rate: root.target-rate;
+                value-color: root.rate-order < 0 ? root.higher-color
+                    : root.rate-order > 0 ? root.lower-color : MdTokens.on-surface;
+            }
+        }
+    }
+}

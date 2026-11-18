@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$SigningCertificateThumbprint
+    [string]$SigningCertificateThumbprint,
+    [switch]$CaptureDiagnostics
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,7 +9,9 @@ Set-StrictMode -Version Latest
 
 $repository = $PSScriptRoot
 $driver = Join-Path $repository 'driver'
-$output = Join-Path $repository 'target\driver'
+$packageName = if ($CaptureDiagnostics) { 'SBMSCaptureDiagnostics' } else { 'SBMSIndirectDisplay' }
+$outputDirectory = if ($CaptureDiagnostics) { 'target\driver-capture-diagnostics' } else { 'target\driver' }
+$output = Join-Path $repository $outputDirectory
 $kitsRoot = (Get-ItemProperty -LiteralPath `
     'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots').KitsRoot10
 
@@ -56,7 +59,7 @@ foreach ($line in $environmentLines) {
 # UMDF 2.25 ships with Windows 10 1803; our minimum 19041 already has 2.31.
 $umdfVersion = '2.25'
 $umdfMinor = 25
-$sourceInf = Join-Path $driver 'SBMSIndirectDisplay.inf'
+$sourceInf = Join-Path $driver "$packageName.inf"
 $infVersion = [regex]::Match(
     (Get-Content -LiteralPath $sourceInf -Raw -Encoding UTF8),
     '(?m)^UmdfLibraryVersion\s*=\s*(\d+\.\d+)\s*$').Groups[1].Value
@@ -90,7 +93,7 @@ if ($SigningCertificateThumbprint -and
 }
 
 if (Test-Path -LiteralPath $output) {
-    $expectedOutput = [IO.Path]::GetFullPath((Join-Path $repository 'target\driver'))
+    $expectedOutput = [IO.Path]::GetFullPath((Join-Path $repository $outputDirectory))
     if ((Resolve-Path -LiteralPath $output).Path -ne $expectedOutput) {
         throw "Unexpected driver output directory: $output"
     }
@@ -98,9 +101,9 @@ if (Test-Path -LiteralPath $output) {
 }
 New-Item -ItemType Directory -Path $output | Out-Null
 
-$object = Join-Path $output 'SBMSIndirectDisplay.obj'
-$binary = Join-Path $output 'SBMSIndirectDisplay.dll'
-$inf = Join-Path $output 'SBMSIndirectDisplay.inf'
+$object = Join-Path $output "$packageName.obj"
+$binary = Join-Path $output "$packageName.dll"
+$inf = Join-Path $output "$packageName.inf"
 
 $compileArguments = @(
     '/nologo', '/c', '/std:c++17', '/EHs-c-', '/guard:cf',
@@ -115,6 +118,9 @@ $compileArguments = @(
     "/I$wdfInclude", "/I$iddInclude",
     "/Fo$object", (Join-Path $driver 'Driver.cpp')
 )
+if ($CaptureDiagnostics) {
+    $compileArguments += '/DSBMS_CAPTURE_DIAGNOSTICS=1'
+}
 & cl.exe @compileArguments
 if ($LASTEXITCODE -ne 0) {
     throw "cl.exe failed with exit code $LASTEXITCODE"
@@ -131,7 +137,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "link.exe failed with exit code $LASTEXITCODE"
 }
 
-Copy-Item -LiteralPath (Join-Path $driver 'SBMSIndirectDisplay.inf') `
+Copy-Item -LiteralPath $sourceInf `
     -Destination $inf
 
 & $apiValidator "-BinaryPath:$binary" `
@@ -161,7 +167,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($SigningCertificateThumbprint) {
-    $catalog = Join-Path $output 'SBMSIndirectDisplay.cat'
+    $catalog = Join-Path $output "$packageName.cat"
     & $signTool sign /sha1 $SigningCertificateThumbprint /fd SHA256 $catalog
     if ($LASTEXITCODE -ne 0) {
         throw "Signing the catalog failed with exit code $LASTEXITCODE"

@@ -35,6 +35,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let open_requested = launch_broker::tray_open_requested(std::env::args_os().skip(1))?;
     match launch_broker::route_tray(open_requested)? {
         LaunchDisposition::Exit => Ok(()),
-        LaunchDisposition::RunHere(instance) => sbms::ui::run_host(instance, open_requested),
+        LaunchDisposition::RunHere(instance) => {
+            sbms::capture_routing::initialize_from_env()?;
+            sbms::ui::run_host(instance, open_requested)
+        }
     }
 }

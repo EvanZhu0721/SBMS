@@ -5,6 +5,9 @@
 #ifndef OutputSuffix
 #define OutputSuffix ""
 #endif
+#ifndef AppRevision
+#define AppRevision "0"
+#endif
 #define AppPublisher "SBMS"
 #define AppExeName "sbms-tray.exe"
 
@@ -12,6 +15,7 @@
 AppId={{7EB4D7A8-16A9-4B6F-82E3-31A77BC81B6A}
 AppName={#AppName}
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}.{#AppRevision}
 AppPublisher={#AppPublisher}
 DefaultDirName={autopf64}\SBMS
 DefaultGroupName=SBMS
@@ -57,6 +61,7 @@ Source: "..\NOTICE.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}\licenses"; DestName: "GPL-3.0.txt"; Flags: ignoreversion
 Source: "..\LICENSES\MS-PL.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "..\LICENSES\Apache-2.0.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\LICENSES\MinHook.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 ; Run maintenance after the final installed file, before Inno evaluates NeedRestart.
 Source: "..\LICENSES\LGPL-2.1.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion; AfterInstall: InstallSbms
 Source: "maintenance.ps1"; DestName: "sbms-maintenance.ps1"; Flags: dontcopy

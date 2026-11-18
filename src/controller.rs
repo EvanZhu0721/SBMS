@@ -39,7 +39,7 @@ pub struct DisplayOption {
     pub physical_height_mm: Option<f64>,
     pub physical_override_inches: Option<f64>,
     pub physical_override_aspect_ratio: Option<AspectRatio>,
-    pub preferred_refresh_millihz: Option<u32>,
+    pub maximum_refresh_millihz: Option<u32>,
     pub current_refresh_millihz: u32,
     pub refresh_override_millihz: Option<u32>,
     pub rotation: Rotation,
@@ -48,6 +48,10 @@ pub struct DisplayOption {
 #[derive(Clone, Debug)]
 pub enum ControllerEvent {
     Displays(Vec<DisplayOption>),
+    Gpu {
+        id: u32,
+        name: Option<String>,
+    },
     GroupReady(MappingGroupInfo),
     Fps {
         id: u32,
@@ -192,7 +196,7 @@ impl PendingRecovery {
         self.attempts
             .retain(|started| now.saturating_duration_since(*started) < RENDERER_RECOVERY_WINDOW);
         if self.attempts.len() >= usize::from(RENDERER_RECOVERY_ATTEMPTS) {
-            self.error = Some("Capture recovery limit reached (4 attempts in 30 seconds); stop and restart mapping to retry".into());
+            self.error = Some("Capture recovery limit reached (4 attempts in 30 seconds); restart mapping to retry".into());
             return None;
         }
         self.attempts.push(now);
@@ -336,7 +340,11 @@ impl Controller {
             let desktop = desktop_monitor.as_ref().map(DesktopMonitor::state);
             let mut observed_desktop = desktop_snapshot(desktop.as_deref());
             loop {
-                let timeout = active.as_ref().and_then(next_recovery_delay);
+                let timeout = active.as_ref().map(|run| {
+                    next_recovery_delay(run)
+                        .unwrap_or(Duration::from_secs(1))
+                        .min(Duration::from_secs(1))
+                });
                 let message = match timeout {
                     Some(timeout) => rx.recv_timeout(timeout),
                     None => rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected),
@@ -912,6 +920,33 @@ impl Controller {
                     &mut observed_desktop,
                     &emit,
                 );
+                if let Some(run) = active.as_mut()
+                    && let Some(error) = recover_due_renderer(
+                        run,
+                        desktop.clone(),
+                        observed_desktop,
+                        &worker_tx,
+                        &emit,
+                    )
+                {
+                    run.interrupted_failure.get_or_insert(error);
+                    request_stop(&active, &emit);
+                    stop_requested = true;
+                }
+                if let Some(run) = active.as_mut().filter(|_| !stop_requested) {
+                    match run.session.gpu_changes() {
+                        Ok(changes) => {
+                            for (id, name) in changes {
+                                emit(ControllerEvent::Gpu { id, name });
+                            }
+                        }
+                        Err(error) => {
+                            run.interrupted_failure.get_or_insert(error);
+                            request_stop(&active, &emit);
+                            stop_requested = true;
+                        }
+                    }
+                }
                 if stop_requested
                     && !stopping
                     && active
@@ -937,15 +972,6 @@ impl Controller {
                 }
                 if shutdown_pending && active.is_none() && !stopping {
                     break;
-                }
-                if let Some(active) = active.as_mut() {
-                    recover_due_renderer(
-                        active,
-                        desktop.clone(),
-                        observed_desktop,
-                        &worker_tx,
-                        &emit,
-                    );
                 }
             }
             sunshine.shutdown();
@@ -1126,12 +1152,12 @@ fn recover_due_renderer(
     observed_desktop: (bool, u64),
     tx: &Sender<Message>,
     emit: &impl Fn(ControllerEvent),
-) {
+) -> Option<MappingError> {
     if active.cancel.load(Ordering::Acquire) {
-        return;
+        return None;
     }
     let now = Instant::now();
-    let Some(id) = active
+    let id = active
         .recovery
         .iter()
         .filter(|(id, pending)| {
@@ -1139,37 +1165,32 @@ fn recover_due_renderer(
                 && (pending.pause || pending.next.is_some_and(|next| next <= now))
         })
         .min_by_key(|(id, pending)| (pending.next, **id))
-        .map(|(id, _)| *id)
-    else {
-        return;
-    };
+        .map(|(id, _)| *id)?;
     let before = desktop_snapshot(desktop.as_deref());
     if before != observed_desktop {
-        return;
+        return None;
     }
     let pending = active.recovery.get_mut(&id).expect("selected recovery");
-    let mut pause_only = pending.pause && (!before.0 || !pending.resumable || pending.exhausted());
+    let pause_only = pending.pause && (!before.0 || !pending.resumable || pending.exhausted());
     let deadline = if pause_only {
         now
     } else if let Some(deadline) = pending.begin_attempt(now) {
         deadline
     } else {
         diagnostics::log(
-            Level::Warn,
+            Level::Error,
             "controller",
-            "renderer-recovery-paused",
+            "renderer-recovery-exhausted",
             Some(active.session_id),
             format!(
                 "group {id}: {}",
                 pending.error.as_deref().unwrap_or_default()
             ),
         );
-        if !pending.pause {
-            emit_recovery_state(active, before.0, emit);
-            return;
-        }
-        pause_only = true;
-        now
+        return Some(MappingError::renderer_failed(
+            id,
+            pending.error.as_deref().expect("recovery limit error"),
+        ));
     };
     pending.pause = false;
     if pause_only {
@@ -1215,6 +1236,7 @@ fn recover_due_renderer(
         })));
     });
     emit_recovery_state(active, before.0, emit);
+    None
 }
 
 fn complete_recovery(
@@ -1399,7 +1421,7 @@ fn refresh(emit: &impl Fn(ControllerEvent), mapping_present: bool) {
                     physical_height_mm: display.physical_height_mm,
                     physical_override_inches: None,
                     physical_override_aspect_ratio: None,
-                    preferred_refresh_millihz: display.preferred_refresh_millihz,
+                    maximum_refresh_millihz: display.maximum_refresh_millihz,
                     current_refresh_millihz: ((u64::from(display.refresh_numerator) * 1000)
                         / u64::from(display.refresh_denominator.max(1)))
                         as u32,
@@ -1597,6 +1619,7 @@ mod tests {
 
     fn plan(routes: Vec<MappingRoute>) -> MappingPlan {
         MappingPlan {
+            preferred_gpu: None,
             groups: routes
                 .into_iter()
                 .enumerate()
@@ -1820,6 +1843,22 @@ mod tests {
         }
     }
 
+    fn wait_stopped(rx: &mpsc::Receiver<ControllerEvent>) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stopping = false;
+        loop {
+            let event = rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("controller did not complete Stop");
+            if let ControllerEvent::State { state, error, .. } = event {
+                stopping |= state == "Stopping";
+                if stopping && state == "Stopped" {
+                    return error;
+                }
+            }
+        }
+    }
+
     #[test]
     fn renderer_failure_survives_controller_stop_and_next_normal_stop_is_clean() {
         let (events, rx) = mpsc::channel();
@@ -1827,21 +1866,6 @@ mod tests {
             let _ = events.send(event);
         });
         let sender = controller.sender();
-        let wait_stopped = || {
-            let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stopping = false;
-            loop {
-                let event = rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .expect("controller did not complete Stop");
-                if let ControllerEvent::State { state, error, .. } = event {
-                    stopping |= state == "Stopping";
-                    if stopping && state == "Stopped" {
-                        return error;
-                    }
-                }
-            }
-        };
         let run = recovery_run();
         let renderer_id = run.session.activate_test_renderer_events();
         sender
@@ -1859,13 +1883,13 @@ mod tests {
                 },
             })
             .unwrap();
-        let failed_stop = wait_stopped();
+        let failed_stop = wait_stopped(&rx);
         sender
             .tx
             .send(Message::TestActivate(Box::new(recovery_run())))
             .unwrap();
         sender.stop();
-        let normal_stop = wait_stopped();
+        let normal_stop = wait_stopped(&rx);
         controller.shutdown();
         assert!(
             failed_stop.contains("injected render device failure"),
@@ -2076,48 +2100,40 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_flapping_capture_only_cleans_up_and_keeps_stop_available() {
-        let mut run = recovery_run();
-        let now = Instant::now();
-        let mut pending = PendingRecovery::new(now, true);
-        for _ in 0..RENDERER_RECOVERY_ATTEMPTS {
-            pending.begin_attempt(now);
-            pending.recovered();
-            pending.capture_lost(now, true);
-        }
-        pending.pause = true;
-        run.recovery.insert(0, pending);
-        let (tx, rx) = mpsc::channel();
-        let (events, event_rx) = mpsc::channel();
-        let emit = |event| events.send(event).unwrap();
-        recover_due_renderer(&mut run, None, (true, 0), &tx, &emit);
-        let Message::Recovered(completed) = rx.recv_timeout(Duration::from_secs(3)).unwrap() else {
-            panic!("expected cleanup completion");
-        };
-        assert!(completed.paused, "must not start another capture attempt");
-        assert!(completed.result.is_ok());
-        let mut active = Some(run);
-        complete_recovery(&mut active, *completed, None, &tx, &emit);
-        let run = active.as_mut().unwrap();
-        assert_eq!(
-            run.recovery[&0].attempts.len(),
-            usize::from(RENDERER_RECOVERY_ATTEMPTS)
-        );
-        assert!(run.recovery[&0].exhausted());
-        assert!(run.recovery_jobs.is_empty());
-        assert!(next_recovery_delay(run).is_none());
-        recover_due_renderer(run, None, (true, 0), &tx, &emit);
-        assert!(run.recovery_jobs.is_empty());
-        assert!(event_rx.try_iter().any(|event| matches!(
-            event,
-            ControllerEvent::State {
-                state: "Degraded",
-                running: true,
-                ..
+    fn exhausted_capture_recovery_stops_mapping_and_reports_the_failure() {
+        for pause in [true, false] {
+            let (events, rx) = mpsc::channel();
+            let controller = Controller::spawn(move |event| {
+                let _ = events.send(event);
+            });
+            let mut run = recovery_run();
+            let cancel = Arc::clone(&run.cancel);
+            let now = Instant::now();
+            let mut pending = PendingRecovery::new(now, true);
+            for _ in 0..RENDERER_RECOVERY_ATTEMPTS {
+                assert!(pending.begin_attempt(now).is_some());
+                if pause {
+                    pending.recovered();
+                    pending.capture_lost(now, true);
+                } else {
+                    pending.failed(now, "first frame failed".into(), true);
+                    pending.next = Some(now);
+                }
             }
-        )));
-        request_stop(&active, &emit);
-        assert!(active.as_ref().unwrap().cancel.load(Ordering::Acquire));
+            pending.pause = pause;
+            run.recovery.insert(0, pending);
+            controller
+                .sender()
+                .tx
+                .send(Message::TestActivate(Box::new(run)))
+                .unwrap();
+            // No Stop command: both repeated frame loss and failed first-frame
+            // recovery must enter the normal full-session Stop pipeline.
+            let error = wait_stopped(&rx);
+            assert!(cancel.load(Ordering::Acquire));
+            assert!(error.contains("4 attempts in 30 seconds"), "{error}");
+            controller.shutdown();
+        }
     }
 
     #[test]
@@ -2137,7 +2153,7 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
         // The fixture target cannot exist. The production worker may wait for
         // topology, but scheduling it must return so handlers can run now.
-        recover_due_renderer(&mut run, None, (true, 0), &tx, &emit);
+        assert!(recover_due_renderer(&mut run, None, (true, 0), &tx, &emit).is_none());
         assert!(run.recovery_jobs.contains_key(&0));
         assert!(next_recovery_delay(&run).is_none());
         refresh(&emit, true);

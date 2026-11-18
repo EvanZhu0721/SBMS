@@ -33,6 +33,15 @@ jobs:
       - name: Rust tests
         run: cargo test --all-targets --locked
 
+      - name: Capture diagnostics checks
+        shell: pwsh
+        run: |
+          cargo fmt --manifest-path tools/capture-diagnostics/Cargo.toml -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --manifest-path tools/capture-diagnostics/Cargo.toml --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --manifest-path tools/capture-diagnostics/Cargo.toml --all-targets --locked
+
       - name: Install compatible Pester for PowerShell 7
         shell: pwsh
         run: |

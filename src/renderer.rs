@@ -389,7 +389,7 @@ fn finish_start_failure(
 
 fn classify_start_timeout(timeout: Duration, cleanup: Result<(), String>) -> RendererStartError {
     let message = format!(
-        "renderer did not complete its first frame within the remaining {} ms of its startup budget; see renderer/first-frame logs for the last stage",
+        "renderer did not complete its first frame within the remaining {} ms of its startup budget",
         timeout.as_millis()
     );
     match cleanup {

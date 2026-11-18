@@ -25,9 +25,9 @@ use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT}
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY,
     ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
-    DM_DISPLAYORIENTATION, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90, DMDO_180, DMDO_270,
-    DMDO_DEFAULT, EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_FLAGS,
-    ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
+    DM_DISPLAYORIENTATION, DM_INTERLACED, DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DMDO_90,
+    DMDO_180, DMDO_270, DMDO_DEFAULT, EDS_ROTATEDMODE, ENUM_CURRENT_SETTINGS,
+    ENUM_DISPLAY_SETTINGS_FLAGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
 };
 use windows::Win32::Security::Cryptography::{
     BCRYPT_ALG_HANDLE, BCRYPT_SHA1_ALGORITHM, BCryptCloseAlgorithmProvider, BCryptHash,
@@ -54,7 +54,7 @@ pub struct Display {
     pub native_height: u32,
     pub physical_width_mm: Option<f64>,
     pub physical_height_mm: Option<f64>,
-    pub preferred_refresh_millihz: Option<u32>,
+    pub maximum_refresh_millihz: Option<u32>,
     pub rotation: Rotation,
     pub refresh_numerator: u32,
     pub refresh_denominator: u32,
@@ -625,8 +625,70 @@ fn prepare_topology_mode(mode: &mut DEVMODEW, display: &Display) {
         | DM_DISPLAYORIENTATION;
 }
 
-fn current_desktop_geometry(device_name: &str) -> Result<(RECT, Rotation), DisplayError> {
-    Ok(desktop_geometry(&current_desktop_mode(device_name)?))
+fn maximum_refresh_millihz(
+    device_name: &str,
+    current_mode: &DEVMODEW,
+    refresh_numerator: u32,
+    refresh_denominator: u32,
+) -> Option<u32> {
+    let name = wide(device_name);
+    let current_refresh_millihz = (u64::from(refresh_numerator) * 1000)
+        .checked_div(u64::from(refresh_denominator))
+        .and_then(|rate| u32::try_from(rate).ok())
+        .filter(|rate| crate::limits::valid_refresh_millihz(*rate));
+    let mut maximum = None;
+    for index in 0..u32::MAX {
+        let mut mode = DEVMODEW {
+            dmSize: size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        // Flags 0 excludes modes incompatible with the monitor and other rotations.
+        if !unsafe {
+            EnumDisplaySettingsExW(
+                PCWSTR(name.as_ptr()),
+                ENUM_DISPLAY_SETTINGS_MODE(index),
+                &mut mode,
+                ENUM_DISPLAY_SETTINGS_FLAGS::default(),
+            )
+        }
+        .as_bool()
+        {
+            break;
+        }
+        maximum = maximum.max(compatible_refresh_millihz(
+            &mode,
+            current_mode,
+            current_refresh_millihz,
+        ));
+    }
+    maximum
+}
+
+fn compatible_refresh_millihz(
+    mode: &DEVMODEW,
+    current_mode: &DEVMODEW,
+    current_refresh_millihz: Option<u32>,
+) -> Option<u32> {
+    if mode.dmPelsWidth != current_mode.dmPelsWidth
+        || mode.dmPelsHeight != current_mode.dmPelsHeight
+        || unsafe { mode.Anonymous1.Anonymous2.dmDisplayOrientation }
+            != unsafe { current_mode.Anonymous1.Anonymous2.dmDisplayOrientation }
+        || unsafe { mode.Anonymous2.dmDisplayFlags } & DM_INTERLACED.0 != 0
+        // Windows uses 0 and 1 to mean the hardware default, not a measured rate.
+        || mode.dmDisplayFrequency <= 1
+    {
+        return None;
+    }
+    let refresh_millihz = mode.dmDisplayFrequency.checked_mul(1000)?;
+    if !crate::limits::valid_refresh_millihz(refresh_millihz) {
+        return None;
+    }
+    // GDI only exposes integer Hz. Keep CCD's precise current rate when it
+    // describes the same rounded mode (for example, 59.94 Hz reported as 60).
+    Some(match current_refresh_millihz {
+        Some(current) if (current + 500) / 1000 == mode.dmDisplayFrequency => current,
+        _ => refresh_millihz,
+    })
 }
 
 fn current_desktop_mode(device_name: &str) -> Result<DEVMODEW, DisplayError> {
@@ -731,7 +793,8 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
                     Rotation::Deg0 | Rotation::Deg180 => (mode.width, mode.height),
                 });
             // CCD source surfaces can remain unrotated; GDI describes desktop coordinates.
-            let (rect, rotation) = current_desktop_geometry(&source)?;
+            let current_mode = current_desktop_mode(&source)?;
+            let (rect, rotation) = desktop_geometry(&current_mode);
             let name = wide_string(&target.monitorFriendlyDeviceName);
             let id = wide_string(&target.monitorDevicePath);
             let virtual_display = is_sbms_adapter(&adapter);
@@ -742,24 +805,30 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
             } else {
                 target.connectorInstance
             };
-            let (physical_size, preferred_refresh_millihz, sunshine_id) =
-                if include_identity && !id.is_empty() {
-                    let monitor_identity = monitor_identity(&id);
-                    (
-                        monitor_identity
-                            .as_ref()
-                            .and_then(|identity| edid_dimensions_mm(&identity.edid)),
-                        monitor_identity
-                            .as_ref()
-                            .and_then(|identity| edid_preferred_refresh_millihz(&identity.edid)),
-                        sunshine_display_id(&sunshine_device_id_payload(
-                            &id,
-                            monitor_identity.as_ref(),
-                        )),
-                    )
-                } else {
-                    (None, None, None)
-                };
+            let maximum_refresh_millihz = if include_identity && !virtual_display {
+                maximum_refresh_millihz(
+                    &source,
+                    &current_mode,
+                    path.targetInfo.refreshRate.Numerator,
+                    path.targetInfo.refreshRate.Denominator,
+                )
+            } else {
+                None
+            };
+            let (physical_size, sunshine_id) = if include_identity && !id.is_empty() {
+                let monitor_identity = monitor_identity(&id);
+                (
+                    monitor_identity
+                        .as_ref()
+                        .and_then(|identity| edid_dimensions_mm(&identity.edid)),
+                    sunshine_display_id(&sunshine_device_id_payload(
+                        &id,
+                        monitor_identity.as_ref(),
+                    )),
+                )
+            } else {
+                (None, None)
+            };
             displays.push(Display {
                 // Windows can publish a target before its PnP path. The driver's
                 // stable slot is the virtual source identity throughout its lifetime.
@@ -777,7 +846,7 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
                 native_height,
                 physical_width_mm: physical_size.map(|size| size.0),
                 physical_height_mm: physical_size.map(|size| size.1),
-                preferred_refresh_millihz,
+                maximum_refresh_millihz,
                 rotation,
                 refresh_numerator: path.targetInfo.refreshRate.Numerator,
                 refresh_denominator: path.targetInfo.refreshRate.Denominator,
@@ -1123,30 +1192,6 @@ fn sunshine_display_id(payload: &[u8]) -> Option<String> {
     ))
 }
 
-fn edid_preferred_refresh_millihz(edid: &[u8]) -> Option<u32> {
-    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
-    if edid.len() < 128 || edid[..8] != HEADER || edid[24] & 0x02 == 0 {
-        return None;
-    }
-    let timing = &edid[54..72];
-    let clock = u64::from(u16::from_le_bytes([timing[0], timing[1]])) * 10_000;
-    // Virtual desktop outputs are progressive. Do not mislabel an interlaced
-    // preferred timing's field rate as a progressive frame rate.
-    if clock == 0 || timing[17] & 0x80 != 0 {
-        return None;
-    }
-    let h_active = u64::from(timing[2]) + (u64::from(timing[4] >> 4) << 8);
-    let h_blank = u64::from(timing[3]) + (u64::from(timing[4] & 0x0f) << 8);
-    let v_active = u64::from(timing[5]) + (u64::from(timing[7] >> 4) << 8);
-    let v_blank = u64::from(timing[6]) + (u64::from(timing[7] & 0x0f) << 8);
-    let pixels = (h_active + h_blank) * (v_active + v_blank);
-    if h_active == 0 || v_active == 0 || pixels == 0 {
-        return None;
-    }
-    let rate = u32::try_from((clock * 1000 + pixels / 2) / pixels).ok()?;
-    crate::limits::valid_refresh_millihz(rate).then_some(rate)
-}
-
 fn edid_dimensions_mm(edid: &[u8]) -> Option<(f64, f64)> {
     const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
     if edid.len() < 128 || edid[..8] != HEADER {
@@ -1334,7 +1379,7 @@ mod tests {
             native_height: 1080,
             physical_width_mm: None,
             physical_height_mm: None,
-            preferred_refresh_millihz: None,
+            maximum_refresh_millihz: None,
             rotation: Rotation::Deg0,
             refresh_numerator: 60,
             refresh_denominator: 1,
@@ -1445,28 +1490,73 @@ mod tests {
     }
 
     #[test]
-    fn preferred_refresh_uses_edid_timing_not_a_fixed_default() {
-        let mut value = edid();
-        value[24] = 0x02;
-        let timing = &mut value[54..72];
-        timing[..2].copy_from_slice(&14850u16.to_le_bytes());
-        timing[2] = 0x80; // 1920 active + 280 blank = 2200.
-        timing[3] = 0x18;
-        timing[4] = 0x71;
-        timing[5] = 0x38; // 1080 active + 45 blank = 1125.
-        timing[6] = 0x2d;
-        timing[7] = 0x40;
-        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(60_000));
-        value[54..56].copy_from_slice(&59400u16.to_le_bytes());
-        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(240_000));
-        value[54..56].copy_from_slice(&14835u16.to_le_bytes());
-        assert_eq!(super::edid_preferred_refresh_millihz(&value), Some(59_939));
-        value[71] = 0x80;
-        assert_eq!(super::edid_preferred_refresh_millihz(&value), None);
-        value[71] = 0;
-        value[24] = 0;
-        assert_eq!(super::edid_preferred_refresh_millihz(&value), None);
-        assert_eq!(super::edid_preferred_refresh_millihz(&[0; 128]), None);
+    fn automatic_refresh_filters_modes_at_the_current_oriented_resolution() {
+        let mut current = super::DEVMODEW {
+            dmPelsWidth: 1440,
+            dmPelsHeight: 2560,
+            dmDisplayFrequency: 60,
+            ..Default::default()
+        };
+        current.Anonymous1.Anonymous2.dmDisplayOrientation = super::DMDO_90;
+        let maximum = [60, 144, 240]
+            .into_iter()
+            .filter_map(|refresh_hz| {
+                let mut mode = current;
+                mode.dmDisplayFrequency = refresh_hz;
+                super::compatible_refresh_millihz(&mode, &current, Some(60_000))
+            })
+            .max();
+        assert_eq!(maximum, Some(240_000));
+
+        for change in ["size", "rotation", "interlaced", "default", "range"] {
+            let mut mode = current;
+            mode.dmDisplayFrequency = 360;
+            match change {
+                "size" => {
+                    mode.dmPelsWidth = 2560;
+                    mode.dmPelsHeight = 1440;
+                }
+                "rotation" => {
+                    mode.Anonymous1.Anonymous2.dmDisplayOrientation = super::DMDO_270;
+                }
+                "interlaced" => mode.Anonymous2.dmDisplayFlags = super::DM_INTERLACED.0,
+                "default" => mode.dmDisplayFrequency = 1,
+                _ => mode.dmDisplayFrequency = 1001,
+            }
+            assert_eq!(
+                super::compatible_refresh_millihz(&mode, &current, Some(60_000)),
+                None,
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn automatic_refresh_preserves_precise_current_rate_only_for_the_same_rounded_mode() {
+        let current = super::DEVMODEW {
+            dmPelsWidth: 1920,
+            dmPelsHeight: 1080,
+            dmDisplayFrequency: 60,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::compatible_refresh_millihz(&current, &current, Some(59_940)),
+            Some(59_940)
+        );
+        let mut faster = current;
+        faster.dmDisplayFrequency = 240;
+        assert_eq!(
+            super::compatible_refresh_millihz(&faster, &current, Some(59_940)),
+            Some(240_000)
+        );
+        assert_eq!(
+            super::compatible_refresh_millihz(&faster, &current, Some(239_760)),
+            Some(239_760)
+        );
+        assert_eq!(
+            super::compatible_refresh_millihz(&faster, &current, None),
+            Some(240_000)
+        );
     }
 
     #[test]

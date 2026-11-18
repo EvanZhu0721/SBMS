@@ -311,6 +311,7 @@ export component MainPage inherits FocusScope {
     in property <string> state-detail: "Choose a target screen to begin";
     in property <bool> running: false;
     in property <bool> busy: false;
+    in property <bool> start-refresh-pending: false;
     in property <bool> restart-available: false;
     in property <string> error-text: "";
     in property <int> mapping-fps: 0;
@@ -917,11 +918,14 @@ export component MainPage inherits FocusScope {
                     }
     
                     if !root.stream-only || !root.running : FullWidthPrimaryButton {
-                        text: root.running ? "Stop and restore" : (root.busy ? root.state : "Start mapping");
-                        enabled: !root.busy && (root.running || root.selected-display >= 0);
-                        accessible-label: root.running ? "Stop mapping and restore windows" : "Start mapping";
+                        text: root.start-refresh-pending ? "Stop"
+                            : (root.running ? "Stop and restore" : (root.busy ? root.state : "Start mapping"));
+                        enabled: root.start-refresh-pending
+                            || (!root.busy && (root.running || root.selected-display >= 0));
+                        accessible-label: root.start-refresh-pending ? "Cancel mapping start"
+                            : (root.running ? "Stop mapping and restore windows" : "Start mapping");
                         clicked => {
-                            if root.running { root.stop(); } else { root.start(); }
+                            if root.running || root.start-refresh-pending { root.stop(); } else { root.start(); }
                         }
                     }
     

@@ -35,12 +35,13 @@ impl SunshineState {
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct GroupTelemetry {
+    pub gpu_name: Option<String>,
     pub sunshine_id: Option<String>,
     pub sunshine_port: Option<u16>,
     pub sunshine_state: SunshineState,
     pub fps: Option<u32>,
     pub ready: bool,
-    pub error: bool,
+    pub runtime_error: bool,
 }
 
 #[derive(Clone, Debug)]

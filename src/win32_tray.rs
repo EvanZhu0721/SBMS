@@ -20,10 +20,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, ChangeWindowMessageFilterEx, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyIcon, DestroyMenu, DestroyWindow, FindWindowW, GWLP_USERDATA,
     GetWindowLongPtrW, HICON, HMENU, ICONINFO, KillTimer, MF_SEPARATOR, MF_STRING, MSGFLT_ALLOW,
-    PostMessageW, RegisterClassW, RegisterWindowMessageW, SetForegroundWindow, SetTimer,
-    SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_APP, WM_CONTEXTMENU, WM_NULL, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_POPUP,
+    PostMessageW, RegisterClassW, RegisterWindowMessageW, SPI_SETWORKAREA, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_APP, WM_CONTEXTMENU, WM_DISPLAYCHANGE, WM_NULL, WM_SETTINGCHANGE, WM_TIMER,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -38,6 +38,7 @@ pub fn meter_rect() -> Option<RECT> {
 
 const WM_METER_TOGGLE: u32 = WM_APP + 3;
 const WM_METER_MENU: u32 = WM_APP + 4;
+const WM_METER_LAYOUT: u32 = WM_APP + 5;
 
 const CLASS_NAME: PCWSTR = w!("SbmsTrayHostWindow");
 const TRAY_ICON_ID: u32 = 1;
@@ -61,6 +62,7 @@ static CURRENT_HWND: AtomicIsize = AtomicIsize::new(0);
 pub enum TrayAction {
     Toggle,
     Open,
+    LayoutChanged,
     Quit,
 }
 
@@ -127,6 +129,17 @@ impl TrayHandle {
         post_status_update(hwnd);
     }
 
+    pub fn set_update_ready(&self, ready: bool) {
+        let mut state = lock_state(&self.0);
+        if state.update_ready == ready {
+            return;
+        }
+        state.update_ready = ready;
+        let hwnd = state.hwnd;
+        drop(state);
+        post_status_update(hwnd);
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test() -> Self {
         Self(Arc::new(TrayState {
@@ -134,6 +147,7 @@ impl TrayHandle {
                 hwnd: 0,
                 status: "Stopped".into(),
                 monitor: TrayMonitor::default(),
+                update_ready: false,
             }),
         }))
     }
@@ -182,6 +196,7 @@ struct SharedTrayState {
     hwnd: isize,
     status: String,
     monitor: TrayMonitor,
+    update_ready: bool,
 }
 
 impl SharedTrayState {
@@ -253,6 +268,7 @@ impl NativeTray {
                 hwnd: hwnd.0 as isize,
                 status: "Stopped".into(),
                 monitor: TrayMonitor::default(),
+                update_ready: false,
             }),
         });
         let inner = Box::new(Inner {
@@ -396,12 +412,13 @@ impl Inner {
     }
 
     fn update_status(&self, reason: &'static str) {
-        let (monitor, tooltip) = {
+        let (monitor, update_ready, tooltip) = {
             let state = lock_state(&self.state);
-            (state.monitor, state.tooltip())
+            (state.monitor, state.update_ready, state.tooltip())
         };
         // Numeric updates do not depend on Explorer registration or layout.
         self.meter.set_monitor(monitor);
+        self.meter.set_update_ready(update_ready);
         if !self.registered.get() {
             return;
         }
@@ -519,6 +536,20 @@ unsafe extern "system" fn wnd_proc(
                     },
                 );
             }
+        }
+        return LRESULT(0);
+    }
+    if message == WM_METER_LAYOUT {
+        if let Some(inner) = unsafe { inner(hwnd) } {
+            (inner.action)(TrayAction::LayoutChanged);
+        }
+        return LRESULT(0);
+    }
+    if message == WM_DISPLAYCHANGE
+        || (message == WM_SETTINGCHANGE && wparam.0 == SPI_SETWORKAREA.0 as usize)
+    {
+        if let Some(inner) = unsafe { inner(hwnd) } {
+            inner.meter.refresh_layout();
         }
         return LRESULT(0);
     }
@@ -771,6 +802,23 @@ fn identity_data(hwnd: HWND) -> NOTIFYICONDATAW {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_ready_survives_status_and_monitor_updates() {
+        let handle = TrayHandle::for_test();
+        assert!(!lock_state(&handle.0).update_ready);
+        handle.set_update_ready(true);
+        handle.set_status("Running");
+        handle.set_monitor(TrayMonitor {
+            fps: 144,
+            running: true,
+            valid: true,
+            ..Default::default()
+        });
+        assert!(lock_state(&handle.0).update_ready);
+        handle.set_update_ready(false);
+        assert!(!lock_state(&handle.0).update_ready);
+    }
 
     #[test]
     #[ignore = "briefly registers a temporary Windows notification icon"]

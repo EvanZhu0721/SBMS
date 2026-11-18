@@ -7,6 +7,7 @@ administrator terminal:
 
 ```powershell
 sbms list
+sbms gpus
 sbms map --target '<monitor-device-path>'
 sbms plan validate examples\two-streams.json
 sbms plan run examples\two-streams.json
@@ -21,3 +22,7 @@ foreground session cleanly. A mapping plan can contain up to sixteen mirror and
 stream-only groups. Up to three persistent configuration profiles can coexist;
 see [Configuration profiles](configuration.md) for import, export,
 activation and hot-reload interfaces.
+
+`sbms gpus` lists GPU names, persistent adapter IDs and current-session LUIDs.
+Use the persistent `id` for `preferred_gpu` in a profile or mapping plan;
+see [GPU preference](configuration.md#gpu-preference).

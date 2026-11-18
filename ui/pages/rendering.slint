@@ -1,4 +1,5 @@
-import { BackButton } from "../controls.slint";
+import { BackButton, CompactComboBox } from "../controls.slint";
+import { ScrollView } from "../vendor/material/std-widgets.slint";
 import { MdTokens } from "../theme.slint";
 
 component RenderingSwitch inherits Rectangle {
@@ -8,7 +9,7 @@ component RenderingSwitch inherits Rectangle {
     in-out property <bool> checked: false;
     callback toggled();
 
-    height: 88px;
+    height: 72px;
     background: transparent;
     forward-focus: switch-focus;
     accessible-role: switch;
@@ -110,6 +111,11 @@ export component RenderingPage inherits FocusScope {
     in-out property <bool> static-refresh: false;
     in property <bool> auto-map-on-login: false;
     in property <bool> login-control-enabled: true;
+    in property <bool> gpu-control-enabled: true;
+    in property <[string]> gpu-names;
+    in-out property <int> selected-gpu: 0;
+    in property <string> actual-gpu;
+    callback gpu-selected();
     callback set-auto-map-on-login(bool);
     callback edited();
     callback close();
@@ -152,8 +158,40 @@ export component RenderingPage inherits FocusScope {
                     }
                 }
             }
-            Rectangle {
-                height: 264px;
+            ScrollView {
+              horizontal-scrollbar-policy: always-off;
+              VerticalLayout {
+                spacing: MdTokens.space-1;
+                Rectangle {
+                    height: root.actual-gpu == "" ? 96px : 120px;
+                    background: MdTokens.surface-container;
+                    border-radius: MdTokens.shape-large;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: "GPU · All groups";
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-small;
+                        }
+                        CompactComboBox {
+                            field-label: "GPU";
+                            model: root.gpu-names;
+                            current-index <=> root.selected-gpu;
+                            control-enabled: root.gpu-control-enabled;
+                            popup-offset-y: self.height + 4px;
+                            selected => { root.gpu-selected(); }
+                        }
+                        if root.actual-gpu != "" : Text {
+                            text: "Active: " + root.actual-gpu;
+                            color: MdTokens.on-surface-variant;
+                            font-size: MdTokens.type-body-small;
+                            overflow: elide;
+                        }
+                    }
+                }
+                Rectangle {
+                height: 216px;
                 background: MdTokens.surface-container;
                 border-radius: MdTokens.shape-large;
                 VerticalLayout {
@@ -182,7 +220,7 @@ export component RenderingPage inherits FocusScope {
                 }
             }
             Rectangle {
-                height: 88px;
+                height: 72px;
                 background: MdTokens.surface-container;
                 border-radius: MdTokens.shape-large;
                 RenderingSwitch {
@@ -194,14 +232,8 @@ export component RenderingPage inherits FocusScope {
                     toggled => { root.set-auto-map-on-login(self.checked); }
                 }
             }
-            if !root.controls-enabled : Text {
-                height: 28px;
-                text: "Read-only";
-                color: MdTokens.on-surface-variant;
-                font-size: MdTokens.type-body-small;
-                vertical-alignment: center;
+              }
             }
-            Rectangle { vertical-stretch: 1; background: transparent; }
         }
     }
 }

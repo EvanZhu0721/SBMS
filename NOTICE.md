@@ -45,5 +45,9 @@ GPL-3.0-only alternative offered by their upstream SPDX license notices.
 The complete license is included in the repository root `LICENSE` file.
 `ui/vendor/README.md` documents the fixed-palette changes and retained files.
 
+The native output routing compatibility layer uses the minhook Rust wrapper
+and MinHook, including its HDE disassembler. Their MIT and BSD-style notices
+are preserved in `LICENSES/MinHook.txt`, installed as `licenses/MinHook.txt`.
+
 Repository builds are development builds. A distributable Windows driver still
 requires an appropriate signing and certification process.

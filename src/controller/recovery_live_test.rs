@@ -83,6 +83,9 @@ impl Probe {
 
     fn record(&mut self, ms: u128, event: ControllerEvent) -> Result<(u128, ControllerEvent)> {
         let value = match &event {
+            ControllerEvent::Gpu { id, name } => {
+                serde_json::json!({ "event": "gpu", "id": id, "name": name })
+            }
             ControllerEvent::State {
                 state,
                 detail,

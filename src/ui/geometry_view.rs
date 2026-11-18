@@ -259,10 +259,15 @@ pub(super) fn geometry_request(
         target,
         strategy: sizing_strategy_from_index(ui.get_sizing_strategy())?,
         alignment: 2,
-        preferred_refresh_millihz: Some(
-            stream
-                .map(|fields| fields.screen.refresh_millihz)
-                .unwrap_or(240_000),
+        preferred_refresh_millihz: stream.map(|fields| fields.screen.refresh_millihz).or_else(
+            || {
+                selected_option(ui, displays, ui.get_selected_display()).map(|display| {
+                    display
+                        .refresh_override_millihz
+                        .or(display.maximum_refresh_millihz)
+                        .unwrap_or(display.current_refresh_millihz)
+                })
+            },
         ),
     }))
 }

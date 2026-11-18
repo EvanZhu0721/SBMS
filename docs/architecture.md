@@ -12,7 +12,9 @@ tray / CLI
   -> stream-only groups: virtual desktop stays available to an external capturer
 ```
 
-The v8 gate contains up to sixteen connector-indexed modes. Its ACL permits the
+The v9 gate contains up to sixteen connector-indexed modes, one preferred render
+adapter LUID and per-connector actual render-adapter receipts (856 bytes total).
+Its ACL permits the
 launching user, SYSTEM, LocalService and Administrators. One IDD adapter
 publishes every requested connector and drains their IddCx swap chains; it does
 not copy frames into shared memory. Connector indexes are stable identities and
@@ -22,9 +24,30 @@ into that connector's response slot, using a sequence counter to prevent partial
 reads during initial publication or driver restart.
 Rust matches these identities directly against CCD targets; identifying a virtual
 connector does not require a PnP monitor path or Container ID lookup. The driver
-holds the original session mapping through publication, and startup waits for
-unpublished responses within its existing deadline. The matching v8 driver and
-application must be deployed together.
+holds each monitor's original session mapping until monitor cleanup, and startup
+waits for unpublished identity responses within its existing deadline. The
+matching v9 driver and application must be deployed together. A v9 product
+session also reserves the old v8 name, preventing older applications and
+diagnostic packages from starting a conflicting session. The independent
+diagnostic driver retains its separate v8 protocol.
+
+The profile's GPU preference is a persistent adapter device path, resolved to a
+current LUID before device creation. The driver calls
+`IddCxAdapterSetRenderAdapter` before reporting monitors. After successful D3D
+device and swapchain setup, it publishes the actual device's adapter LUID;
+reassignment, unassignment and cleanup invalidate that receipt. Requested and
+actual GPUs can differ. The controller reads receipts and emits UI/log updates
+only when the actual assignment changes.
+
+Actual graphics hosts initialize native output routing before their first
+DXGI/D3D operation, including automatic sampling detection. A process-local
+MinHook intercepts `win32u!NtGdiDdDDIGetCachedHybridQueryValue` and returns
+`D3DKMT_GPU_PREFERENCE_STATE_UNSPECIFIED`, preventing preference-based DXGI output
+reparenting. The hook lasts until process exit and does not alter system DLL
+files or other processes. It uses an undocumented export; installation failures
+remain explicit startup errors. Maintenance commands and forwarding launchers
+do not install it. See [rendering.md](rendering.md#gpu-routing) for the diagnostic
+escape setting.
 
 Pixels remain on the GPU in the Rust renderer. Quality sampling first applies
 selective subpixel colour-fringe suppression. A reduction on either axis uses

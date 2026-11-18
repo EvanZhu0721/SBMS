@@ -71,19 +71,62 @@ export component CompactComboBox inherits Rectangle {
     in property <length> popup-offset-y: -root.popup-height - 4px;
     callback selected();
 
-    property <string> current-value: root.current-index >= 0
-        && root.current-index < root.collapsed-model.length
-        ? root.collapsed-model[root.current-index]
+    property <int> preview-index: -1;
+    property <int> displayed-index: popup.is-open ? root.preview-index : root.current-index;
+    property <string> current-value: root.displayed-index >= 0
+        && root.displayed-index < root.collapsed-model.length
+        ? root.collapsed-model[root.displayed-index]
         : "";
-    property <length> menu-height: min(root.model.length, 5) * MdTokens.target;
+    property <bool> has-current: root.current-index >= 0 && root.current-index < root.model.length;
+    property <int> option-count: root.model.length - (root.has-current ? 1 : 0);
+    property <length> menu-height: min(root.option-count, 5) * MdTokens.target;
     property <length> popup-height: root.menu-height + 8px;
     property <length> menu-offset: 0px;
-    property <length> scroll-range: max(0px, root.model.length * MdTokens.target - root.menu-height);
+    property <length> scroll-range: max(0px, root.option-count * MdTokens.target - root.menu-height);
+    property <length> menu-x: root.popup-align-right ? root.width - root.popup-width : 0px;
+    property <length> popup-left: min(0px, root.menu-x);
+    property <length> popup-top: min(0px, root.popup-offset-y);
 
-    function reveal-current() {
+    function reveal-preview() {
+        let row = max(0, root.preview-index
+            - (root.has-current && root.preview-index > root.current-index ? 1 : 0));
         root.menu-offset = max(-root.scroll-range, min(0px,
-            max(-max(root.current-index, 0) * MdTokens.target,
-                min(root.menu-offset, root.menu-height - (max(root.current-index, 0) + 1) * MdTokens.target))));
+            max(-row * MdTokens.target,
+                min(root.menu-offset, root.menu-height - (row + 1) * MdTokens.target))));
+    }
+
+    function open-menu() {
+        if root.control-enabled && root.option-count > 0 && !popup.is-open {
+            root.preview-index = root.current-index;
+            root.reveal-preview();
+            root.focus();
+            popup.show();
+        }
+    }
+
+    function move-preview(direction: int) {
+        let candidate = root.preview-index + direction;
+        let next = candidate == root.current-index ? candidate + direction : candidate;
+        if next >= 0 && next < root.model.length {
+            root.preview-index = next;
+            root.reveal-preview();
+        }
+    }
+
+    function commit(index: int) {
+        popup.close();
+        root.preview-index = -1;
+        if root.control-enabled && index >= 0 && index < root.model.length
+                && index != root.current-index {
+            root.current-index = index;
+            root.selected();
+        }
+    }
+
+    changed control-enabled => {
+        if !root.control-enabled {
+            popup.close();
+        }
     }
 
     height: MdTokens.target;
@@ -104,12 +147,7 @@ export component CompactComboBox inherits Rectangle {
     accessible-enabled: root.control-enabled;
     accessible-expandable: true;
     accessible-expanded: popup.is-open;
-    accessible-action-expand => {
-        if root.control-enabled && root.model.length > 0 {
-            popup.show();
-            root.reveal-current();
-        }
-    }
+    accessible-action-expand => { root.open-menu(); }
 
     Text {
         x: MdTokens.space-2;
@@ -138,6 +176,7 @@ export component CompactComboBox inherits Rectangle {
     }
 
     combo-focus := FocusScope {
+        enabled: root.control-enabled;
         key-pressed(event) => {
             if !root.control-enabled || root.model.length == 0 {
                 return reject;
@@ -151,8 +190,7 @@ export component CompactComboBox inherits Rectangle {
                 root.selected();
                 return accept;
             } else if event.text == Key.Return {
-                popup.show();
-                root.reveal-current();
+                root.open-menu();
                 return accept;
             }
             return reject;
@@ -160,77 +198,116 @@ export component CompactComboBox inherits Rectangle {
 
         selector-touch := TouchArea {
             enabled: root.control-enabled && root.model.length > 0;
-            clicked => {
-                root.focus();
-                popup.show();
-                root.reveal-current();
+            changed has-hover => {
+                if self.has-hover {
+                    root.open-menu();
+                }
             }
+            clicked => { root.open-menu(); }
         }
     }
 
     popup := PopupWindow {
-        x: root.popup-align-right ? root.width - root.popup-width : 0px;
-        y: root.popup-offset-y;
-        width: root.popup-width;
-        height: root.popup-height;
+        // Popups own pointer dispatch, including the selector and the 4px gap.
+        x: root.popup-left;
+        y: root.popup-top;
+        width: max(root.width, root.menu-x + root.popup-width) - root.popup-left;
+        height: max(root.height, root.popup-offset-y + root.popup-height) - root.popup-top;
         close-policy: close-on-click-outside;
         forward-focus: popup-focus;
 
         popup-focus := FocusScope {
             key-pressed(event) => {
                 if event.text == Key.UpArrow {
-                    root.current-index = Math.max(root.current-index - 1, 0);
-                    root.selected();
-                    root.reveal-current();
+                    root.move-preview(-1);
                     return accept;
                 } else if event.text == Key.DownArrow {
-                    root.current-index = Math.min(root.current-index + 1, root.model.length - 1);
-                    root.selected();
-                    root.reveal-current();
+                    root.move-preview(1);
                     return accept;
-                } else if event.text == Key.Return || event.text == Key.Escape {
+                } else if event.text == Key.Return {
+                    root.commit(root.preview-index);
+                    return accept;
+                } else if event.text == Key.Escape || event.text == Key.Tab {
                     popup.close();
-                    return accept;
+                    return event.text == Key.Tab ? reject : accept;
                 }
                 return reject;
             }
 
-            Rectangle {
+            popup-touch := TouchArea {
+                property <bool> contains-pointer: selector-touch.has-hover
+                    || (self.has-hover && (self.over-selector || self.over-menu || self.over-bridge));
+                property <bool> over-selector: self.mouse-x >= -root.popup-left
+                    && self.mouse-x <= root.width - root.popup-left
+                    && self.mouse-y >= -root.popup-top
+                    && self.mouse-y <= root.height - root.popup-top;
+                property <bool> over-menu: self.mouse-x >= menu-frame.x
+                    && self.mouse-x <= menu-frame.x + menu-frame.width
+                    && self.mouse-y >= menu-frame.y
+                    && self.mouse-y <= menu-frame.y + menu-frame.height;
+                property <bool> over-bridge: self.mouse-x >= max(-root.popup-left, menu-frame.x)
+                    && self.mouse-x <= min(root.width - root.popup-left, menu-frame.x + menu-frame.width);
+                changed contains-pointer => {
+                    if !self.contains-pointer {
+                        popup.close();
+                    }
+                }
+
+                scroll-event(event) => {
+                    root.menu-offset = max(-root.scroll-range, min(0px, root.menu-offset + event.delta-y));
+                    if self.mouse-x >= menu-frame.x + 4px
+                            && self.mouse-x < menu-frame.x + menu-frame.width - 4px - (root.scroll-range > 0px ? 10px : 0px)
+                            && self.mouse-y >= menu-frame.y + 4px
+                            && self.mouse-y < menu-frame.y + 4px + root.menu-height {
+                        let row = Math.floor((self.mouse-y - menu-frame.y - 4px - root.menu-offset) / MdTokens.target);
+                        root.preview-index = row + (root.has-current && row >= root.current-index ? 1 : 0);
+                    }
+                    return accept;
+                }
+
+            menu-frame := Rectangle {
+                x: root.menu-x - root.popup-left;
+                y: root.popup-offset-y - root.popup-top;
+                width: root.popup-width;
+                height: root.popup-height;
                 background: MdTokens.surface;
                 border-width: 1px;
                 border-color: MdTokens.outline-variant;
                 border-radius: MdTokens.shape-medium;
                 clip: true;
 
-                menu-scroll := Flickable {
+                menu-scroll := Rectangle {
                     x: 4px;
                     y: 4px;
                     width: parent.width - 8px - (root.scroll-range > 0px ? 10px : 0px);
                     height: root.menu-height;
-                    interactive: false;
-                    viewport-width: self.width;
-                    viewport-height: root.model.length * MdTokens.target;
-                    viewport-y <=> root.menu-offset;
+                    clip: true;
 
                 VerticalLayout {
                     width: menu-scroll.width;
-                    height: menu-scroll.viewport-height;
+                    height: root.option-count * MdTokens.target;
+                    y: root.menu-offset;
                     padding: 0px;
                     spacing: 0px;
 
-                    for option[index] in root.model : Rectangle {
+                    for row in root.option-count : Rectangle {
+                        // Skip by index so two genuinely identical labels remain distinct options.
+                        property <int> option-index: row + (root.has-current && row >= root.current-index ? 1 : 0);
                         height: MdTokens.target;
                         border-radius: MdTokens.space-1;
-                        background: index == root.current-index
+                        background: self.option-index == root.preview-index
                             ? MdTokens.primary-container
                             : (option-touch.has-hover ? MdTokens.surface-container : transparent);
+                        accessible-role: list-item;
+                        accessible-label: root.model[self.option-index];
+                        accessible-action-default => { root.commit(self.option-index); }
 
                         Text {
                             x: MdTokens.space-2;
                             width: parent.width - 2 * MdTokens.space-2;
                             height: parent.height;
-                            text: option;
-                            color: index == root.current-index
+                            text: root.model[parent.option-index];
+                            color: parent.option-index == root.preview-index
                                 ? MdTokens.on-primary-container
                                 : MdTokens.on-surface;
                             font-size: MdTokens.type-body-large;
@@ -240,11 +317,12 @@ export component CompactComboBox inherits Rectangle {
                         }
 
                         option-touch := TouchArea {
-                            clicked => {
-                                root.current-index = index;
-                                root.selected();
-                                popup.close();
+                            changed has-hover => {
+                                if self.has-hover {
+                                    root.preview-index = parent.option-index;
+                                }
                             }
+                            clicked => { root.commit(parent.option-index); }
                         }
                     }
                 }
@@ -256,7 +334,7 @@ export component CompactComboBox inherits Rectangle {
                     width: 10px;
                     height: root.menu-height;
                     background: transparent;
-                    property <length> thumb-height: max(24px, self.height * self.height / (root.model.length * MdTokens.target));
+                    property <length> thumb-height: max(24px, self.height * self.height / (root.option-count * MdTokens.target));
                     property <length> travel: self.height - self.thumb-height;
                     Rectangle {
                         x: 3px;
@@ -285,6 +363,7 @@ export component CompactComboBox inherits Rectangle {
                     }
                 }
             }
+            }
         }
     }
 
@@ -295,7 +374,9 @@ export component CompactComboBox inherits Rectangle {
 // stable when labels or translations change.
 export component BackButton inherits Rectangle {
     in property <string> text: "Back";
+    in property <color> text-color: MdTokens.on-surface;
     in property <bool> enabled: true;
+    out property <bool> has-focus: back-focus.has-focus;
     callback clicked();
     width: 80px;
     height: MdTokens.target;
@@ -319,7 +400,7 @@ export component BackButton inherits Rectangle {
         width: parent.width;
         height: parent.height;
         text: root.text;
-        color: MdTokens.on-surface;
+        color: root.text-color;
         font-size: MdTokens.type-body-medium;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -357,9 +438,9 @@ export component FullWidthSettingsButton inherits Rectangle {
 
     height: MdTokens.target;
     background: MdTokens.surface-container;
-    border-width: 1px;
-    border-color: MdTokens.outline-variant;
     border-radius: MdTokens.button-radius;
+    border-width: 2phx;
+    border-color: MdTokens.outline-variant.with-alpha(0.72);
     opacity: root.control-enabled ? 1 : 0.38;
 
     Rectangle {

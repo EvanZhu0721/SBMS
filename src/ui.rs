@@ -36,9 +36,12 @@ static PROFILE_SAVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 mod diagnostic_view;
 mod geometry_view;
+mod gpu;
 mod handlers;
 mod projection;
+mod refresh_notice;
 mod state;
+mod update_notice;
 
 use diagnostic_view::{open_log_folder, populate_diagnostics};
 use geometry_view::*;
@@ -117,10 +120,12 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         .backend_name("winit".into())
         .renderer_name("software".into())
         .with_winit_window_attributes_hook(|attributes| {
-            attributes
-                .with_transparent(false)
-                .with_skip_taskbar(true)
-                .with_corner_preference(CornerPreference::Round)
+            refresh_notice::window_attributes(
+                attributes
+                    .with_transparent(false)
+                    .with_skip_taskbar(true)
+                    .with_corner_preference(CornerPreference::Round),
+            )
         })
         .select()?;
 
@@ -212,6 +217,14 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
                     show_flyout(&flyout, play_intro);
                 }
             }
+            TrayAction::LayoutChanged => {
+                if let Some(flyout) = flyout_weak.upgrade()
+                    && flyout.window().is_visible()
+                {
+                    win32_flyout::position(flyout.window());
+                    flyout.window().request_redraw();
+                }
+            }
             TrayAction::Quit => {
                 diagnostics::log(Level::Info, "tray", "action", None, "quit");
                 let _ = slint::quit_event_loop();
@@ -295,7 +308,24 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let event_pending_config_reload = pending_config_reload.clone();
     let event_pending_profile_restart = pending_profile_restart.clone();
     let event_tray = tray_handle.clone();
+    let refresh_notices = Arc::new(Mutex::new(Vec::<slint::Weak<RefreshNoticeWindow>>::new()));
+    let event_refresh_notices = refresh_notices.clone();
     let controller = Controller::spawn(move |event| {
+        // Read the current target position/rate on the controller thread, after
+        // startup has presented its first frame and settled the display layout.
+        let notice = match &event {
+            ControllerEvent::GroupReady(info) => refresh_notice_data(info),
+            _ => None,
+        };
+        let refresh_notices = event_refresh_notices.clone();
+        let hide_notices = matches!(
+            &event,
+            ControllerEvent::State { running: false, .. }
+                | ControllerEvent::State {
+                    state: "Stopping",
+                    ..
+                }
+        );
         let pending_login_start = pending_login_start.clone();
         let ui = ui.clone();
         let tray = event_tray.clone();
@@ -332,13 +362,40 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
                     ),
                     event,
                 );
+                if hide_notices {
+                    for notice in refresh_notices
+                        .lock()
+                        .expect("refresh notices poisoned")
+                        .drain(..)
+                    {
+                        if let Some(notice) = notice.upgrade() {
+                            refresh_notice::dismiss(&notice);
+                        }
+                    }
+                } else if ui.get_running()
+                    && let Some((virtual_rate, target_rate, rect)) = notice
+                {
+                    match refresh_notice::show(virtual_rate, target_rate, rect) {
+                        Ok(notice) => refresh_notices
+                            .lock()
+                            .expect("refresh notices poisoned")
+                            .push(notice),
+                        Err(error) => diagnostics::log(
+                            Level::Warn,
+                            "ui",
+                            "refresh-notice",
+                            None,
+                            error.to_string(),
+                        ),
+                    }
+                }
                 if auto_start
                     && !ui.get_geometry_save_blocked()
                     && !ui.get_running()
                     && !ui.get_busy()
                 {
                     match login_displays {
-                        Ok(()) => ui.invoke_start(),
+                        Ok(()) => ui.invoke_start_refreshed(),
                         Err(error) => {
                             ui.set_error_text(error.into());
                             ui.set_state_detail("Login mapping needs attention".into());
@@ -351,7 +408,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     let sender = controller.sender();
 
     let handler_state = HandlerState::new(
-        tray_handle,
+        tray_handle.clone(),
         displays.clone(),
         groups.clone(),
         active_group.clone(),
@@ -443,6 +500,10 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         });
     }
 
+    // Keep update failures separate from mapping state and its error indicator.
+    let _updates = update_notice::start(&flyout, tray_handle).map_err(|error| {
+        diagnostics::log(Level::Warn, "update", "startup", None, error.to_string());
+    });
     sender.refresh();
     if open_on_start {
         let play_intro = intro_pending.swap(false, Ordering::AcqRel);
@@ -458,6 +519,16 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     // The tray host is a native Win32 window, so Slint cannot count it when deciding
     // whether the app is still alive. Only the explicit tray Exit action should quit.
     let event_loop_result = slint::run_event_loop_until_quit();
+    // Detach UI-owned popups before waiting for the renderer's window thread.
+    for notice in refresh_notices
+        .lock()
+        .expect("refresh notices poisoned")
+        .drain(..)
+    {
+        if let Some(notice) = notice.upgrade() {
+            refresh_notice::dismiss(&notice);
+        }
+    }
     // Release native resources before logging or waiting for mapping cleanup.
     drop(outside_click_observer);
     drop(tray);
@@ -478,6 +549,44 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
     controller.shutdown();
     event_loop_result?;
     Ok(())
+}
+
+fn refresh_rates_differ(virtual_millihz: u32, target_millihz: u32) -> bool {
+    // Windows commonly reports the same nominal rate as 59.94 and 60 Hz.
+    (virtual_millihz + 500) / 1_000 != (target_millihz + 500) / 1_000
+}
+
+fn refresh_notice_data(
+    info: &crate::mapping::MappingGroupInfo,
+) -> Option<(u32, u32, windows::Win32::Foundation::RECT)> {
+    let MappingRoute::Mirror { target } = &info.route else {
+        return None;
+    };
+    let target = match crate::display::active_display_topology()
+        .and_then(|displays| crate::display::unique_physical_display(&displays, target))
+    {
+        Ok(target) => target,
+        Err(error) => {
+            diagnostics::log(Level::Warn, "ui", "refresh-notice", None, error.to_string());
+            return None;
+        }
+    };
+    let virtual_rate = (u64::from(info.mode.refresh_numerator) * 1_000)
+        .checked_div(u64::from(info.mode.refresh_denominator))? as u32;
+    let target_rate = (u64::from(target.refresh_numerator) * 1_000)
+        .checked_div(u64::from(target.refresh_denominator))? as u32;
+    let differs = refresh_rates_differ(virtual_rate, target_rate);
+    diagnostics::log(
+        Level::Debug,
+        "ui",
+        "refresh-notice",
+        None,
+        format!(
+            "group={} virtual_millihz={virtual_rate} target_millihz={target_rate} show={differs} rect={:?}",
+            info.id, target.rect
+        ),
+    );
+    differs.then_some((virtual_rate, target_rate, target.rect))
 }
 
 fn active_after_removal(current: usize, removed: usize, remaining: usize) -> usize {
@@ -533,6 +642,13 @@ fn apply_event(
     ) = config_state;
     match event {
         ControllerEvent::Displays(mut displays) => {
+            // Check the user's original selections before hydration can fill defaults.
+            let pending_start = ui.get_start_refresh_pending().then(|| {
+                validate_login_displays(
+                    &group_state.lock().expect("group drafts poisoned"),
+                    &displays,
+                )
+            });
             let geometry_edit = (ui.get_page() == QuickAccessPage::Geometry).then(|| {
                 (
                     ui.get_reference_width(),
@@ -570,6 +686,15 @@ fn apply_event(
             refresh_group_sizing(&mut groups, &displays);
             refresh_group_tab_details(&mut groups, &displays);
             hydrate_group(ui, &tray, &displays, &groups, active);
+            if groups.get(active).is_some_and(|group| {
+                (!group.stream_only && group.target_id.is_none())
+                    || group.reference_source.is_none()
+            }) {
+                // Capture only missing initial selections; saved unavailable IDs
+                // must stay unavailable, and editor drafts are restored below.
+                snapshot_group(ui, &displays, &mut groups, active);
+                hydrate_group(ui, &tray, &displays, &groups, active);
+            }
             if let Some((width, height, diagonal, aspect, rotation, strategy)) = geometry_edit {
                 ui.set_reference_width(width);
                 ui.set_reference_height(height);
@@ -608,6 +733,17 @@ fn apply_event(
                 populate_screen_size_page(ui, &displays, true);
             }
             *display_metadata.lock().expect("display metadata poisoned") = displays;
+            drop(groups);
+            if let Some(result) = pending_start {
+                cancel_start_refresh(ui);
+                match result {
+                    Ok(()) => ui.invoke_start_refreshed(),
+                    Err(error) => {
+                        ui.set_error_text(error.into());
+                        ui.set_state_detail("Mapping plan needs attention".into());
+                    }
+                }
+            }
         }
         ControllerEvent::GroupReady(info) => {
             let mut groups = group_state.lock().expect("group drafts poisoned");
@@ -622,6 +758,14 @@ fn apply_event(
                 } else {
                     SunshineState::Failed
                 };
+            }
+            let active = *active_group.lock().expect("active group poisoned");
+            project_group_telemetry(ui, &tray, &groups, active);
+        }
+        ControllerEvent::Gpu { id, name } => {
+            let mut groups = group_state.lock().expect("group drafts poisoned");
+            if let Some(group) = groups.iter_mut().find(|group| group.id == id) {
+                group.telemetry.gpu_name = name;
             }
             let active = *active_group.lock().expect("active group poisoned");
             project_group_telemetry(ui, &tray, &groups, active);
@@ -652,10 +796,8 @@ fn apply_event(
             group.telemetry.sunshine_port = Some(port.unwrap_or(requested_port));
             if error.is_some() {
                 group.telemetry.sunshine_state = SunshineState::Failed;
-                group.telemetry.error = true;
             } else {
                 group.telemetry.sunshine_state = SunshineState::Ready;
-                group.telemetry.error = false;
             }
             let active = *active_group.lock().expect("active group poisoned");
             project_group_telemetry(ui, &tray, &groups, active);
@@ -668,7 +810,7 @@ fn apply_event(
                 ui.set_diagnostic_summary(message.as_str().into());
                 let ui = ui.as_weak();
                 let error_revision = error_revision.clone();
-                slint::Timer::single_shot(Duration::from_secs(12), move || {
+                slint::Timer::single_shot(Duration::from_secs(5), move || {
                     if error_revision.load(Ordering::Relaxed) != revision {
                         return;
                     }
@@ -687,36 +829,44 @@ fn apply_event(
             restart_available,
         } => {
             let revision = error_revision.fetch_add(1, Ordering::Relaxed) + 1;
+            if !error.is_empty() || running {
+                ui.set_start_refresh_pending(false);
+            }
             ui.set_state(state.into());
             ui.set_state_detail(detail.into());
             ui.set_running(running);
             ui.set_busy(busy);
             ui.set_restart_available(restart_available);
             ui.set_error_text(error.as_str().into());
-            if state == "Reconnecting" {
-                show_flyout(ui, false);
-            }
-            if !running && !busy {
+            {
                 let mut groups = group_state.lock().expect("group drafts poisoned");
                 for group in groups.iter_mut() {
-                    group.reset_telemetry();
+                    if !running && !busy {
+                        group.reset_telemetry();
+                    }
+                    group.telemetry.runtime_error = !error.is_empty();
                 }
             }
             if !error.is_empty() {
-                let mut groups = group_state.lock().expect("group drafts poisoned");
-                for group in groups.iter_mut() {
-                    group.telemetry.error = true;
-                }
                 ui.set_diagnostic_summary(error.as_str().into());
                 let ui = ui.as_weak();
                 let error_revision = error_revision.clone();
-                slint::Timer::single_shot(Duration::from_secs(12), move || {
+                let group_state = group_state.clone();
+                let active_group = active_group.clone();
+                let tray = tray.clone();
+                slint::Timer::single_shot(Duration::from_secs(5), move || {
                     if error_revision.load(Ordering::Relaxed) != revision {
                         return;
                     }
                     if let Some(ui) = ui.upgrade() {
                         ui.set_error_text("".into());
                         if !ui.get_running() && !ui.get_busy() && !ui.get_restart_available() {
+                            let mut groups = group_state.lock().expect("group drafts poisoned");
+                            for group in groups.iter_mut() {
+                                group.telemetry.runtime_error = false;
+                            }
+                            let active = *active_group.lock().expect("active group poisoned");
+                            project_group_telemetry(&ui, &tray, &groups, active);
                             if ui.get_selected_display() >= 0 {
                                 ui.set_state("Stopped".into());
                                 ui.set_state_detail("Choose a display to start".into());
@@ -727,13 +877,6 @@ fn apply_event(
                         }
                     }
                 });
-            } else {
-                let mut groups = group_state.lock().expect("group drafts poisoned");
-                if !running {
-                    for group in groups.iter_mut() {
-                        group.telemetry.error = false;
-                    }
-                }
             }
             let groups = group_state.lock().expect("group drafts poisoned");
             let active = *active_group.lock().expect("active group poisoned");
@@ -827,7 +970,7 @@ fn surface_transient_error(ui: &QuickAccess, error_revision: &Arc<AtomicU64>, me
     ui.set_error_text(message.into());
     let ui = ui.as_weak();
     let error_revision = error_revision.clone();
-    slint::Timer::single_shot(Duration::from_secs(12), move || {
+    slint::Timer::single_shot(Duration::from_secs(5), move || {
         if error_revision.load(Ordering::Relaxed) != revision {
             return;
         }
@@ -835,6 +978,15 @@ fn surface_transient_error(ui: &QuickAccess, error_revision: &Arc<AtomicU64>, me
             ui.set_error_text("".into());
         }
     });
+}
+
+fn cancel_start_refresh(ui: &QuickAccess) {
+    if ui.get_start_refresh_pending() {
+        ui.set_start_refresh_pending(false);
+        ui.set_busy(false);
+        ui.set_state("Stopped".into());
+        ui.set_state_detail("Choose a display to start".into());
+    }
 }
 
 fn is_guid(value: &str) -> bool {
@@ -975,7 +1127,7 @@ fn group_sizing_request(
                 .map(|display| {
                     display
                         .refresh_override_millihz
-                        .or(display.preferred_refresh_millihz)
+                        .or(display.maximum_refresh_millihz)
                         .unwrap_or(display.current_refresh_millihz)
                 })
         },
@@ -1037,14 +1189,14 @@ fn screen_size_rows(displays: &[DisplayOption], drafts: &[ScreenSizeRow]) -> Vec
                 detected_size: detected_size.into(),
                 detected_refresh: format!(
                     "{} · {}",
-                    if display.preferred_refresh_millihz.is_some() {
-                        "EDID"
+                    if display.maximum_refresh_millihz.is_some() {
+                        "Maximum"
                     } else {
                         "Current"
                     },
                     format_refresh(
                         display
-                            .preferred_refresh_millihz
+                            .maximum_refresh_millihz
                             .unwrap_or(display.current_refresh_millihz)
                     )
                 )
@@ -1466,6 +1618,15 @@ fn load_group_config(ui: &QuickAccess) -> LoadedGroups {
         }
     };
     ui.set_geometry_save_blocked(false);
+    ui.set_preferred_gpu(
+        snapshot
+            .config
+            .preferred_gpu
+            .as_deref()
+            .unwrap_or("")
+            .into(),
+    );
+    gpu::refresh_options(ui);
     loaded_groups(snapshot)
 }
 
@@ -1519,6 +1680,15 @@ fn apply_config_reload(
             return false;
         }
     };
+    ui.set_preferred_gpu(
+        snapshot
+            .config
+            .preferred_gpu
+            .as_deref()
+            .unwrap_or("")
+            .into(),
+    );
+    gpu::refresh_options(ui);
     let mut loaded = loaded_groups(snapshot);
     let displays = displays.lock().expect("display metadata poisoned");
     let mut groups = groups.lock().expect("group drafts poisoned");
@@ -1609,6 +1779,7 @@ fn persist_validated_groups(
     };
     let config = AppConfig {
         groups: persisted,
+        preferred_gpu: gpu::selection(ui),
         selected_group_id: Some(selected_group_id),
         ..AppConfig::default()
     };
@@ -1675,7 +1846,14 @@ fn reposition_after_layout(ui: slint::Weak<QuickAccess>) {
 }
 
 fn show_flyout(ui: &QuickAccess, play_intro: bool) {
-    let intro_generation = play_intro.then(|| INTRO_GENERATION.fetch_add(1, Ordering::AcqRel) + 1);
+    if !ui.window().is_visible() {
+        ui.set_update_visible(ui.get_update_ready());
+    }
+    let intro_generation = (play_intro && !ui.get_update_visible())
+        .then(|| INTRO_GENERATION.fetch_add(1, Ordering::AcqRel) + 1);
+    if ui.get_update_visible() {
+        ui.set_intro_active(false);
+    }
     if intro_generation.is_some() {
         ui.set_intro_stage(0);
         ui.set_intro_active(true);
@@ -1845,7 +2023,7 @@ mod tests {
             physical_height_mm: Some(296.0),
             physical_override_inches: None,
             physical_override_aspect_ratio: None,
-            preferred_refresh_millihz: Some(60_000),
+            maximum_refresh_millihz: Some(60_000),
             current_refresh_millihz: 60_000,
             refresh_override_millihz: None,
             rotation: Rotation::Deg0,
@@ -1853,9 +2031,17 @@ mod tests {
     }
 
     #[test]
-    fn mirror_refresh_tracks_edid_and_persisted_override_without_stale_values() {
+    fn refresh_notice_ignores_equivalent_nominal_rates() {
+        assert!(!super::refresh_rates_differ(60_000, 59_940));
+        assert!(!super::refresh_rates_differ(330_000, 330_001));
+        assert!(super::refresh_rates_differ(330_000, 144_000));
+        assert!(super::refresh_rates_differ(60_000, 144_000));
+    }
+
+    #[test]
+    fn mirror_refresh_tracks_maximum_and_persisted_override_without_stale_values() {
         let mut display = display_option("panel", "Panel");
-        display.preferred_refresh_millihz = Some(119_880);
+        display.maximum_refresh_millihz = Some(119_880);
         display.current_refresh_millihz = 60_000;
         let mut group = GroupDraft::new(0);
         group.target_id = Some(display.id.clone());
@@ -1877,7 +2063,7 @@ mod tests {
         let plan = super::build_mapping_plan(&validated).unwrap();
         assert_eq!(plan.groups[0].mode.refresh_numerator, 90);
         display.refresh_override_millihz = None;
-        display.preferred_refresh_millihz = None;
+        display.maximum_refresh_millihz = None;
         assert_eq!(
             super::group_sizing_request(&groups[0], &[display])
                 .unwrap()
@@ -2224,7 +2410,7 @@ mod tests {
             );
             return;
         }
-        use slint::Model;
+        use slint::{ComponentHandle, Model};
         use std::sync::{Arc, Mutex};
         slint::BackendSelector::new()
             .backend_name("winit".into())
@@ -2279,6 +2465,35 @@ mod tests {
         );
         super::register_geometry_handlers(&ui, &state);
         super::register_group_handlers(&ui, &state);
+        // A single GPU preference belongs to the profile, not the selected group.
+        ui.set_gpu_names(slint::ModelRc::new(slint::VecModel::from(vec![
+            "Automatic".into(),
+            "Test GPU".into(),
+        ])));
+        ui.set_gpu_ids(slint::ModelRc::new(slint::VecModel::from(vec![
+            "".into(),
+            "test-gpu-path".into(),
+        ])));
+        ui.set_selected_gpu(1);
+        ui.invoke_gpu_selected();
+        assert_eq!(
+            store.load_active().unwrap().config.preferred_gpu.as_deref(),
+            Some("test-gpu-path")
+        );
+        ui.invoke_tab_selected(1);
+        assert_eq!(ui.get_preferred_gpu(), "test-gpu-path");
+        ui.invoke_tab_selected(0);
+        super::gpu::refresh_options(&ui);
+        assert_eq!(
+            ui.get_gpu_names()
+                .row_data(ui.get_selected_gpu() as usize)
+                .unwrap(),
+            "Unavailable GPU"
+        );
+        assert_eq!(super::gpu::selection(&ui).as_deref(), Some("test-gpu-path"));
+        ui.set_selected_gpu(0);
+        ui.invoke_gpu_selected();
+        assert!(store.load_active().unwrap().config.preferred_gpu.is_none());
         // The hidden GUI and tray share every active-group projection without
         // running a timer, including changes that do not carry an FPS sample.
         use crate::controller::ControllerEvent;
@@ -2324,6 +2539,70 @@ mod tests {
             error: error.into(),
             restart_available: false,
         };
+        // Refresh completion uses the new mode once; cancellation and missing
+        // original targets must never turn a late response into a mapping start.
+        let starts = Arc::new(Mutex::new(Vec::new()));
+        let started_rates = starts.clone();
+        let refreshed_groups = groups.clone();
+        ui.on_start_refreshed(move || {
+            started_rates.lock().unwrap().push(
+                refreshed_groups.lock().unwrap()[0]
+                    .sizing
+                    .unwrap()
+                    .preferred_refresh_millihz,
+            );
+        });
+        let original_displays = displays.lock().unwrap().clone();
+        let mut refreshed = original_displays.clone();
+        refreshed[1].maximum_refresh_millihz = Some(144_000);
+        ui.set_start_refresh_pending(true);
+        ui.set_busy(true);
+        apply(ControllerEvent::Displays(refreshed.clone()));
+        assert_eq!(*starts.lock().unwrap(), [Some(144_000)]);
+        assert!(!ui.get_start_refresh_pending());
+        assert!(!ui.get_busy());
+        apply(ControllerEvent::Displays(refreshed.clone()));
+        assert_eq!(starts.lock().unwrap().len(), 1);
+
+        ui.set_start_refresh_pending(true);
+        ui.set_busy(true);
+        super::cancel_start_refresh(&ui);
+        apply(ControllerEvent::Displays(refreshed.clone()));
+        assert_eq!(starts.lock().unwrap().len(), 1);
+
+        ui.set_start_refresh_pending(true);
+        ui.set_busy(true);
+        apply(ControllerEvent::Displays(
+            refreshed
+                .iter()
+                .filter(|display| display.id != "target-a")
+                .cloned()
+                .collect(),
+        ));
+        assert_eq!(starts.lock().unwrap().len(), 1);
+        assert!(!ui.get_start_refresh_pending());
+        assert!(!ui.get_busy());
+        assert!(
+            ui.get_error_text()
+                .contains("saved target screen is unavailable")
+        );
+        assert_eq!(
+            groups.lock().unwrap()[0].target_id.as_deref(),
+            Some("target-a")
+        );
+
+        ui.set_start_refresh_pending(true);
+        ui.set_busy(true);
+        apply(mapping_state("Stopped", false, "display discovery failed"));
+        assert!(!ui.get_start_refresh_pending());
+        apply(ControllerEvent::Displays(original_displays));
+        assert_eq!(starts.lock().unwrap().len(), 1);
+        assert!(!ui.window().is_visible());
+        apply(mapping_state("Reconnecting", false, ""));
+        assert!(
+            !ui.window().is_visible(),
+            "background recovery stays hidden"
+        );
         apply(mapping_state("Running", true, ""));
         apply(ControllerEvent::Fps {
             id: 0,
@@ -2349,8 +2628,31 @@ mod tests {
         });
         assert!(tray.monitor().valid);
         assert_eq!(tray.monitor().fps, 0);
+        apply(mapping_state("Degraded", true, "capture failed"));
+        assert!(tray.monitor().error);
+        apply(ControllerEvent::Fps {
+            id: 0,
+            fps: Some(60),
+        });
+        assert!(tray.monitor().error);
+        apply(mapping_state("Running", true, ""));
+        assert!(!tray.monitor().error);
+        assert_eq!(tray.monitor().fps, 60);
         apply(mapping_state("Error", false, "mapping failed"));
         assert!(tray.monitor().error);
+        // Exercise the actual expiry timer on both projections and every group.
+        std::thread::sleep(std::time::Duration::from_millis(5_050));
+        slint::platform::update_timers_and_animations();
+        assert_monitor();
+        assert!(!tray.monitor().error);
+        assert!(
+            groups
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|group| !group.telemetry.runtime_error)
+        );
+        assert_eq!(ui.get_diagnostic_summary(), "mapping failed");
         apply(mapping_state("Stopped", false, ""));
         assert!(!tray.monitor().error);
         assert!(!tray.monitor().valid);
@@ -2360,8 +2662,51 @@ mod tests {
         ui.invoke_display_selected();
         assert_monitor();
         assert!(tray.monitor().not_a_number);
+        apply(mapping_state("Running", true, ""));
+        let sunshine_id = "{12345678-1234-1234-1234-123456789abc}";
+        apply(ControllerEvent::Gpu {
+            id: 0,
+            name: Some("Actual GPU".into()),
+        });
+        assert_eq!(ui.get_actual_gpu(), "Actual GPU");
+        apply(ControllerEvent::Gpu { id: 0, name: None });
+        assert_eq!(ui.get_actual_gpu(), "");
+        apply(ControllerEvent::GroupReady(
+            crate::mapping::MappingGroupInfo {
+                id: 0,
+                mode: crate::session_gate::VirtualMode::default(),
+                rotation: Rotation::Deg0,
+                route: crate::mapping::MappingRoute::StreamOnly,
+                source_id: String::new(),
+                source_device_name: String::new(),
+                sunshine_id: Some(sunshine_id.into()),
+            },
+        ));
+        let sunshine = |error: Option<&str>| ControllerEvent::Sunshine {
+            id: 0,
+            display_id: sunshine_id.into(),
+            requested_port: 47989,
+            port: None,
+            error: error.map(str::to_owned),
+        };
+        apply(sunshine(Some("Sunshine failed")));
+        assert!(tray.monitor().error);
+        assert!(!tray.monitor().not_a_number);
+        // Recovery of either source must leave the other source's error visible.
+        apply(mapping_state("Running", true, ""));
+        assert!(tray.monitor().error);
+        apply(mapping_state("Degraded", true, "capture failed"));
+        apply(sunshine(None));
+        assert!(tray.monitor().error);
+        apply(mapping_state("Running", true, ""));
+        assert!(!tray.monitor().error);
+        assert!(tray.monitor().not_a_number);
+        apply(mapping_state("Stopped", false, ""));
         ui.set_selected_display(target_index);
         ui.invoke_display_selected();
+        assert!(ui.get_geometry_configured());
+        assert_eq!(ui.get_geometry_summary(), "2560 × 1440");
+        assert_eq!(ui.get_geometry_summary_detail(), "Planned · 60 Hz");
         assert_monitor();
         assert!(!tray.monitor().not_a_number);
         assert!(!ui.get_high_performance_sampling());
