@@ -35,9 +35,11 @@ Otherwise it uses the source-copy policy above.
 ## GPU routing
 
 **GPU · All groups** selects the preferred GPU for the profile's virtual
-displays. Automatic leaves that choice to Windows. SBMS captures and scales on
-the source output's native adapter; the **Active** value comes from the driver's
-actual device, not the saved preference. Change the preference while mapping is
+displays. Automatic prefers the hardware GPU driving all enabled local mirror
+targets, so virtual and physical outputs can use the same adapter. Windows chooses
+if SBMS cannot identify a common GPU or the session is stream-only. SBMS captures
+and scales on the source output's native adapter. The **Active** value shows the
+GPU the driver actually uses. Change the preference while mapping is
 stopped. A missing explicitly selected GPU blocks startup instead of silently
 substituting another card.
 

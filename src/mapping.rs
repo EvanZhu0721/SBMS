@@ -15,6 +15,7 @@ use crate::display::{
     restore_display_topology, same_physical_display, unique_physical_display,
 };
 use crate::geometry::Rotation;
+use crate::gpu_adapter;
 use crate::limits::MAX_OUTPUTS;
 use crate::renderer::{
     Renderer, RendererEvent, RendererReporter, RendererStartError, START_TIMEOUT,
@@ -329,30 +330,46 @@ impl MappingSession {
     ) -> Result<Self, MappingError> {
         plan.validate()?;
         check_start_cancelled(cancel)?;
-        let adapter = crate::gpu_adapter::resolve(plan.preferred_gpu.as_deref())
+        let explicit_adapter = gpu_adapter::resolve(plan.preferred_gpu.as_deref())
             .map_err(|error| stage("gpu", error))?;
+        let displays = active_displays().map_err(|error| stage("target", error))?;
+        check_start_cancelled(cancel)?;
+        let mut targets = Vec::with_capacity(plan.groups.len());
+        for group in &plan.groups {
+            targets.push(match &group.route {
+                MappingRoute::Mirror { target } => Some(
+                    mapping_target(&displays, target)
+                        .map_err(|error| error.with_group(group.id))?,
+                ),
+                MappingRoute::StreamOnly => None,
+            });
+        }
+        let adapter = match explicit_adapter {
+            Some(gpu) => Some((gpu.luid, format!("explicit; {}; id={}", gpu.name, gpu.id))),
+            None => gpu_adapter::automatic_for_targets(
+                targets
+                    .iter()
+                    .flatten()
+                    .map(|target| target.target_adapter_luid),
+                gpu_adapter::description_for_luid,
+            )
+            .map(|(luid, name)| (luid, format!("automatic; mirror targets; {name}"))),
+        };
         crate::diagnostics::log(
             crate::diagnostics::Level::Info,
             "mapping",
             "gpu-request",
             None,
             adapter.as_ref().map_or_else(
-                || "automatic".into(),
-                |gpu| {
+                || "automatic; Windows default".into(),
+                |(luid, choice)| {
                     format!(
-                        "{}; id={}; luid={:08X}:{:08X}",
-                        gpu.name, gpu.id, gpu.luid.HighPart as u32, gpu.luid.LowPart
+                        "{choice}; luid={:08X}:{:08X}",
+                        luid.HighPart as u32, luid.LowPart
                     )
                 },
             ),
         );
-        let displays = active_displays().map_err(|error| stage("target", error))?;
-        check_start_cancelled(cancel)?;
-        for group in &plan.groups {
-            if let MappingRoute::Mirror { target } = &group.route {
-                mapping_target(&displays, target).map_err(|error| error.with_group(group.id))?;
-            }
-        }
 
         let physical_topology: Vec<_> = displays
             .iter()
@@ -370,11 +387,9 @@ impl MappingSession {
             })
             .collect();
         check_start_cancelled(cancel)?;
-        let session_gate = SessionGate::create_many_with_adapter(
-            &gate_configs,
-            adapter.as_ref().map(|gpu| gpu.luid),
-        )
-        .map_err(|error| stage("session-gate", error))?;
+        let session_gate =
+            SessionGate::create_many_with_adapter(&gate_configs, adapter.map(|(luid, _)| luid))
+                .map_err(|error| stage("session-gate", error))?;
         check_start_cancelled(cancel)?;
         let mut session = Self {
             preferred_gpu: plan.preferred_gpu.clone(),
@@ -388,14 +403,9 @@ impl MappingSession {
 
         // Capture before adding a display: Windows may relocate windows as soon
         // as the device appears. The session owns snapshots throughout rollback.
-        for request in &plan.groups {
-            let target_id = match &request.route {
-                MappingRoute::Mirror { target } => Some(target.clone()),
-                MappingRoute::StreamOnly => None,
-            };
-            let migration = if let Some(target) = &target_id {
-                let physical = mapping_target(&displays, target)?;
-                match WindowMigration::capture(&physical) {
+        for (request, target) in plan.groups.iter().zip(targets) {
+            let migration = if let Some(physical) = &target {
+                match WindowMigration::capture(physical) {
                     Ok(mut migration) => {
                         // Bind every captured transaction before creating the device:
                         // Windows can move its windows before begin is reached.
@@ -423,7 +433,7 @@ impl MappingSession {
                     source_device_name: String::new(),
                     sunshine_id: None,
                 },
-                target_id,
+                target_id: target.map(|physical| physical.id),
                 renderer: None,
                 renderer_event_gate: RendererEventGate::new(request.id, Arc::clone(&reporter)),
                 migration,
@@ -569,7 +579,7 @@ impl MappingSession {
                 "gpu-actual",
                 None,
                 format!(
-                    "group={id}; requested={:?}; actual={actual:?}; name={name:?}",
+                    "group={id}; configured={:?}; actual={actual:?}; name={name:?}",
                     self.preferred_gpu
                 ),
             );
@@ -1986,6 +1996,7 @@ mod tests {
     fn virtual_source(connector_index: u32) -> Display {
         Display {
             id: format!("virtual-{connector_index}"),
+            target_adapter_luid: Default::default(),
             connector_index,
             sunshine_id: Some(format!("sunshine-{connector_index}")),
             name: "SBMS".into(),
@@ -2087,6 +2098,7 @@ mod tests {
         };
         let source = Display {
             id: "virtual".into(),
+            target_adapter_luid: Default::default(),
             connector_index: 1,
             sunshine_id: None,
             name: "SBMS".into(),

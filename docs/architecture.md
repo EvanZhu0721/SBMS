@@ -31,11 +31,12 @@ session also reserves the old v8 name, preventing older applications and
 diagnostic packages from starting a conflicting session. The independent
 diagnostic driver retains its separate v8 protocol.
 
-The profile's GPU preference is a persistent adapter device path, resolved to a
-current LUID before device creation. The driver calls
-`IddCxAdapterSetRenderAdapter` before reporting monitors. After successful D3D
-device and swapchain setup, it publishes the actual device's adapter LUID;
-reassignment, unassignment and cleanup invalidate that receipt. Requested and
+Before device creation, SBMS resolves an explicit GPU's persistent device path
+to its current LUID. In Automatic mode it requests a LUID only when one known
+hardware GPU drives all enabled local mirror targets. The driver passes a
+requested LUID to `IddCxAdapterSetRenderAdapter` before reporting monitors. After
+successful D3D device and swapchain setup, it publishes the actual adapter LUID.
+Reassignment, unassignment and cleanup invalidate that receipt. Requested and
 actual GPUs can differ. The controller reads receipts and emits UI/log updates
 only when the actual assignment changes.
 

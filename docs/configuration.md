@@ -110,9 +110,12 @@ group IDs are rejected before any persistent state changes.
 ## GPU preference
 
 The optional top-level `preferred_gpu` field selects the preferred GPU for every
-virtual display in the profile. All groups share one IDD adapter, so this is not
-a per-group rendering option. Omit it or use `null` for **Automatic**, which
-leaves the virtual display's render-adapter choice to Windows.
+virtual display in the profile. All groups share one IDD adapter. Omit the field
+or use `null` for **Automatic**. At startup, SBMS checks the physical displays
+targeted by enabled local mirror groups. If all of those displays connect to the
+same identifiable hardware GPU, SBMS requests it for the session. Windows chooses
+when the targets span GPUs, any target's GPU is unknown, or the session has only
+stream-only groups. In mixed sessions, only local mirror targets guide the choice.
 
 ```json
 "preferred_gpu": "<id from sbms gpus>"

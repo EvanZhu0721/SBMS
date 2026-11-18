@@ -15,8 +15,10 @@ session.stop()?;
 `MappingPlan::preferred_gpu` optionally contains a persistent adapter device path
 from `sbms gpus`; `MappingPlan::new` defaults it to `None`. One preference applies
 to all groups because they share an IDD adapter. An unavailable explicit GPU
-fails startup before virtual device creation. Automatic (`None`) leaves the
-choice to Windows. Restarts preserve the selected preference.
+fails startup before virtual device creation. Automatic (`None`) requests the GPU
+shared by all physical mirror targets when SBMS can identify it. Otherwise,
+Windows chooses. See [GPU preference](configuration.md#gpu-preference) for mixed
+and stream-only plans. Restarts preserve the selected preference.
 
 `session.gpu_changes()` returns changed `(group_id, Option<gpu_name>)` values
 read from the driver's actual device receipts. `None` clears an assignment that

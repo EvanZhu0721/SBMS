@@ -6,8 +6,8 @@ use windows::Win32::Devices::Display::{
 };
 use windows::Win32::Foundation::LUID;
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1,
-    IDXGIFactory1, IDXGIFactory4,
+    CreateDXGIFactory1, DXGI_ADAPTER_DESC1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND,
+    IDXGIAdapter1, IDXGIFactory1, IDXGIFactory4,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,7 +53,7 @@ pub fn enumerate() -> Result<Vec<Adapter>, String> {
     Ok(adapters)
 }
 
-/// Automatic keeps the OS preference. A missing explicit choice is never replaced.
+/// Resolve a persisted choice. A missing explicit GPU is never replaced.
 pub fn resolve(preferred: Option<&str>) -> Result<Option<Adapter>, String> {
     match preferred {
         None => Ok(None),
@@ -61,15 +61,32 @@ pub fn resolve(preferred: Option<&str>) -> Result<Option<Adapter>, String> {
     }
 }
 
+/// All virtual screens share one render adapter. Request the mirror targets'
+/// owner only when every target identifies the same selectable GPU.
+pub(crate) fn automatic_for_targets(
+    mut owners: impl Iterator<Item = Option<LUID>>,
+    describe: impl FnOnce(LUID) -> Result<DXGI_ADAPTER_DESC1, String>,
+) -> Option<(LUID, String)> {
+    let owner = owners.next()??;
+    if owner == LUID::default() || !owners.all(|other| other == Some(owner)) {
+        return None;
+    }
+    let gpu = describe(owner).ok()?;
+    (gpu.AdapterLuid == owner && gpu.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 == 0)
+        .then(|| (owner, wide_string(&gpu.Description)))
+}
+
 /// Describe the actual GPU from a driver receipt, without requiring it to be selectable.
 pub fn name_for_luid(luid: LUID) -> Result<String, String> {
+    Ok(wide_string(&description_for_luid(luid)?.Description))
+}
+
+pub(crate) fn description_for_luid(luid: LUID) -> Result<DXGI_ADAPTER_DESC1, String> {
     let factory: IDXGIFactory4 =
         unsafe { CreateDXGIFactory1() }.map_err(|error| format!("Read active GPU: {error}"))?;
     let adapter: IDXGIAdapter1 = unsafe { factory.EnumAdapterByLuid(luid) }
         .map_err(|error| format!("Read active GPU: {error}"))?;
-    let description = unsafe { adapter.GetDesc1() }
-        .map_err(|error| format!("Read active GPU description: {error}"))?;
-    Ok(wide_string(&description.Description))
+    unsafe { adapter.GetDesc1() }.map_err(|error| format!("Read active GPU description: {error}"))
 }
 
 fn select<'a>(adapters: &'a [Adapter], id: &str) -> Result<&'a Adapter, String> {
@@ -149,6 +166,47 @@ mod tests {
         assert!(select(&adapters, "missing-device-path").is_err());
         assert!(select(&adapters, "").is_err());
         assert_eq!(resolve(None).unwrap(), None);
+    }
+
+    #[test]
+    fn automatic_selects_the_common_mirror_owner_when_available() {
+        let owner = LUID {
+            LowPart: 42,
+            HighPart: -1,
+        };
+        let other = LUID {
+            HighPart: 1,
+            ..owner
+        };
+        let gpu = DXGI_ADAPTER_DESC1 {
+            AdapterLuid: owner,
+            ..Default::default()
+        };
+        for targets in [vec![owner], vec![owner, owner]] {
+            assert_eq!(
+                automatic_for_targets(targets.into_iter().map(Some), |_| Ok(gpu))
+                    .unwrap()
+                    .0,
+                owner
+            );
+        }
+        for targets in [
+            vec![],
+            vec![Some(owner), Some(other)],
+            vec![Some(owner), None],
+            vec![Some(LUID::default())],
+        ] {
+            assert!(
+                automatic_for_targets(targets.into_iter(), |_| panic!("no common owner")).is_none()
+            );
+        }
+        let one_target = || std::iter::once(Some(owner));
+        assert!(automatic_for_targets(one_target(), |_| Err("GPU unavailable".into())).is_none());
+        let software = DXGI_ADAPTER_DESC1 {
+            Flags: DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32,
+            ..gpu
+        };
+        assert!(automatic_for_targets(one_target(), |_| Ok(software)).is_none());
     }
 
     #[test]

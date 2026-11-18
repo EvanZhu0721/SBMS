@@ -14,14 +14,16 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_ADAPTER_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_ADAPTER_NAME,
     DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
-    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION_IDENTITY,
-    DISPLAYCONFIG_ROTATION_ROTATE90, DISPLAYCONFIG_ROTATION_ROTATE180,
-    DISPLAYCONFIG_ROTATION_ROTATE270, DISPLAYCONFIG_SOURCE_DEVICE_NAME,
-    DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo, GUID_DEVINTERFACE_MONITOR,
-    GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig, SDC_APPLY,
-    SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG, SetDisplayConfig,
+    DISPLAYCONFIG_MODE_INFO_TYPE_TARGET, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL,
+    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED, DISPLAYCONFIG_OUTPUT_TECHNOLOGY_MIRACAST,
+    DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_ROTATION_IDENTITY, DISPLAYCONFIG_ROTATION_ROTATE90,
+    DISPLAYCONFIG_ROTATION_ROTATE180, DISPLAYCONFIG_ROTATION_ROTATE270,
+    DISPLAYCONFIG_SOURCE_DEVICE_NAME, DISPLAYCONFIG_TARGET_DEVICE_NAME, DisplayConfigGetDeviceInfo,
+    GUID_DEVINTERFACE_MONITOR, GetDisplayConfigBufferSizes, QDC_ONLY_ACTIVE_PATHS,
+    QueryDisplayConfig, SDC_APPLY, SDC_SAVE_TO_DATABASE, SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+    SetDisplayConfig,
 };
-use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, RECT};
+use windows::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, LUID, RECT};
 use windows::Win32::Graphics::Gdi::{
     CDS_FULLSCREEN, CDS_NORESET, CDS_SET_PRIMARY, CDS_TYPE, CDS_UPDATEREGISTRY,
     ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
@@ -45,6 +47,8 @@ use crate::session_gate::{ConnectorIdentity, VirtualMode, published_connector_id
 #[derive(Clone, Debug)]
 pub struct Display {
     pub id: String,
+    /// Current-session GPU owner of a directly connected CCD target.
+    pub target_adapter_luid: Option<LUID>,
     pub connector_index: u32,
     pub sunshine_id: Option<String>,
     pub name: String,
@@ -837,6 +841,13 @@ fn read_active_displays(include_identity: bool) -> Result<Vec<Display>, DisplayE
                 } else {
                     id
                 },
+                target_adapter_luid: (!matches!(
+                    path.targetInfo.outputTechnology,
+                    DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_VIRTUAL
+                        | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_INDIRECT_WIRED
+                        | DISPLAYCONFIG_OUTPUT_TECHNOLOGY_MIRACAST
+                ))
+                .then_some(path.targetInfo.adapterId),
                 connector_index,
                 sunshine_id,
                 name: display_name(&name, physical_size, &source),
@@ -1370,6 +1381,7 @@ mod tests {
     fn display(id: &str, device_name: &str, virtual_display: bool) -> Display {
         Display {
             id: id.into(),
+            target_adapter_luid: Default::default(),
             connector_index: 0,
             sunshine_id: None,
             name: id.into(),
