@@ -142,26 +142,6 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         });
     })?;
     let flyout = QuickAccess::new()?;
-    let outside_click_flyout = flyout.as_weak();
-    let outside_click_observer = win32_flyout::OutsideClickObserver::new(move |point| {
-        // Leave the native hook before querying either Slint or the Shell.
-        let flyout = outside_click_flyout.clone();
-        let _ = slint::invoke_from_event_loop(move || {
-            if let Some(flyout) = flyout.upgrade()
-                && flyout.window().is_visible()
-                && win32_flyout::should_dismiss_on_press(flyout.window(), point)
-            {
-                diagnostics::log(
-                    Level::Debug,
-                    "ui",
-                    "flyout-dismiss",
-                    None,
-                    "mouse pressed on desktop, taskbar, or fullscreen window",
-                );
-                let _ = flyout.hide();
-            }
-        });
-    })?;
     let auto_map_on_login = ConfigProfileStore::default_store()
         .and_then(|store| store.list())
         .map(|profiles| profiles.auto_map_on_login)
@@ -204,7 +184,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
             TrayAction::Toggle => {
                 if let Some(flyout) = flyout_weak.upgrade() {
                     if flyout.window().is_visible() {
-                        let _ = flyout.hide();
+                        flyout.invoke_dismiss();
                     } else {
                         let play_intro = intro_pending.swap(false, Ordering::AcqRel);
                         show_flyout(&flyout, play_intro);
@@ -530,7 +510,7 @@ pub fn run_host(_instance: TrayInstance, open_on_start: bool) -> Result<(), Box<
         }
     }
     // Release native resources before logging or waiting for mapping cleanup.
-    drop(outside_click_observer);
+    win32_flyout::stop_observing_outside_clicks();
     drop(tray);
     diagnostics::log(
         Level::Info,
@@ -1869,6 +1849,29 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
     if let Err(error) = ui.show() {
         diagnostics::log(Level::Warn, "ui", "flyout-show", None, error.to_string());
         return;
+    }
+    let flyout = ui.as_weak();
+    if let Err(error) = win32_flyout::observe_outside_clicks(move |point| {
+        if let Some(flyout) = flyout.upgrade()
+            && win32_flyout::should_dismiss_on_press(flyout.window(), point)
+        {
+            diagnostics::log(
+                Level::Debug,
+                "ui",
+                "flyout-dismiss",
+                None,
+                "mouse pressed on desktop, taskbar, or fullscreen window",
+            );
+            flyout.invoke_dismiss();
+        }
+    }) {
+        diagnostics::log(
+            Level::Warn,
+            "ui",
+            "flyout-observer",
+            None,
+            error.to_string(),
+        );
     }
 
     // A display-mode change can leave a hidden HWND with pending monitor state.

@@ -48,8 +48,13 @@ pub(super) fn register_lifecycle_handlers(
     let flyout_weak = flyout.as_weak();
     flyout.on_dismiss(move || {
         if let Some(flyout) = flyout_weak.upgrade() {
+            win32_flyout::stop_observing_outside_clicks();
             let _ = flyout.hide();
         }
+    });
+    flyout.window().on_close_requested(|| {
+        win32_flyout::stop_observing_outside_clicks();
+        slint::CloseRequestResponse::HideWindow
     });
 
     let refresh_sender = sender.clone();
