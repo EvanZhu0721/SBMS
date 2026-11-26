@@ -1608,7 +1608,7 @@ fn end_screenshot_pause(held: bool) {
     }
 }
 
-fn physical_buttons_down() -> u8 {
+pub(crate) fn physical_buttons_down() -> u8 {
     [
         (VK_LBUTTON, BUTTON_LEFT),
         (VK_RBUTTON, BUTTON_RIGHT),

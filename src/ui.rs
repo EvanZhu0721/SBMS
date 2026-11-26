@@ -1851,7 +1851,7 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
         return;
     }
     let flyout = ui.as_weak();
-    if let Err(error) = win32_flyout::observe_outside_clicks(move |point| {
+    win32_flyout::observe_outside_clicks(move |point| {
         if let Some(flyout) = flyout.upgrade()
             && win32_flyout::should_dismiss_on_press(flyout.window(), point)
         {
@@ -1864,15 +1864,7 @@ fn show_flyout(ui: &QuickAccess, play_intro: bool) {
             );
             flyout.invoke_dismiss();
         }
-    }) {
-        diagnostics::log(
-            Level::Warn,
-            "ui",
-            "flyout-observer",
-            None,
-            error.to_string(),
-        );
-    }
+    });
 
     // A display-mode change can leave a hidden HWND with pending monitor state.
     // ShowWindow/winit applies that state while showing and may overwrite the

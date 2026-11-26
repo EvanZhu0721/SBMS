@@ -1,87 +1,52 @@
-use std::cell::RefCell;
 use std::mem::size_of;
-use std::sync::Arc;
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use slint::{PhysicalPosition, Window};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GA_ROOT, GetAncestor, GetClassNameW, GetCursorPos, GetDesktopWindow,
-    GetShellWindow, GetWindowRect, HHOOK, IsZoomed, MSLLHOOKSTRUCT, SetForegroundWindow,
-    SetWindowsHookExW, UnhookWindowsHookEx, WH_MOUSE_LL, WM_LBUTTONDOWN, WM_MBUTTONDOWN,
-    WM_RBUTTONDOWN, WM_XBUTTONDOWN, WindowFromPoint,
+    GA_ROOT, GetAncestor, GetClassNameW, GetCursorPos, GetDesktopWindow, GetShellWindow,
+    GetWindowRect, IsZoomed, SetForegroundWindow, WindowFromPoint,
 };
 const FLYOUT_GAP: i32 = 8;
 
 thread_local! {
-    static OUTSIDE_CLICK_OBSERVER: RefCell<Option<OutsideClickObserver>> = const { RefCell::new(None) };
+    static OUTSIDE_CLICK_TIMER: slint::Timer = slint::Timer::default();
 }
 
-/// Observes presses without consuming input, even when Windows denied activation.
-struct OutsideClickObserver {
-    hook: HHOOK,
-    handler: Arc<dyn Fn(POINT) + Send + Sync>,
-}
-
-pub fn observe_outside_clicks(
-    handler: impl Fn(POINT) + Send + Sync + 'static,
-) -> windows::core::Result<()> {
-    OUTSIDE_CLICK_OBSERVER.with(|slot| {
-        if slot.borrow().is_some() {
-            return Ok(());
+pub fn observe_outside_clicks(handler: impl Fn(POINT) + 'static) {
+    OUTSIDE_CLICK_TIMER.with(|timer| {
+        if timer.running() {
+            return;
         }
-        let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), None, 0) }?;
-        slot.replace(Some(OutsideClickObserver {
-            hook,
-            handler: Arc::new(handler),
-        }));
-        Ok(())
-    })
+        // Ignore buttons already held when the tray opens, including an opening click.
+        let mut previous = crate::input::physical_buttons_down();
+        timer.start(
+            slint::TimerMode::Repeated,
+            std::time::Duration::from_millis(16),
+            move || {
+                if sampled_new_press(&mut previous, crate::input::physical_buttons_down()) {
+                    let mut point = POINT::default();
+                    if unsafe { GetCursorPos(&mut point) }.is_ok() {
+                        handler(point);
+                    }
+                }
+            },
+        );
+    });
 }
 
 pub fn stop_observing_outside_clicks() {
-    OUTSIDE_CLICK_OBSERVER.with(|slot| slot.take());
+    OUTSIDE_CLICK_TIMER.with(slint::Timer::stop);
 }
 
-impl Drop for OutsideClickObserver {
-    fn drop(&mut self) {
-        let _ = unsafe { UnhookWindowsHookEx(self.hook) };
-    }
-}
-
-unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if let Some(press) = unsafe { pending_press(code, wparam, lparam) } {
-        let _ = slint::invoke_from_event_loop(press);
-    }
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
-}
-
-unsafe fn pending_press(code: i32, wparam: WPARAM, lparam: LPARAM) -> Option<impl FnOnce() + Send> {
-    if code < 0
-        || !matches!(
-            wparam.0 as u32,
-            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
-        )
-    {
-        return None;
-    }
-    let point = unsafe { (*(lparam.0 as *const MSLLHOOKSTRUCT)).pt };
-    // Query Slint and the shell after leaving the hook. A queued press belongs
-    // to this opening of the flyout and expires when its observer is removed.
-    let handler = OUTSIDE_CLICK_OBSERVER.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .map(|observer| Arc::downgrade(&observer.handler))
-    })?;
-    Some(move || {
-        if let Some(handler) = handler.upgrade() {
-            handler(point);
-        }
-    })
+fn sampled_new_press(previous: &mut u8, buttons: u8) -> bool {
+    let pressed = buttons & !*previous;
+    *previous = buttons;
+    pressed != 0
 }
 
 pub fn should_dismiss_on_press(window: &Window, point: POINT) -> bool {
@@ -275,8 +240,17 @@ fn taskbar_edge(monitor: RECT, work: RECT, anchor: POINT) -> Edge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use windows::Win32::UI::WindowsAndMessaging::WM_LBUTTONUP;
+
+    #[test]
+    fn holding_or_releasing_does_not_repeat_an_outside_press() {
+        let mut held = 1; // The opening click is still down.
+        assert!(!sampled_new_press(&mut held, 1));
+        assert!(!sampled_new_press(&mut held, 0));
+        assert!(sampled_new_press(&mut held, 1));
+        assert!(!sampled_new_press(&mut held, 1)); // Dragging out of the panel.
+        assert!(sampled_new_press(&mut held, 3)); // A second button while dragging.
+        assert!(!sampled_new_press(&mut held, 2));
+    }
 
     #[test]
     fn outside_click_classification_preserves_controls_and_distinguishes_desktop_from_windows() {
@@ -357,45 +331,5 @@ mod tests {
             Some(meter),
             POINT { x: -100, y: 676 }
         ));
-    }
-
-    #[test]
-    fn native_observer_dispatches_presses_without_a_focus_event() {
-        let presses = Arc::new(AtomicUsize::new(0));
-        let observed = presses.clone();
-        observe_outside_clicks(move |point| {
-            assert_eq!((point.x, point.y), (-20, 700));
-            observed.fetch_add(1, Ordering::Relaxed);
-        })
-        .unwrap();
-        observe_outside_clicks(|_| panic!("replaced the active observer")).unwrap();
-        let mouse = MSLLHOOKSTRUCT {
-            pt: POINT { x: -20, y: 700 },
-            ..Default::default()
-        };
-        let data = LPARAM((&mouse as *const MSLLHOOKSTRUCT) as isize);
-        let press = |code, message| unsafe { pending_press(code, WPARAM(message as usize), data) };
-        for message in [
-            WM_LBUTTONDOWN,
-            WM_RBUTTONDOWN,
-            WM_MBUTTONDOWN,
-            WM_XBUTTONDOWN,
-        ] {
-            press(0, message).unwrap()();
-        }
-        assert!(press(0, WM_LBUTTONUP).is_none());
-        assert!(press(-1, WM_LBUTTONDOWN).is_none());
-        let stale_press = press(0, WM_LBUTTONDOWN).unwrap();
-        let hook = OUTSIDE_CLICK_OBSERVER.with(|slot| slot.borrow().as_ref().unwrap().hook);
-        stop_observing_outside_clicks();
-        assert!(
-            unsafe { UnhookWindowsHookEx(hook) }.is_err(),
-            "hook was still installed"
-        );
-        assert!(press(0, WM_LBUTTONDOWN).is_none());
-        observe_outside_clicks(|_| panic!("received a press from a previous opening")).unwrap();
-        stale_press();
-        assert_eq!(presses.load(Ordering::Relaxed), 4);
-        stop_observing_outside_clicks();
     }
 }
