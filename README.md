@@ -1,5 +1,10 @@
 ![SBMS banner](assets/sbms-banner.png?v=75f6b3b)
 
+![README views](https://komarev.com/ghpvc/?username=EvanZhu0721-SBMS&label=Visitors&base=3312&color=007ec6 "README views, starting at 3312")
+[![GitHub stars](https://img.shields.io/github/stars/EvanZhu0721/SBMS?style=social)](https://github.com/EvanZhu0721/SBMS/stargazers)
+[![Project video on Bilibili](https://img.shields.io/badge/Project%20video-Bilibili-00A1D6?logo=bilibili&logoColor=white)](https://www.bilibili.com/video/BV13vsf6DE8W/)
+[![Total commits on main](https://img.shields.io/github/commit-activity/t/EvanZhu0721/SBMS/main?label=Commits)](https://github.com/EvanZhu0721/SBMS/commits/main/)
+
 ![SBMS 代码历史：新增行数为绿色上涨，删除行数为红色下跌](assets/readme/code-history.svg)
 
 ![手机后盖上的 ChatGPT Logo](assets/readme/coding-chatgpt.png)
